@@ -12,6 +12,21 @@
 
 local M = {}
 
+-- Well-known detection flag for the user's config to branch on.
+-- Plugins that also claim `ext_cmdline`/`ext_popupmenu` (noice.nvim,
+-- etc.) should disable their cmdline/popupmenu modules when this is
+-- set so their output doesn't pollute the grid. Follows the convention
+-- established by goneovim (`g:goneovim`) and fvim.
+--
+-- Example in user config:
+--   if vim.g.symmetria_ide == 1 then
+--     require("noice").setup({
+--       cmdline = { enabled = false },
+--       popupmenu = { enabled = false },
+--     })
+--   end
+vim.g.symmetria_ide = 1
+
 -- Hide the native statusline and mode echo — the wrapper's QML status
 -- bar owns that real estate. Setting these both here AND in a VimEnter
 -- autocmd below is intentional: the early set lets the screen start
@@ -128,6 +143,20 @@ vim.api.nvim_create_autocmd("VimEnter", {
     -- so their globals stay but the native status line stays hidden.
     vim.opt.laststatus = 0
     vim.opt.showmode = false
+
+    -- Force-disable nvim-cmp's cmp-cmdline source. That plugin draws
+    -- its own floating window anchored to the default cmdline position
+    -- (bottom row) which becomes an orphaned ghost popup once we've
+    -- extracted the cmdline into a centered overlay. It also binds
+    -- arrow keys to cycle its completions, which fights our pipeline.
+    -- Best-effort; silent no-op if the user doesn't have cmp installed.
+    local ok, cmp = pcall(require, "cmp")
+    if ok and cmp.setup and cmp.setup.cmdline then
+      pcall(cmp.setup.cmdline, ":", { enabled = false })
+      pcall(cmp.setup.cmdline, "/", { enabled = false })
+      pcall(cmp.setup.cmdline, "?", { enabled = false })
+    end
+
     M.push_state()
   end,
 })
@@ -137,6 +166,137 @@ vim.api.nvim_create_autocmd("VimEnter", {
 vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
   group = grp,
   callback = function() M.push_position() end,
+})
+
+-- --- Cmdline completion pipeline ------------------------------------
+--
+-- We emit our own completion list via `getcompletion()` on every
+-- cmdline keystroke. This is independent of whatever plugin the user
+-- has for cmdline completion (nvim-cmp, wilder, noice) — so the
+-- overlay behaves the same for any user configuration.
+--
+-- Plugins that draw their own cmdline completion window (nvim-cmp's
+-- `cmp-cmdline`, wilder.nvim) should be disabled when `g:symmetria_ide
+-- == 1` or their floating windows will render in the grid anchored to
+-- the wrong place (the default cmdline position, bottom row).
+
+-- Cached items from the last fresh `getcompletion`. Kept stable across
+-- cycle steps so Tab navigation doesn't collapse the popup to a single
+-- row each time the cmdline text changes to the chosen completion.
+--
+-- The cycle/typing distinction is made by text matching: if the new
+-- cmdline content equals one of our cached items, a cycle just
+-- happened (either via our cycle_completion or external wildmenu),
+-- so reuse the list and emit the matching row index as selected.
+-- Otherwise the user typed — recompute. This is robust against
+-- whether CmdlineChanged fires synchronously during setcmdline or
+-- deferred to the next event loop tick.
+--
+-- We deliberately do NOT keep a global selected_idx. cycle_completion
+-- derives position from cmdline text each call, so the source of
+-- truth stays the cmdline itself.
+local last_items = {}
+
+local function emit_completions()
+  local line = vim.fn.getcmdline()
+
+  -- Cycle detection by equality — if the cmdline content matches one
+  -- of the cached items, keep the list stable and report the index.
+  if #last_items > 0 then
+    for i, item in ipairs(last_items) do
+      if item == line then
+        pcall(vim.rpcnotify, 0, "completions", {
+          items = last_items,
+          line = line,
+          selected = i - 1, -- 0-indexed for Qt model consumption
+        })
+        return
+      end
+    end
+  end
+
+  -- Fresh typing — recompute completions.
+  local ok, fresh = pcall(vim.fn.getcompletion, line, "cmdline")
+  if not ok then
+    fresh = {}
+  end
+  last_items = fresh
+  pcall(vim.rpcnotify, 0, "completions", {
+    items = fresh,
+    line = line,
+    selected = -1,
+  })
+end
+
+local function cycle_completion(direction)
+  local n = #last_items
+  if n == 0 then
+    return
+  end
+
+  -- Locate our current position by matching the live cmdline against
+  -- the cached list. -1 means "not in the list" (user was typing, not
+  -- cycling yet) — first Tab jumps to row 0, first S-Tab to the last.
+  local current = vim.fn.getcmdline()
+  local current_idx = -1
+  for i, item in ipairs(last_items) do
+    if item == current then
+      current_idx = i - 1
+      break
+    end
+  end
+
+  local new_idx
+  if direction > 0 then
+    new_idx = current_idx < 0 and 0 or ((current_idx + 1) % n)
+  else
+    new_idx = current_idx < 0 and (n - 1) or ((current_idx - 1 + n) % n)
+  end
+
+  -- The subsequent CmdlineChanged fires emit_completions, which will
+  -- match the new cmdline against last_items[new_idx+1] and emit the
+  -- stable list + correct selected index.
+  vim.fn.setcmdline(last_items[new_idx + 1])
+end
+
+vim.api.nvim_create_autocmd({ "CmdlineEnter", "CmdlineChanged" }, {
+  group = grp,
+  callback = emit_completions,
+})
+
+vim.api.nvim_create_autocmd("CmdlineLeave", {
+  group = grp,
+  callback = function()
+    last_items = {}
+    pcall(vim.rpcnotify, 0, "completions", {
+      items = {},
+      line = "",
+      selected = -1,
+    })
+  end,
+})
+
+-- Install our Tab/S-Tab cmdline keymaps when cmdline opens. Scheduled
+-- (vim.schedule) so we run *after* any plugin CmdlineEnter autocmds in
+-- the same event loop tick — that means our mapping wins over whatever
+-- nvim-cmp / noice.nvim installed this cmdline session.
+--
+-- `expr = true` lets our handler run side-effects (setcmdline) and then
+-- return "" so the original Tab keystroke does nothing further.
+vim.api.nvim_create_autocmd("CmdlineEnter", {
+  group = grp,
+  callback = function()
+    vim.schedule(function()
+      vim.keymap.set("c", "<Tab>", function()
+        cycle_completion(1)
+        return ""
+      end, { silent = true, expr = true, desc = "Symmetria: cycle completion forward" })
+      vim.keymap.set("c", "<S-Tab>", function()
+        cycle_completion(-1)
+        return ""
+      end, { silent = true, expr = true, desc = "Symmetria: cycle completion backward" })
+    end)
+  end,
 })
 
 -- Also emit immediately, since by the time VimEnter fires the UI may

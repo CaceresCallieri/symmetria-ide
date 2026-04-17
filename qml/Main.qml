@@ -31,6 +31,17 @@ Window {
             focus: true
 
             Component.onCompleted: forceActiveFocus()
+
+            // Floating cmdline + wildmenu overlay — parented to the
+            // editor so it clips within the viewport (not over the
+            // status bar) and so its anchors.fill tracks editor resizes.
+            // Focus stays on the NvimView; keys flow to NeoVim, which
+            // emits ext_cmdline/ext_popupmenu events that this overlay
+            // reads via cmdlineState / popupmenuModel.
+            CommandLine {
+                id: cmdlineOverlay
+                anchors.fill: parent
+            }
         }
 
         StatusBar {

@@ -40,6 +40,9 @@ class NvimBackend(QObject):
 
     redraw_flushed = Signal()
     capsule_updated = Signal(dict)
+    cmdline_updated = Signal(dict)
+    popupmenu_updated = Signal(dict)
+    completions_updated = Signal(dict)
     closed = Signal()
 
     def __init__(
@@ -98,11 +101,17 @@ class NvimBackend(QObject):
             raise
         # rgb=true: NeoVim sends rgb hex values (no color indices).
         # ext_linegrid=true: use the modern grid_line-based protocol.
+        # ext_cmdline=true: NeoVim stops drawing the `:` prompt inside
+        #   the grid and instead fires cmdline_show/_pos/_hide events
+        #   that our native QML overlay renders.
+        # ext_popupmenu=true: same extraction for wildmenu autocomplete.
         self._nvim.ui_attach(
             self._cols,
             self._rows,
             rgb=True,
             ext_linegrid=True,
+            ext_cmdline=True,
+            ext_popupmenu=True,
         )
         self._worker = threading.Thread(
             target=self._run_loop,
@@ -179,9 +188,10 @@ class NvimBackend(QObject):
         assert self._nvim is not None
         try:
             self._nvim.subscribe("capsule")
-            log.info("subscribed to 'capsule' notifications")
+            self._nvim.subscribe("completions")
+            log.info("subscribed to 'capsule' + 'completions' notifications")
         except Exception:  # noqa: BLE001
-            log.exception("subscribe(capsule) failed")
+            log.exception("subscribe(capsule/completions) failed")
         try:
             self._nvim.exec_lua(
                 "if _G.symmetria_push_state then _G.symmetria_push_state() end"
@@ -213,6 +223,15 @@ class NvimBackend(QObject):
             payload: dict = args[0]
             log.debug("capsule notification: %r", payload)
             self.capsule_updated.emit(payload)
+            return
+        if name == "completions":
+            if not args or not isinstance(args[0], dict):
+                log.warning(
+                    "completions notification with unexpected payload: %r",
+                    args,
+                )
+                return
+            self.completions_updated.emit(args[0])
             return
         log.debug("unhandled notification: %s (args=%r)", name, args)
 
@@ -300,6 +319,87 @@ class NvimBackend(QObject):
     def _h_flush(self) -> None:
         self.redraw_flushed.emit()
 
+    # --- Ext-cmdline / ext-popupmenu handlers --------------------------
+    #
+    # These events arrive through the same `redraw` notification as
+    # grid_line/grid_scroll, but they describe cmdline + wildmenu state
+    # the native UI renders on top of the grid. NeoVim still owns the
+    # cmdline *logic* (typing, history, completion); we only render.
+
+    def _h_cmdline_show(
+        self,
+        content: list,
+        pos: int,
+        firstc: str,
+        prompt: str,
+        indent: int,  # noqa: ARG002 — we don't render prompt indent yet
+        level: int,
+        _hl_id: int = 0,  # NeoVim 0.10+ passes firstchar hl_id here
+    ) -> None:
+        # content is [[attrs, text], ...] in older NeoVim and
+        # [[attrs, text, hl_id], ...] in 0.10+. Flatten for MVP;
+        # per-chunk highlights can come later by preserving the tuples.
+        parts: list[str] = []
+        for chunk in content or ():
+            if isinstance(chunk, (list, tuple)) and len(chunk) >= 2:
+                parts.append(str(chunk[1]))
+        self.cmdline_updated.emit({
+            "kind": "show",
+            "text": "".join(parts),
+            "pos": int(pos or 0),
+            "firstchar": str(firstc or ""),
+            "prompt": str(prompt or ""),
+            "level": int(level or 0),
+        })
+
+    def _h_cmdline_pos(self, pos: int, level: int, *_rest: Any) -> None:
+        # *_rest swallows any trailing args newer NeoVim versions may
+        # add — keeps the handler forward-compatible.
+        self.cmdline_updated.emit({
+            "kind": "pos",
+            "pos": int(pos or 0),
+            "level": int(level or 0),
+        })
+
+    def _h_cmdline_hide(self, level: int, *_rest: Any) -> None:
+        # Some NeoVim versions pass `abort` (0.9) then added more
+        # fields; *_rest absorbs whatever else comes through.
+        self.cmdline_updated.emit({
+            "kind": "hide",
+            "level": int(level or 0),
+        })
+
+    def _h_popupmenu_show(
+        self,
+        items: list,
+        selected: int,
+        row: int,  # noqa: ARG002 — cmdline-anchored popup is positioned by QML
+        col: int,  # noqa: ARG002
+        _grid: int = -1,
+        *_rest: Any,
+    ) -> None:
+        flattened: list[dict[str, str]] = []
+        for it in items or ():
+            word = str(it[0]) if len(it) >= 1 else ""
+            kind = str(it[1]) if len(it) >= 2 else ""
+            menu = str(it[2]) if len(it) >= 3 else ""
+            # `info` (it[3]) can be large documentation; omit for now.
+            flattened.append({"word": word, "kind": kind, "menu": menu})
+        self.popupmenu_updated.emit({
+            "kind": "show",
+            "items": flattened,
+            "selected": int(selected if selected is not None else -1),
+        })
+
+    def _h_popupmenu_select(self, selected: int) -> None:
+        self.popupmenu_updated.emit({
+            "kind": "select",
+            "selected": int(selected if selected is not None else -1),
+        })
+
+    def _h_popupmenu_hide(self) -> None:
+        self.popupmenu_updated.emit({"kind": "hide"})
+
     # --- GUI-thread-facing API -----------------------------------------
     #
     # pynvim requires all RPC calls to run on the thread that owns its
@@ -362,4 +462,10 @@ _REDRAW_HANDLERS = {
     "mode_info_set": NvimBackend._h_mode_info_set,
     "mode_change": NvimBackend._h_mode_change,
     "flush": NvimBackend._h_flush,
+    "cmdline_show": NvimBackend._h_cmdline_show,
+    "cmdline_pos": NvimBackend._h_cmdline_pos,
+    "cmdline_hide": NvimBackend._h_cmdline_hide,
+    "popupmenu_show": NvimBackend._h_popupmenu_show,
+    "popupmenu_select": NvimBackend._h_popupmenu_select,
+    "popupmenu_hide": NvimBackend._h_popupmenu_hide,
 }
