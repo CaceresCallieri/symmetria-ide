@@ -71,6 +71,11 @@ SCROLL_ANIMATION_FAR_LINES = 1
 # kicks in.
 SCROLLBACK_MULTIPLIER = 3
 
+# Default editor font size in points. ~18% smaller than the Phase 0
+# starting size of 11pt — chosen to fit more code on screen without
+# exposing a user-facing font setting yet (Phase 0 scope).
+DEFAULT_FONT_POINT_SIZE = 9
+
 
 _qcolor_cache: dict[tuple[int | None, int], QColor] = {}
 
@@ -294,12 +299,12 @@ class NvimView(QQuickPaintedItem):
         for name in preferred:
             if name in QFontDatabase.families():
                 font = QFont(name)
-                font.setPointSize(11)
+                font.setPointSize(DEFAULT_FONT_POINT_SIZE)
                 font.setStyleHint(QFont.StyleHint.Monospace)
                 font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
                 return font
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-        font.setPointSize(11)
+        font.setPointSize(DEFAULT_FONT_POINT_SIZE)
         return font
 
     # --- QML-visible properties ----------------------------------------
