@@ -164,6 +164,56 @@ vim.api.nvim_create_autocmd("VimEnter", {
   end,
 })
 
+-- --- Viewport scroll tracking ---------------------------------------
+--
+-- `grid_scroll` events (the nvim redraw-protocol optimization) only
+-- fire when nvim decides that shifting existing cells is cheaper than
+-- re-drawing them. For scroll-down (Ctrl-d) this is the common path,
+-- but for scroll-up (Ctrl-u) nvim often just re-transmits the whole
+-- viewport via grid_line events without emitting any grid_scroll. That
+-- leaves a UI-side scroll animation that relies on grid_scroll blind
+-- to Ctrl-u.
+--
+-- WinScrolled is an nvim *semantic* event — it fires whenever the
+-- visible viewport (topline) changes, regardless of how nvim chose to
+-- redraw. We compute the line delta from the topline (`line('w0')`)
+-- and push it over rpcnotify; Python uses this as the authoritative
+-- scroll signal for animation.
+--
+-- `ext_multigrid` + `win_viewport.scroll_delta` would be the
+-- canonical path (what Neovide does), but turning on multigrid means
+-- each window becomes a separate grid — a larger architectural shift.
+-- This autocmd-based approach is a single-grid equivalent.
+local last_topline = nil
+local last_buf = nil
+
+vim.api.nvim_create_autocmd("WinScrolled", {
+  group = grp,
+  callback = function()
+    local buf = vim.api.nvim_get_current_buf()
+    local topline = vim.fn.line("w0")
+    if last_topline ~= nil and buf == last_buf then
+      local delta = topline - last_topline
+      if delta ~= 0 then
+        pcall(vim.rpcnotify, 0, "scroll", { delta = delta })
+      end
+    end
+    last_buf = buf
+    last_topline = topline
+  end,
+})
+
+-- Reset the tracking baseline when the active buffer or window
+-- changes — otherwise the first WinScrolled in a new buffer would
+-- treat the switch as a huge delta and animate a long flourish.
+vim.api.nvim_create_autocmd({ "BufEnter", "WinEnter" }, {
+  group = grp,
+  callback = function()
+    last_buf = vim.api.nvim_get_current_buf()
+    last_topline = vim.fn.line("w0")
+  end,
+})
+
 -- Cursor position changes are high-frequency; emit only the cheap
 -- position capsule on motion, not the full payload.
 vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {

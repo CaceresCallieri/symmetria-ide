@@ -39,6 +39,18 @@ class NvimBackend(QObject):
     """
 
     redraw_flushed = Signal()
+    # Emitted when the active window's topline changes. Drives the
+    # viewport scroll animation. Payload is the line delta: positive =
+    # content scrolls up (Ctrl-d), negative = content scrolls down
+    # (Ctrl-u). Fed by the WinScrolled autocmd in runtime/init.lua.
+    # Preferred over grid_scroll_performed because WinScrolled fires
+    # reliably for any viewport change, not just the ones where NeoVim
+    # uses the grid_scroll redraw optimization.
+    viewport_scrolled = Signal(int)
+    # Emitted from _h_grid_scroll before the in-place mutation. Kept
+    # for parity/diagnostics even though the view now prefers
+    # viewport_scrolled as its source of truth.
+    grid_scroll_performed = Signal(int, int, int, int, int, int, int)
     capsule_updated = Signal(dict)
     cmdline_updated = Signal(dict)
     popupmenu_updated = Signal(dict)
@@ -189,7 +201,10 @@ class NvimBackend(QObject):
         try:
             self._nvim.subscribe("capsule")
             self._nvim.subscribe("completions")
-            log.info("subscribed to 'capsule' + 'completions' notifications")
+            self._nvim.subscribe("scroll")
+            log.info(
+                "subscribed to 'capsule' + 'completions' + 'scroll' notifications"
+            )
         except Exception:  # noqa: BLE001
             log.exception("subscribe(capsule/completions) failed")
         try:
@@ -232,6 +247,20 @@ class NvimBackend(QObject):
                 )
                 return
             self.completions_updated.emit(args[0])
+            return
+        if name == "scroll":
+            if not args or not isinstance(args[0], dict):
+                log.warning(
+                    "scroll notification with unexpected payload: %r", args
+                )
+                return
+            try:
+                delta = int(args[0].get("delta", 0))
+            except (TypeError, ValueError):
+                log.warning("scroll payload has non-int delta: %r", args[0])
+                return
+            if delta != 0:
+                self.viewport_scrolled.emit(delta)
             return
         log.debug("unhandled notification: %s (args=%r)", name, args)
 
@@ -286,6 +315,14 @@ class NvimBackend(QObject):
         rows: int,
         cols: int,  # noqa: ARG002 — redundant with `right - left`; NeoVim sends it anyway.
     ) -> None:
+        # Emit pre-mutation: the view needs the scroll delta + the grid
+        # dimensions as they were *before* the shift so it can size its
+        # scrollback buffer and accumulate the pending delta. The actual
+        # cell snapshot happens later on flush when grid_line events for
+        # the scrolled-in region have landed.
+        self.grid_scroll_performed.emit(
+            top, bot, left, right, rows, self.grid.cols, self.grid.rows
+        )
         self.grid.scroll(top, bot, left, right, rows)
 
     def _h_grid_cursor_goto(self, grid: int, row: int, col: int) -> None:  # noqa: ARG002
