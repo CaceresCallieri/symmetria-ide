@@ -100,6 +100,11 @@ def translate(key: int, text: str, modifiers: Qt.KeyboardModifier) -> str | None
         if len(char) == 1 and ord(char) < 0x20:
             # Qt gives control-char codepoints (e.g. Ctrl-A → \x01) in
             # `text`. Convert back to the letter + explicit C- prefix.
+            # Special case: \x00 is Ctrl+@ (also Ctrl+Space on some
+            # layouts). chr(0 + 0x60) = '`' which is wrong — NeoVim
+            # wants "<C-Space>" for this combination.
+            if ord(char) == 0:
+                return "<C-Space>"
             letter = chr(ord(char) + 0x60)
             return f"<C-{letter}>"
         if ctrl or alt or meta:

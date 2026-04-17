@@ -74,7 +74,9 @@ local function file_display()
     return "[no name]"
   end
   local cwd = vim.fn.getcwd()
-  if full:sub(1, #cwd + 1) == cwd .. "/" then
+  -- Guard against cwd == "/" where cwd .. "/" would be "//" and the
+  -- prefix check would never match any real path.
+  if cwd ~= "/" and full:sub(1, #cwd + 1) == cwd .. "/" then
     return full:sub(#cwd + 2)
   end
   return vim.fn.fnamemodify(full, ":~")

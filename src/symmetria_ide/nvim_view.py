@@ -57,8 +57,13 @@ class NvimView(QQuickPaintedItem):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        # ItemHasContents: tells the scene graph this item paints pixels.
         self.setFlag(QQuickPaintedItem.Flag.ItemHasContents, True)
+        # ItemIsFocusScope: makes this item a focus boundary so Tab
+        # navigation stops here rather than passing through to QML peers.
         self.setFlag(QQuickPaintedItem.Flag.ItemIsFocusScope, True)
+        # ItemAcceptsInputMethod: required for IME / compose-key support
+        # on Wayland so the compositor routes input method events here.
         self.setFlag(QQuickPaintedItem.Flag.ItemAcceptsInputMethod, True)
         self.setActiveFocusOnTab(True)
 
@@ -66,7 +71,20 @@ class NvimView(QQuickPaintedItem):
         self._metrics = QFontMetricsF(self._font)
         self._cell_w = max(1.0, self._metrics.horizontalAdvance("M"))
         self._cell_h = max(1.0, self._metrics.height())
+        # _ascent is reserved for future baseline-accurate text placement
+        # (drawing text at `y + ascent` rather than relying on AlignVCenter).
         self._ascent = self._metrics.ascent()
+
+        # Pre-build bold/italic font variants so the paint loop doesn't
+        # allocate transient QFont objects per run. Key is (bold, italic).
+        self._font_variants: dict[tuple[bool, bool], QFont] = {}
+        for bold in (False, True):
+            for italic in (False, True):
+                if bold or italic:
+                    variant = QFont(self._font)
+                    variant.setBold(bold)
+                    variant.setItalic(italic)
+                    self._font_variants[(bold, italic)] = variant
 
         self._backend: NvimBackend | None = None
         self._cols = 0
@@ -173,7 +191,6 @@ class NvimView(QQuickPaintedItem):
 
         cw = self._cell_w
         ch = self._cell_h
-        ascent = self._ascent
 
         for r in range(grid.rows):
             y = r * ch
@@ -202,14 +219,14 @@ class NvimView(QQuickPaintedItem):
                 rect = QRectF(run_start * cw, y, (c - run_start) * cw, ch)
                 painter.fillRect(rect, _rgb_to_qcolor(bg_val, default_bg))
 
-                font = self._font
-                if attr.bold != font.bold() or attr.italic != font.italic():
-                    f = QFont(font)
-                    f.setBold(attr.bold)
-                    f.setItalic(attr.italic)
-                    painter.setFont(f)
+                # Use the pre-cached variant — avoids allocating a QFont
+                # copy per run on every frame.
+                if attr.bold or attr.italic:
+                    painter.setFont(
+                        self._font_variants.get((attr.bold, attr.italic), self._font)
+                    )
                 else:
-                    painter.setFont(font)
+                    painter.setFont(self._font)
 
                 painter.setPen(_rgb_to_qcolor(fg_val, default_fg))
                 painter.drawText(
@@ -217,7 +234,6 @@ class NvimView(QQuickPaintedItem):
                     int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
                     "".join(run_chars),
                 )
-                _ = ascent  # reserved for future baseline-accurate drawing
 
         # Cursor: simple reverse block for Phase 0. Mode-aware shapes
         # (bar for insert, underline for replace) come in Phase 3 when

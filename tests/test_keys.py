@@ -70,3 +70,13 @@ def test_modifier_only_event_returns_none():
 
 def test_alt_letter():
     assert translate(int(Qt.Key.Key_X), "x", ALT) == "<M-x>"
+
+
+def test_ctrl_at_emits_c_space():
+    # Ctrl+@ produces \x00 in text; chr(0 + 0x60) == '`' which would be
+    # wrong. Verify we special-case it to <C-Space>.
+    assert translate(int(Qt.Key.Key_At), "\x00", CTRL) == "<C-Space>"
+
+
+def test_alt_special_key():
+    assert translate(int(Qt.Key.Key_Left), "", ALT) == "<M-Left>"

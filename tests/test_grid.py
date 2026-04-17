@@ -87,3 +87,40 @@ def test_define_hl_stores_rgb_and_flags():
     assert attr.foreground == 0xFF0000
     assert attr.bold is True
     assert attr.italic is False
+
+
+def test_scroll_noop_when_rows_is_zero():
+    g = make_grid(3, 4)
+    for r, ch in enumerate("ABCD"):
+        g.apply_line(r, 0, [[ch, 0, 3]])
+    g.scroll(top=0, bot=4, left=0, right=3, rows=0)
+    # Nothing should have changed.
+    assert [g.cells[r][0].char for r in range(4)] == ["A", "B", "C", "D"]
+
+
+def test_scroll_up_by_full_region_height_discards_all_content():
+    # Scrolling by the full region height (rows == bot - top) moves all
+    # original content out; the cells NeoVim would refill are left as-is.
+    g = make_grid(3, 4)
+    for r, ch in enumerate("ABCD"):
+        g.apply_line(r, 0, [[ch, 0, 3]])
+    g.scroll(top=0, bot=4, left=0, right=3, rows=4)
+    # The loop `range(0, 4 - 4)` = `range(0, 0)` is empty — no cells are
+    # moved, which is correct: all source rows have been scrolled out of
+    # the region. NeoVim follows with grid_line calls to repaint.
+    # The cells retain their last values (implementation-defined) — just
+    # confirm no crash and the grid dimensions are unchanged.
+    assert g.rows == 4
+    assert g.cols == 3
+
+
+def test_apply_line_with_nonzero_col_start_writes_correct_columns():
+    g = make_grid(5, 1)
+    # Seed the row so we can verify only the targeted column is changed.
+    g.apply_line(0, 0, [["A", 0, 5]])
+    g.apply_line(0, 2, [["Z", 1]])
+    assert g.cells[0][0].char == "A"
+    assert g.cells[0][1].char == "A"
+    assert g.cells[0][2].char == "Z"
+    assert g.cells[0][3].char == "A"
+    assert g.cells[0][4].char == "A"

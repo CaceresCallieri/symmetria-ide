@@ -89,7 +89,13 @@ class NvimBackend(QObject):
         if self._clean:
             argv.insert(3, "--clean")
         log.info("spawning nvim: %s", argv)
-        self._nvim = pynvim.attach("child", argv=argv)
+        try:
+            self._nvim = pynvim.attach("child", argv=argv)
+        except Exception:
+            log.exception(
+                "failed to spawn nvim — is nvim installed and on PATH?"
+            )
+            raise
         # rgb=true: NeoVim sends rgb hex values (no color indices).
         # ext_linegrid=true: use the modern grid_line-based protocol.
         self._nvim.ui_attach(
@@ -185,6 +191,12 @@ class NvimBackend(QObject):
             log.debug("initial push_state call failed", exc_info=True)
 
     def _on_request(self, name: str, args: list[Any]) -> Any:  # noqa: ARG002
+        """Handle an RPC request from NeoVim.
+
+        NeoVim's UI client protocol does not send requests to the UI
+        (only notifications), so this handler is intentionally a no-op.
+        Returning None is correct — pynvim sends a nil reply.
+        """
         log.debug("rpc request: %s", name)
         return None
 
@@ -193,10 +205,14 @@ class NvimBackend(QObject):
             self._dispatch_redraw(args)
             return
         if name == "capsule":
-            payload = args[0] if args else {}
+            if not args or not isinstance(args[0], dict):
+                log.warning(
+                    "capsule notification with unexpected payload: %r", args
+                )
+                return
+            payload: dict = args[0]
             log.debug("capsule notification: %r", payload)
-            if isinstance(payload, dict):
-                self.capsule_updated.emit(payload)
+            self.capsule_updated.emit(payload)
             return
         log.debug("unhandled notification: %s (args=%r)", name, args)
 

@@ -200,6 +200,9 @@ class AppController(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        # These initial dimensions are a seed that gets immediately overridden
+        # when NvimView first receives a geometryChange event and calls
+        # backend.resize() with the real pixel-derived cell count.
         self._backend = NvimBackend(cols=120, rows=30)
         self._status = StatusBarState(self)
         self._capsules = CapsuleModel(self)
@@ -232,10 +235,23 @@ class AppController(QObject):
 
 
 def _qml_dir() -> Path:
-    """Resolve the qml/ directory — works both in-tree and when installed."""
+    """Resolve the qml/ directory — works both in-tree and when installed.
+
+    In-tree layout (development): project_root/qml/Main.qml
+      __file__ is  project_root/src/symmetria_ide/app.py
+      parents[2]   is project_root/
+
+    Installed layout: pyproject.toml package-data copies qml/ into the
+      package directory alongside this file (symmetria_ide/qml/).
+      parents[0] is the package directory.
+
+    Note: Phase 0 is always run in-tree. The installed fallback path is
+    provided for completeness but is untested until packaging is wired up.
+    """
     in_tree = Path(__file__).resolve().parents[2] / "qml"
     if in_tree.exists():
         return in_tree
+    # Installed case: qml/ is expected alongside this module file.
     packaged = Path(__file__).resolve().parent / "qml"
     return packaged
 
@@ -245,6 +261,44 @@ def _configure_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)-5s %(name)s — %(message)s",
     )
+
+
+def _configure_headless_mode(
+    controller: "AppController",
+    engine: "QQmlApplicationEngine",
+    app: "QGuiApplication",
+    shot_path: str | None,
+    test_keys: str | None,
+) -> None:
+    """Wire smoke-test timers when headless env vars are set.
+
+    `SYMMETRIA_IDE_SCREENSHOT=/path.png` — grabs the window from Qt's
+    scene graph after a warmup delay and saves it (works under Wayland
+    without compositor capture permissions).
+    `SYMMETRIA_IDE_TEST_KEYS=<keys>` — injects a keycode string before
+    the screenshot is taken.
+    `SYMMETRIA_IDE_WARMUP_MS` / `SYMMETRIA_IDE_SETTLE_MS` — tune timing.
+    """
+    warmup_ms = int(os.environ.get("SYMMETRIA_IDE_WARMUP_MS", "1500"))
+    settle_ms = int(os.environ.get("SYMMETRIA_IDE_SETTLE_MS", "800"))
+
+    def _send_keys() -> None:
+        if test_keys:
+            log.info("injecting test keys: %r", test_keys)
+            controller.backend.input(test_keys)
+
+    def _grab_and_exit() -> None:
+        if shot_path:
+            for obj in engine.rootObjects():
+                if isinstance(obj, QQuickWindow):
+                    img = obj.grabWindow()
+                    ok = img.save(shot_path)
+                    log.info("screenshot saved to %s: %s", shot_path, ok)
+                    break
+        app.quit()
+
+    QTimer.singleShot(warmup_ms, _send_keys)
+    QTimer.singleShot(warmup_ms + settle_ms, _grab_and_exit)
 
 
 def run() -> int:
@@ -282,32 +336,9 @@ def run() -> int:
     # the user has no way to exit except killing the process.
     controller.backend.closed.connect(app.quit, Qt.ConnectionType.QueuedConnection)
 
-    # Optional: headless screenshot-and-exit for smoke testing.
-    # `SYMMETRIA_IDE_SCREENSHOT=/path.png` waits the given delay, grabs
-    # the window directly from Qt's scene graph (works under Wayland
-    # without compositor capture perms), saves it, then quits.
     shot_path = os.environ.get("SYMMETRIA_IDE_SCREENSHOT")
     test_keys = os.environ.get("SYMMETRIA_IDE_TEST_KEYS")
     if shot_path or test_keys:
-        warmup_ms = int(os.environ.get("SYMMETRIA_IDE_WARMUP_MS", "1500"))
-        settle_ms = int(os.environ.get("SYMMETRIA_IDE_SETTLE_MS", "800"))
-
-        def _send_keys() -> None:
-            if test_keys:
-                log.info("injecting test keys: %r", test_keys)
-                controller.backend.input(test_keys)
-
-        def _grab_and_exit() -> None:
-            if shot_path:
-                for obj in engine.rootObjects():
-                    if isinstance(obj, QQuickWindow):
-                        img = obj.grabWindow()
-                        ok = img.save(shot_path)
-                        log.info("screenshot saved to %s: %s", shot_path, ok)
-                        break
-            app.quit()
-
-        QTimer.singleShot(warmup_ms, _send_keys)
-        QTimer.singleShot(warmup_ms + settle_ms, _grab_and_exit)
+        _configure_headless_mode(controller, engine, app, shot_path, test_keys)
 
     return app.exec()
