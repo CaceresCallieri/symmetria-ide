@@ -207,6 +207,13 @@ class NvimView(QQuickPaintedItem):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        # Transparent fill: QQuickPaintedItem otherwise clears its backing
+        # with white before every paint(), which would paint over the
+        # Window's transparent clear and defeat wallpaper see-through.
+        # Combined with skipping per-cell fills when bg == default_bg,
+        # this produces the terminal-style "only glyphs + explicit-bg
+        # cells paint" look that matches Ghostty on Hyprland.
+        self.setFillColor(QColor(0, 0, 0, 0))
         # ItemHasContents: tells the scene graph this item paints pixels.
         self.setFlag(QQuickPaintedItem.Flag.ItemHasContents, True)
         # ItemIsFocusScope: makes this item a focus boundary so Tab
@@ -639,7 +646,8 @@ class NvimView(QQuickPaintedItem):
 
     def paint(self, painter: QPainter) -> None:
         if self._backend is None:
-            painter.fillRect(self.boundingRect(), QColor(30, 30, 30))
+            # No fill: leave the backing store as the transparent clear
+            # from setFillColor(). The compositor shows the wallpaper.
             return
         grid: Grid = self._backend.grid
         painter.setFont(self._font)
@@ -647,7 +655,14 @@ class NvimView(QQuickPaintedItem):
 
         default_fg = grid.default_fg
         default_bg = grid.default_bg
-        painter.fillRect(self.boundingRect(), _rgb_to_qcolor(default_bg, 0x1E1E1E))
+        # Ghostty-parity ambient dim: black at 60% alpha over the
+        # wallpaper, matching `~/ghostty/config` (`background = #000000`,
+        # `background-opacity = 0.6`). Improves text contrast against
+        # bright wallpapers without hiding them. Cells with explicit,
+        # non-default backgrounds (line numbers, diff, cursorline,
+        # signs, visual-selection, reversed highlights) still paint
+        # opaquely on top of this tint — see `_paint_row`.
+        painter.fillRect(self.boundingRect(), QColor(0, 0, 0, 153))
 
         cw = self._cell_w
         ch = self._cell_h
@@ -807,7 +822,17 @@ class NvimView(QQuickPaintedItem):
                 c += 1
 
             rect = QRectF(run_start * cw, y, (c - run_start) * cw, ch)
-            painter.fillRect(rect, _rgb_to_qcolor(bg_val, default_bg))
+            # Skip the bg fill when the run's effective background equals
+            # the colorscheme's default — the paint() ambient tint
+            # (Ghostty-parity black @ 60%) already covers these cells,
+            # and painting default_bg opaquely here would black out the
+            # wallpaper. Runs with explicit bg (signs column, diff,
+            # cursorline, visual selection, reversed highlights) still
+            # paint. `bg_val` is post-reverse so a reversed cell with
+            # original bg == default_bg now has bg_val == default_fg and
+            # correctly paints.
+            if bg_val != default_bg:
+                painter.fillRect(rect, _rgb_to_qcolor(bg_val, default_bg))
 
             if attr.bold or attr.italic:
                 painter.setFont(

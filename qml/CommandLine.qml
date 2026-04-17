@@ -22,15 +22,21 @@ Item {
     visible: cmdlineState.visible
     z: 100
 
-    // Palette — minimal Symmetria-aesthetic dark surfaces.
-    property color bgColor: "#ee111418"
-    property color borderColor: "#2f3540"
+    // Palette — matches Symmetria Shell matte-pill chrome (derived from
+    // `~/.config/quickshell/symmetria/services/Colours.qml` mattePill()
+    // at intensity 0.5). The cmdline and popup are overlays *on top of*
+    // the transparent editor; using the same opaque matte as the
+    // StatusBar keeps UI chrome visually coherent and readable
+    // regardless of the wallpaper behind. Keep in sync with
+    // StatusBar.qml's `color`.
+    property color bgColor: "#252323"
+    property color borderColor: "#1fffffff"       // white @ 12% alpha
     property color firstCharColor: "#c8a37a"
     property color textColor: "#e8e8e8"
     property color cursorColor: "#e8e8e8"
-    property color popupBgColor: "#f00e1116"
-    property color popupBorderColor: "#2a303a"
-    property color popupSelBgColor: "#233245"
+    property color popupBgColor: "#252323"
+    property color popupBorderColor: "#1fffffff"  // white @ 12% alpha
+    property color popupSelBgColor: "#3a3335"     // slightly lifted matte
     property color popupSelFgColor: "#f5f5f5"
     property color popupFgColor: "#b0b0b0"
     property string monoFont: "Iosevka, JetBrains Mono, monospace"

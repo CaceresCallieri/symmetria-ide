@@ -15,7 +15,12 @@ Window {
     height: 720
     visible: true
     title: "Symmetria IDE"
-    color: "#1a1a1a"
+    // Transparent clear so the compositor shows the wallpaper through
+    // the editor viewport (matches Ghostty + other transparent terminals
+    // on Hyprland). The status bar and cmdline overlay are opaque —
+    // they paint the Symmetria Shell matte-pill color (`#252323`) on
+    // top. See StatusBar.qml / CommandLine.qml for the palette source.
+    color: "transparent"
     minimumWidth: 800
     minimumHeight: 400
 

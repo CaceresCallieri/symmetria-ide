@@ -8,14 +8,21 @@ import QtQuick.Layouts
 
 Rectangle {
     id: root
-    color: "#0e0e0e"
+    // Symmetria Shell matte-pill color. Derived from
+    // `~/.config/quickshell/symmetria/services/Colours.qml` mattePill()
+    // at intensity 0.5 with m3surfaceContainerHigh as base. The editor
+    // above paints transparent against the wallpaper, but the status bar
+    // stays opaque — it's chrome, not content, and reads as a solid
+    // surface matching the shell's pills. Keep in sync with
+    // CommandLine.qml's `bgColor`.
+    color: "#252323"
 
-    // Hairline divider between editor and status bar — echoes Symmetria
-    // Shell's thin separators.
+    // Hairline divider between editor and status bar — white at 12%
+    // alpha, matching the matte pill's border treatment in the shell.
     Rectangle {
         width: parent.width
         height: 1
-        color: "#2a2a2a"
+        color: "#1fffffff"
         anchors.top: parent.top
     }
 

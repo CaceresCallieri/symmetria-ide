@@ -30,7 +30,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine, QmlElement
 from PySide6.QtQuick import QQuickWindow
 
@@ -601,6 +601,14 @@ def run() -> int:
     _configure_logging()
     # Ctrl-C in the terminal should kill the app, not be caught by Qt.
     signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+    # Request an alpha channel on the default surface BEFORE QGuiApplication
+    # spins up the QPA plugin. Without this, Wayland (and X) hand us an
+    # opaque framebuffer and `color: "transparent"` in QML has no effect —
+    # the compositor composites against black. Must precede app creation.
+    _fmt = QSurfaceFormat.defaultFormat()
+    _fmt.setAlphaBufferSize(8)
+    QSurfaceFormat.setDefaultFormat(_fmt)
 
     app = QGuiApplication(sys.argv)
     app.setApplicationName("Symmetria IDE")
