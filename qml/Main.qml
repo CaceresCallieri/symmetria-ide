@@ -36,8 +36,7 @@ Window {
         StatusBar {
             id: statusBar
             Layout.fillWidth: true
-            Layout.preferredHeight: 40
-            capsules: capsuleModel
+            Layout.preferredHeight: 30
         }
     }
 

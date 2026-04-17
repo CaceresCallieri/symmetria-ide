@@ -1,17 +1,24 @@
--- Symmetria IDE runtime stub for Phase 0.
+-- Symmetria IDE runtime.
 --
 -- This file is loaded by the embedded NeoVim (via the `--cmd luafile`
--- arg the Python side passes). It imitates the capsule-emission side of
--- orchestrator.nvim: any time the buffer or mode changes, we send an
--- rpcnotify "capsule" message up to the wrapper so the native status
--- bar can render it.
+-- arg Python passes). It emits the status-bar data ("capsules") the
+-- wrapper UI renders — mode, buffer, branch, project, cursor position.
+-- It also hides NeoVim's native status line (lualine etc.) from the
+-- viewport since we render the same info natively.
 --
--- Real orchestrator.nvim will replace this file once the plugin is
--- installed. The protocol here is the contract the plugin must match:
+-- Protocol (what orchestrator.nvim must match when it replaces this):
 --
 --   rpcnotify(0, "capsule", { id = "...", label = "...", value = "..." })
 
 local M = {}
+
+-- Hide the native statusline and mode echo — the wrapper's QML status
+-- bar owns that real estate. Setting these both here AND in a VimEnter
+-- autocmd below is intentional: the early set lets the screen start
+-- out clean, and the VimEnter re-set re-asserts our choice after the
+-- user's plugins (lualine, etc.) run and clobber `laststatus`.
+vim.opt.laststatus = 0
+vim.opt.showmode = false
 
 local function emit_capsule(id, label, value)
   pcall(vim.rpcnotify, 0, "capsule", {
@@ -19,15 +26,6 @@ local function emit_capsule(id, label, value)
     label = label,
     value = value,
   })
-end
-
-local function current_buffer_name()
-  local name = vim.api.nvim_buf_get_name(0)
-  if name == nil or name == "" then
-    return "[no name]"
-  end
-  -- Show only the last path segment — status bars are narrow.
-  return name:match("([^/]+)$") or name
 end
 
 local function mode_label(mode)
@@ -45,9 +43,60 @@ local function mode_label(mode)
   return t[mode:sub(1, 1)] or mode
 end
 
+local function project_name()
+  local cwd = vim.fn.getcwd()
+  return vim.fn.fnamemodify(cwd, ":t")
+end
+
+local function git_branch()
+  -- Read .git/HEAD directly — avoids spawning a git subprocess on
+  -- every BufEnter. Handles both normal refs (`ref: refs/heads/main`)
+  -- and detached HEAD (just a 40-char sha).
+  local cwd = vim.fn.getcwd()
+  local head_path = cwd .. "/.git/HEAD"
+  if vim.fn.filereadable(head_path) == 0 then
+    return ""
+  end
+  local lines = vim.fn.readfile(head_path)
+  if #lines == 0 then
+    return ""
+  end
+  local ref = lines[1]:match("^ref:%s*refs/heads/(.+)$")
+  if ref then
+    return ref
+  end
+  return lines[1]:sub(1, 7) -- detached HEAD short sha
+end
+
+local function file_display()
+  local full = vim.api.nvim_buf_get_name(0)
+  if full == nil or full == "" then
+    return "[no name]"
+  end
+  local cwd = vim.fn.getcwd()
+  if full:sub(1, #cwd + 1) == cwd .. "/" then
+    return full:sub(#cwd + 2)
+  end
+  return vim.fn.fnamemodify(full, ":~")
+end
+
+local function cursor_position()
+  local pos = vim.api.nvim_win_get_cursor(0)
+  local total = math.max(1, vim.api.nvim_buf_line_count(0))
+  local percent = math.floor((pos[1] / total) * 100)
+  return string.format("%d:%d/%d %d%%", pos[1], pos[2] + 1, total, percent)
+end
+
 function M.push_state()
-  emit_capsule("buf", "buf", current_buffer_name())
-  emit_capsule("mode", "mode", mode_label(vim.api.nvim_get_mode().mode))
+  emit_capsule("mode", "", mode_label(vim.api.nvim_get_mode().mode))
+  emit_capsule("project", "", project_name())
+  emit_capsule("branch", "", git_branch())
+  emit_capsule("file", "", file_display())
+  emit_capsule("pos", "", cursor_position())
+end
+
+function M.push_position()
+  emit_capsule("pos", "", cursor_position())
 end
 
 -- Expose the push function as a global so the Python side can trigger
@@ -59,7 +108,7 @@ _G.symmetria_push_state = M.push_state
 -- mode change; NeoVim coalesces rapid changes so this is cheap.
 local grp = vim.api.nvim_create_augroup("SymmetriaIdeCapsules", { clear = true })
 
-vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost" }, {
+vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "DirChanged" }, {
   group = grp,
   callback = function() M.push_state() end,
 })
@@ -72,8 +121,20 @@ vim.api.nvim_create_autocmd("ModeChanged", {
 vim.api.nvim_create_autocmd("VimEnter", {
   group = grp,
   callback = function()
+    -- Lualine and similar plugins set laststatus during their own
+    -- setup, which runs before VimEnter. Re-assert our settings here
+    -- so their globals stay but the native status line stays hidden.
+    vim.opt.laststatus = 0
+    vim.opt.showmode = false
     M.push_state()
   end,
+})
+
+-- Cursor position changes are high-frequency; emit only the cheap
+-- position capsule on motion, not the full payload.
+vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
+  group = grp,
+  callback = function() M.push_position() end,
 })
 
 -- Also emit immediately, since by the time VimEnter fires the UI may

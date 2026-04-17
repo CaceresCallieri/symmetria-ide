@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import (
+    Property,
     QAbstractListModel,
     QModelIndex,
     QObject,
@@ -40,6 +41,89 @@ QML_IMPORT_MAJOR_VERSION = 1
 
 
 log = logging.getLogger(__name__)
+
+
+@QmlElement
+class StatusBarState(QObject):
+    """Per-field statusline state with individual notify signals.
+
+    QML binds to properties (`mode`, `file`, `branch`, `project`,
+    `position`) and each `*Changed` signal makes dependent bindings
+    re-evaluate automatically. This is why we moved off a generic
+    `ListModel`-of-dicts — `Text.text: model.valueFor("mode")` won't
+    re-bind when the dict is replaced, but `Text.text: state.mode` will.
+
+    Unknown capsule ids still flow through `CapsuleModel` so future
+    extensions (LSP progress, task state) have somewhere to land
+    without touching this class.
+    """
+
+    modeChanged = Signal()
+    fileChanged = Signal()
+    branchChanged = Signal()
+    projectChanged = Signal()
+    positionChanged = Signal()
+
+    _KNOWN_IDS = frozenset({"mode", "file", "branch", "project", "pos"})
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._mode = ""
+        self._file = ""
+        self._branch = ""
+        self._project = ""
+        self._position = ""
+
+    @Property(str, notify=modeChanged)
+    def mode(self) -> str:
+        return self._mode
+
+    @Property(str, notify=fileChanged)
+    def file(self) -> str:
+        return self._file
+
+    @Property(str, notify=branchChanged)
+    def branch(self) -> str:
+        return self._branch
+
+    @Property(str, notify=projectChanged)
+    def project(self) -> str:
+        return self._project
+
+    @Property(str, notify=positionChanged)
+    def position(self) -> str:
+        return self._position
+
+    @Slot(dict, result=bool)
+    def apply(self, payload: dict) -> bool:
+        """Apply one capsule payload; return True if it was handled.
+
+        Returning a bool lets the caller decide whether to also forward
+        unhandled payloads into a generic model.
+        """
+        cid = str(payload.get("id") or "")
+        value = str(payload.get("value") or "")
+        if cid == "mode" and value != self._mode:
+            self._mode = value
+            self.modeChanged.emit()
+            return True
+        if cid == "file" and value != self._file:
+            self._file = value
+            self.fileChanged.emit()
+            return True
+        if cid == "branch" and value != self._branch:
+            self._branch = value
+            self.branchChanged.emit()
+            return True
+        if cid == "project" and value != self._project:
+            self._project = value
+            self.projectChanged.emit()
+            return True
+        if cid == "pos" and value != self._position:
+            self._position = value
+            self.positionChanged.emit()
+            return True
+        return cid in self._KNOWN_IDS  # handled but unchanged
 
 
 @QmlElement
@@ -105,10 +189,11 @@ class CapsuleModel(QAbstractListModel):
 class AppController(QObject):
     """Glue object exposed to QML as `controller`.
 
-    Holds references to `NvimBackend` and `CapsuleModel` so the QML can
-    bind the view and the status bar to them. A root controller keeps
-    QML simpler than exposing each object as a separate context
-    property.
+    Owns the `NvimBackend`, the `StatusBarState` (for well-known
+    capsules bound directly into QML properties), and `CapsuleModel`
+    (for unknown/extension capsules). Every incoming capsule is tried
+    against `StatusBarState.apply` first; if unhandled, it goes into
+    the generic model.
     """
 
     backendReady = Signal()
@@ -116,8 +201,15 @@ class AppController(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._backend = NvimBackend(cols=120, rows=30)
+        self._status = StatusBarState(self)
         self._capsules = CapsuleModel(self)
-        self._backend.capsule_updated.connect(self._capsules.update)
+        self._backend.capsule_updated.connect(self._route_capsule)
+
+    @Slot(dict)
+    def _route_capsule(self, payload: dict) -> None:
+        if self._status.apply(payload):
+            return
+        self._capsules.update(payload)
 
     def start(self) -> None:
         self._backend.start()
@@ -129,6 +221,10 @@ class AppController(QObject):
     @property
     def backend(self) -> NvimBackend:
         return self._backend
+
+    @property
+    def status(self) -> StatusBarState:
+        return self._status
 
     @property
     def capsules(self) -> CapsuleModel:
@@ -171,6 +267,7 @@ def run() -> int:
     engine.rootContext().setContextProperty("controller", controller)
     engine.rootContext().setContextProperty("nvimBackend", controller.backend)
     engine.rootContext().setContextProperty("capsuleModel", controller.capsules)
+    engine.rootContext().setContextProperty("statusState", controller.status)
 
     qml_root = _qml_dir() / "Main.qml"
     engine.load(QUrl.fromLocalFile(str(qml_root)))
