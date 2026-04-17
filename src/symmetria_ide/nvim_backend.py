@@ -49,6 +49,18 @@ class NvimBackend(QObject):
     # redraw optimization.
     viewport_scrolled = Signal(int)
 
+    # Emitted when nvim reports a mode change OR updates mode_info.
+    # Payload is the resolved mode descriptor dict — the relevant keys
+    # for rendering are `cursor_shape` ("block" | "vertical" |
+    # "horizontal"), `cell_percentage` (int, 0-100, for bar/underline
+    # thickness), and `blinkwait` / `blinkon` / `blinkoff` (ints in ms).
+    # We resolve here rather than sending the full mode_info list + idx
+    # so the view doesn't need to worry about ordering between the two
+    # events: either one arriving triggers a re-emit with the current
+    # resolved view. Empty dict means "no info yet" — view should fall
+    # back to a solid block cursor.
+    cursor_mode_updated = Signal(dict)
+
     capsule_updated = Signal(dict)
     cmdline_updated = Signal(dict)
     popupmenu_updated = Signal(dict)
@@ -73,6 +85,7 @@ class NvimBackend(QObject):
         self._worker: threading.Thread | None = None
         self._stopping = False
         self._mode_info: list[dict[str, Any]] = []
+        self._mode_idx: int = 0
 
     # --- Lifecycle -----------------------------------------------------
 
@@ -356,9 +369,35 @@ class NvimBackend(QObject):
 
     def _h_mode_info_set(self, _cursor_style_enabled: bool, mode_info: list) -> None:
         self._mode_info = mode_info
+        # Re-emit the resolved descriptor — mode_info_set can arrive
+        # either before the first mode_change (startup) or after it
+        # (e.g. user runs `:set guicursor=...` mid-session). Either way
+        # the view wants the current resolved view, not the raw list.
+        self.cursor_mode_updated.emit(self._resolved_mode_info())
 
-    def _h_mode_change(self, mode: str, _mode_idx: int) -> None:
+    def _h_mode_change(self, mode: str, mode_idx: int) -> None:
         self.grid.mode = mode
+        self._mode_idx = int(mode_idx or 0)
+        self.cursor_mode_updated.emit(self._resolved_mode_info())
+
+    def _resolved_mode_info(self) -> dict[str, Any]:
+        """Look up the current mode's cursor descriptor.
+
+        Returns a best-effort dict. Missing keys (some mode_info entries
+        from older nvim versions omit blink fields) are left absent so
+        the view can apply its own defaults without special-casing.
+        """
+        if not self._mode_info:
+            return {}
+        idx = self._mode_idx
+        if not (0 <= idx < len(self._mode_info)):
+            return {}
+        entry = self._mode_info[idx]
+        if not isinstance(entry, dict):
+            return {}
+        # Shallow copy — the mode_info list is owned by the worker
+        # thread and we don't want GUI-side mutations to leak back.
+        return dict(entry)
 
     def _h_flush(self) -> None:
         self.redraw_flushed.emit()

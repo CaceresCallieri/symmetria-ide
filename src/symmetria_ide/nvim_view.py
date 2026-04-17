@@ -71,9 +71,45 @@ SCROLL_ANIMATION_FAR_LINES = 1
 # kicks in.
 SCROLLBACK_MULTIPLIER = 3
 
+# Cursor animation tunables. Match the user's Neovide config values
+# (`vim.g.neovide_cursor_animation_length = 0.075`, trail disabled).
+# Ported from `neovide/src/renderer/cursor_renderer/mod.rs` @ main.
+CURSOR_ANIMATION_LENGTH = 0.075      # seconds — main settle time
+CURSOR_SHORT_ANIMATION_LENGTH = 0.04  # speedup for ≤2-cell horizontal jumps
+# Neovide's spring early-out threshold is 0.01 in the spring's own
+# units. Our cursor spring stores pixel deltas, so 0.01 px is fine.
+_SPRING_EPSILON = 0.01
+
 # Default editor font size in points. Not yet user-configurable —
 # change here to tweak globally.
 DEFAULT_FONT_POINT_SIZE = 9
+
+
+def _spring_step(
+    position: float,
+    velocity: float,
+    dt: float,
+    animation_length: float,
+) -> tuple[float, float]:
+    """Critically-damped spring integrator — shared by scroll + cursor.
+
+    Closed-form analytic step from Neovide's
+    `CriticallyDampedSpringAnimation::update`
+    (`src/renderer/animation_utils.rs` lines 88-123 at commit 04fcd7ac).
+    Target is always 0.0; the caller either stores a displacement (scroll)
+    or a remaining delta to destination (cursor).
+
+    If `animation_length <= dt`, snaps to settled. Returns
+    `(new_position, new_velocity)` — active/settled decision is the
+    caller's to make (so thresholds can differ between units).
+    """
+    if animation_length <= dt:
+        return 0.0, 0.0
+    omega = 4.0 / animation_length
+    a = position
+    b = position * omega + velocity
+    c = math.exp(-omega * dt)
+    return (a + b * dt) * c, c * (-a * omega - b * dt * omega + b)
 
 
 _qcolor_cache: dict[tuple[int | None, int], QColor] = {}
@@ -162,23 +198,16 @@ class ScrollAnimation:
     def tick(self, dt: float) -> bool:
         """Advance one frame. Returns True iff still animating.
 
-        Integrator: closed-form critically-damped spring step. See
-        Neovide's source for the math derivation (cited GDC talk).
+        Delegates the integrator math to the shared `_spring_step`; this
+        class's contribution is unit (lines) and the 0.01-line settle
+        threshold appropriate to that unit.
         """
-        if SCROLL_ANIMATION_LENGTH <= dt:
-            # Frame took longer than the whole animation — snap.
-            self.position = 0.0
-            self.velocity = 0.0
-            return False
         if not self.active:
             return False
-        omega = 4.0 / SCROLL_ANIMATION_LENGTH
-        a = self.position
-        b = self.position * omega + self.velocity
-        c = math.exp(-omega * dt)
-        self.position = (a + b * dt) * c
-        self.velocity = c * (-a * omega - b * dt * omega + b)
-        if abs(self.position) < 0.01 and abs(self.velocity) < 0.01:
+        self.position, self.velocity = _spring_step(
+            self.position, self.velocity, dt, SCROLL_ANIMATION_LENGTH
+        )
+        if abs(self.position) < _SPRING_EPSILON and abs(self.velocity) < _SPRING_EPSILON:
             self.position = 0.0
             self.velocity = 0.0
             return False
@@ -194,6 +223,313 @@ class ScrollAnimation:
         flag = self._far_jump_clear_pending
         self._far_jump_clear_pending = False
         return flag
+
+
+class CursorAnimation:
+    """Two-axis spring animator that slides the cursor to its destination.
+
+    Port of Neovide's cursor position spring, simplified to a single
+    rectangle (the `trail_size = 0` case the user has configured). Unit
+    is **pixels** — grid coords are converted via cell width/height by
+    the caller before arriving here.
+
+    Neovide-specific quirk we faithfully preserve
+    (`neovide/src/renderer/cursor_renderer/mod.rs` lines 124-145 @ main):
+    the spring stores the *remaining delta toward destination*, not an
+    absolute position. When a new destination arrives mid-flight we
+    re-seed `position_x/y` with the live remaining delta — velocity
+    carries over automatically through the analytic formula, so
+    chained cursor moves feel smooth rather than snappy.
+    """
+
+    __slots__ = (
+        "_animation_length",
+        "_current_x",
+        "_current_y",
+        "_destination_x",
+        "_destination_y",
+        "_position_x",
+        "_position_y",
+        "_velocity_x",
+        "_velocity_y",
+        "_seeded",
+    )
+
+    def __init__(self) -> None:
+        # `current_x/y` is the live painted position in pixels.
+        self._current_x: float = 0.0
+        self._current_y: float = 0.0
+        # `destination_x/y` is where the cursor should end up.
+        self._destination_x: float = 0.0
+        self._destination_y: float = 0.0
+        # `position_x/y` / `velocity_x/y` are spring state — the REMAINING
+        # delta toward destination (decays to 0).
+        self._position_x: float = 0.0
+        self._position_y: float = 0.0
+        self._velocity_x: float = 0.0
+        self._velocity_y: float = 0.0
+        # Current animation length in seconds — varies with short-jump
+        # detection. Set lazily by `set_destination`.
+        self._animation_length: float = CURSOR_ANIMATION_LENGTH
+        # Whether `_current_{x,y}` is trustworthy. False until the first
+        # `set_destination` call so the first paint snaps rather than
+        # sliding from 0,0.
+        self._seeded: bool = False
+
+    @property
+    def current_x(self) -> float:
+        return self._current_x
+
+    @property
+    def current_y(self) -> float:
+        return self._current_y
+
+    @property
+    def active(self) -> bool:
+        return (
+            abs(self._position_x) >= _SPRING_EPSILON
+            or abs(self._position_y) >= _SPRING_EPSILON
+            or abs(self._velocity_x) >= _SPRING_EPSILON
+            or abs(self._velocity_y) >= _SPRING_EPSILON
+        )
+
+    def set_destination(
+        self,
+        dest_x: float,
+        dest_y: float,
+        cell_w: float,
+        cell_h: float,
+    ) -> None:
+        """Register a new destination in pixels.
+
+        `cell_w` / `cell_h` are passed so we can classify the jump as
+        "short" (≤ 2 cells horizontal AND 0 cells vertical → typing a
+        word) and fall back to `CURSOR_SHORT_ANIMATION_LENGTH` for a
+        snappier feel. This matches Neovide's rank-based speedup without
+        the trail-specific split logic.
+
+        Idempotent on destination: if the cursor is already heading to
+        this exact pixel, we don't re-seed (which would zero velocity
+        even though position hasn't changed). This keeps per-frame
+        paints that happen to re-call `set_destination` from stuttering.
+        """
+        if not self._seeded:
+            # First ever destination — snap to it so we don't animate
+            # from (0, 0) at startup.
+            self._current_x = dest_x
+            self._current_y = dest_y
+            self._destination_x = dest_x
+            self._destination_y = dest_y
+            self._position_x = 0.0
+            self._position_y = 0.0
+            self._velocity_x = 0.0
+            self._velocity_y = 0.0
+            self._seeded = True
+            return
+        if dest_x == self._destination_x and dest_y == self._destination_y:
+            return
+        # Re-seed spring with the delta from the current PAINTED position
+        # (not previous destination) so mid-flight redirects are smooth.
+        self._position_x = dest_x - self._current_x
+        self._position_y = dest_y - self._current_y
+        self._destination_x = dest_x
+        self._destination_y = dest_y
+        # Short-jump speedup: same row (within half a cell), ≤ 2 cells
+        # horizontal. Typing a letter scrolls the cursor right by one
+        # cell — we want that to feel instantaneous rather than laggy.
+        if (
+            abs(self._position_y) < cell_h * 0.5
+            and abs(self._position_x) <= cell_w * 2.0
+        ):
+            self._animation_length = CURSOR_SHORT_ANIMATION_LENGTH
+        else:
+            self._animation_length = CURSOR_ANIMATION_LENGTH
+
+    def tick(self, dt: float) -> bool:
+        """Advance spring one frame. Returns True iff still animating.
+
+        Updates `_current_x/y` so the view can paint at the animated
+        position. Returns False when we've settled on destination.
+        """
+        if not self.active:
+            # Snap current to destination so the last frame's paint
+            # lands exactly on the cell (no 0.01px residual).
+            self._current_x = self._destination_x
+            self._current_y = self._destination_y
+            return False
+        self._position_x, self._velocity_x = _spring_step(
+            self._position_x, self._velocity_x, dt, self._animation_length
+        )
+        self._position_y, self._velocity_y = _spring_step(
+            self._position_y, self._velocity_y, dt, self._animation_length
+        )
+        # current = destination - remaining_delta (invert the spring's
+        # "decay toward 0" into "approach destination").
+        self._current_x = self._destination_x - self._position_x
+        self._current_y = self._destination_y - self._position_y
+        if not self.active:
+            self._current_x = self._destination_x
+            self._current_y = self._destination_y
+            return False
+        return True
+
+    def reset(self) -> None:
+        self._current_x = 0.0
+        self._current_y = 0.0
+        self._destination_x = 0.0
+        self._destination_y = 0.0
+        self._position_x = 0.0
+        self._position_y = 0.0
+        self._velocity_x = 0.0
+        self._velocity_y = 0.0
+        self._seeded = False
+
+
+class CursorBlink:
+    """Smooth-blink state machine for the cursor's opacity envelope.
+
+    Port of Neovide's `BlinkStateMachine`
+    (`neovide/src/renderer/cursor_renderer/blink.rs`). Opacity is a
+    *linear* triangle wave (not a spring) sampled from wall-clock at
+    paint time — sampling from `dt` would stair-step when the frame
+    clock stalls.
+
+    Lifecycle:
+      - `set_timings(wait, on, off)` initializes or refreshes the state
+        machine when nvim's `mode_info_set` changes (new shape brings
+        new timings from `guicursor`).
+      - `opacity_at(now)` advances internal phase and returns [0, 1].
+      - Any of `wait / on / off == 0` disables blinking entirely and
+        the cursor stays fully opaque (matches Neovide's
+        `is_static_cursor`).
+
+    Neovide intentionally does NOT reset blink on cursor *move* — only
+    on cursor *shape* change. This keeps the cursor visible while you're
+    holding `j` (it doesn't restart the blink timer every keystroke).
+    The user opted into this behavior explicitly in design review.
+    """
+
+    __slots__ = (
+        "_static",
+        "_wait_s",
+        "_on_s",
+        "_off_s",
+        "_phase_start",
+        "_phase",
+    )
+
+    # Phase constants. Kept small-int so `__slots__` storage is tight.
+    PHASE_WAITING = 0  # blinkwait period at the start; opacity = 1
+    PHASE_ON = 1       # fading 1 -> 0 across blinkon
+    PHASE_OFF = 2      # fading 0 -> 1 across blinkoff
+
+    def __init__(self) -> None:
+        self._static: bool = True
+        self._wait_s: float = 0.0
+        self._on_s: float = 0.0
+        self._off_s: float = 0.0
+        self._phase_start: float = 0.0
+        self._phase: int = CursorBlink.PHASE_WAITING
+
+    def set_timings(
+        self,
+        blinkwait_ms: int,
+        blinkon_ms: int,
+        blinkoff_ms: int,
+        now: float,
+    ) -> None:
+        """Refresh from a mode_info entry's blinkwait/on/off (milliseconds).
+
+        NeoVim exposes these as integer ms; Neovide treats any zero as
+        "disable blinking for this mode" (matches `:h guicursor`).
+        """
+        new_static = (
+            blinkwait_ms <= 0 or blinkon_ms <= 0 or blinkoff_ms <= 0
+        )
+        # Skip state reset if the timings haven't actually changed — the
+        # mode_info_set event fires at startup and on `:set guicursor`
+        # but our phase tracking should survive mode-to-mode switches
+        # that happen to share timings.
+        if (
+            new_static == self._static
+            and blinkwait_ms / 1000.0 == self._wait_s
+            and blinkon_ms / 1000.0 == self._on_s
+            and blinkoff_ms / 1000.0 == self._off_s
+        ):
+            return
+        self._static = new_static
+        self._wait_s = blinkwait_ms / 1000.0
+        self._on_s = blinkon_ms / 1000.0
+        self._off_s = blinkoff_ms / 1000.0
+        self._phase = CursorBlink.PHASE_WAITING
+        self._phase_start = now
+
+    @property
+    def is_static(self) -> bool:
+        return self._static
+
+    @property
+    def active(self) -> bool:
+        """True iff this blink state will produce opacity changes over time."""
+        return not self._static
+
+    def opacity_at(self, now: float) -> float:
+        """Return cursor opacity in [0, 1] sampled at wall-clock `now`.
+
+        Advances internal phase as needed (waiting → on → off → on → ...).
+        Linear ramp during ON/OFF; constant 1.0 during WAITING.
+        """
+        if self._static:
+            return 1.0
+        # Advance phases until `now` lands inside the current one. Guards
+        # against loop-runaway if clock jumps backward by breaking on
+        # zero/negative phase durations.
+        while True:
+            if self._phase == CursorBlink.PHASE_WAITING:
+                duration = self._wait_s
+            elif self._phase == CursorBlink.PHASE_ON:
+                duration = self._on_s
+            else:
+                duration = self._off_s
+            if duration <= 0.0:
+                # Degenerate — treat as fully opaque.
+                return 1.0
+            elapsed = now - self._phase_start
+            if elapsed < duration:
+                break
+            # Advance phase. After a long gap (tab away and come back)
+            # `elapsed` can be many cycles long — fast-forward by subtracting
+            # the phase duration rather than snapping to `now`, so we stay
+            # in sync with wall clock.
+            self._phase_start += duration
+            if self._phase == CursorBlink.PHASE_WAITING:
+                self._phase = CursorBlink.PHASE_ON
+            elif self._phase == CursorBlink.PHASE_ON:
+                self._phase = CursorBlink.PHASE_OFF
+            else:
+                self._phase = CursorBlink.PHASE_ON
+            # Safety valve: if we've fallen catastrophically behind
+            # (elapsed > 10× the current phase), rebase so we don't burn
+            # CPU iterating. Matches Neovide's "lagging badly" guard.
+            if now - self._phase_start > max(self._wait_s, self._on_s, self._off_s) * 10:
+                self._phase_start = now
+        # Compute opacity within the current phase.
+        elapsed = now - self._phase_start
+        if self._phase == CursorBlink.PHASE_WAITING:
+            return 1.0
+        if self._phase == CursorBlink.PHASE_ON:
+            # Fading out across the ON window (Neovide's inversion —
+            # the "on" period ends with opacity approaching 0 so the
+            # transition into OFF is continuous).
+            remaining = self._on_s - elapsed
+            return max(0.0, min(1.0, remaining / self._on_s))
+        # PHASE_OFF — fading in from 0 to 1.
+        return max(0.0, min(1.0, elapsed / self._off_s))
+
+    def reset_phase(self, now: float) -> None:
+        """Restart blink cycle (e.g. on mode/shape change)."""
+        self._phase = CursorBlink.PHASE_WAITING
+        self._phase_start = now
 
 
 @QmlElement
@@ -271,6 +607,17 @@ class NvimView(QQuickPaintedItem):
         self._last_frame_t: float | None = None
         self._driver_connected = False
 
+        # --- Cursor animation state (GUI-thread-only) -------------------
+        # Position spring — slides cursor in pixel space to its target
+        # grid cell. Unseeded until the first paint so the cursor snaps
+        # to its initial position rather than animating in from (0, 0).
+        self._cursor_anim = CursorAnimation()
+        self._cursor_blink = CursorBlink()
+        # Last mode descriptor received from the backend. Defaults read
+        # "solid block, no blink" so startup before mode_info_set still
+        # paints a sensible cursor.
+        self._cursor_mode: dict = {}
+
         # Frame driver runs off the QQuickWindow's frameSwapped signal.
         # The item isn't attached to a window in __init__ — connect when
         # the window becomes known via the built-in windowChanged signal.
@@ -325,9 +672,14 @@ class NvimView(QQuickPaintedItem):
                 self._backend.viewport_scrolled.disconnect(self._on_viewport_scrolled)
             except (RuntimeError, TypeError):
                 pass
+            try:
+                self._backend.cursor_mode_updated.disconnect(self._on_cursor_mode_updated)
+            except (RuntimeError, TypeError):
+                pass
         self._backend = value
         if value is not None:
             value.redraw_flushed.connect(self._on_redraw_flushed)
+            value.cursor_mode_updated.connect(self._on_cursor_mode_updated)
             # `viewport_scrolled` is fed by the WinScrolled autocmd in
             # runtime/init.lua — fires for any topline change whether
             # nvim used grid_scroll or a full grid_line repaint. Queued
@@ -346,6 +698,28 @@ class NvimView(QQuickPaintedItem):
         return self._cell_h
 
     # --- Backend → view ------------------------------------------------
+
+    @Slot(dict)
+    def _on_cursor_mode_updated(self, descriptor: dict) -> None:
+        """Store the current mode's cursor descriptor and refresh blink.
+
+        We swallow the descriptor dict here and read it from
+        `_paint_cursor` — the view doesn't need to know about any
+        individual field until paint time.
+
+        Blink timings come from `guicursor`. A change in shape/mode
+        without timing changes leaves the blink phase alone (matches
+        Neovide's "don't restart blink on cursor move" behavior).
+        """
+        self._cursor_mode = descriptor or {}
+        blinkwait = int(self._cursor_mode.get("blinkwait", 0) or 0)
+        blinkon = int(self._cursor_mode.get("blinkon", 0) or 0)
+        blinkoff = int(self._cursor_mode.get("blinkoff", 0) or 0)
+        self._cursor_blink.set_timings(blinkwait, blinkon, blinkoff, time.perf_counter())
+        # Any blink state change may require the frame driver to keep
+        # ticking even when cursor/scroll position are settled.
+        self._maybe_start_frame_driver()
+        self.update()
 
     @Slot(int)
     def _on_viewport_scrolled(self, delta: int) -> None:
@@ -386,10 +760,39 @@ class NvimView(QQuickPaintedItem):
         """
         try:
             self._maybe_apply_scroll_delta()
+            self._update_cursor_destination()
         except Exception:  # noqa: BLE001
             log.exception("scroll-delta application failed; animation reset")
             self._reset_animation_state_after_error()
         self.update()
+
+    def _update_cursor_destination(self) -> None:
+        """Seed the cursor spring with the post-flush cell position.
+
+        Runs after `_maybe_apply_scroll_delta` so `grid.cursor_row`/
+        `cursor_col` already reflect the same batch's final state. The
+        cursor spring decides internally whether the jump is short
+        (speedup) or full-length (animation_length = 0.075s).
+
+        For scrolls like Ctrl-d where cursor_row and topline move by
+        the same delta, `cursor_row` is unchanged and the spring sees
+        zero delta — cursor stays pinned and no animation fires. This
+        preserves the gotcha #11 invariant automatically.
+        """
+        if self._backend is None:
+            return
+        grid = self._backend.grid
+        if grid.rows <= 0 or grid.cols <= 0:
+            return
+        cur_row = grid.cursor_row
+        cur_col = grid.cursor_col
+        if not (0 <= cur_row < grid.rows and 0 <= cur_col < grid.cols):
+            return
+        dest_x = cur_col * self._cell_w
+        dest_y = cur_row * self._cell_h
+        self._cursor_anim.set_destination(dest_x, dest_y, self._cell_w, self._cell_h)
+        if self._cursor_anim.active:
+            self._maybe_start_frame_driver()
 
     def _maybe_apply_scroll_delta(self) -> None:
         """Meat of _on_redraw_flushed — extracted so try/except can wrap it.
@@ -472,6 +875,7 @@ class NvimView(QQuickPaintedItem):
         partially-updated state that keeps crashing on every repaint.
         """
         self._scroll_anim.reset()
+        self._cursor_anim.reset()
         self._pending_scroll_delta = 0
         self._scrollback = []
         self._scrollback_rows = 0
@@ -547,14 +951,28 @@ class NvimView(QQuickPaintedItem):
 
     # --- Frame driver -------------------------------------------------
 
+    def _animation_is_active(self) -> bool:
+        """Any source of per-frame repaint demand.
+
+        Scroll spring mid-flight, cursor spring mid-flight, or a
+        non-static blink state all require `frameSwapped` ticks to keep
+        the paint loop advancing. If all three are inactive we disconnect
+        to return to idle (zero CPU cost).
+        """
+        return (
+            self._scroll_anim.active
+            or self._cursor_anim.active
+            or self._cursor_blink.active
+        )
+
     def _maybe_start_frame_driver(self) -> None:
-        """Connect to frameSwapped if an animation is active.
+        """Connect to frameSwapped if any animation source is active.
 
         Idempotent and defensive: if the item isn't attached to a
         QQuickWindow yet, defer — the windowChanged connection in
         __init__ will retry once the window becomes known.
         """
-        if self._driver_connected or not self._scroll_anim.active:
+        if self._driver_connected or not self._animation_is_active():
             return
         window = self.window()
         if window is None:
@@ -598,9 +1016,14 @@ class NvimView(QQuickPaintedItem):
             self._last_frame_t = now
             # Negative or zero dt (clock skew, first tick) — just repaint.
             dt = max(0.0, dt)
-            still = self._scroll_anim.tick(dt)
+            # Tick BOTH springs — each returns True iff still animating.
+            # We still repaint while blink is active (opacity sampling is
+            # wall-clock-based inside _paint_cursor, so we only need a
+            # frame to land there).
+            self._scroll_anim.tick(dt)
+            self._cursor_anim.tick(dt)
             self.update()
-            if not still:
+            if not self._animation_is_active():
                 self._stop_frame_driver()
         except Exception:  # noqa: BLE001
             log.exception("frame-swap tick failed; stopping animation")
@@ -616,7 +1039,7 @@ class NvimView(QQuickPaintedItem):
         """
         try:
             self._stop_frame_driver()
-            if self._scroll_anim.active:
+            if self._animation_is_active():
                 self._maybe_start_frame_driver()
         except Exception:  # noqa: BLE001
             log.exception("windowChanged handler failed; resetting animation")
@@ -646,6 +1069,9 @@ class NvimView(QQuickPaintedItem):
             # against the wrong geometry. Snap to the new state — a
             # brief snap is less jarring than a mid-resize wobble.
             self._scroll_anim.reset()
+            # Resize changes cell pixel dimensions; cached cursor pixel
+            # coords become meaningless. Reset so the next paint re-seeds.
+            self._cursor_anim.reset()
             self._pending_scroll_delta = 0
             self._scrollback = []
             self._scrollback_rows = 0
@@ -864,34 +1290,89 @@ class NvimView(QQuickPaintedItem):
         cw: float,
         ch: float,
     ) -> None:
-        """Reverse-block cursor pinned to its post-scroll viewport row.
+        """Animated cursor with shape and smooth blink.
 
-        Cursor is drawn at `cur_row * ch`, pinned to its post-scroll
-        viewport row. We do NOT subtract the live scroll animation
-        position — see CLAUDE.md gotcha #11 ("Cursor is pinned to cur_row * ch")
-        for the full rationale. Short version: for Ctrl-d/Ctrl-u/gg/G,
-        nvim moves the cursor and topline by the same delta, so the
-        cursor's visual row is unchanged and applying the offset draws it
-        at the wrong row for the entire 300 ms animation.
+        Draws at the spring's animated pixel position (which converges
+        on `cur_row * ch`, `cur_col * cw` — see `_update_cursor_destination`).
+        We do NOT subtract the live SCROLL animation position — see
+        CLAUDE.md gotcha #11 for the full rationale. Short version: for
+        Ctrl-d/Ctrl-u/gg/G, nvim moves cursor_row and topline by the same
+        delta so `cur_row` is unchanged; the cursor spring correctly sees
+        zero delta and stays pinned.
+
+        Shape comes from `_cursor_mode["cursor_shape"]` + `cell_percentage`
+        (NeoVim `mode_info_set`):
+            - "block": full reverse-video cell, glyph visible.
+            - "vertical": thin bar at leading edge, `cell_percentage`% of
+              cell width (insert mode's `ver25`).
+            - "horizontal": thin bar at cell bottom, `cell_percentage`%
+              of cell height (cmdline/replace `hor20`, etc.).
+
+        Opacity comes from the blink state machine. Static cursors
+        (any of blinkwait/on/off == 0) are always fully opaque.
         """
         cur_row = grid.cursor_row
         cur_col = grid.cursor_col
         if not (0 <= cur_row < grid.rows and 0 <= cur_col < grid.cols):
             return
-        cursor_cell = grid.cells[cur_row][cur_col]
-        cursor_rect = QRectF(
-            cur_col * cw,
-            cur_row * ch,
-            cw,
-            ch,
-        )
-        painter.fillRect(cursor_rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
-        painter.setPen(_rgb_to_qcolor(grid.default_bg, 0x1E1E1E))
-        painter.drawText(
-            cursor_rect,
-            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            cursor_cell.char,
-        )
+        # Bootstrap: if the spring hasn't been seeded yet (first paint
+        # before the first flush-driven `set_destination`), snap to the
+        # cell now so we don't draw at (0, 0).
+        if not self._cursor_anim._seeded:  # noqa: SLF001 — same module
+            self._cursor_anim.set_destination(
+                cur_col * cw, cur_row * ch, cw, ch,
+            )
+        x = self._cursor_anim.current_x
+        y = self._cursor_anim.current_y
+
+        # Resolve shape / cell_percentage / opacity. Defaults match a
+        # plain block cursor when mode_info_set hasn't arrived yet.
+        shape = self._cursor_mode.get("cursor_shape", "block")
+        cell_pct = int(self._cursor_mode.get("cell_percentage", 100) or 100)
+        opacity = self._cursor_blink.opacity_at(time.perf_counter())
+
+        # Qt doesn't have a painter-wide opacity on fills/text directly;
+        # setOpacity() works but it's a state change — save/restore so we
+        # don't leak this into the next paint call (which handles the
+        # grid and doesn't want a dimmed pass).
+        painter.save()
+        try:
+            painter.setOpacity(opacity)
+            if shape == "vertical":
+                # Bar at the cell's leading edge. `cell_percentage` is
+                # thickness as a fraction of cell width (25 → 25% → a
+                # 1.75-px bar at 7px-wide cells; Qt handles sub-pixel).
+                bar_w = max(1.0, cw * cell_pct / 100.0)
+                rect = QRectF(x, y, bar_w, ch)
+                painter.fillRect(
+                    rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0)
+                )
+                # No glyph overlay for vertical bars — the underlying
+                # grid paint already shows the character at that cell.
+            elif shape == "horizontal":
+                # Underline at the cell's bottom edge. Thickness is
+                # `cell_percentage`% of cell height.
+                bar_h = max(1.0, ch * cell_pct / 100.0)
+                rect = QRectF(x, y + ch - bar_h, cw, bar_h)
+                painter.fillRect(
+                    rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0)
+                )
+            else:
+                # Block (default) — reverse-video the cell: fg-colored
+                # background with the cell glyph in bg color on top.
+                cursor_cell = grid.cells[cur_row][cur_col]
+                rect = QRectF(x, y, cw, ch)
+                painter.fillRect(
+                    rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0)
+                )
+                painter.setPen(_rgb_to_qcolor(grid.default_bg, 0x1E1E1E))
+                painter.drawText(
+                    rect,
+                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                    cursor_cell.char,
+                )
+        finally:
+            painter.restore()
 
     # --- Keyboard ------------------------------------------------------
 
