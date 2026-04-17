@@ -104,8 +104,26 @@ local function cursor_position()
   return string.format("%d:%d/%d %d%%", pos[1], pos[2] + 1, total, percent)
 end
 
+-- Last mode label we emitted to the UI. Used as a dedup cache so the
+-- SafeState reconciliation hook below only fires rpcnotify when the
+-- label actually drifted.
+local last_emitted_mode = nil
+
+-- Emit the mode capsule only if the label changed since our last
+-- emission. Keeps SafeState reconciliation cheap (no-op when already
+-- in sync) and keeps ModeChanged correct even when nvim reports
+-- compound states (`niI`, `nt`, `no`...) that collapse to the same
+-- label as their parent mode.
+local function push_mode(mode_str)
+  local label = mode_label(mode_str)
+  if label ~= last_emitted_mode then
+    last_emitted_mode = label
+    emit_capsule("mode", "", label)
+  end
+end
+
 function M.push_state()
-  emit_capsule("mode", "", mode_label(vim.api.nvim_get_mode().mode))
+  push_mode(vim.api.nvim_get_mode().mode)
   emit_capsule("project", "", project_name())
   emit_capsule("branch", "", git_branch())
   emit_capsule("file", "", file_display())
@@ -130,9 +148,35 @@ vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "DirChanged" }, {
   callback = function() M.push_state() end,
 })
 
+-- Mode capsule hygiene. Two-layer defense against drift between what
+-- the UI shows and what NeoVim is actually doing:
+--
+--   1. ModeChanged: use `v:event.new_mode` (the authoritative transition
+--      payload), NOT a live `nvim_get_mode()` re-query. The re-query
+--      can return compound states (`niI`, `no`, `nt`) captured at a
+--      different instant than the transition fired, which previously
+--      caused the UI to occasionally display INSERT after the user
+--      had already returned to NORMAL (e.g. after a plugin-initiated
+--      buffer switch via `gf` into a preview buffer).
+--   2. SafeState: fires whenever NeoVim enters the input-wait state
+--      (i.e. between keystrokes). Re-emits the mode capsule if it
+--      differs from last-emitted — this reconciles any drift from
+--      paths we didn't hook (plugin `nvim_feedkeys` with `n` flag,
+--      compound state transitions, etc.). `push_mode` dedups, so this
+--      is a no-op cost on every settled tick after the first correct
+--      emit.
 vim.api.nvim_create_autocmd("ModeChanged", {
   group = grp,
-  callback = function() M.push_state() end,
+  callback = function()
+    push_mode(vim.v.event.new_mode or vim.api.nvim_get_mode().mode)
+  end,
+})
+
+vim.api.nvim_create_autocmd("SafeState", {
+  group = grp,
+  callback = function()
+    push_mode(vim.api.nvim_get_mode().mode)
+  end,
 })
 
 vim.api.nvim_create_autocmd("VimEnter", {
