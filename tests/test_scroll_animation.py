@@ -193,3 +193,32 @@ def test_reset_zeroes_state() -> None:
     assert anim.velocity == 0.0
     assert not anim.active
     assert anim.consume_far_jump_clear() is False
+
+
+def test_active_is_true_when_only_velocity_nonzero() -> None:
+    """active checks both position and velocity — zero position alone is not settled."""
+    anim = ScrollAnimation()
+    # Manually inject a nonzero velocity with zero position (transient
+    # spring state that can occur mid-integration near the zero crossing).
+    anim.position = 0.0
+    anim.velocity = 0.5
+    assert anim.active is True
+
+
+def test_compounding_reverse_shift_clamps_to_negative_max_delta() -> None:
+    """Compounding a backward shift after a forward one clamps to -max_delta."""
+    anim = ScrollAnimation()
+    anim.shift(-15, max_delta=20)   # position = +15
+    anim.shift(-10, max_delta=20)   # would go to +25, should clamp to +20
+    assert anim.position == 20.0
+
+
+def test_reset_clears_far_jump_flag() -> None:
+    """reset() must clear _far_jump_clear_pending set by a far-jump shift."""
+    anim = ScrollAnimation()
+    anim.shift(500, max_delta=20)   # triggers far-jump path
+    assert anim._far_jump_clear_pending is True
+    anim.reset()
+    assert anim._far_jump_clear_pending is False
+    # consume_far_jump_clear should also return False after reset.
+    assert anim.consume_far_jump_clear() is False

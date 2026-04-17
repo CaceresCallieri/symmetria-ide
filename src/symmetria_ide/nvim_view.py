@@ -387,7 +387,7 @@ class NvimView(QQuickPaintedItem):
         # pynvim's greenlet-based RPC dispatch on the worker thread.
         # GIL guarantees list item assignment is atomic, so this is
         # safe vs. the worker thread's concurrent redraw batch.
-        slot_start = (self._scrollback_rows - grid.rows) // 2
+        slot_start = self._scrollback_center_slot(grid.rows)
         for r in range(grid.rows):
             try:
                 src_row = grid.cells[r]
@@ -419,6 +419,15 @@ class NvimView(QQuickPaintedItem):
         self._stop_frame_driver()
 
     # --- Scrollback management ----------------------------------------
+
+    def _scrollback_center_slot(self, grid_rows: int) -> int:
+        """First index of the center (viewport) slot within the scrollback buffer.
+
+        The scrollback buffer is SCROLLBACK_MULTIPLIER × grid_rows rows.
+        The live viewport occupies the center `grid_rows` rows so that
+        equal overrun space is available above and below during animation.
+        """
+        return (self._scrollback_rows - grid_rows) // 2
 
     def _ensure_scrollback_sized(self, grid_rows: int, grid_cols: int) -> None:
         """Allocate scrollback to 2× grid_rows, seeded with blank cells.
@@ -453,7 +462,10 @@ class NvimView(QQuickPaintedItem):
         d = delta % n
         if d == 0:
             return
-        self._scrollback = self._scrollback[d:] + self._scrollback[:d]
+        # In-place slice assignment reuses the same list object, avoiding
+        # a ref-cycle from replacing _scrollback entirely (keeps GC pressure
+        # low on the pynvim worker thread path).
+        self._scrollback[:] = self._scrollback[d:] + self._scrollback[:d]
 
     def _clear_scrollback_excluding_viewport(self, grid_rows: int) -> None:
         """Zero out scrollback rows outside the center viewport slot.
@@ -464,15 +476,15 @@ class NvimView(QQuickPaintedItem):
         region contains stale content from thousands of lines ago.
         Wipe it so the short flourish doesn't reveal garbage.
         """
-        slot_start = (self._scrollback_rows - grid_rows) // 2
+        slot_start = self._scrollback_center_slot(grid_rows)
         slot_end = slot_start + grid_rows
-        cols = len(self._scrollback[0]) if self._scrollback else 0
-        blank_row = [Cell() for _ in range(cols)]
         for i in range(self._scrollback_rows):
             if slot_start <= i < slot_end:
                 continue
-            # Copy per-row so rows don't alias; blank_row stays unique.
-            self._scrollback[i] = list(blank_row)
+            # Reset each row in-place using its own length — avoids
+            # deriving cols from scrollback[0] (stale after a resize).
+            row = self._scrollback[i]
+            row[:] = [Cell() for _ in range(len(row))]
 
     # --- Frame driver -------------------------------------------------
 
@@ -616,9 +628,18 @@ class NvimView(QQuickPaintedItem):
         painter.setClipRect(self.boundingRect())
         try:
             pos = self._scroll_anim.position
+            # Geometry: pos=-2.7 lines means the viewport is displaced
+            # 2.7 lines upward (old content above, new content entering
+            # from below). Decompose into an integer row offset + a
+            # sub-cell pixel residual so each paint lands on a row
+            # boundary plus a smooth pixel fraction.
+            #
+            #   floor(-2.7) = -3  → read buf rows starting 3 above center
+            #   residual = (-3 - (-2.7)) * ch = -0.3*ch
+            #   row dr=3 (center) renders at 3*ch + (-0.3*ch) = 2.7*ch  ✓
             scroll_offset_lines = math.floor(pos)
             pixel_residual_y = (scroll_offset_lines - pos) * ch  # in (-ch, 0]
-            slot_start = (self._scrollback_rows - grid.rows) // 2
+            slot_start = self._scrollback_center_slot(grid.rows)
             buf_start = slot_start + scroll_offset_lines
             self._paint_rows_from_scrollback(
                 painter,
