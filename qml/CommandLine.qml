@@ -7,7 +7,7 @@
 // NvimView and NeoVim owns the cmdline state.
 //
 // The autocomplete list uses ListView.isCurrentItem for selected-row
-// highlight (bound via `currentIndex: popupmenuModel.selected`). Only
+// highlight (bound via `currentIndex: completionModel.selected`). Only
 // the two affected delegates re-paint on selection change.
 
 import QtQuick
@@ -33,7 +33,6 @@ Item {
     property color popupSelBgColor: "#233245"
     property color popupSelFgColor: "#f5f5f5"
     property color popupFgColor: "#b0b0b0"
-    property color popupKindColor: "#6a7280"
     property string monoFont: "Iosevka, JetBrains Mono, monospace"
     property int fontSize: 14
     property int rowHeight: 24

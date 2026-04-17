@@ -152,9 +152,12 @@ vim.api.nvim_create_autocmd("VimEnter", {
     -- Best-effort; silent no-op if the user doesn't have cmp installed.
     local ok, cmp = pcall(require, "cmp")
     if ok and cmp.setup and cmp.setup.cmdline then
-      pcall(cmp.setup.cmdline, ":", { enabled = false })
-      pcall(cmp.setup.cmdline, "/", { enabled = false })
-      pcall(cmp.setup.cmdline, "?", { enabled = false })
+      -- `enabled = false` is NOT read per-cmdline by nvim-cmp — only the
+      -- global `enabled` flag is checked. Setting sources = {} is the
+      -- correct way to suppress cmp's cmdline popup for these modes.
+      pcall(cmp.setup.cmdline, ":", { sources = {} })
+      pcall(cmp.setup.cmdline, "/", { sources = {} })
+      pcall(cmp.setup.cmdline, "?", { sources = {} })
     end
 
     M.push_state()
@@ -199,6 +202,15 @@ local last_items = {}
 
 local function emit_completions()
   local line = vim.fn.getcmdline()
+
+  -- Skip completions when the cmdline is empty (e.g. just opened with `:`)
+  -- to avoid flooding the model with the full command set (~300 items)
+  -- before the user has typed anything.
+  if line == "" then
+    last_items = {}
+    pcall(vim.rpcnotify, 0, "completions", { items = {}, line = "", selected = -1 })
+    return
+  end
 
   -- Cycle detection by equality — if the cmdline content matches one
   -- of the cached items, keep the list stable and report the index.

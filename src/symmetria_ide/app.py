@@ -294,6 +294,9 @@ class CmdlineState(QObject):
             if self._prompt:
                 self._prompt = ""
                 self.promptChanged.emit()
+            if self._level:
+                self._level = 0
+                self.levelChanged.emit()
 
 
 @QmlElement
@@ -444,9 +447,13 @@ class CompletionModel(QAbstractListModel):
         raw_items = payload.get("items") or []
         items = [str(it) for it in raw_items]
         new_selected = int(payload.get("selected", -1))
-        self.beginResetModel()
-        self._items = items
-        self.endResetModel()
+        # Only reset the model when the item list actually changed. Skipping
+        # during Tab cycling (items unchanged, only selected advances) avoids
+        # a full delegate re-create on every cycle step.
+        if items != self._items:
+            self.beginResetModel()
+            self._items = items
+            self.endResetModel()
         new_visible = bool(items)
         if new_visible != self._visible:
             self._visible = new_visible

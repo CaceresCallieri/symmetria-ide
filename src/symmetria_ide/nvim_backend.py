@@ -361,7 +361,7 @@ class NvimBackend(QObject):
             "level": int(level or 0),
         })
 
-    def _h_cmdline_hide(self, level: int, *_rest: Any) -> None:
+    def _h_cmdline_hide(self, level: int = 0, *_rest: Any) -> None:
         # Some NeoVim versions pass `abort` (0.9) then added more
         # fields; *_rest absorbs whatever else comes through.
         self.cmdline_updated.emit({
@@ -380,6 +380,8 @@ class NvimBackend(QObject):
     ) -> None:
         flattened: list[dict[str, str]] = []
         for it in items or ():
+            if not isinstance(it, (list, tuple)):
+                continue
             word = str(it[0]) if len(it) >= 1 else ""
             kind = str(it[1]) if len(it) >= 2 else ""
             menu = str(it[2]) if len(it) >= 3 else ""
