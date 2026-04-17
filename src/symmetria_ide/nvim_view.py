@@ -61,14 +61,33 @@ SCROLL_ANIMATION_FAR_LINES = 1
 SCROLLBACK_MULTIPLIER = 2           # oversize factor for the cell buffer
 
 
+_qcolor_cache: dict[tuple[int | None, int], QColor] = {}
+
+
 def _rgb_to_qcolor(value: int | None, fallback: int) -> QColor:
-    """Convert a 24-bit RGB integer (NeoVim's rgb_attr format) to QColor."""
-    if value is None:
-        value = fallback
-    r = (value >> 16) & 0xFF
-    g = (value >> 8) & 0xFF
-    b = value & 0xFF
-    return QColor(r, g, b)
+    """Convert a 24-bit RGB integer (NeoVim's rgb_attr format) to QColor.
+
+    Memoized. Every `_paint_row` call allocates two QColors per hl run
+    (fg + bg), and a typical frame has dozens of runs per row x 30+
+    rows = hundreds of QColors per frame. Each fresh QColor is a
+    shiboken-tracked wrapper that counts against `gc.threshold`, so
+    throwing them away per paint was pushing the Qt render thread into
+    a race with cyclic GC on the pynvim worker thread (SIGSEGV in
+    `painter.setPen(...)`). Caching stabilizes the wrapper objects and
+    eliminates allocation from the paint hot path. Palettes are tiny
+    (one entry per distinct rgb used by the colorscheme), so the cache
+    saturates quickly and stays small.
+    """
+    cached = _qcolor_cache.get((value, fallback))
+    if cached is not None:
+        return cached
+    resolved = fallback if value is None else value
+    r = (resolved >> 16) & 0xFF
+    g = (resolved >> 8) & 0xFF
+    b = resolved & 0xFF
+    color = QColor(r, g, b)
+    _qcolor_cache[(value, fallback)] = color
+    return color
 
 
 class ScrollAnimation:

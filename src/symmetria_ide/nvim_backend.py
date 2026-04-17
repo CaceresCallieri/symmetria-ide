@@ -11,6 +11,7 @@ The GUI side calls `input(keys)` to forward keystrokes, and
 
 from __future__ import annotations
 
+import gc
 import logging
 import threading
 from pathlib import Path
@@ -271,18 +272,35 @@ class NvimBackend(QObject):
         multiple identical events into one batch for efficiency (the
         first entry is the name, every subsequent entry is one call's
         args), so we iterate call-by-call.
+
+        GC is suspended for the duration. `apply_line` is allocation-heavy
+        (one `Cell` per updated grid position; ~3600/frame on a 120x30
+        grid), and Python 3.14 tracks even tuples-of-primitives so every
+        allocation counts toward `gc.threshold`. Collection cycles that
+        fire mid-dispatch race with the Qt scene-graph render thread
+        running `paint()` — the crash trace shows `Cell.__init__` →
+        GC on the worker thread while `_paint_row` sits in a
+        `painter.setPen(...)` C++ call on `QSGRenderThread`. Deferring
+        GC to outside this critical section closes the window.
         """
-        for batch in batches:
-            event = batch[0]
-            calls = batch[1:]
-            handler = _REDRAW_HANDLERS.get(event)
-            if handler is None:
-                continue
-            for call in calls:
-                try:
-                    handler(self, *call)
-                except Exception:  # noqa: BLE001
-                    log.exception("failed to apply %s %r", event, call)
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+        try:
+            for batch in batches:
+                event = batch[0]
+                calls = batch[1:]
+                handler = _REDRAW_HANDLERS.get(event)
+                if handler is None:
+                    continue
+                for call in calls:
+                    try:
+                        handler(self, *call)
+                    except Exception:  # noqa: BLE001
+                        log.exception("failed to apply %s %r", event, call)
+        finally:
+            if gc_was_enabled:
+                gc.enable()
 
     # --- Redraw handlers (invoked from _dispatch_redraw) ---------------
 

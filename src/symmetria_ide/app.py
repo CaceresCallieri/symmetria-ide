@@ -12,6 +12,7 @@ by QML polling.
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import signal
@@ -638,5 +639,15 @@ def run() -> int:
     test_keys = os.environ.get("SYMMETRIA_IDE_TEST_KEYS")
     if shot_path or test_keys:
         _configure_headless_mode(controller, engine, app, shot_path, test_keys)
+
+    # Everything allocated up to here is long-lived (Qt wrappers, QML
+    # engine state, controller, backend). Freeze those objects into the
+    # permanent generation so the cyclic collector skips them on every
+    # subsequent pass. Combined with the gc-disabled window in
+    # `NvimBackend._dispatch_redraw`, this shrinks the "GC runs while
+    # Qt renders" race surface that was causing SIGSEGVs under Python
+    # 3.14 (see nvim_backend.py for full context).
+    gc.collect()
+    gc.freeze()
 
     return app.exec()
