@@ -47,12 +47,14 @@ class NvimBackend(QObject):
         cols: int = 120,
         rows: int = 30,
         runtime_dir: Path | None = None,
+        clean: bool = False,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._cols = cols
         self._rows = rows
         self._runtime_dir = runtime_dir or _RUNTIME_DIR
+        self._clean = clean
         self.grid = Grid()
         self._nvim: pynvim.Nvim | None = None
         self._worker: threading.Thread | None = None
@@ -64,10 +66,14 @@ class NvimBackend(QObject):
     def start(self) -> None:
         """Spawn nvim, attach UI, start the event thread.
 
-        Safe to call once. `--embed` gives us the msgpack-RPC channel
-        over stdio; `-n` skips swapfile creation; `--clean` avoids the
-        user's own init.vim poisoning the embedded instance while we're
-        still building the wrapper. We load only our own runtime.
+        `--embed` gives us the msgpack-RPC channel over stdio; `-n`
+        skips swapfile creation. We load our `runtime/` first via `--cmd
+        luafile` so capsule emission is wired before the user's own
+        init.lua runs — their config then overrides normally.
+
+        Pass `symmetria_clean=True` to force `--clean` for isolation
+        testing (bypasses user config entirely). Default is False so
+        NeoVim motions and plugins match the user's everyday setup.
         """
         if self._nvim is not None:
             return
@@ -75,12 +81,13 @@ class NvimBackend(QObject):
             "nvim",
             "--embed",
             "-n",
-            "--clean",
             "--cmd",
             f"set rtp^={self._runtime_dir}",
             "--cmd",
             f"luafile {self._runtime_dir / 'init.lua'}",
         ]
+        if self._clean:
+            argv.insert(3, "--clean")
         log.info("spawning nvim: %s", argv)
         self._nvim = pynvim.attach("child", argv=argv)
         # rgb=true: NeoVim sends rgb hex values (no color indices).
@@ -139,10 +146,16 @@ class NvimBackend(QObject):
                 setup_cb=self._on_loop_setup,
                 err_cb=self._on_err,
             )
+        except EOFError:
+            # nvim exited normally (e.g. user typed `:q` inside the
+            # editor). The channel closes, pynvim raises EOFError. This
+            # isn't a crash — log at DEBUG, not ERROR.
+            log.debug("nvim closed its RPC channel (normal exit)")
         except Exception:  # noqa: BLE001
             if not self._stopping:
                 log.exception("nvim event loop crashed")
         finally:
+            self._stopping = True
             self.closed.emit()
 
     def _on_loop_setup(self) -> None:

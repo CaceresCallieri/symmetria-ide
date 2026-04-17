@@ -180,6 +180,10 @@ def run() -> int:
 
     controller.start()
     app.aboutToQuit.connect(controller.shutdown)
+    # If nvim exits on its own (user typed `:q`), close the window too
+    # — otherwise the grid freezes on whatever was last rendered and
+    # the user has no way to exit except killing the process.
+    controller.backend.closed.connect(app.quit, Qt.ConnectionType.QueuedConnection)
 
     # Optional: headless screenshot-and-exit for smoke testing.
     # `SYMMETRIA_IDE_SCREENSHOT=/path.png` waits the given delay, grabs
