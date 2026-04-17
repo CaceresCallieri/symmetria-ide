@@ -606,9 +606,9 @@ def run() -> int:
     # spins up the QPA plugin. Without this, Wayland (and X) hand us an
     # opaque framebuffer and `color: "transparent"` in QML has no effect —
     # the compositor composites against black. Must precede app creation.
-    _fmt = QSurfaceFormat.defaultFormat()
-    _fmt.setAlphaBufferSize(8)
-    QSurfaceFormat.setDefaultFormat(_fmt)
+    fmt = QSurfaceFormat.defaultFormat()
+    fmt.setAlphaBufferSize(8)
+    QSurfaceFormat.setDefaultFormat(fmt)
 
     app = QGuiApplication(sys.argv)
     app.setApplicationName("Symmetria IDE")

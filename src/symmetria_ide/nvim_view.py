@@ -214,6 +214,11 @@ class NvimView(QQuickPaintedItem):
         # this produces the terminal-style "only glyphs + explicit-bg
         # cells paint" look that matches Ghostty on Hyprland.
         self.setFillColor(QColor(0, 0, 0, 0))
+        # Pre-allocate the ambient tint color so paint() does not create a
+        # fresh shiboken wrapper every frame. Per CLAUDE.md gotcha #10,
+        # any PySide6 wrapper allocated inside paint() is a GC/race hazard
+        # on Python 3.14 — cache here, reference in paint().
+        self._ambient_tint_color = QColor(0, 0, 0, 153)
         # ItemHasContents: tells the scene graph this item paints pixels.
         self.setFlag(QQuickPaintedItem.Flag.ItemHasContents, True)
         # ItemIsFocusScope: makes this item a focus boundary so Tab
@@ -662,7 +667,7 @@ class NvimView(QQuickPaintedItem):
         # non-default backgrounds (line numbers, diff, cursorline,
         # signs, visual-selection, reversed highlights) still paint
         # opaquely on top of this tint — see `_paint_row`.
-        painter.fillRect(self.boundingRect(), QColor(0, 0, 0, 153))
+        painter.fillRect(self.boundingRect(), self._ambient_tint_color)
 
         cw = self._cell_w
         ch = self._cell_h
