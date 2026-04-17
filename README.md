@@ -6,7 +6,14 @@ A custom IDE being grown around NeoVim and the Symmetria ecosystem. Part of a cl
 
 ## Status
 
-Inception. No code yet — this repository currently holds the design documents that shape the project.
+**Phase 0 (Spine) complete.** The spine runs: a PySide6 window embedding NeoVim (`--embed`, msgpack-RPC), the grid rendered by a `QQuickPaintedItem`, and a native QML status bar wired to an `orchestrator.nvim`-style capsule stream.
+
+```
+$ sudo pacman -S --needed pyside6 python-pynvim
+$ PYTHONPATH=src python -m symmetria_ide
+```
+
+Phase 1 (File Manager integration) is next.
 
 ## Concept
 
