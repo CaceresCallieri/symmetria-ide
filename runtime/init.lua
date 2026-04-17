@@ -104,16 +104,14 @@ local function cursor_position()
   return string.format("%d:%d/%d %d%%", pos[1], pos[2] + 1, total, percent)
 end
 
--- Last mode label we emitted to the UI. Used as a dedup cache so the
--- SafeState reconciliation hook below only fires rpcnotify when the
--- label actually drifted.
+-- Dedup cache for the mode capsule: track the last label we emitted
+-- so redundant pushes become no-ops. Covers two cases:
+--   * SafeState reconciliation firing on every idle tick when already
+--     in sync (the hot path).
+--   * Compound-state transitions that collapse to the same label
+--     (`i` -> `niI` -> `i` all map to INSERT).
 local last_emitted_mode = nil
 
--- Emit the mode capsule only if the label changed since our last
--- emission. Keeps SafeState reconciliation cheap (no-op when already
--- in sync) and keeps ModeChanged correct even when nvim reports
--- compound states (`niI`, `nt`, `no`...) that collapse to the same
--- label as their parent mode.
 local function push_mode(mode_str)
   local label = mode_label(mode_str)
   if label ~= last_emitted_mode then
