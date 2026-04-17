@@ -26,7 +26,6 @@ Rectangle {
         anchors.top: parent.top
     }
 
-    property color colorMuted: "#5a5a5a"
     property color colorDim: "#7a7a7a"
     property color colorNormal: "#b0b0b0"
     property color colorStrong: "#e0e0e0"
@@ -44,8 +43,8 @@ Rectangle {
             visible: statusState.mode !== ""
             Layout.alignment: Qt.AlignVCenter
             Layout.preferredHeight: 22
-            Layout.preferredWidth: modeLabel.implicitWidth + 14
-            radius: 3
+            Layout.preferredWidth: modeLabel.implicitWidth + 18
+            radius: height / 2
             color: {
                 switch (statusState.mode) {
                     case "INSERT": return "#6a9955"
@@ -118,16 +117,6 @@ Rectangle {
             color: root.colorDim
             font.family: root.monoFont
             font.pixelSize: 12
-            Layout.alignment: Qt.AlignVCenter
-        }
-
-        // Brand marker at the far right — quiet, just a tag.
-        Text {
-            text: "symmetria"
-            color: root.colorMuted
-            font.family: root.monoFont
-            font.pixelSize: 11
-            font.letterSpacing: 1.0
             Layout.alignment: Qt.AlignVCenter
         }
     }
