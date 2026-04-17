@@ -18,20 +18,52 @@ Federation is harder to keep coherent today: inter-app communication under Hyprl
 ```
  Symmetria IDE  (Qt / QML window)
  │
- ├─ Native status bar           ← orchestrator.nvim capsules                  (Phase 0)
+ ├─ Native status bar           ← orchestrator.nvim capsules  (Phase 0 — DONE)
  │
  ├─ Editor pane
- │   └─ NeoVim                  (headless, --embed, msgpack-RPC)
+ │   └─ NeoVim                  (--embed, msgpack-RPC)        (Phase 0 — DONE)
  │
- ├─ File manager drawer         ← Symmetria File Manager QML root             (Phase 1)
+ ├─ File manager drawer         ← deferred pending QuickShell→Qt decision
  │
- ├─ Agent pane
- │   ├─ pty + pyte              ← terminal emulation for Claude Code          (Phase 2)
+ ├─ Agent pane                                                 (Phase 2 — NEXT)
+ │   ├─ pty + pyte              ← terminal emulation for Claude Code
  │   ├─ Warp-style block model  ← conversation history as navigable blocks
  │   └─ Inline image / HTML diagram renderers
  │
  └─ Browser pane                ← QtWebEngine, cmux-pattern agent control     (Phase 4)
 ```
+
+## Realized Phase 0 implementation
+
+```
+NeoVim (--embed child process)
+    ↓ msgpack-RPC over stdio
+pynvim.Nvim (worker thread)
+    ↓ run_loop dispatches redraw + capsule notifications
+    │
+    ├─ redraw batches → Grid (pure Python, 2-D Cell array)
+    │                       ↓ flush
+    │                   redraw_flushed signal → NvimView.update()
+    │                                              ↓ paint()
+    │                                          QQuickPaintedItem
+    │
+    └─ capsule notifications → capsule_updated signal
+                                   ↓
+                               AppController._route_capsule
+                                   ↓
+                          ┌────────┴────────┐
+                  StatusBarState.apply   CapsuleModel.update
+                  (mode/file/branch/     (unknown ids,
+                   project/pos)           extensibility)
+                          ↓
+                     StatusBar.qml (bindings re-evaluate via per-property notify signals)
+```
+
+**Critical invariants (encoded in code):**
+- Any RPC call from the Qt GUI thread MUST be marshaled via `nvim.async_call` — cross-thread calls raise `NvimError: request from non-main thread`.
+- Our `runtime/init.lua` publishes `_G.symmetria_push_state()` so Python can force a re-push after subscribing to `"capsule"` (we race the plugin's initial push otherwise).
+- `laststatus` / `showmode` must be re-asserted from a `VimEnter` autocmd — lualine setup clobbers them if we only set at `--cmd` time.
+- QML bindings must depend on notifiable properties. A `Text { text: model.rowCount() }` computes once and stays stale; use per-field `@Property` with `notify=` signals instead.
 
 ## Progressive NeoVim extraction
 

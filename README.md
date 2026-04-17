@@ -33,11 +33,14 @@ See `docs/` for the full design:
 
 - `docs/vision.md` — the long-horizon idea
 - `docs/identity.md` — naming and design principles
-- `docs/architecture.md` — embedding and extraction model
+- `docs/architecture.md` — embedding and extraction model (updated with realized Phase 0)
 - `docs/tech-stack.md` — framework decision (PySide6 now, gpui later)
-- `docs/phases.md` — the phased build plan
+- `docs/phases.md` — the phased build plan (Phase 0 done, Phase 1 deferred, Phase 2 next)
+- `docs/dev-workflow.md` — concrete commands: running, headless testing, workspace rules
 - `docs/references.md` — projects that inform this one
 - `docs/future.md` — years-out direction
+
+`CLAUDE.md` is the fast-onboarding brief for agents and collaborators — source layout, capsule protocol, gotchas, Phase 2 starting points.
 
 ## Related projects
 
