@@ -377,7 +377,7 @@ class NvimBackend(QObject):
 
     def _h_mode_change(self, mode: str, mode_idx: int) -> None:
         self.grid.mode = mode
-        self._mode_idx = int(mode_idx or 0)
+        self._mode_idx = int(mode_idx) if mode_idx is not None else 0
         self.cursor_mode_updated.emit(self._resolved_mode_info())
 
     def _resolved_mode_info(self) -> dict[str, Any]:

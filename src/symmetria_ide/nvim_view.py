@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from typing import Any
 
 from PySide6.QtCore import (
     Property,
@@ -293,6 +294,11 @@ class CursorAnimation:
             or abs(self._velocity_y) >= _SPRING_EPSILON
         )
 
+    @property
+    def seeded(self) -> bool:
+        """True after the first set_destination call; False after reset()."""
+        return self._seeded
+
     def set_destination(
         self,
         dest_x: float,
@@ -352,8 +358,10 @@ class CursorAnimation:
         position. Returns False when we've settled on destination.
         """
         if not self.active:
-            # Snap current to destination so the last frame's paint
-            # lands exactly on the cell (no 0.01px residual).
+            # Defensive snap: in normal flow current == destination when
+            # active is False, so this is a no-op. Corrects silently if
+            # they ever diverge (e.g. reset race). Also avoids a needless
+            # spring step on the already-settled fast path.
             self._current_x = self._destination_x
             self._current_y = self._destination_y
             return False
@@ -383,6 +391,7 @@ class CursorAnimation:
         self._velocity_x = 0.0
         self._velocity_y = 0.0
         self._seeded = False
+        self._animation_length = CURSOR_ANIMATION_LENGTH
 
 
 class CursorBlink:
@@ -616,7 +625,7 @@ class NvimView(QQuickPaintedItem):
         # Last mode descriptor received from the backend. Defaults read
         # "solid block, no blink" so startup before mode_info_set still
         # paints a sensible cursor.
-        self._cursor_mode: dict = {}
+        self._cursor_mode: dict[str, Any] = {}
 
         # Frame driver runs off the QQuickWindow's frameSwapped signal.
         # The item isn't attached to a window in __init__ — connect when
@@ -1318,7 +1327,7 @@ class NvimView(QQuickPaintedItem):
         # Bootstrap: if the spring hasn't been seeded yet (first paint
         # before the first flush-driven `set_destination`), snap to the
         # cell now so we don't draw at (0, 0).
-        if not self._cursor_anim._seeded:  # noqa: SLF001 — same module
+        if not self._cursor_anim.seeded:
             self._cursor_anim.set_destination(
                 cur_col * cw, cur_row * ch, cw, ch,
             )

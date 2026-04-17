@@ -132,6 +132,8 @@ def test_vertical_jump_uses_full_animation_length() -> None:
     anim = CursorAnimation()
     anim.set_destination(0.0, 0.0, CELL_W, CELL_H)
     anim.set_destination(CELL_W, CELL_H, CELL_W, CELL_H)  # 1-cell diag
+    # Direct check — consistent with test_three_cell_horizontal_jump_is_not_short.
+    assert anim._animation_length == CURSOR_ANIMATION_LENGTH  # noqa: SLF001
     frames = 0
     while anim.active and frames < 200:
         anim.tick(FRAME_DT)
@@ -139,6 +141,18 @@ def test_vertical_jump_uses_full_animation_length() -> None:
     # Full-length animation should take at least ~10 frames @ 60fps
     # to settle below 0.01px (spring decay).
     assert frames >= 8
+
+
+def test_vertical_only_jump_uses_full_animation_length() -> None:
+    """Purely vertical move (j/k with no column change) is not a short jump.
+
+    This is the most common non-short cursor move: moving between rows
+    with the cursor staying in the same column.
+    """
+    anim = CursorAnimation()
+    anim.set_destination(0.0, 0.0, CELL_W, CELL_H)
+    anim.set_destination(0.0, CELL_H, CELL_W, CELL_H)  # 0 cols, 1 row
+    assert anim._animation_length == CURSOR_ANIMATION_LENGTH  # noqa: SLF001
 
 
 def test_mid_flight_redirect_preserves_velocity() -> None:
@@ -279,3 +293,31 @@ def test_reset_phase_restarts_waiting() -> None:
     blink.reset_phase(10.0)
     # At t=10.5 we should still be in the new WAITING phase.
     assert blink.opacity_at(10.5) == 1.0
+
+def test_reset_phase_on_static_cursor_has_no_visible_effect() -> None:
+    """reset_phase on a static cursor doesn't break opacity_at.
+
+    _static is still True so opacity_at still returns 1.0 regardless
+    of the internal phase / phase_start values.
+    """
+    blink = CursorBlink()
+    # No set_timings — stays static.
+    blink.reset_phase(10.0)
+    assert blink.is_static
+    assert blink.opacity_at(10.5) == 1.0
+    assert blink.opacity_at(12.0) == 1.0
+
+
+def test_opacity_at_clamped_to_one_for_clock_skew_before_phase_start() -> None:
+    """Backward clock (now < phase_start) should not return opacity > 1.
+
+    elapsed = now - phase_start < 0 satisfies 'elapsed < duration'
+    immediately so the phase-advance loop does not run. Opacity formula
+    for PHASE_ON is remaining/on_s = (on_s - negative)/on_s > 1,
+    clamped to 1.0 by min(1.0, ...).
+    """
+    blink = CursorBlink()
+    blink.set_timings(1000, 500, 500, 5.0)  # phase_start = 5.0
+    # Query with now < phase_start (clock skew scenario).
+    opacity = blink.opacity_at(4.0)
+    assert opacity == 1.0, f"expected 1.0, got {opacity}"
