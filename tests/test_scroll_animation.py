@@ -222,3 +222,39 @@ def test_reset_clears_far_jump_flag() -> None:
     assert anim._far_jump_clear_pending is False
     # consume_far_jump_clear should also return False after reset.
     assert anim.consume_far_jump_clear() is False
+
+
+def test_compound_half_page_scroll_stays_within_slot_start_headroom() -> None:
+    """Two back-to-back half-page Ctrl-d presses must not exceed slot_start.
+
+    Regression guard for the max_delta clamp bug fixed in commit 7282f68.
+    With SCROLLBACK_MULTIPLIER=3 and grid_rows=30, slot_start=30 rows of
+    headroom. Two Ctrl-d presses of 15 lines each would compound to -30,
+    which is exactly the boundary — they should NOT trigger the far-jump
+    path or produce a blank-band artifact.
+
+    Old (wrong) code used max_delta = scrollback_rows - grid_rows = 60,
+    so position could reach -30 without clamping. The paint loop would
+    then read past the valid buffer range and show a blank strip at the
+    viewport edge. This test uses max_delta = slot_start = 30 (the
+    correct value) to confirm both shifts stay within the renderable range.
+    """
+    grid_rows = 30
+    # SCROLLBACK_MULTIPLIER=3 → scrollback_rows=90 → slot_start=30
+    scrollback_rows = 3 * grid_rows
+    slot_start = (scrollback_rows - grid_rows) // 2  # 30
+
+    anim = ScrollAnimation()
+    # First half-page scroll down (15 lines).
+    anim.shift(15, max_delta=slot_start)
+    assert anim.position == -15.0, "first half-page shift should set position to -15"
+    assert not anim._far_jump_clear_pending, "first shift should not trigger far-jump"
+
+    # Second half-page scroll down (15 more lines, mid-animation).
+    anim.shift(15, max_delta=slot_start)
+    assert anim.position == -30.0, "compound shift should reach exactly -slot_start"
+    assert not anim._far_jump_clear_pending, (
+        "compound shift at the exact boundary should not trigger far-jump"
+    )
+    # Confirm position is within the renderable headroom (|pos| <= slot_start).
+    assert abs(anim.position) <= slot_start

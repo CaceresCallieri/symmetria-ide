@@ -131,9 +131,12 @@ class ScrollAnimation:
     def shift(self, delta_lines: int, max_delta: int) -> None:
         """Register a scroll delta; displaces `position` away from 0.
 
-        `max_delta` is the amount of scrollback headroom available in
-        the view's buffer (typically `scrollback_rows - grid.rows`). If
-        the requested scroll exceeds that, clamp to a short decorative
+        `max_delta` is the one-sided scrollback headroom — the number of
+        rows available on one side of the center slot, i.e.
+        `_scrollback_center_slot(grid_rows)` = `(scrollback_rows - grid_rows) // 2`.
+        Using the full `scrollback_rows - grid_rows` (2x the true headroom)
+        caused the blank-band compound-scroll regression (see CLAUDE.md gotcha #11).
+        If the requested scroll exceeds max_delta, clamp to a short decorative
         flourish and raise the clear flag so the view blanks the
         scrolled-in region (matches Neovide's far-jump behavior — stops
         `gg`/`G` from streaking across thousands of lines).
@@ -653,7 +656,7 @@ class NvimView(QQuickPaintedItem):
         # flush hasn't landed). Read grid.cells directly this one time.
         if self._scrollback_rows <= 0:
             self._paint_rows_from_grid(painter, grid, cw, ch, default_fg, default_bg)
-            self._paint_cursor(painter, grid, cw, ch, y_offset_lines=0.0)
+            self._paint_cursor(painter, grid, cw, ch)
             return
 
         # All other paints go through the scrollback. Even when not
@@ -701,9 +704,9 @@ class NvimView(QQuickPaintedItem):
         finally:
             painter.restore()
 
-        # Cursor rides the scroll when animating; sits at its current
-        # grid position when idle. Read glyph from grid.cells (truth).
-        self._paint_cursor(painter, grid, cw, ch, y_offset_lines=pos)
+        # Cursor pinned to cur_row * ch regardless of animation state.
+        # Read glyph from grid.cells (truth source).
+        self._paint_cursor(painter, grid, cw, ch)
 
     def _paint_rows_from_grid(
         self,
@@ -826,26 +829,16 @@ class NvimView(QQuickPaintedItem):
         grid: Grid,
         cw: float,
         ch: float,
-        y_offset_lines: float,  # noqa: ARG002 — kept for call-site symmetry
     ) -> None:
         """Reverse-block cursor pinned to its post-scroll viewport row.
 
-        We used to subtract `y_offset_lines` (the live scroll animation
-        position) from `cur_row` under the "cursor rides the scroll"
-        idea. That is correct only when the cursor stays on the same
-        BUFFER LINE while the viewport translates under it — Ctrl-y,
-        Ctrl-e, some mouse-wheel patterns — but wrong for the scrolls
-        that dominate real use: Ctrl-d, Ctrl-u, search jumps, `zz`,
-        `gg`/`G`. In those, nvim moves the cursor by the same delta
-        as the topline, so the cursor's visual row does NOT change.
-        Applying the offset pushed the bright reverse-block to
-        `(cur_row + |delta|) * ch` at animation start, which with a
-        15-line half-page scroll meant the cursor landed on the viewport's
-        bottom row for the entire 300 ms animation — exactly the "last
-        line is delayed / disappears before it should" perception. The
-        simple fix: draw the cursor at `cur_row * ch` and let it pop to
-        its new position instantly. Ctrl-y/Ctrl-e will pop by one row
-        rather than sliding; acceptable given they're far less common.
+        Cursor is drawn at `cur_row * ch`, pinned to its post-scroll
+        viewport row. We do NOT subtract the live scroll animation
+        position — see CLAUDE.md gotcha #11 ("Cursor is pinned to cur_row * ch")
+        for the full rationale. Short version: for Ctrl-d/Ctrl-u/gg/G,
+        nvim moves the cursor and topline by the same delta, so the
+        cursor's visual row is unchanged and applying the offset draws it
+        at the wrong row for the entire 300 ms animation.
         """
         cur_row = grid.cursor_row
         cur_col = grid.cursor_col
