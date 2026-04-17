@@ -71,9 +71,8 @@ SCROLL_ANIMATION_FAR_LINES = 1
 # kicks in.
 SCROLLBACK_MULTIPLIER = 3
 
-# Default editor font size in points. ~18% smaller than the Phase 0
-# starting size of 11pt — chosen to fit more code on screen without
-# exposing a user-facing font setting yet (Phase 0 scope).
+# Default editor font size in points. Not yet user-configurable —
+# change here to tweak globally.
 DEFAULT_FONT_POINT_SIZE = 9
 
 
