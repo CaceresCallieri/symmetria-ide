@@ -58,7 +58,18 @@ SCROLL_ANIMATION_LENGTH = 0.3       # seconds — spring settle time
 # from nvim), so a larger value shows a visible blank strip for 300ms —
 # worse-looking than a quick 1-line blink. Keep at 1 to match Neovide.
 SCROLL_ANIMATION_FAR_LINES = 1
-SCROLLBACK_MULTIPLIER = 2           # oversize factor for the cell buffer
+# oversize factor for the cell buffer. For `SCROLLBACK_MULTIPLIER = n`,
+# the center slot occupies `grid.rows` rows and there are
+# `((n - 1) * grid.rows) // 2` rows of headroom ABOVE and BELOW center
+# — that headroom caps how many lines an active scroll animation can
+# displace before `paint()` starts reading past the buffer edges and
+# produces a blank band at the entering/leaving edge of the viewport.
+# mult=2 gave only `rows/2` headroom, which was exactly breached by
+# compounding two half-page Ctrl-d presses. mult=3 gives a full
+# `rows` of headroom, enough for a full-viewport scroll or two
+# half-page scrolls in quick succession before the far-jump clamp
+# kicks in.
+SCROLLBACK_MULTIPLIER = 3
 
 
 _qcolor_cache: dict[tuple[int | None, int], QColor] = {}
@@ -393,7 +404,17 @@ class NvimView(QQuickPaintedItem):
             # holds stale content — the snapshot below overwrites it
             # with the post-scroll viewport for the animation target.
             self._rotate_scrollback(delta)
-            max_delta = max(0, self._scrollback_rows - grid.rows)
+            # max_delta is the animation's position cap in LINES. We can
+            # only paint with a displaced position as large as the number
+            # of rows of scrollback *on one side* of the center slot — if
+            # `|position|` exceeds `slot_start`, the paint loop reads
+            # `src = buf_start + dr` at indices past the buffer ends, the
+            # range guard skips those iterations, and the viewport shows
+            # a blank strip of `default_bg` at the leading edge. Using
+            # `scrollback_rows - grid.rows` (2x slot_start) allowed twice
+            # the displacement we can actually render — compound scrolls
+            # landed in that invalid range and showed a visible gap.
+            max_delta = self._scrollback_center_slot(grid.rows)
             self._scroll_anim.shift(delta, max_delta)
             self._pending_scroll_delta = 0
             if self._scroll_anim.consume_far_jump_clear():
@@ -644,7 +665,14 @@ class NvimView(QQuickPaintedItem):
         # without any animation, producing a single-frame snap that
         # looks like "content disappears before leaving the viewport."
         painter.save()
-        painter.setClipRect(self.boundingRect())
+        # Clip to EXACT grid dimensions, not boundingRect(). QML float
+        # sizing can make the widget's actual painted area marginally
+        # larger than `grid.rows * ch`, and boundingRect() reflects that
+        # — enough slack for a full row of stale scrollback content to
+        # leak through at the bottom edge. Tight clipping is defense in
+        # depth on top of the row-iteration guard in
+        # `_paint_rows_from_scrollback`.
+        painter.setClipRect(QRectF(0.0, 0.0, grid.cols * cw, grid.rows * ch))
         try:
             pos = self._scroll_anim.position
             # Geometry: pos=-2.7 lines means the viewport is displaced
@@ -707,12 +735,24 @@ class NvimView(QQuickPaintedItem):
     ) -> None:
         """Animated paint: iterate the scrollback slice with pixel offset.
 
-        We draw one extra row above and below so that, during the sub-cell
-        pixel residual, the row entering from the top/bottom edge is
-        already in place and doesn't pop in.
+        Row iteration range:
+        - `dr=-1` would draw at `y = -ch + residual` which is always
+          above the viewport top (residual is in (-ch, 0]), so it is
+          never visible and is never iterated.
+        - `dr=grid.rows` is only visible when `residual < 0` (sub-cell
+          animation in flight) — it then peeks in from the bottom
+          with `-residual` pixels of height. At settled state
+          (residual == 0) the row would be at `y = grid.rows * ch`
+          exactly at the viewport bottom; if the widget's actual
+          painted area overshoots that by even one pixel (which has
+          happened due to QML float sizing), a full row of STALE
+          content from earlier scroll-rotations leaks through and
+          shows up as a wrong-numbered line at the bottom of the
+          viewport. Gating on residual eliminates that leak.
         """
         cols = grid.cols
-        for dr in range(-1, grid.rows + 1):
+        last_dr = grid.rows if pixel_residual_y < 0.0 else grid.rows - 1
+        for dr in range(0, last_dr + 1):
             src = buf_start + dr
             if not (0 <= src < self._scrollback_rows):
                 continue
@@ -786,14 +826,26 @@ class NvimView(QQuickPaintedItem):
         grid: Grid,
         cw: float,
         ch: float,
-        y_offset_lines: float,
+        y_offset_lines: float,  # noqa: ARG002 — kept for call-site symmetry
     ) -> None:
-        """Reverse-block cursor, optionally translated by the scroll offset.
+        """Reverse-block cursor pinned to its post-scroll viewport row.
 
-        `y_offset_lines` is the current scroll animation position (0.0
-        on the fast path). We subtract it from cursor_row so the cursor
-        rides with the scrolling content instead of teleporting to its
-        new row the instant the scroll event fires.
+        We used to subtract `y_offset_lines` (the live scroll animation
+        position) from `cur_row` under the "cursor rides the scroll"
+        idea. That is correct only when the cursor stays on the same
+        BUFFER LINE while the viewport translates under it — Ctrl-y,
+        Ctrl-e, some mouse-wheel patterns — but wrong for the scrolls
+        that dominate real use: Ctrl-d, Ctrl-u, search jumps, `zz`,
+        `gg`/`G`. In those, nvim moves the cursor by the same delta
+        as the topline, so the cursor's visual row does NOT change.
+        Applying the offset pushed the bright reverse-block to
+        `(cur_row + |delta|) * ch` at animation start, which with a
+        15-line half-page scroll meant the cursor landed on the viewport's
+        bottom row for the entire 300 ms animation — exactly the "last
+        line is delayed / disappears before it should" perception. The
+        simple fix: draw the cursor at `cur_row * ch` and let it pop to
+        its new position instantly. Ctrl-y/Ctrl-e will pop by one row
+        rather than sliding; acceptable given they're far less common.
         """
         cur_row = grid.cursor_row
         cur_col = grid.cursor_col
@@ -802,7 +854,7 @@ class NvimView(QQuickPaintedItem):
         cursor_cell = grid.cells[cur_row][cur_col]
         cursor_rect = QRectF(
             cur_col * cw,
-            (cur_row - y_offset_lines) * ch,
+            cur_row * ch,
             cw,
             ch,
         )
