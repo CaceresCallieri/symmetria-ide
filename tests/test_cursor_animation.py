@@ -4,7 +4,7 @@ Pure math / pure state-machine. No Qt. Exercises:
 
 - Position spring convergence and the "store remaining delta" seeding
   convention (cursor spring's unique twist relative to the scroll one).
-- Short-jump speedup: ≤2-cell horizontal AND 0 vertical → 0.04s window.
+- Short-jump speedup: ≤2-cell horizontal AND 0 vertical → 0.048s window.
 - First-destination snap (no animate-in-from-origin on startup).
 - Mid-flight re-seed preserves velocity (Neovide's "chained move feels
   continuous" behavior).
@@ -187,6 +187,43 @@ def test_idempotent_redirect_to_same_destination_is_noop() -> None:
     v = anim._velocity_x  # noqa: SLF001
     anim.set_destination(CELL_W * 5, 0.0, CELL_W, CELL_H)  # same
     assert anim._velocity_x == v  # noqa: SLF001
+
+
+def test_per_frame_retarget_does_not_reclassify_mid_flight() -> None:
+    """Per-frame scroll-target retargets must not flip animation_length mid-flight.
+
+    `_update_cursor_destination` calls `set_destination` every frame while
+    a scroll animation is active, chasing a moving target. As the cursor
+    approaches that target the remaining delta shrinks below the short-jump
+    threshold (`|pos_y| < cell_h * 0.5`). Without the `not self.active`
+    guard, `_animation_length` would flip from CURSOR_ANIMATION_LENGTH to
+    CURSOR_SHORT_ANIMATION_LENGTH mid-flight, speeding up the spring decay
+    and biasing the trajectory by up to ~4px for ~300ms.
+
+    Regression guard for the fix introduced alongside the per-frame retarget
+    feature (`_update_cursor_destination` called from `_on_frame_swapped`).
+    """
+    anim = CursorAnimation()
+    anim.set_destination(0.0, 0.0, CELL_W, CELL_H)
+    # Large vertical jump (8 rows) — full animation length expected.
+    anim.set_destination(0.0, CELL_H * 8, CELL_W, CELL_H)
+    assert anim._animation_length == CURSOR_ANIMATION_LENGTH  # noqa: SLF001
+
+    # Simulate a few frames of a scroll-driven retarget: the destination
+    # drifts as the scroll spring decays, and the remaining delta shrinks.
+    # Each call mimics `_update_cursor_destination` with a slightly lower
+    # dest_y as scroll_anim.position approaches 0.
+    for frame in range(10):
+        anim.tick(FRAME_DT)
+        # Shrink dest_y toward the final row position (scroll decaying).
+        shrinking_dest_y = CELL_H * 8 * (1.0 - frame / 20.0)
+        anim.set_destination(0.0, shrinking_dest_y, CELL_W, CELL_H)
+        # animation_length must remain at CURSOR_ANIMATION_LENGTH throughout
+        # — the spring is still active, so no reclassification should occur.
+        assert anim._animation_length == CURSOR_ANIMATION_LENGTH, (  # noqa: SLF001
+            f"frame {frame}: animation_length was reclassified mid-flight "
+            f"(dest_y={shrinking_dest_y:.1f}, current_y={anim.current_y:.1f})"
+        )
 
 
 def test_reset_clears_state() -> None:

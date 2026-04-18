@@ -323,6 +323,12 @@ class CursorAnimation:
         this exact pixel, we don't re-seed (which would zero velocity
         even though position hasn't changed). This keeps per-frame
         paints that happen to re-call `set_destination` from stuttering.
+
+        Short/long classification only runs when the spring is at rest
+        (`not self.active`). Per-frame retargets during an active scroll
+        must not reclassify — the remaining delta shrinks toward zero as
+        the cursor chases the moving target, so the short-jump condition
+        triggers spuriously and biases the decay rate mid-flight.
         """
         if not self._seeded:
             # First ever destination — snap to it so we don't animate
@@ -339,6 +345,10 @@ class CursorAnimation:
             return
         if dest_x == self._destination_x and dest_y == self._destination_y:
             return
+        # Capture active state BEFORE re-seeding. After we write _position_x/y
+        # below, `self.active` always evaluates True — we need the pre-seed
+        # state to distinguish "freshly started jump" from "mid-flight retarget".
+        was_active = self.active
         # Re-seed spring with the delta from the current PAINTED position
         # (not previous destination) so mid-flight redirects are smooth.
         self._position_x = dest_x - self._current_x
@@ -348,13 +358,23 @@ class CursorAnimation:
         # Short-jump speedup: same row (within half a cell), ≤ 2 cells
         # horizontal. Typing a letter scrolls the cursor right by one
         # cell — we want that to feel instantaneous rather than laggy.
-        if (
-            abs(self._position_y) < cell_h * 0.5
-            and abs(self._position_x) <= cell_w * 2.0
-        ):
-            self._animation_length = CURSOR_SHORT_ANIMATION_LENGTH
-        else:
-            self._animation_length = CURSOR_ANIMATION_LENGTH
+        #
+        # Only classify on a freshly-started jump (spring was at rest).
+        # Per-frame retargets from `_update_cursor_destination` arrive
+        # while the spring is already mid-flight (was_active=True) — the
+        # remaining delta shrinks as the cursor approaches the moving
+        # target, so the short-jump condition (`|pos_y| < cell_h*0.5`)
+        # would trigger mid-flight and switch to the faster decay, biasing
+        # the trajectory by up to ~4px for ~300ms. Preserving the
+        # original classification during flight keeps the cadence stable.
+        if not was_active:
+            if (
+                abs(self._position_y) < cell_h * 0.5
+                and abs(self._position_x) <= cell_w * 2.0
+            ):
+                self._animation_length = CURSOR_SHORT_ANIMATION_LENGTH
+            else:
+                self._animation_length = CURSOR_ANIMATION_LENGTH
 
     def tick(self, dt: float) -> bool:
         """Advance spring one frame. Returns True iff still animating.
@@ -801,7 +821,7 @@ class NvimView(QQuickPaintedItem):
         screen row as the scroll settles.
 
         Two springs, different time constants: scroll settles in ~300 ms,
-        cursor in ~75 ms. Because the cursor spring is ~4× faster than
+        cursor in ~90 ms. Because the cursor spring is ~3.3× faster than
         the target's decay, the cursor converges on the moving target
         quickly and visually "leads" the scroll — the layered cadence
         effect Neovide is known for. See CLAUDE.md gotcha #11 for the
