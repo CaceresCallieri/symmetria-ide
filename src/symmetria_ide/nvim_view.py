@@ -72,11 +72,16 @@ SCROLL_ANIMATION_FAR_LINES = 1
 # kicks in.
 SCROLLBACK_MULTIPLIER = 3
 
-# Cursor animation tunables. Match the user's Neovide config values
-# (`vim.g.neovide_cursor_animation_length = 0.075`, trail disabled).
+# Cursor animation tunables. Start from Neovide's defaults
+# (`vim.g.neovide_cursor_animation_length = 0.075`, trail disabled) and
+# slow by 20% — user-calibrated for the decoupled two-spring cadence
+# introduced by `_update_cursor_destination`: once the cursor chases a
+# moving scroll target instead of sitting still, 75 ms read as too
+# snappy for large jumps. 90 ms / 48 ms give a calmer glide while
+# still leading the 300 ms scroll spring.
 # Ported from `neovide/src/renderer/cursor_renderer/mod.rs` @ main.
-CURSOR_ANIMATION_LENGTH = 0.075      # seconds — main settle time
-CURSOR_SHORT_ANIMATION_LENGTH = 0.04  # speedup for ≤2-cell horizontal jumps
+CURSOR_ANIMATION_LENGTH = 0.09        # seconds — main settle time
+CURSOR_SHORT_ANIMATION_LENGTH = 0.048  # speedup for ≤2-cell horizontal jumps
 # Neovide's spring early-out threshold is 0.01 in the spring's own
 # units. Our cursor spring stores pixel deltas, so 0.01 px is fine.
 _SPRING_EPSILON = 0.01
@@ -776,17 +781,40 @@ class NvimView(QQuickPaintedItem):
         self.update()
 
     def _update_cursor_destination(self) -> None:
-        """Seed the cursor spring with the post-flush cell position.
+        """Retarget the cursor spring at the scroll-adjusted cell position.
 
-        Runs after `_maybe_apply_scroll_delta` so `grid.cursor_row`/
-        `cursor_col` already reflect the same batch's final state. The
-        cursor spring decides internally whether the jump is short
-        (speedup) or full-length (animation_length = 0.075s).
+        Ported from Neovide's `CursorRenderer::update_cursor_destination`
+        (`src/renderer/cursor_renderer/mod.rs:294-330` @ main). The
+        cursor's target is NOT just `cur_row * cell_h` — it's offset by
+        the LIVE scroll spring value:
 
-        For scrolls like Ctrl-d where cursor_row and topline move by
-        the same delta, `cursor_row` is unchanged and the spring sees
-        zero delta — cursor stays pinned and no animation fires. This
-        preserves the gotcha #11 invariant automatically.
+            dest_y = (cur_row - scroll_anim.position) * cell_h
+
+        Rationale: nvim reports `grid_cursor_goto` in viewport-relative
+        coords, so for Ctrl-d/Ctrl-u/gg/G, `cur_row` is unchanged (both
+        cursor buffer-line and topline moved by the same delta). But
+        during the animation, the rendered content is *shifted* by the
+        scroll spring — the buffer line the cursor actually lives on is
+        currently painted at row `(cur_row - position)`. Pointing the
+        cursor spring at that shifted position makes the cursor follow
+        its buffer line as the scroll animates, arriving at its final
+        screen row as the scroll settles.
+
+        Two springs, different time constants: scroll settles in ~300 ms,
+        cursor in ~75 ms. Because the cursor spring is ~4× faster than
+        the target's decay, the cursor converges on the moving target
+        quickly and visually "leads" the scroll — the layered cadence
+        effect Neovide is known for. See CLAUDE.md gotcha #11 for the
+        history (this formula previously failed when there was no cursor
+        spring to animate around the shifted target).
+
+        Called from two places:
+        1. `_on_redraw_flushed` — after a scroll batch lands, so the
+           cursor spring is seeded with the full delta at the moment
+           the scroll spring is shifted.
+        2. `_on_frame_swapped` (every frame while animating) — so the
+           target tracks the scroll spring's decay and the cursor
+           spring chases a moving destination with preserved velocity.
         """
         if self._backend is None:
             return
@@ -798,7 +826,7 @@ class NvimView(QQuickPaintedItem):
         if not (0 <= cur_row < grid.rows and 0 <= cur_col < grid.cols):
             return
         dest_x = cur_col * self._cell_w
-        dest_y = cur_row * self._cell_h
+        dest_y = (cur_row - self._scroll_anim.position) * self._cell_h
         self._cursor_anim.set_destination(dest_x, dest_y, self._cell_w, self._cell_h)
         if self._cursor_anim.active:
             self._maybe_start_frame_driver()
@@ -1029,7 +1057,16 @@ class NvimView(QQuickPaintedItem):
             # We still repaint while blink is active (opacity sampling is
             # wall-clock-based inside _paint_cursor, so we only need a
             # frame to land there).
+            #
+            # ORDER MATTERS. Scroll ticks first to produce the post-tick
+            # `scroll_anim.position`; we then retarget the cursor spring
+            # at `(cur_row - position) * cell_h` so the cursor chases the
+            # scroll's *live* decay (Neovide's decoupled-springs feel —
+            # see `_update_cursor_destination` for the full rationale).
+            # Finally the cursor spring ticks toward the new target with
+            # velocity preserved across the reseed.
             self._scroll_anim.tick(dt)
+            self._update_cursor_destination()
             self._cursor_anim.tick(dt)
             self.update()
             if not self._animation_is_active():
@@ -1301,13 +1338,11 @@ class NvimView(QQuickPaintedItem):
     ) -> None:
         """Animated cursor with shape and smooth blink.
 
-        Draws at the spring's animated pixel position (which converges
-        on `cur_row * ch`, `cur_col * cw` — see `_update_cursor_destination`).
-        We do NOT subtract the live SCROLL animation position — see
-        CLAUDE.md gotcha #11 for the full rationale. Short version: for
-        Ctrl-d/Ctrl-u/gg/G, nvim moves cursor_row and topline by the same
-        delta so `cur_row` is unchanged; the cursor spring correctly sees
-        zero delta and stays pinned.
+        Draws at the spring's animated pixel position (see
+        `_update_cursor_destination` for the target formula — during an
+        active scroll animation the target is offset by the live scroll
+        spring value so the cursor chases a moving destination, which
+        produces Neovide's layered-cadence feel).
 
         Shape comes from `_cursor_mode["cursor_shape"]` + `cell_percentage`
         (NeoVim `mode_info_set`):
