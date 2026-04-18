@@ -147,6 +147,58 @@ def _rgb_to_qcolor(value: int | None, fallback: int) -> QColor:
     return color
 
 
+# Pre-computed text alignment flags for drawText. Computing
+# `int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)` inside
+# the paint loop is cheap but still resolves two enum attributes per run;
+# caching the final int saves the attr lookups on every flush.
+_TEXT_ALIGN_FLAGS = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+
+def _flush_run(
+    painter: QPainter,
+    run_chars: list[str],
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    fg_val: int,
+    bg_val: int,
+    default_fg: int,
+    default_bg: int,
+    font: QFont,
+    font_variants: dict[tuple[bool, bool], QFont],
+    attr: HlAttr,
+) -> None:
+    """Flush one coalesced highlight run with a single fillRect + drawText.
+
+    Module-level function (not a method) so the paint hot path avoids
+    `self.` attribute lookups on every run — CPython resolves `self.x`
+    via `__getattribute__`, which is unnecessary overhead when we can
+    receive already-resolved values as arguments. See issue #12.
+
+    Allocation accounting (CLAUDE.md gotcha #10): ONE `QRectF` is created
+    here (same as before extraction). `_rgb_to_qcolor` returns cached
+    wrappers. `"".join(run_chars)` is a str alloc that existed before
+    extraction too. No new shiboken wrappers are introduced by this
+    helper — verified by inspection of the body, no `QColor(...)`, no
+    `QFont(...)`, no fresh shiboken-tracked objects beyond the pre-existing
+    QRectF. Pooling that QRectF is tracked separately in issue #1.
+
+    The `bg_val != default_bg` gate preserves the transparent-viewport
+    invariant (see TestTransparentFillColor): default-bg cells must NOT
+    paint opaquely, or the ambient tint + wallpaper are covered over.
+    """
+    rect = QRectF(x, y, w, h)
+    if bg_val != default_bg:
+        painter.fillRect(rect, _rgb_to_qcolor(bg_val, default_bg))
+    if attr.bold or attr.italic:
+        painter.setFont(font_variants.get((attr.bold, attr.italic), font))
+    else:
+        painter.setFont(font)
+    painter.setPen(_rgb_to_qcolor(fg_val, default_fg))
+    painter.drawText(rect, _TEXT_ALIGN_FLAGS, "".join(run_chars))
+
+
 class ScrollAnimation:
     """Critically-damped spring animator for the scroll offset.
 
@@ -352,32 +404,60 @@ class CursorAnimation:
         # below, `self.active` always evaluates True — we need the pre-seed
         # state to distinguish "freshly started jump" from "mid-flight retarget".
         was_active = self.active
-        # Re-seed spring with the delta from the current PAINTED position
-        # (not previous destination) so mid-flight redirects are smooth.
-        self._position_x = dest_x - self._current_x
-        self._position_y = dest_y - self._current_y
-        self._destination_x = dest_x
-        self._destination_y = dest_y
-        # Short-jump speedup: same row (within half a cell), ≤ 2 cells
-        # horizontal. Typing a letter scrolls the cursor right by one
-        # cell — we want that to feel instantaneous rather than laggy.
-        #
+        self._seed_delta(dest_x, dest_y)
         # Only classify on a freshly-started jump (spring was at rest).
         # Per-frame retargets from `_update_cursor_destination` arrive
         # while the spring is already mid-flight (was_active=True) — the
         # remaining delta shrinks as the cursor approaches the moving
-        # target, so the short-jump condition (`|pos_y| < cell_h*0.5`)
-        # would trigger mid-flight and switch to the faster decay, biasing
-        # the trajectory by up to ~4px for ~300ms. Preserving the
-        # original classification during flight keeps the cadence stable.
+        # target, so the short-jump condition would trigger mid-flight
+        # and switch to the faster decay, biasing the trajectory by up
+        # to ~4px for ~300ms. Preserving the original classification
+        # during flight keeps the cadence stable.
         if not was_active:
-            if (
-                abs(self._position_y) < cell_h * 0.5
-                and abs(self._position_x) <= cell_w * 2.0
-            ):
-                self._animation_length = CURSOR_SHORT_ANIMATION_LENGTH
-            else:
-                self._animation_length = CURSOR_ANIMATION_LENGTH
+            self._animation_length = self._pick_animation_length(cell_w, cell_h)
+
+    def _seed_delta(self, dest_x: float, dest_y: float) -> None:
+        """Seed the spring with the REMAINING DELTA to the new destination.
+
+        CLAUDE.md gotcha #12: this spring stores the remaining delta
+        (`dest - current`), NOT the absolute painted position. The spring
+        decays `_position_{x,y}` to 0 and `tick()` inverts it via
+        `current = destination - position` to produce the pixel-space
+        trajectory. DO NOT "fix" this to store absolute position — that
+        breaks mid-flight retargets (the whole point of re-seeding from
+        `_current_x/y`) and loses velocity continuity on chained cursor
+        moves, making typing feel like stutter-steps instead of one glide.
+
+        Caller must capture `was_active` BEFORE invoking this method —
+        after we write `_position_x/y`, `self.active` is always True.
+        """
+        # Re-seed with delta from the current PAINTED position (not the
+        # previous destination) so mid-flight redirects are smooth.
+        self._position_x = dest_x - self._current_x
+        self._position_y = dest_y - self._current_y
+        self._destination_x = dest_x
+        self._destination_y = dest_y
+
+    def _pick_animation_length(self, cell_w: float, cell_h: float) -> float:
+        """Choose short-jump vs normal animation length for a fresh jump.
+
+        Reads `_position_{x,y}` as the remaining delta, so this MUST be
+        called immediately after `_seed_delta` and ONLY when the spring
+        was at rest before the new seed — otherwise mid-flight deltas
+        spuriously trigger the short-jump speedup (see `set_destination`
+        docstring for the full cadence argument).
+
+        Short-jump criterion (matches Neovide's rank-based speedup): same
+        row (within half a cell vertically) AND ≤ 2 cells horizontal.
+        Typing a letter scrolls the cursor right by one cell — we want
+        that to feel instantaneous rather than laggy.
+        """
+        if (
+            abs(self._position_y) < cell_h * 0.5
+            and abs(self._position_x) <= cell_w * 2.0
+        ):
+            return CURSOR_SHORT_ANIMATION_LENGTH
+        return CURSOR_ANIMATION_LENGTH
 
     def tick(self, dt: float) -> bool:
         """Advance spring one frame. Returns True iff still animating.
@@ -584,6 +664,25 @@ class NvimView(QQuickPaintedItem):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        # Field init order matters: paint-item flags + font/metrics must
+        # land before any animation state references them indirectly.
+        # The helpers below preserve that order — do not reorder calls.
+        self._init_buffers()
+        self._init_springs()
+        self._init_signals()
+
+    # --- Init helpers --------------------------------------------------
+
+    def _init_buffers(self) -> None:
+        """Paint-item setup, fonts, scrollback, and cached shiboken wrappers.
+
+        Bundles everything that underpins a single frame of paint: Qt flags
+        so QQuickPaintedItem behaves correctly, the mono font + bold/italic
+        variants so the paint loop never allocates a QFont, the oversized
+        scrollback list used during scroll animation, and the pre-built
+        ambient-tint QColor (gotcha #10 — allocating a QColor inside
+        paint() is a GC/race hazard on Python 3.14).
+        """
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         # Transparent fill: QQuickPaintedItem otherwise clears its backing
         # with white before every paint(), which would paint over the
@@ -630,8 +729,6 @@ class NvimView(QQuickPaintedItem):
         self._cols = 0
         self._rows = 0
 
-        # --- Smooth-scroll animation state (all GUI-thread-only) ---------
-        self._scroll_anim = ScrollAnimation()
         # Oversized cell buffer (2× viewport rows). Populated on demand
         # when an animation starts; dormant otherwise to avoid per-flush
         # copy cost while idle.
@@ -640,12 +737,23 @@ class NvimView(QQuickPaintedItem):
         # Multiple grid_scroll events may arrive in one redraw batch
         # (e.g. `zz` center-on-cursor). Accumulate until flush fires.
         self._pending_scroll_delta = 0
+
+    def _init_springs(self) -> None:
+        """Animation springs + blink + frame-driver state.
+
+        All GUI-thread-only — worker threads never touch these. Per
+        gotcha #14, any new animation source must also be OR'd into
+        `_animation_is_active()` so the frame driver stays connected
+        while it's still settling.
+        """
+        # --- Smooth-scroll animation state -------------------------------
+        self._scroll_anim = ScrollAnimation()
         # Wall-clock timestamp of the last frameSwapped tick, for real
         # dt measurement. None when the driver is disconnected.
         self._last_frame_t: float | None = None
         self._driver_connected = False
 
-        # --- Cursor animation state (GUI-thread-only) -------------------
+        # --- Cursor animation state --------------------------------------
         # Position spring — slides cursor in pixel space to its target
         # grid cell. Unseeded until the first paint so the cursor snaps
         # to its initial position rather than animating in from (0, 0).
@@ -656,9 +764,14 @@ class NvimView(QQuickPaintedItem):
         # paints a sensible cursor.
         self._cursor_mode: dict[str, Any] = {}
 
-        # Frame driver runs off the QQuickWindow's frameSwapped signal.
-        # The item isn't attached to a window in __init__ — connect when
-        # the window becomes known via the built-in windowChanged signal.
+    def _init_signals(self) -> None:
+        """Qt signal connections owned by this view.
+
+        Frame driver runs off the QQuickWindow's frameSwapped signal, but
+        the item isn't attached to a window in __init__ yet — connect
+        when the window becomes known via the built-in windowChanged
+        signal.
+        """
         self.windowChanged.connect(self._on_window_changed)
 
     # --- Font setup ----------------------------------------------------
@@ -1332,6 +1445,12 @@ class NvimView(QQuickPaintedItem):
         path (row from scrollback). Run-coalescing keeps large
         same-attribute regions to a single fillRect + drawText.
         """
+        # Resolve attribute-lookups ONCE outside the loop. Each `self.`
+        # access goes through __getattribute__ and costs us on every row;
+        # local names are a pure `LOAD_FAST` at bytecode level.
+        font = self._font
+        font_variants = self._font_variants
+
         c = 0
         while c < cols:
             cell = row_cells[c]
@@ -1351,31 +1470,26 @@ class NvimView(QQuickPaintedItem):
                 run_chars.append(nxt.char)
                 c += 1
 
-            rect = QRectF(run_start * cw, y, (c - run_start) * cw, ch)
-            # Skip the bg fill when the run's effective background equals
-            # the colorscheme's default — the paint() ambient tint
-            # (Ghostty-parity black @ 60%) already covers these cells,
-            # and painting default_bg opaquely here would black out the
-            # wallpaper. Runs with explicit bg (signs column, diff,
-            # cursorline, visual selection, reversed highlights) still
-            # paint. `bg_val` is post-reverse so a reversed cell with
-            # original bg == default_bg now has bg_val == default_fg and
-            # correctly paints.
-            if bg_val != default_bg:
-                painter.fillRect(rect, _rgb_to_qcolor(bg_val, default_bg))
-
-            if attr.bold or attr.italic:
-                painter.setFont(
-                    self._font_variants.get((attr.bold, attr.italic), self._font)
-                )
-            else:
-                painter.setFont(self._font)
-
-            painter.setPen(_rgb_to_qcolor(fg_val, default_fg))
-            painter.drawText(
-                rect,
-                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                "".join(run_chars),
+            # `_flush_run` handles the fillRect + drawText. Extracted to
+            # a module-level function so the hot path avoids self-dot
+            # lookups on every run (see issue #12). The run-coalescing
+            # loop (which accumulates `run_chars`) stays here because it
+            # drives iteration of `row_cells` — extracting that would
+            # cost more in function-call overhead than it saves.
+            _flush_run(
+                painter,
+                run_chars,
+                run_start * cw,
+                y,
+                (c - run_start) * cw,
+                ch,
+                fg_val,
+                bg_val,
+                default_fg,
+                default_bg,
+                font,
+                font_variants,
+                attr,
             )
 
     def _paint_cursor(

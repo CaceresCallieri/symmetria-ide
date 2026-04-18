@@ -12,8 +12,9 @@ Covers three new behaviors introduced in the transparent editor commit:
      source. CLAUDE.md gotcha #10: any shiboken wrapper allocated inside
      paint() is a GC/race hazard — the fix must stay as an instance attr.
 
-  3. setFillColor is called with a transparent color in __init__.
-     Validated by inspecting the __init__ source for the call.
+  3. setFillColor is called with a transparent color during construction.
+     Validated by inspecting the construction source (`__init__` and its
+     `_init_*` helpers) for the call.
 
 Tests 2 and 3 are structural (source-inspection) rather than behavioral
 because instantiating NvimView requires QGuiApplication (QFontDatabase
@@ -29,6 +30,25 @@ import sys
 import pytest
 
 from PySide6.QtCore import QCoreApplication
+
+
+def _construction_source(cls) -> str:
+    """Return `__init__` source concatenated with every `_init_*` helper.
+
+    The NvimView constructor groups setup into `_init_buffers`,
+    `_init_springs`, and `_init_signals` helpers (see issue #10). Tests
+    verifying "a call exists during construction" must inspect that whole
+    path, not just `__init__`, or they'll regress the moment a line
+    crosses a helper boundary. This helper stays resilient as new
+    `_init_*` helpers are added.
+    """
+    parts = [inspect.getsource(cls.__init__)]
+    for name in dir(cls):
+        if name.startswith("_init_"):
+            member = getattr(cls, name)
+            if callable(member):
+                parts.append(inspect.getsource(member))
+    return "\n".join(parts)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -181,17 +201,18 @@ class TestAmbientTintNotInlinedInPaint:
         )
 
     def test_init_pre_allocates_ambient_tint_color(self):
-        """__init__ must assign self._ambient_tint_color = QColor(0, 0, 0, 153)."""
+        """Construction must assign self._ambient_tint_color = QColor(0, 0, 0, 153)."""
         from symmetria_ide.nvim_view import NvimView
 
-        init_src = inspect.getsource(NvimView.__init__)
+        init_src = _construction_source(NvimView)
         assert "_ambient_tint_color" in init_src, (
-            "__init__ must pre-allocate self._ambient_tint_color. "
+            "Construction must pre-allocate self._ambient_tint_color. "
             "Without this, paint() would inline the QColor each frame."
         )
         assert "QColor(0, 0, 0, 153)" in init_src, (
-            "__init__ must assign QColor(0, 0, 0, 153) to _ambient_tint_color. "
-            "This is the Ghostty-parity 60% opacity ambient dim value."
+            "Construction must assign QColor(0, 0, 0, 153) to "
+            "_ambient_tint_color. This is the Ghostty-parity 60% opacity "
+            "ambient dim value."
         )
 
 
@@ -203,12 +224,12 @@ class TestTransparentFillColor:
     """
 
     def test_init_calls_set_fill_color_with_transparent(self):
-        """__init__ must call setFillColor(QColor(0, 0, 0, 0))."""
+        """Construction must call setFillColor(QColor(0, 0, 0, 0))."""
         from symmetria_ide.nvim_view import NvimView
 
-        init_src = inspect.getsource(NvimView.__init__)
+        init_src = _construction_source(NvimView)
         assert "setFillColor(QColor(0, 0, 0, 0))" in init_src, (
-            "__init__ must call setFillColor(QColor(0, 0, 0, 0)) so the "
+            "Construction must call setFillColor(QColor(0, 0, 0, 0)) so the "
             "QQuickPaintedItem backing store is cleared to transparent (not white) "
             "before every paint(). Without this, 'color: transparent' on the Window "
             "has no effect in the editor area."
