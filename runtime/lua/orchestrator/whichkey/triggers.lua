@@ -71,15 +71,13 @@ local function install_one(mode, keys)
       )
     end
   end, {
-    -- Deliberately `nowait = false` so nvim waits for longer
-    -- matches. When execute_leaf later feedkeys a full user sequence
-    -- like `<leader>bn` with the `m` flag, nvim matches the USER's
-    -- `<leader>bn` keymap (longer) instead of firing our shorter
-    -- `<leader>` trigger. Net effect: we pay a `timeoutlen`-wait on
-    -- the first key (500ms default) before the menu opens, but in
-    -- exchange we don't need to uninstall/reinstall the trigger
-    -- around every leaf execution (which was impossible to do
-    -- reliably — see state.lua::execute_leaf).
+    -- `nowait = true` so the menu opens INSTANTLY on the prefix
+    -- key (no `timeoutlen` wait). Execution of leaves via
+    -- `vim.cmd.normal` (see state.lua::execute_leaf) is synchronous
+    -- and doesn't require keymap uninstall/reinstall — so we don't
+    -- have the recursion / reinstall-reliability concerns that
+    -- pushed earlier iterations to `nowait = false`.
+    nowait = true,
     silent = true,
     desc = TRIGGER_DESC,
   })
@@ -94,7 +92,13 @@ local function uninstall_one(mode, keys)
 end
 
 -- Reconcile installed triggers with the current trie's top-level
--- prefixes. Called after every rebuild.
+-- prefixes. Called after every rebuild AND after each menu close —
+-- the menu's `_install_for` calls `vim.keymap.set` on keys that are
+-- also triggers (e.g. `g` for the `gg → First line` preset leaf),
+-- which overwrites the trigger keymap. `M._installed` still remembers
+-- we "installed" them, so the diff below would skip re-adding. To
+-- recover from menu-overwrite, we verify each wanted trigger's
+-- CURRENT keymap matches the trigger desc; if not, re-install.
 ---@param mode string
 function M.install(mode)
   mode = mode or "n"
@@ -115,10 +119,24 @@ function M.install(mode)
     end
   end
 
-  -- Add new triggers where we don't clash with real user mappings.
+  -- Add or restore triggers. `force_add` captures the case where the
+  -- keymap slot was overwritten by a menu keymap and later deleted,
+  -- leaving the slot empty — in that case `M._installed[id]` still
+  -- says the trigger is there, but it actually isn't.
   for id, t in pairs(wanted) do
-    if not M._installed[id] and not user_has_real_mapping(t.mode, t.keys) then
-      install_one(t.mode, t.keys)
+    local current = vim.fn.maparg(t.keys, t.mode, false, true)
+    local ours_present = type(current) == "table"
+      and current.desc
+      and current.desc:find(TRIGGER_DESC, 1, true) ~= nil
+    if not ours_present then
+      -- The slot either was never ours or got clobbered. Clear it first
+      -- (in case some other keymap sits there) and install fresh.
+      if type(current) == "table" and not vim.tbl_isempty(current) and not user_has_real_mapping(t.mode, t.keys) then
+        pcall(vim.keymap.del, t.mode, t.keys)
+      end
+      if not user_has_real_mapping(t.mode, t.keys) then
+        install_one(t.mode, t.keys)
+      end
     end
   end
 end

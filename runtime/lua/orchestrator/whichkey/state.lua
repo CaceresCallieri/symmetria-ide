@@ -69,6 +69,17 @@ local function clear_menu_keymaps()
 end
 
 -- Tear down the menu and emit hide. Idempotent.
+--
+-- ### Important: trigger restoration
+--
+-- When `_install_for` installs a menu keymap at a key that is ALSO a
+-- top-level trigger (e.g. `g` as both a prefix AND a child of the `g`
+-- menu for the preset "gg → First line"), `vim.keymap.set` REPLACES
+-- the trigger keymap. Deleting the menu keymap on close therefore
+-- leaves that slot EMPTY — the next press of `g` dispatches nothing,
+-- which manifested as "after pressing gg, subsequent g does nothing."
+-- Restoring triggers on close ensures the slot is always either our
+-- trigger OR a menu keymap — never empty.
 function M.close()
   if not M._active then
     return
@@ -77,6 +88,9 @@ function M.close()
   M._active = false
   M._node = nil
   require("orchestrator.whichkey").emit_hide()
+  -- Re-install any triggers that got clobbered by the menu keymap
+  -- set. `install()` is idempotent and fast (~O(trie-top-level)).
+  require("orchestrator.whichkey.triggers").install("n")
 end
 
 -- Navigate up one level, closing the menu if we'd hit root.
@@ -97,34 +111,54 @@ end
 -- through nvim. Triggers are suspended across the feedkeys so our
 -- top-level trigger doesn't re-fire on the leading <leader>.
 ---@param node table
--- Execute a leaf by feeding its key sequence back through nvim.
+-- Execute a leaf by running its key sequence through nvim's `:normal`
+-- command.
 --
--- ### Why we don't uninstall triggers anymore
+-- ### Why `:normal` instead of feedkeys
 --
--- Earlier iterations uninstalled our top-level triggers, fed the
--- leaf keys with `m` (remap), and tried to reinstall via
--- `vim.schedule` / `vim.defer_fn` / `CursorMoved` autocmd. NONE of
--- those fired reliably in our embedded setup after a feedkeys like
--- "gg" — nvim ended up in prefix-wait with trailing chars in
--- typeahead, which blocks timer and schedule callbacks until a full
--- safe-state is reached. That left the trigger uninstalled for
--- arbitrarily long and manifested as "press gg → then pressing g
--- does nothing."
+-- `feedkeys` queues keys into typeahead and returns immediately — the
+-- actual processing happens later on the event loop. That created two
+-- problems in our embedded setup:
 --
--- The fix: KEEP TRIGGERS INSTALLED. For built-in preset leaves
--- (rhs="" / no callback — just nvim-core motions like `gg`, `gf`,
--- `gU`) we feed with flag "n" (no remap), which bypasses our own
--- trigger and runs the native command. For user keymap leaves (rhs
--- is a real command or callback) we feed with "m" (remap); nvim's
--- longest-match semantics resolve the full lhs (e.g. `<leader>bn`)
--- to the user's action BEFORE our shorter prefix trigger fires —
--- provided triggers are `nowait = false` (see triggers.lua).
+--   1. If we uninstalled the trigger and used feedkeys with `m`
+--      (remap), any cleanup scheduled via `vim.schedule` /
+--      `vim.defer_fn` / `CursorMoved` autocmd wouldn't fire reliably
+--      — nvim ends up in prefix-wait state with trailing chars in
+--      typeahead, blocking those callbacks indefinitely. Result:
+--      "press gg → native runs, next g does nothing" bug.
+--   2. If we kept the trigger installed (`nowait = false`) and used
+--      feedkeys with "m", there was a 500ms `timeoutlen` wait before
+--      the FIRST `g` fired the trigger and opened the menu.
+--
+-- `vim.cmd.normal` runs the keys SYNCHRONOUSLY — control returns
+-- after nvim has fully processed them. No deferred cleanup required.
+-- We use `bang = true` (equivalent to `:normal!`) for preset
+-- built-ins like `gg`, `gf`, `gU` so they run as native motions even
+-- when our trigger at `g` is installed (`:normal!` bypasses user
+-- keymaps). For user keymap leaves we use `bang = false` (no !) so
+-- the user's action resolves through their mapping — the trigger
+-- keymap has `nowait = true` but my own keymap is SHORTER than the
+-- user's (`g` vs `gcc`), and `:normal` resolves the longest map, so
+-- we don't recurse.
+--
+-- Known edge: this is a normal-mode-only synchronous execution. If a
+-- leaf's action changes modes (e.g. `i` to enter insert), `:normal`
+-- will enter insert then exit when done. For C4 that's acceptable;
+-- full mode preservation would need a different strategy.
 local function execute_leaf(node)
-  local keys = vim.api.nvim_replace_termcodes(node.keys, true, true, true)
   local has_real_action = (type(node.rhs) == "string" and node.rhs ~= "")
     or type(node.callback) == "function"
-  local flag = has_real_action and "m" or "n"
-  vim.api.nvim_feedkeys(keys, flag, false)
+  local ok, err = pcall(vim.cmd.normal, {
+    args = { node.keys },
+    bang = not has_real_action,
+  })
+  if not ok then
+    vim.notify(
+      "[symmetria-whichkey] failed to execute `" .. tostring(node.keys)
+        .. "`: " .. tostring(err),
+      vim.log.levels.WARN
+    )
+  end
 end
 
 -- Handler invoked when the user presses a known child key in the menu.
