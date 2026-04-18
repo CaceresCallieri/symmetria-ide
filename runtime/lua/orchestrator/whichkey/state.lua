@@ -45,41 +45,80 @@ local M = {}
 M._active = false
 ---@type table?   current trie node the menu is anchored at
 M._node = nil
----@type { mode: string, key: string }[]
+---@type { mode: string, key: string, prev: table? }[]
 M._installed_menu_keymaps = {}
 
 local MENU_DESC = "sym-whichkey-menu-key"
 
+-- `vim.keymap.set` REPLACES any existing keymap at the slot. When we
+-- install a menu keymap for child `s` of the `g` menu, we overwrite
+-- whatever was there — commonly a third-party plugin's global map
+-- (flash.nvim puts its jump callback at `s` / `S`; other motion /
+-- surround / jump plugins do the same). Simply deleting the menu
+-- keymap on close would leave that slot empty, dropping back to
+-- default vim behavior. Save the prior keymap and restore it on
+-- teardown so arbitrary user / plugin mappings survive the menu round-
+-- trip. Triggers AT top-level prefixes (the `gotcha #17` case) are
+-- separately reconciled by `triggers.install` since those aren't
+-- arbitrary — we know how to recreate them.
 ---@param mode string
 ---@param key string
 local function install_menu_key(mode, key, handler)
+  local prev = vim.fn.maparg(key, mode, false, true)
+  local had_prev = type(prev) == "table" and not vim.tbl_isempty(prev)
+  -- Skip saving if what was there is OUR trigger keymap — otherwise
+  -- restore would double-install (trigger gets reinstalled by
+  -- `triggers.install` after close, and the saved copy would stomp it
+  -- again on the NEXT menu open in a way that fights reconciliation).
+  local TRIGGER_DESC = "symmetria-whichkey-trigger"
+  if had_prev and type(prev.desc) == "string" and prev.desc:find(TRIGGER_DESC, 1, true) then
+    had_prev = false
+  end
   vim.keymap.set(mode, key, handler, {
     nowait = true,
     silent = true,
     desc = MENU_DESC,
   })
-  table.insert(M._installed_menu_keymaps, { mode = mode, key = key })
+  table.insert(M._installed_menu_keymaps, {
+    mode = mode,
+    key = key,
+    prev = had_prev and prev or nil,
+  })
 end
 
 local function clear_menu_keymaps()
   for _, km in ipairs(M._installed_menu_keymaps) do
     pcall(vim.keymap.del, km.mode, km.key)
+    if km.prev then
+      -- `vim.fn.mapset(mode, abbr, dict)` restores a keymap from the
+      -- dict returned by `maparg(..., true)`. Works for callback-based
+      -- keymaps (flash's global `s` is a Lua callback), expr maps, and
+      -- buffer-local maps (dict carries `buffer` field).
+      pcall(vim.fn.mapset, km.mode, false, km.prev)
+    end
   end
   M._installed_menu_keymaps = {}
 end
 
 -- Tear down the menu and emit hide. Idempotent.
 --
--- ### Important: trigger restoration
+-- ### Two restoration paths
 --
--- When `_install_for` installs a menu keymap at a key that is ALSO a
--- top-level trigger (e.g. `g` as both a prefix AND a child of the `g`
--- menu for the preset "gg → First line"), `vim.keymap.set` REPLACES
--- the trigger keymap. Deleting the menu keymap on close therefore
--- leaves that slot EMPTY — the next press of `g` dispatches nothing,
--- which manifested as "after pressing gg, subsequent g does nothing."
--- Restoring triggers on close ensures the slot is always either our
--- trigger OR a menu keymap — never empty.
+-- Menu-open install_menu_key() replaces whatever keymap was at each
+-- child slot. On close we must put something back — failure to do
+-- that has bitten us twice:
+--
+--   1. **Trigger slots** (e.g. `g` is a child of the `g` menu for the
+--      preset `gg → First line`): `_installed` records those as our
+--      own triggers, so `triggers.install()` reconciles + reinstalls.
+--      This was the original gotcha #17 fix.
+--   2. **Arbitrary user / plugin keymaps** (e.g. flash.nvim's global
+--      `s` callback — `s` is a child of the `g` menu for preset
+--      `gs → Sleep`): no trigger exists to reinstate, so
+--      `install_menu_key` saves the prior keymap and
+--      `clear_menu_keymaps` restores it via `vim.fn.mapset`. Without
+--      this, plugins lose their keys after the first time the user
+--      opens any menu whose children overlap those keys.
 function M.close()
   if not M._active then
     return
