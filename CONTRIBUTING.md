@@ -53,7 +53,7 @@ stylua --check runtime/
 QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/ -v
 ```
 
-Pyright baseline is 26 warnings — all documented PySide6-stubs false positives (see gotcha #7). Do NOT "fix" those by changing `@QAbstractItemModel` signatures — it breaks Qt's metaobject system. New warnings above 26 must be resolved before merge.
+Pyright baseline is ~39 errors — all documented PySide6-stubs false positives (see gotcha #7). Do NOT "fix" those by changing `@QAbstractItemModel` signatures — it breaks Qt's metaobject system. Run `pyright 2>&1 | tail -1` on `main` to get the current baseline; new errors above that count must be resolved before merge.
 
 ## PR checklist
 

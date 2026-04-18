@@ -104,3 +104,24 @@ def test_stop_event_wait_unblocks_within_timeout(qapp: QCoreApplication) -> None
 
     assert backend.stop_event.wait(timeout=0.5) is True
     worker.join(timeout=0.5)
+    assert not worker.is_alive(), (
+        "background stop() thread did not finish within timeout"
+    )
+
+
+def test_stop_event_set_on_generic_crash(qapp: QCoreApplication) -> None:
+    """`_run_loop`'s finally block sets the event even on non-EOFError crashes.
+
+    Simulates pynvim raising a RuntimeError (e.g. protocol corruption).
+    The except-Exception branch logs the error; the finally block still
+    sets stop_event so any waiter is unblocked.
+    """
+    backend = NvimBackend()
+    fake_nvim = MagicMock()
+    fake_nvim.run_loop.side_effect = RuntimeError("protocol error")
+    backend._nvim = fake_nvim  # type: ignore[assignment]
+
+    # _run_loop absorbs all exceptions internally — must not re-raise.
+    backend._run_loop()
+
+    assert backend.stop_event.is_set() is True

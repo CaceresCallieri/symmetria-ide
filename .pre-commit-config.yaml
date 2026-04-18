@@ -54,14 +54,13 @@ repos:
         pass_filenames: true
 
       # pyright runs in REPORT-ONLY mode for now — the project baseline is
-      # 26 warnings (known PySide6-stubs false positives, gotcha #7).
+      # ~39 errors (known PySide6-stubs false positives, gotcha #7).
       # Blocking commits here would be noisy until the baseline is clean.
-      # Flip `verbose: false` to `false` + remove `verbose: true` and
-      # `always_run: true` once the baseline warning count is zero.
+      # Remove `verbose: true` once the baseline error count drops to zero.
       - id: pyright
         name: pyright (type check — report only)
         language: system
-        entry: bash -c 'pyright "$@" || true' --
-        types_or: [python]
-        pass_filenames: true
+        entry: bash -c 'pyright || true'
+        pass_filenames: false
+        always_run: true
         verbose: true

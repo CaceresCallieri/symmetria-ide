@@ -47,7 +47,7 @@ Add to `~/.hyprdots/.config/hypr/` for persistence across sessions.
 PYTHONPATH=src python -m pytest tests/ -v
 ```
 
-102 unit tests cover the pure-Python `Grid`, Qt-key translator, scroll/cursor springs, and model classes. No Qt display needed.
+107 unit tests cover the pure-Python `Grid`, Qt-key translator, scroll/cursor springs, model classes, and NvimBackend shutdown paths. No Qt display needed.
 
 ## Pre-commit hooks
 
