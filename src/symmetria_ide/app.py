@@ -38,7 +38,7 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
     PopupmenuModel,
 )
 from .nvim_backend import NvimBackend
-from .nvim_view import NvimView  # noqa: F401 — side-effect: registers @QmlElement
+from .nvim_view import NvimView  # noqa: F401 — side-effect: @QmlElement registration
 from .whichkey_models import (  # noqa: F401 — side-effect: @QmlElement registration
     WhichKeyModel,
     WhichKeyState,
@@ -283,12 +283,21 @@ def _register_qml_types() -> None:
     a discoverable home for any *explicit* `qmlRegisterType(...)` calls
     that can't be expressed with the decorator.
 
-    The `NvimView` symbol is referenced here (not just imported at
-    module scope with a `noqa: F401`) so that a future import-pruner
-    can't strip the side-effect import without also touching this
-    function.
+    Every side-effect import is also referenced here by name so that
+    automated import-pruners cannot strip the `noqa: F401` import
+    without also touching this function. This applies to all QML-
+    registered modules, not just `NvimView`.
     """
+    # Keep these references — they are the second layer of protection for
+    # the noqa: F401 side-effect imports above. Removing any name here
+    # means a linter can silently drop the import and break @QmlElement
+    # registration. See CLAUDE.md gotcha #7 and project-standards §2 P1.
     _ = NvimView
+    _ = CmdlineState
+    _ = CompletionModel
+    _ = PopupmenuModel
+    _ = WhichKeyModel
+    _ = WhichKeyState
 
 
 def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:

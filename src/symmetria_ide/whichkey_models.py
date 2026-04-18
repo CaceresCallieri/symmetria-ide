@@ -6,7 +6,7 @@ module must be imported before `QQmlApplicationEngine.load()` runs. That
 import (with `noqa: F401`) is kept in `app.py`.
 
 The emission protocol lives in `runtime/lua/orchestrator/whichkey/init.lua`
-and the dispatch routing in `app.AppController._on_whichkey_event`.
+and the dispatch routing wires directly in `AppController.__init__` at `app.py:228-229`.
 """
 
 from __future__ import annotations

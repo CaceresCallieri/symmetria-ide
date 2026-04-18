@@ -336,6 +336,34 @@ class TestPopupmenuModel:
         assert model.data(idx, PopupmenuModel.KindRole) == "function"
         assert model.data(idx, PopupmenuModel.MenuRole) == "mod"
 
+    def test_data_invalid_index_returns_none(self):
+        model = self._make()
+        model.apply(
+            {
+                "kind": "show",
+                "items": [{"word": "x", "kind": "", "menu": ""}],
+                "selected": -1,
+            }
+        )
+
+        from PySide6.QtCore import QModelIndex
+
+        assert model.data(QModelIndex(), model.WordRole) is None
+
+    def test_data_out_of_range_index_returns_none(self):
+        model = self._make()
+        model.apply(
+            {
+                "kind": "show",
+                "items": [{"word": "x", "kind": "", "menu": ""}],
+                "selected": -1,
+            }
+        )
+
+        # index(5) on a 1-row model: isValid() == False, data() returns None.
+        idx = model.index(5)
+        assert model.data(idx, model.WordRole) is None
+
 
 # ---------------------------------------------------------------------------
 # WhichKeyState
@@ -430,7 +458,7 @@ class TestWhichKeyState:
         assert state.visible is False
         assert state.canGoBack is False
         # Trail and mode intentionally retained on hide — the payload
-        # only carries op. Matches the implementation at app.py:528-534.
+        # only carries op. Matches the implementation at whichkey_models.py:90-96.
         assert state.trail == "<leader> b"
         assert state.mode == "n"
 

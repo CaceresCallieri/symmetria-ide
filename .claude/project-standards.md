@@ -78,7 +78,7 @@ Findings in these files/directories get prioritized. When two findings are equal
 ### P1 — Strongly Encouraged
 
 - **Prefer `@QmlElement` + `QML_IMPORT_NAME` over manual `qmlRegisterType`.** Supported path since PySide6 6.0, integrates with `pyside6-qmltyperegistrar` for stub generation.
-- **Prefer `QAbstractListModel` subclass over `ListModel` or `property var []`.** **Why:** Row/role semantics give granular `dataChanged`/`rowsInserted`; JS arrays trigger full rebind on every change. `CompletionModel` in `app.py` is the template. Always bracket mutations with `beginInsertRows`/`endInsertRows` etc.
+- **Prefer `QAbstractListModel` subclass over `ListModel` or `property var []`.** **Why:** Row/role semantics give granular `dataChanged`/`rowsInserted`; JS arrays trigger full rebind on every change. `CompletionModel` in `cmdline_models.py` is the template. Always bracket mutations with `beginInsertRows`/`endInsertRows` etc.
 - **Split single-valued state from list-shaped state.** Put scalars on a `QObject` with one `@Property(notify=)` per field (`StatusBarState` pattern); put lists in a `QAbstractListModel` (`CapsuleModel`, `CompletionModel`). Mixing the two breaks binding semantics predictably — this is a project invariant.
 
 ### P2 — Recommended
@@ -347,10 +347,10 @@ A grep audit at the time of this document:
 | `layer.enabled: true` | 0 | Clean. |
 | `property var` | 0 | Clean. |
 | `Qt.DirectConnection` (cross-thread) | 0 | Clean. |
-| Python functions without return-type annotation | 4 | `QAbstractItemModel.data()` overrides in `app.py` (lines 159, 348, 439, 572) — intentionally un-annotated due to pyright stub conflict; see gotcha #7. Do not "fix" by adding return types — that breaks Qt's metaobject system. |
+| Python functions without return-type annotation | 4 | `QAbstractItemModel.data()` overrides — intentionally un-annotated due to pyright stub conflict; see gotcha #7. Do not "fix" by adding return types — that breaks Qt's metaobject system. Locations after Issue #5 extraction: `app.py:166`, `cmdline_models.py:188`, `cmdline_models.py:279`, `whichkey_models.py:134`. |
 | `# type: ignore` | check before each release | Keep ≤2 per 1k LOC. |
 | `nvim_view.py` module length | 1453 lines | Exceeds "Bad" threshold (>800). **Known hotspot** — `QQuickPaintedItem`, animation classes, and rendering helpers are co-located for paint-thread safety (see Section 5). Splitting across modules would require sharing mutable animation state across thread boundaries. Acceptable until a clean seam is identified. |
-| `app.py` module length | 824 lines | Exceeds "Bad" threshold (>800). Refactor candidate for Phase 2: `StatusBarState`, `CapsuleModel`, `CompletionModel`, `WhichKeyState`, `WhichKeyModel`, and `AppController` could move to `models.py` and `controller.py`. |
+| `app.py` module length | 379 lines | Within "Good" threshold (≤400). Issue #5 extracted `CmdlineState`, `PopupmenuModel`, `CompletionModel` → `cmdline_models.py` and `WhichKeyState`, `WhichKeyModel` → `whichkey_models.py`. |
 
 When working near any non-zero row, consider addressing the instance. Do not regress the zero rows.
 
