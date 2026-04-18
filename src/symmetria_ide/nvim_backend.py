@@ -243,6 +243,27 @@ class NvimBackend(QObject):
         return None
 
     def _on_notification(self, name: str, args: list[Any]) -> None:
+        # GC is suspended for the entire handler, not just _dispatch_redraw.
+        # Python 3.14's incremental cyclic GC can fire from ANY allocation
+        # on this worker thread — including logging.debug() inside pynvim's
+        # msgpack session handler BEFORE we even reach _dispatch_redraw.
+        # A crash trace showed GC mid-`logging.__init__.py:1498 debug` from
+        # `session.py:269 handler`, racing with QSGRenderThread inside
+        # `_paint_row`. Widening the gc.disable window to cover the whole
+        # notification entrypoint closes that window without affecting
+        # the existing _dispatch_redraw guard (which is now redundant when
+        # entered through here, but kept for defence-in-depth and because
+        # some code paths invoke _dispatch_redraw directly in tests).
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+        try:
+            self._dispatch_notification(name, args)
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+
+    def _dispatch_notification(self, name: str, args: list[Any]) -> None:
         if name == "redraw":
             self._dispatch_redraw(args)
             return

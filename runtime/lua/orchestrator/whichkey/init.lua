@@ -21,6 +21,16 @@
 
 local Tree = require("orchestrator.whichkey.tree")
 local Icons = require("orchestrator.whichkey.icons")
+-- Preload state + triggers eagerly at init time. If we waited until
+-- the keymap callback fired, `require("orchestrator.whichkey.state")`
+-- could fail: user config (lazy.nvim in particular) can mutate `rtp`
+-- AFTER init.lua runs but BEFORE the trigger fires, so Lua's nvim-rtp
+-- searcher may no longer find our runtime/lua/ path. Loading here
+-- while our rtp entry is still fresh caches these modules in
+-- `package.loaded`, so the later require() hits the cache regardless
+-- of what happened to `rtp` in between.
+local State = require("orchestrator.whichkey.state")
+local Triggers = require("orchestrator.whichkey.triggers")
 
 local M = {}
 
@@ -89,42 +99,42 @@ function M.setup()
 
   local grp = vim.api.nvim_create_augroup("SymWhichKey", { clear = true })
 
-  -- Keep the trie fresh. BufEnter catches buffer-local maps from
-  -- plugins that attach per-buffer (LSP, treesitter); LspAttach /
-  -- LspDetach cover LSP-installed maps that arrive async after
-  -- BufEnter fires.
+  -- Keep the trie + triggers fresh. BufEnter catches buffer-local
+  -- maps from plugins attaching per-buffer; LspAttach/LspDetach cover
+  -- LSP-installed maps that arrive async after BufEnter. Each event
+  -- rebuilds the tree and reconciles the installed trigger keymaps
+  -- against the new top-level prefix set.
   vim.api.nvim_create_autocmd({ "BufEnter", "LspAttach", "LspDetach" }, {
     group = grp,
     callback = function()
       rebuild("n")
+      Triggers.install("n")
     end,
   })
 
-  -- C2 demo: show the <leader> menu once on startup so the overlay
-  -- renders with REAL user keymaps (not the C1 mock). C3 replaces
-  -- this with trigger keymaps that fire on prefix press.
+  -- VimEnter is when user config has finished loading, so keymaps
+  -- are stable. Install our triggers here (not on require) so we see
+  -- the post-config map set.
   vim.api.nvim_create_autocmd("VimEnter", {
     group = grp,
     callback = function()
-      vim.defer_fn(function()
-        -- Mapleader in this codebase is " " (space). Show that subtree.
-        M.show(" ")
-      end, 300)
+      rebuild("n")
+      Triggers.install("n")
     end,
   })
 
-  -- Temporary escape hatch: Esc hides the demo overlay. C3 replaces
-  -- with the state-machine's proper Esc handling.
-  vim.keymap.set("n", "<Esc>", function()
-    M.emit_hide()
-    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
-  end, { desc = "Symmetria whichkey (scaffold) hide overlay + normal <Esc>" })
-
-  -- Testing hook: `:lua _G.symmetria_whichkey_show(" ")` or any
-  -- prefix path. Stays in place for headless smoke tests even after
-  -- C3's state machine lands.
+  -- Testing hooks. Kept around after the state machine lands — useful
+  -- for headless smoke tests that want to force a menu open without
+  -- simulating keystrokes.
   _G.symmetria_whichkey_show = M.show
   _G.symmetria_whichkey_hide = M.emit_hide
+  _G.symmetria_whichkey_start = function(keys)
+    State.start({ keys = keys or " " })
+  end
+
+  -- Silence unused-local linter noise — the locals exist for side-
+  -- effect module loading, not for direct reference.
+  local _ = Triggers and State
 end
 
 return M
