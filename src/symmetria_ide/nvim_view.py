@@ -185,8 +185,13 @@ def _flush_run(
     QRectF. Pooling that QRectF is tracked separately in issue #1.
 
     The `bg_val != default_bg` gate preserves the transparent-viewport
-    invariant (see TestTransparentFillColor): default-bg cells must NOT
-    paint opaquely, or the ambient tint + wallpaper are covered over.
+    invariant (see TestTransparentFillColor): the paint() ambient tint
+    (Ghostty-parity black @ 60%) already covers default-bg cells — painting
+    them opaquely here would black out the wallpaper. Runs with explicit bg
+    (signs column, diff, cursorline, visual selection, reversed highlights)
+    still paint. `bg_val` is post-reverse, so a reversed cell whose original
+    bg == default_bg now has bg_val == default_fg and correctly fires the fill
+    (does NOT skip).
     """
     rect = QRectF(x, y, w, h)
     if bg_val != default_bg:
@@ -1570,11 +1575,7 @@ class NvimView(QQuickPaintedItem):
                 rect = QRectF(x, y, cw, ch)
                 painter.fillRect(rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
                 painter.setPen(_rgb_to_qcolor(grid.default_bg, 0x1E1E1E))
-                painter.drawText(
-                    rect,
-                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                    cursor_cell.char,
-                )
+                painter.drawText(rect, _TEXT_ALIGN_FLAGS, cursor_cell.char)
         finally:
             painter.restore()
 
