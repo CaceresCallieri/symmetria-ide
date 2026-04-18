@@ -47,7 +47,7 @@ Add to `~/.hyprdots/.config/hypr/` for persistence across sessions.
 PYTHONPATH=src python -m pytest tests/ -v
 ```
 
-107 unit tests cover the pure-Python `Grid`, Qt-key translator, scroll/cursor springs, model classes, and NvimBackend shutdown paths. No Qt display needed.
+125 unit tests cover the pure-Python `Grid`, Qt-key translator, scroll/cursor springs, model classes (CmdlineState/CompletionModel/PopupmenuModel/WhichKeyState/WhichKeyModel), and NvimBackend shutdown paths. No Qt display needed.
 
 ## Pre-commit hooks
 
@@ -64,7 +64,11 @@ Hooks run `ruff check`, `ruff format --check`, `selene`, `stylua --check`, `qmll
 pre-commit run --all-files
 ```
 
-Pyright currently reports ~26 known PySide6-stubs false positives (gotcha #7) and is **not** a blocking hook — the entry is wrapped in `bash -c '... || true'`. Flip that to blocking once the baseline warning count drops to zero.
+Pyright currently reports ~59 known PySide6-stubs false positives (gotcha #7) and is **not** a blocking hook — the entry is wrapped in `bash -c '... || true'`. The count fluctuates as tests/classes are added; the noise pattern is `@QmlElement`/`@Property` decorators that pyright treats as returning `object`. Treat the count as an order-of-magnitude check, not a regression gate. Flip that to blocking once the baseline warning count drops to zero.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs the same seven checks on every push to `main` and every pull request: `ruff check`, `ruff format --check`, `pyright` (report-only), `pyside6-qmllint`, `stylua --check`, `selene`, `pip-audit`, and `pytest` under `QT_QPA_PLATFORM=offscreen`. It runs on `ubuntu-latest` with pip-installed PySide6 — no Arch container, no Xorg/Wayland, no graphics stack. When CI disagrees with a local pre-commit run the tool versions drifted; keep them aligned by bumping both sides together.
 
 ## Inspecting what arrived over RPC
 

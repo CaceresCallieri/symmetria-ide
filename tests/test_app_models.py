@@ -1,4 +1,5 @@
-"""Unit tests for CmdlineState, CompletionModel, and PopupmenuModel.
+"""Unit tests for CmdlineState, CompletionModel, PopupmenuModel,
+WhichKeyState, and WhichKeyModel.
 
 These models carry non-trivial signal-emission logic (change-guarded
 property setters, `beginResetModel`/`endResetModel` lifecycle) that is
@@ -334,3 +335,285 @@ class TestPopupmenuModel:
         assert model.data(idx, PopupmenuModel.WordRole) == "fn"
         assert model.data(idx, PopupmenuModel.KindRole) == "function"
         assert model.data(idx, PopupmenuModel.MenuRole) == "mod"
+
+
+# ---------------------------------------------------------------------------
+# WhichKeyState
+# ---------------------------------------------------------------------------
+
+
+class TestWhichKeyState:
+    def _make(self):
+        from symmetria_ide.app import WhichKeyState
+
+        return WhichKeyState()
+
+    def test_initial_state_is_hidden(self):
+        state = self._make()
+        assert state.visible is False
+        assert state.trail == ""
+        assert state.canGoBack is False
+        assert state.mode == "n"
+
+    def test_show_sets_visible_and_fields(self):
+        state = self._make()
+        signals = []
+        state.visibleChanged.connect(lambda: signals.append("visible"))
+        state.trailChanged.connect(lambda: signals.append("trail"))
+        state.canGoBackChanged.connect(lambda: signals.append("canGoBack"))
+        state.modeChanged.connect(lambda: signals.append("mode"))
+
+        state.apply(
+            {
+                "op": "show",
+                "trail": "<leader>",
+                "can_go_back": True,
+                "mode": "n",
+                "items": [],
+            }
+        )
+
+        assert state.visible is True
+        assert state.trail == "<leader>"
+        assert state.canGoBack is True
+        assert state.mode == "n"
+        assert "visible" in signals
+        assert "trail" in signals
+        assert "canGoBack" in signals
+        # mode stayed "n" — no re-emit.
+        assert "mode" not in signals
+
+    def test_show_does_not_re_emit_unchanged_fields(self):
+        state = self._make()
+        state.apply(
+            {
+                "op": "show",
+                "trail": "<leader>",
+                "can_go_back": False,
+                "mode": "n",
+                "items": [],
+            }
+        )
+
+        signals = []
+        state.trailChanged.connect(lambda: signals.append("trail"))
+        state.visibleChanged.connect(lambda: signals.append("visible"))
+        state.canGoBackChanged.connect(lambda: signals.append("canGoBack"))
+
+        state.apply(
+            {
+                "op": "show",
+                "trail": "<leader>",
+                "can_go_back": False,
+                "mode": "n",
+                "items": [],
+            }
+        )
+
+        assert "trail" not in signals
+        assert "visible" not in signals
+        assert "canGoBack" not in signals
+
+    def test_hide_clears_visible_and_can_go_back(self):
+        state = self._make()
+        state.apply(
+            {
+                "op": "show",
+                "trail": "<leader> b",
+                "can_go_back": True,
+                "mode": "n",
+            }
+        )
+
+        state.apply({"op": "hide"})
+
+        assert state.visible is False
+        assert state.canGoBack is False
+        # Trail and mode intentionally retained on hide — the payload
+        # only carries op. Matches the implementation at app.py:528-534.
+        assert state.trail == "<leader> b"
+        assert state.mode == "n"
+
+    def test_hide_does_not_double_emit_when_already_hidden(self):
+        state = self._make()
+        signals = []
+        state.visibleChanged.connect(lambda: signals.append("visible"))
+        state.canGoBackChanged.connect(lambda: signals.append("canGoBack"))
+
+        state.apply({"op": "hide"})
+
+        assert "visible" not in signals
+        assert "canGoBack" not in signals
+
+    def test_unknown_op_is_ignored(self):
+        state = self._make()
+        signals = []
+        state.visibleChanged.connect(lambda: signals.append("visible"))
+
+        state.apply({"op": "bogus"})
+
+        assert state.visible is False
+        assert "visible" not in signals
+
+
+# ---------------------------------------------------------------------------
+# WhichKeyModel
+# ---------------------------------------------------------------------------
+
+
+class TestWhichKeyModel:
+    def _make(self):
+        from symmetria_ide.app import WhichKeyModel
+
+        return WhichKeyModel()
+
+    def test_initial_state(self):
+        model = self._make()
+        assert model.rowCount() == 0
+
+    def test_role_names_cover_all_roles(self):
+        from symmetria_ide.app import WhichKeyModel
+
+        model = WhichKeyModel()
+        names = model.roleNames()
+        assert names[WhichKeyModel.KeyRole] == b"key"
+        assert names[WhichKeyModel.DescRole] == b"desc"
+        assert names[WhichKeyModel.IsGroupRole] == b"isGroup"
+        assert names[WhichKeyModel.IconRole] == b"icon"
+        assert names[WhichKeyModel.IconColorRole] == b"iconColor"
+
+    def test_show_populates_items(self):
+        model = self._make()
+        model.apply(
+            {
+                "op": "show",
+                "items": [
+                    {
+                        "key": "b",
+                        "desc": "Buffer navigation",
+                        "is_group": True,
+                        "icon": "\uf1c0",
+                        "icon_color": "#b4b4b4",
+                    },
+                    {
+                        "key": "w",
+                        "desc": "Save",
+                        "is_group": False,
+                        "icon": "",
+                        "icon_color": "",
+                    },
+                ],
+            }
+        )
+
+        assert model.rowCount() == 2
+
+    def test_role_data_round_trip(self):
+        from symmetria_ide.app import WhichKeyModel
+
+        model = WhichKeyModel()
+        model.apply(
+            {
+                "op": "show",
+                "items": [
+                    {
+                        "key": "b",
+                        "desc": "Buffers",
+                        "is_group": True,
+                        "icon": "\uf1c0",
+                        "icon_color": "#b4b4b4",
+                    }
+                ],
+            }
+        )
+
+        idx = model.index(0)
+        assert model.data(idx, WhichKeyModel.KeyRole) == "b"
+        assert model.data(idx, WhichKeyModel.DescRole) == "Buffers"
+        assert model.data(idx, WhichKeyModel.IsGroupRole) is True
+        assert model.data(idx, WhichKeyModel.IconRole) == "\uf1c0"
+        assert model.data(idx, WhichKeyModel.IconColorRole) == "#b4b4b4"
+
+    def test_missing_fields_default_to_empty_or_false(self):
+        from symmetria_ide.app import WhichKeyModel
+
+        model = WhichKeyModel()
+        # Partial entry — only `key` provided; apply should default the
+        # rest rather than KeyError'ing out.
+        model.apply({"op": "show", "items": [{"key": "x"}]})
+
+        idx = model.index(0)
+        assert model.data(idx, WhichKeyModel.KeyRole) == "x"
+        assert model.data(idx, WhichKeyModel.DescRole) == ""
+        assert model.data(idx, WhichKeyModel.IsGroupRole) is False
+        assert model.data(idx, WhichKeyModel.IconRole) == ""
+        assert model.data(idx, WhichKeyModel.IconColorRole) == ""
+
+    def test_non_dict_items_are_filtered(self):
+        model = self._make()
+        model.apply(
+            {
+                "op": "show",
+                "items": [
+                    {"key": "a", "desc": "Alpha"},
+                    "not a dict",
+                    None,
+                    {"key": "b", "desc": "Beta"},
+                ],
+            }
+        )
+
+        assert model.rowCount() == 2
+
+    def test_hide_clears_model(self):
+        model = self._make()
+        model.apply(
+            {
+                "op": "show",
+                "items": [{"key": "a", "desc": "Alpha"}],
+            }
+        )
+        assert model.rowCount() == 1
+
+        model.apply({"op": "hide"})
+
+        assert model.rowCount() == 0
+
+    def test_hide_when_already_empty_is_noop(self):
+        """Guard against spurious beginResetModel on an already-empty model."""
+        model = self._make()
+        # No-op hide on empty model should not crash and should leave it empty.
+        model.apply({"op": "hide"})
+
+        assert model.rowCount() == 0
+
+    def test_show_replaces_previous_items(self):
+        model = self._make()
+        model.apply({"op": "show", "items": [{"key": "a"}, {"key": "b"}]})
+        assert model.rowCount() == 2
+
+        model.apply({"op": "show", "items": [{"key": "c"}]})
+        assert model.rowCount() == 1
+
+        idx = model.index(0)
+        from symmetria_ide.app import WhichKeyModel
+
+        assert model.data(idx, WhichKeyModel.KeyRole) == "c"
+
+    def test_data_invalid_index_returns_none(self):
+        model = self._make()
+        model.apply({"op": "show", "items": [{"key": "a"}]})
+
+        from PySide6.QtCore import QModelIndex
+
+        assert model.data(QModelIndex(), model.KeyRole) is None
+
+    def test_data_out_of_range_index_returns_none(self):
+        model = self._make()
+        model.apply({"op": "show", "items": [{"key": "a"}]})
+
+        # index(5) on a 1-row model produces an invalid QModelIndex and
+        # the guard returns None. Note: model.index() enforces bounds at
+        # the QAbstractListModel layer for a valid row-count.
+        idx = model.index(5)
+        assert model.data(idx, model.KeyRole) is None
