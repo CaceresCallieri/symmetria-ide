@@ -7,7 +7,7 @@
 
 ## Stack
 
-- **Python 3.14** — main language. Free-threaded build is NOT used; GIL + cooperative threads.
+- **Python 3.14** — runtime version (actual running version on this machine). Minimum declared in `pyproject.toml`: `>=3.12`. Rules in this document that cite 3.14-specific behavior (notably GC/SEGV risk — gotcha #10) apply only when running 3.14. Free-threaded build is NOT used; GIL + cooperative threads.
 - **PySide6 / Qt 6.5+** — GUI, QML, `QQuickPaintedItem` custom grid renderer.
 - **QML (vanilla Qt Quick, NOT QuickShell)** — overlays, status bar, command line, which-key panel.
 - **pynvim** — msgpack-RPC to an embedded `nvim --embed` child process.
@@ -91,7 +91,7 @@ Findings in these files/directories get prioritized. When two findings are equal
 
 ### P0 — Required / Forbidden
 
-- **FORBIDDEN: committing QML files that produce `qmllint` severity `error` or `unqualified`.** **Why:** Unqualified access is resolved at runtime with a perf penalty today and fails to compile under the QML→C++ compiler planned for Qt 6.11+. Fix: `id: root` at the outer item, reference `root.foo` not `foo`.
+- **FORBIDDEN: committing QML files that produce `qmllint` findings of severity `error` or of warning category `unqualified`.** **Why:** Unqualified access is resolved at runtime with a perf penalty today and fails to compile under the QML→C++ compiler planned for Qt 6.11+. Fix: `id: root` at the outer item, reference `root.foo` not `foo`.
 - **FORBIDDEN: `eval()` in QML JavaScript.** Prevents compiler optimizations; security hazard.
 
 ### P1 — Strongly Encouraged
@@ -130,7 +130,7 @@ Background: the app has **three threads** — (1) GUI thread (Qt event loop, QML
 - **FORBIDDEN: `QCoreApplication.processEvents()` inside a slot, destructor, or `paint()`.** Re-entrancy corrupts state. For deferred work: `QTimer.singleShot(0, ...)` or `Qt.callLater`.
 - **FORBIDDEN: emitting a signal while holding a `QMutex`.** Same-thread direct connection re-locks → deadlock.
 - **FORBIDDEN: instantiating `QTimer` (or any event-driven QObject) on a thread without an active event loop.** `timeout` never fires; `deleteLater` never runs.
-- **REQUIRED: every pynvim RPC call from non-worker code marshals through `nvim.async_call`.** **Why:** pynvim is not thread-safe; direct calls from the GUI thread raise `NvimError: request from non-main thread`. Gotcha #1.
+- **REQUIRED: every pynvim RPC call from non-worker code marshals through `nvim.async_call`.** **Why:** pynvim is not thread-safe; direct calls from the GUI thread raise `NvimError: request from non-main thread`. Gotcha #1. (See also Section 6 P0 for the pynvim-side enforcement.)
 - **REQUIRED: shutdown sequence: `thread.quit()` → `thread.wait()` → release references.** Deleting a running `QThread` crashes the process.
 
 ### P1 — Strongly Encouraged / Discouraged
@@ -206,20 +206,21 @@ This is the most dangerous code in the project. Read CLAUDE.md gotchas #10–#14
 
 ### P0 — Required / Forbidden
 
-- **REQUIRED: every pynvim RPC call from non-worker code marshals through `nvim.async_call(...)`.** Gotcha #1. The pynvim worker is the only thread allowed to touch `nvim.*` RPC methods directly.
+- **REQUIRED: every pynvim RPC call from non-worker code marshals through `nvim.async_call(...)`.** Gotcha #1. The pynvim worker is the only thread allowed to touch `nvim.*` RPC methods directly. (See also Section 4 P0 for the Qt threading perspective.)
 - **REQUIRED: after `nvim.subscribe("capsule")` and any other notification subscription, trigger an initial state push via `exec_lua("_G.symmetria_push_state()")`.** **Why:** `init.lua` runs during nvim startup, before Python has subscribed. Missed events are not buffered. Gotcha #2.
 - **FORBIDDEN: `vim.fn.getcharstr()` / `vim.fn.input()` in any Lua modal UI reachable from `--embed`.** **Why:** Blocks nvim's main thread, starves RPC delivery, hangs both sides. Use event-driven keymaps + autocmds (the `orchestrator.whichkey.state` pattern). Gotcha #15.
 - **FORBIDDEN: relying on `vim.schedule` / `vim.defer_fn` for cleanup after `feedkeys`-style sequences.** Scheduled callbacks don't fire while nvim is in `timeoutlen` prefix-wait with pending typeahead. Use `vim.cmd.normal{keys, bang = true}` — synchronous, returns after nvim has fully processed the keys. Gotcha #16.
 - **REQUIRED: save-and-restore pre-existing keymaps via `vim.fn.maparg` + `vim.fn.mapset` when an ephemeral keymap (modal UI, etc.) installs at a slot.** **Why:** Third-party plugin maps (flash.nvim at `s`/`S`, etc.) get clobbered; `vim.keymap.del` on close leaves the slot empty. Gotcha #19. Skip `prev.buffer > 0` entries — `mapset` cannot honor `dict.buffer` and would promote buffer-local to global.
 - **REQUIRED: trigger installers (the outer layer of any modal UI) self-heal by verifying each slot via `vim.fn.maparg`, NOT by trusting an internal install-cache.** **Why:** Menu keymaps overwrite trigger slots; internal caches lie after overwrite. Gotcha #17.
-- **REQUIRED: `redraw` event handlers accept forward-compat arg tails via `*_rest: Any`.** `cmdline_show` gained `hl_id` between 0.9 and 0.10; `grid_line` is gaining a wrap flag at 0.11. Strict positional signatures crash the channel on version bump. Gotcha #9.
+- **REQUIRED: `redraw` event handlers accept forward-compat arg tails.** Two patterns must stack: (a) known new positional args added by documented NeoVim releases get typed named defaults (e.g., `_hl_id: int = 0` in `cmdline_show` for the 0.10 addition); (b) a trailing `*_rest: Any` absorbs any further additions beyond what you've named, preventing crashes on version bumps. `cmdline_show` gained `hl_id` between 0.9 and 0.10; `grid_line` is gaining a wrap flag at 0.11. A signature with only named defaults and no `*_rest` will crash on the NEXT undocumented addition. Gotcha #9.
 - **FORBIDDEN: catching broadly with `pcall` and dropping the error.** `local ok, _ = pcall(f)` silently swallows real bugs. Use `if not ok then vim.notify(err, vim.log.levels.ERROR) end`.
 - **REQUIRED: when a plugin ecosystem claims the same `ext_*` extension we do, set `vim.g.symmetria_ide = 1` and document the off-switch.** Pattern borrowed from `g:goneovim` / `g:neovide`. Applies to noice.nvim, nvim-cmp cmdline/popupmenu, etc. Gotcha #8.
+- **REQUIRED: `laststatus=0` must be re-asserted from a `VimEnter` autocmd, NOT only from `--cmd`.** **Why:** Plugin `setup()` calls (lualine, etc.) run after startup and overwrite `laststatus`, restoring the status line inside the viewport. `--cmd` fires too early and loses the race. Gotcha #5.
 
 ### P1 — Strongly Encouraged
 
 - **Use `pynvim.attach("child", argv=["nvim", "--embed", ...])` for the IDE frontend.** `stdio` mode is for *plugin hosts* (nvim calling into Python). `socket`/`tcp` are for remote control only.
-- **Call `nvim.ui_attach(cols, rows, {ext_linegrid=True, ext_cmdline=True, ext_popupmenu=True, ext_hlstate=True, rgb=True})`.** `ext_linegrid` is mandatory on 0.7+. Avoid `ext_multigrid` unless you actually render windows separately — 3–4× event volume.
+- **Call `nvim.ui_attach(cols, rows, {ext_linegrid=True, ext_cmdline=True, ext_popupmenu=True, rgb=True})`.** `ext_linegrid` is mandatory on 0.7+. Omit `ext_hlstate` unless you actually consume semantic highlight-group names — it increases `hl_attr_define` payload volume with no benefit when you only use RGB values. Avoid `ext_multigrid` unless you actually render windows separately — 3–4× event volume.
 - **Batch with `nvim.request(name, *args, async_=True)` for fire-and-forget notifications.** Sync requests block the worker; `nvim_input`/`nvim_feedkeys` should always be async.
 - **Drain `flush` before repainting.** The UI contract: buffer all `grid_line`/`grid_scroll`/`mode_change` into the Grid, trigger Qt update on `flush`. Painting mid-burst tears.
 - **Namespace every Lua module under `lua/orchestrator/...` with `local M = {}; return M`.** No bare globals. Enables `package.loaded["..."] = nil` + force-reload during dev.
@@ -227,6 +228,7 @@ This is the most dangerous code in the project. Read CLAUDE.md gotchas #10–#14
 - **Use `vim.keymap.set(mode, lhs, rhs, {nowait=true, silent=true, desc="..."})` with explicit `desc`.** `desc` is the data source our which-key trie reads; missing `desc` means `<no desc>` in the menu.
 - **Use `vim.notify(msg, vim.log.levels.WARN)` not `print`.** `print` dumps to `:messages`, skipping the user's notification pipeline (noice, mini.notify).
 - **Rebuild the keymap trie on `BufEnter`, `LspAttach`, `LspDetach` — NOT `CursorMoved`.** Buffer-local maps only change at those boundaries. Over-rebuild costs ~5–15ms each and ruins scroll feel.
+- **REQUIRED: any keymap trie for modal UI must be seeded from the which-key.nvim preset catalog in addition to `nvim_get_keymap`.** **Why:** `nvim_get_keymap()` does not return NeoVim's built-in motion chains (`gg`, `gU`, `gf`, `zz`, `[s`, `<C-w>h`, etc.) — these are hardcoded in the C core and are invisible to the API. A trie built purely from `nvim_get_keymap` will produce empty submenus under `g`, `z`, `[`, `]`, `<C-w>`. The preset catalog (`which-key.nvim`'s `lua/which-key/plugins/presets.lua`) fills this gap. **Lazy-load caveat:** the module is `event = "VeryLazy"` — retry on each rebuild until it returns a non-empty catalog, then cache; do NOT require it at VimEnter. Gotcha #18.
 
 ### P2 — Recommended
 
@@ -345,8 +347,10 @@ A grep audit at the time of this document:
 | `layer.enabled: true` | 0 | Clean. |
 | `property var` | 0 | Clean. |
 | `Qt.DirectConnection` (cross-thread) | 0 | Clean. |
-| Python functions without return-type annotation | 0 | Clean. |
+| Python functions without return-type annotation | 4 | `QAbstractItemModel.data()` overrides in `app.py` (lines 159, 348, 439, 572) — intentionally un-annotated due to pyright stub conflict; see gotcha #7. Do not "fix" by adding return types — that breaks Qt's metaobject system. |
 | `# type: ignore` | check before each release | Keep ≤2 per 1k LOC. |
+| `nvim_view.py` module length | 1453 lines | Exceeds "Bad" threshold (>800). **Known hotspot** — `QQuickPaintedItem`, animation classes, and rendering helpers are co-located for paint-thread safety (see Section 5). Splitting across modules would require sharing mutable animation state across thread boundaries. Acceptable until a clean seam is identified. |
+| `app.py` module length | 824 lines | Exceeds "Bad" threshold (>800). Refactor candidate for Phase 2: `StatusBarState`, `CapsuleModel`, `CompletionModel`, `WhichKeyState`, `WhichKeyModel`, and `AppController` could move to `models.py` and `controller.py`. |
 
 When working near any non-zero row, consider addressing the instance. Do not regress the zero rows.
 
@@ -358,6 +362,11 @@ When working near any non-zero row, consider addressing the instance. Do not reg
 - `docs/vision.md`, `docs/identity.md`, `docs/architecture.md`, `docs/tech-stack.md`, `docs/phases.md`, `docs/references.md`, `docs/future.md` — durable design + planning.
 - `docs/dev-workflow.md` — env vars for headless smoke testing, Hyprland workspace-6 rule, notification-system quirks.
 - **Regression comments:** when a code-review fix causes a regression that must be reverted, add an inline comment at the affected code explaining what was tried, why it broke, and why the current approach is correct. Future agents will attempt the same "improvement" without this context. Also update CLAUDE.md or this file when the lesson is general.
+
+### Environment / Deployment Notes
+
+- **Window `app_id` for Hyprland:** `QGuiApplication.setDesktopFileName("symmetria-ide")` sets the Wayland `app_id`, which becomes the Hyprland window class. Required for `windowrule = workspace 6 silent, class:^(symmetria-ide)$` to match. Without it the rule targets the process name, which may vary by Python invocation. Gotcha #4.
+- **Notification daemon is Symmetria Shell (QuickShell), not swaync/mako.** `swaync-client` and `makoctl` are no-ops on this system. Any code or script that calls these tools will silently do nothing — test notifications via the QuickShell IPC path. Gotcha #6.
 
 ---
 
@@ -377,7 +386,7 @@ When working near any non-zero row, consider addressing the instance. Do not reg
 
 ### QML performance
 - https://doc.qt.io/qt-6/qtquick-visualcanvas-scenegraph.html — batching, sync phase, render thread.
-- https://doc.qt.io/qt-6/qml-qtquick-repeater.html vs https://runebook.dev/en/docs/qt/qml-qtquick-listview — Repeater vs ListView recycling.
+- https://doc.qt.io/qt-6/qml-qtquick-repeater.html vs https://doc.qt.io/qt-6/qml-qtquick-listview.html — Repeater vs ListView recycling.
 - https://www.kdab.com/10-tips-to-make-your-qml-code-faster-and-more-maintainable/ — delegate slimness, avoid `var`.
 - https://www.qt.io/blog/whats-new-in-qml-tooling-for-qt-6.11-part-2 — recent qmllint warnings.
 
@@ -394,7 +403,7 @@ When working near any non-zero row, consider addressing the instance. Do not reg
 - https://docs.python.org/3/whatsnew/3.14.html — tuple-of-primitives GC tracking (gotcha #10).
 - https://peps.python.org/pep-0695/ — generic syntax + `type` aliases.
 - https://peps.python.org/pep-0698/ — `@override`.
-- https://peps.python.org/pep-0654/ — `ExceptionGroup`.
+- https://peps.python.org/pep-0654/ — `ExceptionGroup` (Python 3.11+; no active rules reference this yet, listed for completeness).
 - https://docs.python.org/3/library/gc.html — `freeze`, `disable`, generational thresholds.
 - https://docs.python.org/3/library/faulthandler.html — segfault traceback capture.
 - https://docs.astral.sh/ruff/ — rule coverage vs black/flake8/isort/pylint.
@@ -407,7 +416,7 @@ When working near any non-zero row, consider addressing the instance. Do not reg
 - https://pynvim.readthedocs.io/en/latest/usage/python-plugin-api.html — threading, `async_call`, subscribe.
 - https://github.com/neovim/neovim/blob/master/src/nvim/api/ui.c — authoritative redraw event arg counts.
 - https://github.com/folke/which-key.nvim/tree/main/lua/which-key/plugins/presets.lua — preset catalog we flatten.
-- https://github.com/neovide/neovide/tree/main/src/bridge — reference frontend; scroll/cursor spring patterns (gotchas #11, #12).
+- https://github.com/neovide/neovide/tree/main/src/renderer/cursor_renderer — reference frontend; scroll/cursor spring patterns (gotchas #11, #12). Note: `src/bridge` is the msgpack-RPC layer; the spring algorithms live in `src/renderer/cursor_renderer/mod.rs`.
 - https://github.com/Kampfkarren/selene — Lua linter with Neovim std.
 - https://github.com/nvim-lua/plenary.nvim — busted test runner pattern.
 
