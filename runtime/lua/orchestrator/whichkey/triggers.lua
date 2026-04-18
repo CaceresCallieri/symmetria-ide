@@ -124,7 +124,7 @@ function M.install(mode)
   -- keymap slot was overwritten by a menu keymap and later deleted,
   -- leaving the slot empty — in that case `M._installed[id]` still
   -- says the trigger is there, but it actually isn't.
-  for id, t in pairs(wanted) do
+  for _, t in pairs(wanted) do
     local current = vim.fn.maparg(t.keys, t.mode, false, true)
     local ours_present = type(current) == "table"
       and current.desc

@@ -135,6 +135,8 @@ end
 -- Expose the push function as a global so the Python side can trigger
 -- an on-demand re-push after it finishes subscribing (the initial push
 -- below fires before Python subscribes, so we need this handshake).
+-- This is the deliberate IPC boundary — see CLAUDE.md gotcha #2.
+-- selene: allow(global_usage)
 _G.symmetria_push_state = M.push_state
 
 -- Wire autocmds. We push once on each buffer enter / cursor move /

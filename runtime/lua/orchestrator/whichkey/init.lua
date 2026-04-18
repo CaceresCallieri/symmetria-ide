@@ -178,9 +178,13 @@ function M.setup()
 
   -- Testing hooks. Kept around after the state machine lands — useful
   -- for headless smoke tests that want to force a menu open without
-  -- simulating keystrokes.
+  -- simulating keystrokes. `_G` is the deliberate IPC boundary that
+  -- Python hits via `nvim.exec_lua(...)`; see CLAUDE.md gotcha #2.
+  -- selene: allow(global_usage)
   _G.symmetria_whichkey_show = M.show
+  -- selene: allow(global_usage)
   _G.symmetria_whichkey_hide = M.emit_hide
+  -- selene: allow(global_usage)
   _G.symmetria_whichkey_start = function(keys)
     State.start({ keys = keys or " " })
   end

@@ -1,0 +1,7 @@
+std = "lua51+neovim"
+
+# Inline one-statement lambdas (e.g. `function() M.close() end`) are an
+# idiomatic Lua pattern used throughout runtime/ for compact keymap
+# callbacks. Disable the style warning project-wide.
+[lints]
+multiple_statements = "allow"

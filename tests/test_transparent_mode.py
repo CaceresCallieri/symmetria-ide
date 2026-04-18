@@ -24,7 +24,6 @@ constraint and are what the existing test suite uses for similar gotchas.
 
 from __future__ import annotations
 
-import ast
 import inspect
 import sys
 import pytest

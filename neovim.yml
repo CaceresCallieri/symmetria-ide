@@ -1,0 +1,10 @@
+---
+base: lua51
+lua_versions:
+  - lua51
+
+globals:
+  vim:
+    any: true
+  jit:
+    any: true

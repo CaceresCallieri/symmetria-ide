@@ -179,7 +179,6 @@ class TestCompletionModel:
         assert model.selected == 1
 
     def test_word_role_data(self):
-        from PySide6.QtCore import QModelIndex
         from symmetria_ide.app import CompletionModel
         model = CompletionModel()
         model.apply({"items": ["edit", "enew"], "selected": -1})
