@@ -6,8 +6,8 @@ the QML engine wiring without mixing in single-use bootstrap code.
 
 Three things live here:
 
-  * `QML_DIR`     — the `qml/` directory, resolved at import time.
-  * `configure_logging`       — root logger setup for the CLI entry.
+  * `QML_DIR`               — the `qml/` directory, resolved at import time.
+  * `configure_logging`     — root logger setup for the CLI entry.
   * `configure_headless_mode` — wires the smoke-test screenshot +
     key-injection timers when `SYMMETRIA_IDE_SCREENSHOT` /
     `SYMMETRIA_IDE_TEST_KEYS` env vars are set.

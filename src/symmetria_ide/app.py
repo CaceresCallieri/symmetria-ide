@@ -698,9 +698,7 @@ def _register_qml_types() -> None:
     of their class definition being evaluated. That happens when their
     module is imported. This function exists so future maintainers have
     a discoverable home for any *explicit* `qmlRegisterType(...)` calls
-    that can't be expressed with the decorator — and so we can assert,
-    at the top of `run()`, that all QmlElement classes we care about
-    have already been imported.
+    that can't be expressed with the decorator.
 
     The `NvimView` symbol is referenced here (not just imported at
     module scope with a `noqa: F401`) so that a future import-pruner
@@ -723,18 +721,19 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     change.
     """
     engine = QQmlApplicationEngine()
+    ctx = engine.rootContext()
 
     # Make backend + capsules available to QML as a single `controller`
     # context property — keeps the QML surface small.
-    engine.rootContext().setContextProperty("controller", controller)
-    engine.rootContext().setContextProperty("nvimBackend", controller.backend)
-    engine.rootContext().setContextProperty("capsuleModel", controller.capsules)
-    engine.rootContext().setContextProperty("statusState", controller.status)
-    engine.rootContext().setContextProperty("cmdlineState", controller.cmdline)
-    engine.rootContext().setContextProperty("popupmenuModel", controller.popupmenu)
-    engine.rootContext().setContextProperty("completionModel", controller.completion)
-    engine.rootContext().setContextProperty("whichKeyState", controller.whichkey_state)
-    engine.rootContext().setContextProperty("whichKeyModel", controller.whichkey_model)
+    ctx.setContextProperty("controller", controller)
+    ctx.setContextProperty("nvimBackend", controller.backend)
+    ctx.setContextProperty("capsuleModel", controller.capsules)
+    ctx.setContextProperty("statusState", controller.status)
+    ctx.setContextProperty("cmdlineState", controller.cmdline)
+    ctx.setContextProperty("popupmenuModel", controller.popupmenu)
+    ctx.setContextProperty("completionModel", controller.completion)
+    ctx.setContextProperty("whichKeyState", controller.whichkey_state)
+    ctx.setContextProperty("whichKeyModel", controller.whichkey_model)
 
     qml_root = QML_DIR / "Main.qml"
     engine.load(QUrl.fromLocalFile(str(qml_root)))
@@ -783,8 +782,15 @@ def run() -> int:
         configure_headless_mode(controller, engine, app, shot_path, test_keys)
 
     # gotcha #10: gc.freeze() must sit immediately before app.exec() —
-    # later allocations wouldn't be frozen; earlier moves would miss
+    # everything allocated up to here is long-lived (Qt wrappers, QML
+    # engine state, controller, backend). Freezing them moves those
+    # objects into the permanent generation so the cyclic collector skips
+    # them on every subsequent pass. Combined with the gc-disabled window
+    # in `NvimBackend._dispatch_redraw`, this shrinks the "GC runs while
+    # Qt renders" race surface that caused SIGSEGVs under Python 3.14.
+    # Later allocations wouldn't be frozen; earlier placement would miss
     # state that still needs freezing. See CLAUDE.md gotcha #10.
     gc.collect()
     gc.freeze()
+
     return app.exec()
