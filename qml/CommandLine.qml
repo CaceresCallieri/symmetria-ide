@@ -158,16 +158,14 @@ Item {
                 interactive: false
 
                 delegate: Rectangle {
+                    id: delegateRow
                     width: popupList.width
                     height: root.rowHeight
                     color: ListView.isCurrentItem ? root.popupSelBgColor : "transparent"
                     radius: 3
 
                     Text {
-                        // parent here is the Rectangle delegate for this
-                        // ListView row — immediate-sibling anchor is the
-                        // intended target, no named ancestor to point at.
-                        anchors.fill: parent
+                        anchors.fill: delegateRow
                         anchors.leftMargin: 10
                         anchors.rightMargin: 10
                         verticalAlignment: Text.AlignVCenter

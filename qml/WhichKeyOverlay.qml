@@ -153,9 +153,8 @@ Rectangle {
 
         Row {
             spacing: 5
-            // parent here is `footer` — anonymous inner Row uses its
-            // immediate parent's verticalCenter so the ESC/⏎ groups
-            // align on the footer row's midline.
+            // footer is the outer Row (immediate parent) — explicit id
+            // reference instead of parent, per §3 P2 id-naming convention.
             anchors.verticalCenter: footer.verticalCenter
             Text {
                 text: "ESC"
