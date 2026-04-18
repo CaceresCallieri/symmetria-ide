@@ -17,22 +17,22 @@ local M = {}
 -- in the user's config (mapleader=" "), so prefix matches use " ".
 ---@type table<string, { glyph: string, color: string }>
 M.by_path = {
-  [" g"]  = { glyph = "",  color = "#e8ab6f" },  -- git / lazygit
-  [" G"]  = { glyph = "",  color = "#e8ab6f" },  -- GitHub
-  [" b"]  = { glyph = "",  color = "#b4b4b4" },  -- buffers
-  [" e"]  = { glyph = "",  color = "#7fb3d5" },  -- file explorer
-  [" c"]  = { glyph = "",  color = "#b4b4b4" },  -- copy
-  [" S"]  = { glyph = "",  color = "#b4b4b4" },  -- sessions
-  [" L"]  = { glyph = "",  color = "#7fb3d5" },  -- lint
-  [" f"]  = { glyph = "",  color = "#c8a37a" },  -- find / telescope
-  [" p"]  = { glyph = "",  color = "#c8a37a" },  -- plugins
-  [" s"]  = { glyph = "",  color = "#7fb3d5" },  -- search
-  [" t"]  = { glyph = "",  color = "#c8a37a" },  -- toggle
-  [" o"]  = { glyph = "",  color = "#7a7a7a" },  -- obsidian / notes
-  [" x"]  = { glyph = "",  color = "#d16969" },  -- trouble / diag
-  [" m"]  = { glyph = "",  color = "#b4b4b4" },  -- misc
-  [" n"]  = { glyph = "",  color = "#b4b4b4" },  -- misc
-  [" a"]  = { glyph = "",  color = "#b4b4b4" },  -- misc
+  [" g"] = { glyph = "", color = "#e8ab6f" }, -- git / lazygit
+  [" G"] = { glyph = "", color = "#e8ab6f" }, -- GitHub
+  [" b"] = { glyph = "", color = "#b4b4b4" }, -- buffers
+  [" e"] = { glyph = "", color = "#7fb3d5" }, -- file explorer
+  [" c"] = { glyph = "", color = "#b4b4b4" }, -- copy
+  [" S"] = { glyph = "", color = "#b4b4b4" }, -- sessions
+  [" L"] = { glyph = "", color = "#7fb3d5" }, -- lint
+  [" f"] = { glyph = "", color = "#c8a37a" }, -- find / telescope
+  [" p"] = { glyph = "", color = "#c8a37a" }, -- plugins
+  [" s"] = { glyph = "", color = "#7fb3d5" }, -- search
+  [" t"] = { glyph = "", color = "#c8a37a" }, -- toggle
+  [" o"] = { glyph = "", color = "#7a7a7a" }, -- obsidian / notes
+  [" x"] = { glyph = "", color = "#d16969" }, -- trouble / diag
+  [" m"] = { glyph = "", color = "#b4b4b4" }, -- misc
+  [" n"] = { glyph = "", color = "#b4b4b4" }, -- misc
+  [" a"] = { glyph = "", color = "#b4b4b4" }, -- misc
 }
 
 local EMPTY = { glyph = "", color = "" }

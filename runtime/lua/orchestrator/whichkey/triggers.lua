@@ -63,13 +63,9 @@ local function install_one(mode, keys)
   -- nvim blocks on input, and it keeps Python's Qt event loop from
   -- stalling during the transition from "no menu" to "menu open".
   vim.keymap.set(mode, keys, function()
-    local ok, err = pcall(require("orchestrator.whichkey.state").start,
-      { keys = keys })
+    local ok, err = pcall(require("orchestrator.whichkey.state").start, { keys = keys })
     if not ok then
-      vim.notify(
-        "[symmetria-whichkey] state.start failed: " .. tostring(err),
-        vim.log.levels.ERROR
-      )
+      vim.notify("[symmetria-whichkey] state.start failed: " .. tostring(err), vim.log.levels.ERROR)
     end
   end, {
     -- `nowait = true` so the menu opens INSTANTLY on the prefix
@@ -132,7 +128,11 @@ function M.install(mode)
     if not ours_present then
       -- The slot either was never ours or got clobbered. Clear it first
       -- (in case some other keymap sits there) and install fresh.
-      if type(current) == "table" and not vim.tbl_isempty(current) and not user_has_real_mapping(t.mode, t.keys) then
+      if
+        type(current) == "table"
+        and not vim.tbl_isempty(current)
+        and not user_has_real_mapping(t.mode, t.keys)
+      then
         pcall(vim.keymap.del, t.mode, t.keys)
       end
       if not user_has_real_mapping(t.mode, t.keys) then

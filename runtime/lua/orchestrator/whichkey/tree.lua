@@ -94,7 +94,7 @@ function M.insert(root, km)
       child.desc = (km.desc ~= "" and km.desc) or child.desc
       child.rhs = km.rhs
       child.buffer = km.buffer or 0
-      child.callback = km.callback  -- function rhs
+      child.callback = km.callback -- function rhs
     end
     node = child
   end
@@ -172,12 +172,12 @@ local function sort_children(a, b)
   local a_is_tok = ak:sub(1, 1) == "<"
   local b_is_tok = bk:sub(1, 1) == "<"
   if a_is_tok ~= b_is_tok then
-    return not a_is_tok  -- plain chars before <...> tokens
+    return not a_is_tok -- plain chars before <...> tokens
   end
   local a_lower = ak:lower()
   local b_lower = bk:lower()
   if a_lower == b_lower then
-    return ak < bk  -- lowercase sorts before uppercase at equal-letter
+    return ak < bk -- lowercase sorts before uppercase at equal-letter
   end
   return a_lower < b_lower
 end

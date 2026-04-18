@@ -1,0 +1,23 @@
+# CODEOWNERS — auto-requests review when the critical-path files change.
+# Syntax: https://docs.github.com/en/repositories/managing-your-repositories-settings-and-customizations/customizing-your-repository/about-code-owners
+#
+# Pattern matching is last-match-wins, so specific rules belong below generic ones.
+
+# Everything defaults to the project owner.
+*                                       @CaceresCallieri
+
+# Render hot path — any change here needs scrutiny against gotchas #10, #11, #12, #13, #14.
+src/symmetria_ide/nvim_view.py          @CaceresCallieri
+
+# pynvim worker + signal boundary — gotchas #1, #2, #9. Thread-safety regressions here are silent and catastrophic.
+src/symmetria_ide/nvim_backend.py       @CaceresCallieri
+
+# QGuiApplication / QML engine / shutdown order — the GC-freeze timing is a hard correctness constraint (gotcha #10).
+src/symmetria_ide/app.py                @CaceresCallieri
+
+# Lua overlay — which-key state machine is full of sharp edges (gotchas #15–#19).
+runtime/                                @CaceresCallieri
+
+# Agent-facing context. Rewrites or gotcha changes require explicit review.
+CLAUDE.md                               @CaceresCallieri
+.claude/project-standards.md            @CaceresCallieri

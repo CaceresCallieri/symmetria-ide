@@ -130,7 +130,8 @@ local function neutralize_whichkey_nvim()
   -- failure — the overlay still works from `nvim_get_keymap()` data.
   if type(wk._queue) == "table" and #wk._queue > 0 then
     vim.notify(
-      "[symmetria-whichkey] " .. #wk._queue
+      "[symmetria-whichkey] "
+        .. #wk._queue
         .. " which-key.add() spec(s) detected — metadata (icons, group names)"
         .. " is not read by the native overlay. Attach via `desc` on"
         .. " `vim.keymap.set` instead.",

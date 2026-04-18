@@ -51,7 +51,7 @@ QML_IMPORT_MAJOR_VERSION = 1
 # Smooth-scroll animation tunables. Defaults adapted from Neovide
 # (src/renderer/mod.rs lines 120-122 at commit 04fcd7ac). Hardcoded here
 # rather than exposed as user config until the feel is dialed in.
-SCROLL_ANIMATION_LENGTH = 0.3       # seconds — spring settle time
+SCROLL_ANIMATION_LENGTH = 0.3  # seconds — spring settle time
 # For too-far jumps (gg, G, search) we clamp visual travel to this many
 # lines instead of animating the full delta. Neovide default is 1.
 # We tried 5 but the scrollback outer slots are blank during the
@@ -80,7 +80,7 @@ SCROLLBACK_MULTIPLIER = 3
 # snappy for large jumps. 90 ms / 48 ms give a calmer glide while
 # still leading the 300 ms scroll spring.
 # Ported from `neovide/src/renderer/cursor_renderer/mod.rs` @ main.
-CURSOR_ANIMATION_LENGTH = 0.09        # seconds — main settle time
+CURSOR_ANIMATION_LENGTH = 0.09  # seconds — main settle time
 CURSOR_SHORT_ANIMATION_LENGTH = 0.048  # speedup for ≤2-cell horizontal jumps
 # Neovide's spring early-out threshold is 0.01 in the spring's own
 # units. Our cursor spring stores pixel deltas, so 0.01 px is fine.
@@ -213,7 +213,10 @@ class ScrollAnimation:
         self.position, self.velocity = _spring_step(
             self.position, self.velocity, dt, SCROLL_ANIMATION_LENGTH
         )
-        if abs(self.position) < _SPRING_EPSILON and abs(self.velocity) < _SPRING_EPSILON:
+        if (
+            abs(self.position) < _SPRING_EPSILON
+            and abs(self.velocity) < _SPRING_EPSILON
+        ):
             self.position = 0.0
             self.velocity = 0.0
             return False
@@ -454,8 +457,8 @@ class CursorBlink:
 
     # Phase constants. Kept small-int so `__slots__` storage is tight.
     PHASE_WAITING = 0  # blinkwait period at the start; opacity = 1
-    PHASE_ON = 1       # fading 1 -> 0 across blinkon
-    PHASE_OFF = 2      # fading 0 -> 1 across blinkoff
+    PHASE_ON = 1  # fading 1 -> 0 across blinkon
+    PHASE_OFF = 2  # fading 0 -> 1 across blinkoff
 
     def __init__(self) -> None:
         self._static: bool = True
@@ -477,9 +480,7 @@ class CursorBlink:
         NeoVim exposes these as integer ms; Neovide treats any zero as
         "disable blinking for this mode" (matches `:h guicursor`).
         """
-        new_static = (
-            blinkwait_ms <= 0 or blinkon_ms <= 0 or blinkoff_ms <= 0
-        )
+        new_static = blinkwait_ms <= 0 or blinkon_ms <= 0 or blinkoff_ms <= 0
         # Skip state reset if the timings haven't actually changed — the
         # mode_info_set event fires at startup and on `:set guicursor`
         # but our phase tracking should survive mode-to-mode switches
@@ -545,7 +546,10 @@ class CursorBlink:
             # Safety valve: if we've fallen catastrophically behind
             # (elapsed > 10× the current phase), rebase so we don't burn
             # CPU iterating. Matches Neovide's "lagging badly" guard.
-            if now - self._phase_start > max(self._wait_s, self._on_s, self._off_s) * 10:
+            if (
+                now - self._phase_start
+                > max(self._wait_s, self._on_s, self._off_s) * 10
+            ):
                 self._phase_start = now
         # Compute opacity within the current phase.
         elapsed = now - self._phase_start
@@ -707,7 +711,9 @@ class NvimView(QQuickPaintedItem):
             except (RuntimeError, TypeError):
                 pass
             try:
-                self._backend.cursor_mode_updated.disconnect(self._on_cursor_mode_updated)
+                self._backend.cursor_mode_updated.disconnect(
+                    self._on_cursor_mode_updated
+                )
             except (RuntimeError, TypeError):
                 pass
         self._backend = value
@@ -749,7 +755,9 @@ class NvimView(QQuickPaintedItem):
         blinkwait = int(self._cursor_mode.get("blinkwait", 0) or 0)
         blinkon = int(self._cursor_mode.get("blinkon", 0) or 0)
         blinkoff = int(self._cursor_mode.get("blinkoff", 0) or 0)
-        self._cursor_blink.set_timings(blinkwait, blinkon, blinkoff, time.perf_counter())
+        self._cursor_blink.set_timings(
+            blinkwait, blinkon, blinkoff, time.perf_counter()
+        )
         # Any blink state change may require the frame driver to keep
         # ticking even when cursor/scroll position are settled.
         self._maybe_start_frame_driver()
@@ -964,9 +972,7 @@ class NvimView(QQuickPaintedItem):
             # Column mismatches are tolerated — paint reads up to
             # grid.cols per row and the live snapshot overwrites.
             return
-        self._scrollback = [
-            [Cell() for _ in range(grid_cols)] for _ in range(target)
-        ]
+        self._scrollback = [[Cell() for _ in range(grid_cols)] for _ in range(target)]
         self._scrollback_rows = target
 
     def _rotate_scrollback(self, delta: int) -> None:
@@ -1237,8 +1243,15 @@ class NvimView(QQuickPaintedItem):
         for r in range(grid.rows):
             y = r * ch
             self._paint_row(
-                painter, grid.cells[r], grid.cols, grid.hl_attrs,
-                default_fg, default_bg, y, cw, ch,
+                painter,
+                grid.cells[r],
+                grid.cols,
+                grid.hl_attrs,
+                default_fg,
+                default_bg,
+                y,
+                cw,
+                ch,
             )
 
     def _paint_rows_from_scrollback(
@@ -1281,8 +1294,15 @@ class NvimView(QQuickPaintedItem):
             # count if the grid resized; cap at whichever is smaller.
             row_cols = min(cols, len(row_cells))
             self._paint_row(
-                painter, row_cells, row_cols, grid.hl_attrs,
-                default_fg, default_bg, y, cw, ch,
+                painter,
+                row_cells,
+                row_cols,
+                grid.hl_attrs,
+                default_fg,
+                default_bg,
+                y,
+                cw,
+                ch,
             )
 
     def _paint_row(
@@ -1384,7 +1404,10 @@ class NvimView(QQuickPaintedItem):
         # cell now so we don't draw at (0, 0).
         if not self._cursor_anim.seeded:
             self._cursor_anim.set_destination(
-                cur_col * cw, cur_row * ch, cw, ch,
+                cur_col * cw,
+                cur_row * ch,
+                cw,
+                ch,
             )
         x = self._cursor_anim.current_x
         y = self._cursor_anim.current_y
@@ -1408,9 +1431,7 @@ class NvimView(QQuickPaintedItem):
                 # 1.75-px bar at 7px-wide cells; Qt handles sub-pixel).
                 bar_w = max(1.0, cw * cell_pct / 100.0)
                 rect = QRectF(x, y, bar_w, ch)
-                painter.fillRect(
-                    rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0)
-                )
+                painter.fillRect(rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
                 # No glyph overlay for vertical bars — the underlying
                 # grid paint already shows the character at that cell.
             elif shape == "horizontal":
@@ -1418,17 +1439,13 @@ class NvimView(QQuickPaintedItem):
                 # `cell_percentage`% of cell height.
                 bar_h = max(1.0, ch * cell_pct / 100.0)
                 rect = QRectF(x, y + ch - bar_h, cw, bar_h)
-                painter.fillRect(
-                    rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0)
-                )
+                painter.fillRect(rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
             else:
                 # Block (default) — reverse-video the cell: fg-colored
                 # background with the cell glyph in bg color on top.
                 cursor_cell = grid.cells[cur_row][cur_col]
                 rect = QRectF(x, y, cw, ch)
-                painter.fillRect(
-                    rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0)
-                )
+                painter.fillRect(rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
                 painter.setPen(_rgb_to_qcolor(grid.default_bg, 0x1E1E1E))
                 painter.drawText(
                     rect,

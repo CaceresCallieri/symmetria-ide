@@ -12,9 +12,18 @@ venv/
 env/
 .python-version
 
-# Environment
-.env
-.env.local
+# Environment — cover every .env* variant, not just the two we thought of.
+# A silent commit of .env.production would be catastrophic (§9 "Never commit
+# credentials"). Broadened per tech-debt #14.
+.env*
+
+# Secrets — certificate / private-key files must never enter git.
+*.pem
+*.key
+
+# Node artifacts — not currently used, but any future QML tooling or
+# experimental web component could drop a node_modules/ into the tree.
+node_modules/
 
 # IDE / editors
 .vscode/

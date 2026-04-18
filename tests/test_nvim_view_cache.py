@@ -31,6 +31,7 @@ def clear_qcolor_cache():
     The cache is a module singleton — tests pollute each other without this.
     """
     from symmetria_ide.nvim_view import _qcolor_cache
+
     _qcolor_cache.clear()
     yield
     _qcolor_cache.clear()
@@ -44,6 +45,7 @@ class TestRgbToQcolorCache:
         = no GC pressure from repeated paint calls.
         """
         from symmetria_ide.nvim_view import _rgb_to_qcolor
+
         c1 = _rgb_to_qcolor(0xFF0000, 0x000000)
         c2 = _rgb_to_qcolor(0xFF0000, 0x000000)
         assert c1 is c2
@@ -51,6 +53,7 @@ class TestRgbToQcolorCache:
     def test_none_value_uses_fallback_rgb(self):
         """When value is None, the fallback int is used to construct the QColor."""
         from symmetria_ide.nvim_view import _rgb_to_qcolor
+
         color = _rgb_to_qcolor(None, 0x00FF00)
         assert color.red() == 0
         assert color.green() == 255
@@ -59,6 +62,7 @@ class TestRgbToQcolorCache:
     def test_value_wins_over_fallback(self):
         """When value is not None, it determines the color and fallback is ignored."""
         from symmetria_ide.nvim_view import _rgb_to_qcolor
+
         color = _rgb_to_qcolor(0xFF0000, 0x0000FF)
         assert color.red() == 255
         assert color.green() == 0
@@ -67,6 +71,7 @@ class TestRgbToQcolorCache:
     def test_distinct_keys_produce_distinct_objects(self):
         """Different (value, fallback) pairs cache independently."""
         from symmetria_ide.nvim_view import _rgb_to_qcolor
+
         red = _rgb_to_qcolor(0xFF0000, 0x000000)
         blue = _rgb_to_qcolor(0x0000FF, 0x000000)
         assert red is not blue
@@ -76,6 +81,7 @@ class TestRgbToQcolorCache:
     def test_cache_is_populated_after_first_call(self):
         """The cache dict contains an entry after the first unique call."""
         from symmetria_ide.nvim_view import _rgb_to_qcolor, _qcolor_cache
+
         assert len(_qcolor_cache) == 0
         _rgb_to_qcolor(0x123456, 0x000000)
         assert len(_qcolor_cache) == 1
@@ -83,6 +89,7 @@ class TestRgbToQcolorCache:
     def test_24bit_rgb_decomposition_correct(self):
         """Verify R/G/B channel extraction for a known 24-bit value."""
         from symmetria_ide.nvim_view import _rgb_to_qcolor
+
         # 0xAABBCC: R=0xAA=170, G=0xBB=187, B=0xCC=204
         color = _rgb_to_qcolor(0xAABBCC, 0x000000)
         assert color.red() == 0xAA

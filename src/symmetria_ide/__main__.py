@@ -8,7 +8,9 @@ import sys
 from pathlib import Path
 
 _xdg_state = os.environ.get("XDG_STATE_HOME")
-_state_dir = (Path(_xdg_state) if _xdg_state else Path.home() / ".local" / "state") / "symmetria-ide"
+_state_dir = (
+    Path(_xdg_state) if _xdg_state else Path.home() / ".local" / "state"
+) / "symmetria-ide"
 _state_dir.mkdir(parents=True, exist_ok=True)
 _crash_log_path = _state_dir / "crash.log"
 _crash_log = _crash_log_path.open("a", buffering=1)

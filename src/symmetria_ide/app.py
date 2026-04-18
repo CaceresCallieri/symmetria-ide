@@ -593,13 +593,15 @@ class WhichKeyModel(QAbstractListModel):
             for raw in payload.get("items") or ():
                 if not isinstance(raw, dict):
                     continue
-                new_items.append({
-                    "key": str(raw.get("key") or ""),
-                    "desc": str(raw.get("desc") or ""),
-                    "is_group": bool(raw.get("is_group") or False),
-                    "icon": str(raw.get("icon") or ""),
-                    "icon_color": str(raw.get("icon_color") or ""),
-                })
+                new_items.append(
+                    {
+                        "key": str(raw.get("key") or ""),
+                        "desc": str(raw.get("desc") or ""),
+                        "is_group": bool(raw.get("is_group") or False),
+                        "icon": str(raw.get("icon") or ""),
+                        "icon_color": str(raw.get("icon_color") or ""),
+                    }
+                )
             self.beginResetModel()
             self._items = new_items
             self.endResetModel()

@@ -73,9 +73,7 @@ local function install_menu_key(mode, key, handler)
   local is_trigger = type(prev) == "table"
     and type(prev.desc) == "string"
     and prev.desc:find(TRIGGER_DESC, 1, true) ~= nil
-  local had_prev = type(prev) == "table"
-    and not vim.tbl_isempty(prev)
-    and not is_trigger
+  local had_prev = type(prev) == "table" and not vim.tbl_isempty(prev) and not is_trigger
   -- Buffer-local keymaps (buffer > 0) are owned by LSP/treesitter and
   -- will be reinstalled on LspAttach/BufEnter — restoring them here
   -- via mapset() would promote them to global scope, stomping unrelated
@@ -107,7 +105,11 @@ local function clear_menu_keymaps()
       if not ok then
         vim.notify(
           "[symmetria-whichkey] failed to restore keymap `"
-            .. tostring(km.key) .. "` (" .. km.mode .. "): " .. tostring(err),
+            .. tostring(km.key)
+            .. "` ("
+            .. km.mode
+            .. "): "
+            .. tostring(err),
           vim.log.levels.WARN
         )
       end
@@ -209,8 +211,7 @@ local function execute_leaf(node)
   })
   if not ok then
     vim.notify(
-      "[symmetria-whichkey] failed to execute `" .. tostring(node.keys)
-        .. "`: " .. tostring(err),
+      "[symmetria-whichkey] failed to execute `" .. tostring(node.keys) .. "`: " .. tostring(err),
       vim.log.levels.WARN
     )
   end
@@ -247,10 +248,14 @@ function M._install_for(node)
     end)
   end
 
-  install_menu_key("n", "<Esc>", function() M.close() end)
+  install_menu_key("n", "<Esc>", function()
+    M.close()
+  end)
   -- <BS> pops; at the depth-1 layer (direct <leader> menu) it closes
   -- instead, matching the can_go_back semantics used in init.lua.
-  install_menu_key("n", "<BS>", function() M.pop() end)
+  install_menu_key("n", "<BS>", function()
+    M.pop()
+  end)
 
   require("orchestrator.whichkey").show(node.keys)
 end

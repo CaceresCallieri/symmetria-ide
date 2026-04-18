@@ -1,0 +1,67 @@
+# Local-hook pre-commit config — every hook calls a tool already installed on
+# the developer's machine (see docs/dev-workflow.md for the `paru -S` list).
+# We avoid pulling pinned versions from GitHub so local + CI use the exact
+# same tool binaries; drift surfaces the moment CI disagrees with a hook.
+#
+# Installation:
+#   pre-commit install
+#
+# One-off full run against all tracked files:
+#   pre-commit run --all-files
+
+default_stages: [pre-commit]
+fail_fast: false
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        language: system
+        entry: ruff check
+        types_or: [python]
+        pass_filenames: true
+
+      - id: ruff-format
+        name: ruff format
+        language: system
+        entry: ruff format --check
+        types_or: [python]
+        pass_filenames: true
+
+      - id: selene
+        name: selene (Lua)
+        language: system
+        entry: selene --config selene.toml
+        types_or: [lua]
+        pass_filenames: true
+
+      - id: stylua-check
+        name: stylua (check-only)
+        language: system
+        entry: stylua --check
+        types_or: [lua]
+        pass_filenames: true
+
+      # QML lint — uses system `qmllint`. If you have pyside6-qmllint
+      # installed (PySide6 devtools), swap the entry to that wrapper for
+      # type-aware warnings against Python-registered QML types.
+      - id: qmllint
+        name: qmllint (QML)
+        language: system
+        entry: qmllint
+        files: \.qml$
+        pass_filenames: true
+
+      # pyright runs in REPORT-ONLY mode for now — the project baseline is
+      # 26 warnings (known PySide6-stubs false positives, gotcha #7).
+      # Blocking commits here would be noisy until the baseline is clean.
+      # Flip `verbose: false` to `false` + remove `verbose: true` and
+      # `always_run: true` once the baseline warning count is zero.
+      - id: pyright
+        name: pyright (type check — report only)
+        language: system
+        entry: bash -c 'pyright "$@" || true' --
+        types_or: [python]
+        pass_filenames: true
+        verbose: true

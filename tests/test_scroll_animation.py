@@ -78,8 +78,8 @@ def test_far_jump_negative_direction() -> None:
 def test_shift_clamps_to_max_delta() -> None:
     """Within-limits compounding still clamps to the buffer headroom."""
     anim = ScrollAnimation()
-    anim.shift(15, max_delta=20)   # position = -15
-    anim.shift(10, max_delta=20)   # would go to -25, should clamp to -20
+    anim.shift(15, max_delta=20)  # position = -15
+    anim.shift(10, max_delta=20)  # would go to -25, should clamp to -20
     assert anim.position == -20.0
 
 
@@ -152,15 +152,14 @@ def test_tick_converges_for_small_displacement() -> None:
         anim.tick(FRAME_DT)
         ticks += 1
     assert not anim.active, (
-        f"1-line shift did not settle in {max_ticks} frames "
-        f"(pos={anim.position})"
+        f"1-line shift did not settle in {max_ticks} frames (pos={anim.position})"
     )
 
 
 def test_tick_no_overshoot_for_small_dt() -> None:
     """Critically damped => strictly signed-monotonic; never crosses 0."""
     anim = ScrollAnimation()
-    anim.shift(-7, max_delta=50)   # position = +7
+    anim.shift(-7, max_delta=50)  # position = +7
     assert anim.position > 0
     for _ in range(200):
         if not anim.tick(FRAME_DT):
@@ -208,15 +207,15 @@ def test_active_is_true_when_only_velocity_nonzero() -> None:
 def test_compounding_reverse_shift_clamps_to_negative_max_delta() -> None:
     """Compounding a backward shift after a forward one clamps to -max_delta."""
     anim = ScrollAnimation()
-    anim.shift(-15, max_delta=20)   # position = +15
-    anim.shift(-10, max_delta=20)   # would go to +25, should clamp to +20
+    anim.shift(-15, max_delta=20)  # position = +15
+    anim.shift(-10, max_delta=20)  # would go to +25, should clamp to +20
     assert anim.position == 20.0
 
 
 def test_reset_clears_far_jump_flag() -> None:
     """reset() must clear _far_jump_clear_pending set by a far-jump shift."""
     anim = ScrollAnimation()
-    anim.shift(500, max_delta=20)   # triggers far-jump path
+    anim.shift(500, max_delta=20)  # triggers far-jump path
     assert anim._far_jump_clear_pending is True
     anim.reset()
     assert anim._far_jump_clear_pending is False

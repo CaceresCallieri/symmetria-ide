@@ -331,6 +331,7 @@ def test_reset_phase_restarts_waiting() -> None:
     # At t=10.5 we should still be in the new WAITING phase.
     assert blink.opacity_at(10.5) == 1.0
 
+
 def test_reset_phase_on_static_cursor_has_no_visible_effect() -> None:
     """reset_phase on a static cursor doesn't break opacity_at.
 

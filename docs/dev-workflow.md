@@ -47,7 +47,24 @@ Add to `~/.hyprdots/.config/hypr/` for persistence across sessions.
 PYTHONPATH=src python -m pytest tests/ -v
 ```
 
-21 unit tests cover the pure-Python `Grid` (redraw ops) and Qt-key translator. No Qt display needed.
+102 unit tests cover the pure-Python `Grid`, Qt-key translator, scroll/cursor springs, and model classes. No Qt display needed.
+
+## Pre-commit hooks
+
+The project ships `.pre-commit-config.yaml` — all hooks are `language: system` and shell out to tools already installed via `paru` (`ruff`, `selene`, `stylua`, `qmllint`, `pyright`). Install once:
+
+```
+paru -S --needed python-pre-commit
+pre-commit install
+```
+
+Hooks run `ruff check`, `ruff format --check`, `selene`, `stylua --check`, `qmllint`, and a report-only `pyright` pass on staged files. Wall time for a full-tree run is ≤5 s on this machine. One-off sweep against everything:
+
+```
+pre-commit run --all-files
+```
+
+Pyright currently reports ~26 known PySide6-stubs false positives (gotcha #7) and is **not** a blocking hook — the entry is wrapped in `bash -c '... || true'`. Flip that to blocking once the baseline warning count drops to zero.
 
 ## Inspecting what arrived over RPC
 

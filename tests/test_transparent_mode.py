@@ -42,6 +42,7 @@ def qt_app():
 def clear_qcolor_cache():
     """Keep the module-level cache clean across tests."""
     from symmetria_ide.nvim_view import _qcolor_cache
+
     _qcolor_cache.clear()
     yield
     _qcolor_cache.clear()
@@ -50,6 +51,7 @@ def clear_qcolor_cache():
 # ---------------------------------------------------------------------------
 # bg_val skip logic — pure Python, no Qt required
 # ---------------------------------------------------------------------------
+
 
 class TestBgSkipLogic:
     """The bg_val != default_bg guard is the core transparency invariant.
@@ -72,6 +74,7 @@ class TestBgSkipLogic:
         changes how it derives bg_val, these tests break and alert the dev.
         """
         from symmetria_ide.grid import HlAttr
+
         attr = HlAttr()
         attr.background = bg_override
         attr.foreground = None
@@ -139,9 +142,11 @@ class TestBgSkipLogic:
 # Structural checks — ensure paint() and __init__ have the right shape
 # ---------------------------------------------------------------------------
 
+
 def _nvim_view_source() -> str:
     """Return the source of nvim_view.py."""
     import symmetria_ide.nvim_view as mod
+
     return inspect.getsource(mod)
 
 
@@ -156,6 +161,7 @@ class TestAmbientTintNotInlinedInPaint:
     def test_paint_does_not_contain_inline_qcolor_tint(self):
         """paint() must not contain 'QColor(0, 0, 0, 153)'."""
         from symmetria_ide.nvim_view import NvimView
+
         paint_src = inspect.getsource(NvimView.paint)
         assert "QColor(0, 0, 0, 153)" not in paint_src, (
             "QColor(0, 0, 0, 153) must NOT appear inside paint(). "
@@ -167,6 +173,7 @@ class TestAmbientTintNotInlinedInPaint:
     def test_paint_references_ambient_tint_color_attribute(self):
         """paint() must reference self._ambient_tint_color for the tint fill."""
         from symmetria_ide.nvim_view import NvimView
+
         paint_src = inspect.getsource(NvimView.paint)
         assert "_ambient_tint_color" in paint_src, (
             "paint() must reference self._ambient_tint_color for the ambient dim fill. "
@@ -176,6 +183,7 @@ class TestAmbientTintNotInlinedInPaint:
     def test_init_pre_allocates_ambient_tint_color(self):
         """__init__ must assign self._ambient_tint_color = QColor(0, 0, 0, 153)."""
         from symmetria_ide.nvim_view import NvimView
+
         init_src = inspect.getsource(NvimView.__init__)
         assert "_ambient_tint_color" in init_src, (
             "__init__ must pre-allocate self._ambient_tint_color. "
@@ -197,6 +205,7 @@ class TestTransparentFillColor:
     def test_init_calls_set_fill_color_with_transparent(self):
         """__init__ must call setFillColor(QColor(0, 0, 0, 0))."""
         from symmetria_ide.nvim_view import NvimView
+
         init_src = inspect.getsource(NvimView.__init__)
         assert "setFillColor(QColor(0, 0, 0, 0))" in init_src, (
             "__init__ must call setFillColor(QColor(0, 0, 0, 0)) so the "

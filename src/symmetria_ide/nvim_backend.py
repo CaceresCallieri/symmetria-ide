@@ -88,9 +88,27 @@ class NvimBackend(QObject):
         self.grid = Grid()
         self._nvim: pynvim.Nvim | None = None
         self._worker: threading.Thread | None = None
-        self._stopping = False
+        # Cooperative-shutdown signal. The worker is `daemon=True` so
+        # interpreter exit alone won't hang, but the daemon-only contract
+        # is silent: the main thread can't cleanly wait for the nvim loop
+        # to finish, and tests can't assert "stop() actually unblocked."
+        # `_stop_event` is set (a) at the top of `stop()`, before any RPC
+        # or close call, and (b) in the worker's `finally` block — so
+        # both the cooperative and crash-exit paths are observable.
+        # Standards §1 P0 — "every long-running thread is daemon=True
+        # OR owns an explicit shutdown Event"; we satisfy both.
+        self._stop_event = threading.Event()
         self._mode_info: list[dict[str, Any]] = []
         self._mode_idx: int = 0
+
+    @property
+    def stop_event(self) -> threading.Event:
+        """Shutdown signal — set as soon as teardown begins or the worker exits.
+
+        Exposed for tests and any future coordinator that needs to wait
+        on the nvim backend's lifecycle without polling `_worker.is_alive()`.
+        """
+        return self._stop_event
 
     # --- Lifecycle -----------------------------------------------------
 
@@ -123,9 +141,7 @@ class NvimBackend(QObject):
         try:
             self._nvim = pynvim.attach("child", argv=argv)
         except Exception:
-            log.exception(
-                "failed to spawn nvim — is nvim installed and on PATH?"
-            )
+            log.exception("failed to spawn nvim — is nvim installed and on PATH?")
             raise
         # rgb=true: NeoVim sends rgb hex values (no color indices).
         # ext_linegrid=true: use the modern grid_line-based protocol.
@@ -155,10 +171,15 @@ class NvimBackend(QObject):
         methods directly — they'd raise the same cross-thread error
         `input`/`resize` would. Instead, marshal `quit` via async_call,
         then let the worker exit naturally when nvim closes the channel.
+
+        `_stop_event` is set FIRST so any concurrent observer (tests,
+        health-check loop) sees shutdown-in-progress before the RPC
+        round-trip even starts.
         """
-        self._stopping = True
+        self._stop_event.set()
         nvim = self._nvim
         if nvim is not None:
+
             def _quit() -> None:
                 try:
                     nvim.command("qa!")
@@ -195,10 +216,13 @@ class NvimBackend(QObject):
             # isn't a crash — log at DEBUG, not ERROR.
             log.debug("nvim closed its RPC channel (normal exit)")
         except Exception:  # noqa: BLE001
-            if not self._stopping:
+            if not self._stop_event.is_set():
                 log.exception("nvim event loop crashed")
         finally:
-            self._stopping = True
+            # Set unconditionally — covers both the cooperative stop()
+            # path and the "nvim crashed / closed unexpectedly" path, so
+            # anyone blocking on stop_event.wait(...) is unblocked either way.
+            self._stop_event.set()
             self.closed.emit()
 
     def _on_loop_setup(self) -> None:
@@ -269,9 +293,7 @@ class NvimBackend(QObject):
             return
         if name == "capsule":
             if not args or not isinstance(args[0], dict):
-                log.warning(
-                    "capsule notification with unexpected payload: %r", args
-                )
+                log.warning("capsule notification with unexpected payload: %r", args)
                 return
             payload: dict = args[0]
             log.debug("capsule notification: %r", payload)
@@ -288,9 +310,7 @@ class NvimBackend(QObject):
             return
         if name == "scroll":
             if not args or not isinstance(args[0], dict):
-                log.warning(
-                    "scroll notification with unexpected payload: %r", args
-                )
+                log.warning("scroll notification with unexpected payload: %r", args)
                 return
             try:
                 delta = int(args[0].get("delta", 0))
@@ -302,9 +322,7 @@ class NvimBackend(QObject):
             return
         if name == "whichkey":
             if not args or not isinstance(args[0], dict):
-                log.warning(
-                    "whichkey notification with unexpected payload: %r", args
-                )
+                log.warning("whichkey notification with unexpected payload: %r", args)
                 return
             self.whichkey_event.emit(args[0])
             return
@@ -461,31 +479,37 @@ class NvimBackend(QObject):
         for chunk in content or ():
             if isinstance(chunk, (list, tuple)) and len(chunk) >= 2:
                 parts.append(str(chunk[1]))
-        self.cmdline_updated.emit({
-            "kind": "show",
-            "text": "".join(parts),
-            "pos": int(pos or 0),
-            "firstchar": str(firstc or ""),
-            "prompt": str(prompt or ""),
-            "level": int(level or 0),
-        })
+        self.cmdline_updated.emit(
+            {
+                "kind": "show",
+                "text": "".join(parts),
+                "pos": int(pos or 0),
+                "firstchar": str(firstc or ""),
+                "prompt": str(prompt or ""),
+                "level": int(level or 0),
+            }
+        )
 
     def _h_cmdline_pos(self, pos: int, level: int, *_rest: Any) -> None:
         # *_rest swallows any trailing args newer NeoVim versions may
         # add — keeps the handler forward-compatible.
-        self.cmdline_updated.emit({
-            "kind": "pos",
-            "pos": int(pos or 0),
-            "level": int(level or 0),
-        })
+        self.cmdline_updated.emit(
+            {
+                "kind": "pos",
+                "pos": int(pos or 0),
+                "level": int(level or 0),
+            }
+        )
 
     def _h_cmdline_hide(self, level: int = 0, *_rest: Any) -> None:
         # Some NeoVim versions pass `abort` (0.9) then added more
         # fields; *_rest absorbs whatever else comes through.
-        self.cmdline_updated.emit({
-            "kind": "hide",
-            "level": int(level or 0),
-        })
+        self.cmdline_updated.emit(
+            {
+                "kind": "hide",
+                "level": int(level or 0),
+            }
+        )
 
     def _h_popupmenu_show(
         self,
@@ -505,17 +529,21 @@ class NvimBackend(QObject):
             menu = str(it[2]) if len(it) >= 3 else ""
             # `info` (it[3]) can be large documentation; omit for now.
             flattened.append({"word": word, "kind": kind, "menu": menu})
-        self.popupmenu_updated.emit({
-            "kind": "show",
-            "items": flattened,
-            "selected": int(selected if selected is not None else -1),
-        })
+        self.popupmenu_updated.emit(
+            {
+                "kind": "show",
+                "items": flattened,
+                "selected": int(selected if selected is not None else -1),
+            }
+        )
 
     def _h_popupmenu_select(self, selected: int) -> None:
-        self.popupmenu_updated.emit({
-            "kind": "select",
-            "selected": int(selected if selected is not None else -1),
-        })
+        self.popupmenu_updated.emit(
+            {
+                "kind": "select",
+                "selected": int(selected if selected is not None else -1),
+            }
+        )
 
     def _h_popupmenu_hide(self) -> None:
         self.popupmenu_updated.emit({"kind": "hide"})

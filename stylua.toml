@@ -1,0 +1,11 @@
+# Stylua config — matches the existing 2-space indentation used throughout
+# runtime/. Stylua's default is tabs; committing to that would require a
+# fleet-wide reformat of every Lua file and break line-number anchors in
+# CLAUDE.md + project-standards.md references.
+
+indent_type = "Spaces"
+indent_width = 2
+column_width = 100
+quote_style = "AutoPreferDouble"
+call_parentheses = "Always"
+collapse_simple_statement = "Never"

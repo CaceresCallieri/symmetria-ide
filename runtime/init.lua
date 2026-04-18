@@ -145,7 +145,9 @@ local grp = vim.api.nvim_create_augroup("SymmetriaIdeCapsules", { clear = true }
 
 vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "DirChanged" }, {
   group = grp,
-  callback = function() M.push_state() end,
+  callback = function()
+    M.push_state()
+  end,
 })
 
 -- Mode capsule hygiene. Two-layer defense against drift between what
@@ -262,7 +264,9 @@ vim.api.nvim_create_autocmd({ "BufEnter", "WinEnter" }, {
 -- position capsule on motion, not the full payload.
 vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
   group = grp,
-  callback = function() M.push_position() end,
+  callback = function()
+    M.push_position()
+  end,
 })
 
 -- --- Cmdline completion pipeline ------------------------------------
