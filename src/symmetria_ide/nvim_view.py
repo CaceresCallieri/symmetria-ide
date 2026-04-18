@@ -157,6 +157,7 @@ _TEXT_ALIGN_FLAGS = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCent
 def _flush_run(
     painter: QPainter,
     run_chars: list[str],
+    rect: QRectF,
     x: float,
     y: float,
     w: float,
@@ -176,13 +177,12 @@ def _flush_run(
     via `__getattribute__`, which is unnecessary overhead when we can
     receive already-resolved values as arguments. See issue #12.
 
-    Allocation accounting (CLAUDE.md gotcha #10): ONE `QRectF` is created
-    here (same as before extraction). `_rgb_to_qcolor` returns cached
-    wrappers. `"".join(run_chars)` is a str alloc that existed before
-    extraction too. No new shiboken wrappers are introduced by this
-    helper — verified by inspection of the body, no `QColor(...)`, no
-    `QFont(...)`, no fresh shiboken-tracked objects beyond the pre-existing
-    QRectF. Pooling that QRectF is tracked separately in issue #1.
+    Allocation accounting (CLAUDE.md gotcha #10): ZERO shiboken wrappers
+    allocated here. `rect` is a pooled `QRectF` owned by the caller
+    (`NvimView._run_rect`) and mutated in place via `setRect` per run
+    (issue #1). `_rgb_to_qcolor` returns cached wrappers. `"".join(...)`
+    is a str alloc — strings are CPython-managed, not shiboken-tracked,
+    so GC pressure here is harmless to the render thread.
 
     The `bg_val != default_bg` gate preserves the transparent-viewport
     invariant (see TestTransparentFillColor): the paint() ambient tint
@@ -193,7 +193,7 @@ def _flush_run(
     bg == default_bg now has bg_val == default_fg and correctly fires the fill
     (does NOT skip).
     """
-    rect = QRectF(x, y, w, h)
+    rect.setRect(x, y, w, h)
     if bg_val != default_bg:
         painter.fillRect(rect, _rgb_to_qcolor(bg_val, default_bg))
     if attr.bold or attr.italic:
@@ -701,6 +701,24 @@ class NvimView(QQuickPaintedItem):
         # any PySide6 wrapper allocated inside paint() is a GC/race hazard
         # on Python 3.14 — cache here, reference in paint().
         self._ambient_tint_color = QColor(0, 0, 0, 153)
+        # Pooled QRectF wrappers mutated via setRect() inside the paint hot
+        # path. Fresh QRectF(...) inside paint() is the next-most-likely
+        # gotcha #10 resurface candidate after QColor (documented in the
+        # gotcha). Three pools cover all paint allocation sites:
+        #   _run_rect    — reused per highlight run in _paint_row/_flush_run
+        #   _clip_rect   — reused per frame for the exact-grid clip
+        #   _cursor_rect — reused per frame for the three cursor shapes
+        # Each pool is a single long-lived shiboken wrapper; paint() never
+        # allocates a new QRectF. See issue #1.
+        self._run_rect = QRectF()
+        self._clip_rect = QRectF()
+        self._cursor_rect = QRectF()
+        # Reusable char buffer for _paint_row's run-coalescing loop. Fresh
+        # `list[str] = [cell.char]` per run churned dozens-to-hundreds of
+        # tiny Python lists per frame — same 3.14 cyclic-GC pressure class
+        # as gotcha #10 (tuples and lists of primitives are now tracked).
+        # Pooling + clear() keeps the working set to one list. See issue #2.
+        self._run_chars: list[str] = []
         # ItemHasContents: tells the scene graph this item paints pixels.
         self.setFlag(QQuickPaintedItem.Flag.ItemHasContents, True)
         # ItemIsFocusScope: makes this item a focus boundary so Tab
@@ -1324,7 +1342,10 @@ class NvimView(QQuickPaintedItem):
         # leak through at the bottom edge. Tight clipping is defense in
         # depth on top of the row-iteration guard in
         # `_paint_rows_from_scrollback`.
-        painter.setClipRect(QRectF(0.0, 0.0, grid.cols * cw, grid.rows * ch))
+        # Pooled clip rect — setRect mutates the wrapper in place instead
+        # of allocating a fresh QRectF every frame (gotcha #10 / issue #1).
+        self._clip_rect.setRect(0.0, 0.0, grid.cols * cw, grid.rows * ch)
+        painter.setClipRect(self._clip_rect)
         try:
             pos = self._scroll_anim.position
             # Geometry: pos=-2.7 lines means the viewport is displaced
@@ -1452,9 +1473,14 @@ class NvimView(QQuickPaintedItem):
         """
         # Resolve attribute-lookups ONCE outside the loop. Each `self.`
         # access goes through __getattribute__ and costs us on every row;
-        # local names are a pure `LOAD_FAST` at bytecode level.
+        # local names are a pure `LOAD_FAST` at bytecode level. The pooled
+        # `run_chars` list and `run_rect` are reused across runs and rows
+        # — see _init_buffers for the pool rationale (gotcha #10 / issues
+        # #1, #2).
         font = self._font
         font_variants = self._font_variants
+        run_chars = self._run_chars
+        run_rect = self._run_rect
 
         c = 0
         while c < cols:
@@ -1466,7 +1492,8 @@ class NvimView(QQuickPaintedItem):
                 fg_val, bg_val = bg_val, fg_val
 
             run_start = c
-            run_chars: list[str] = [cell.char]
+            run_chars.clear()
+            run_chars.append(cell.char)
             c += 1
             while c < cols:
                 nxt = row_cells[c]
@@ -1484,6 +1511,7 @@ class NvimView(QQuickPaintedItem):
             _flush_run(
                 painter,
                 run_chars,
+                run_rect,
                 run_start * cw,
                 y,
                 (c - run_start) * cw,
@@ -1553,12 +1581,15 @@ class NvimView(QQuickPaintedItem):
         painter.save()
         try:
             painter.setOpacity(opacity)
+            # Pooled cursor rect — setRect mutates in place instead of
+            # allocating a fresh QRectF per paint (gotcha #10 / issue #1).
+            rect = self._cursor_rect
             if shape == "vertical":
                 # Bar at the cell's leading edge. `cell_percentage` is
                 # thickness as a fraction of cell width (25 → 25% → a
                 # 1.75-px bar at 7px-wide cells; Qt handles sub-pixel).
                 bar_w = max(1.0, cw * cell_pct / 100.0)
-                rect = QRectF(x, y, bar_w, ch)
+                rect.setRect(x, y, bar_w, ch)
                 painter.fillRect(rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
                 # No glyph overlay for vertical bars — the underlying
                 # grid paint already shows the character at that cell.
@@ -1566,13 +1597,13 @@ class NvimView(QQuickPaintedItem):
                 # Underline at the cell's bottom edge. Thickness is
                 # `cell_percentage`% of cell height.
                 bar_h = max(1.0, ch * cell_pct / 100.0)
-                rect = QRectF(x, y + ch - bar_h, cw, bar_h)
+                rect.setRect(x, y + ch - bar_h, cw, bar_h)
                 painter.fillRect(rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
             else:
                 # Block (default) — reverse-video the cell: fg-colored
                 # background with the cell glyph in bg color on top.
                 cursor_cell = grid.cells[cur_row][cur_col]
-                rect = QRectF(x, y, cw, ch)
+                rect.setRect(x, y, cw, ch)
                 painter.fillRect(rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
                 painter.setPen(_rgb_to_qcolor(grid.default_bg, 0x1E1E1E))
                 painter.drawText(rect, _TEXT_ALIGN_FLAGS, cursor_cell.char)
