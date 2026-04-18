@@ -180,11 +180,11 @@ function M.setup()
   -- for headless smoke tests that want to force a menu open without
   -- simulating keystrokes. `_G` is the deliberate IPC boundary that
   -- Python hits via `nvim.exec_lua(...)`; see CLAUDE.md gotcha #2.
-  -- selene: allow(global_usage)
+  -- selene: allow(global_usage)  -- IPC boundary; gotcha #2
   _G.symmetria_whichkey_show = M.show
-  -- selene: allow(global_usage)
+  -- selene: allow(global_usage)  -- IPC boundary; gotcha #2
   _G.symmetria_whichkey_hide = M.emit_hide
-  -- selene: allow(global_usage)
+  -- selene: allow(global_usage)  -- IPC boundary; gotcha #2
   _G.symmetria_whichkey_start = function(keys)
     State.start({ keys = keys or " " })
   end

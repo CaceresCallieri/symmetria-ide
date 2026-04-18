@@ -1,7 +1,11 @@
+# neovim resolves to ./neovim.yml (local std file — must remain co-located
+# with selene.toml; selene has no built-in "neovim" on this install).
 std = "lua51+neovim"
 
 # Inline one-statement lambdas (e.g. `function() M.close() end`) are an
 # idiomatic Lua pattern used throughout runtime/ for compact keymap
-# callbacks. Disable the style warning project-wide.
+# callbacks. This setting silences ALL multi-statement lines, not just
+# lambdas — intentional, since narrowing to "warn" would require
+# per-site `selene: allow` on ~30 callback sites.
 [lints]
 multiple_statements = "allow"
