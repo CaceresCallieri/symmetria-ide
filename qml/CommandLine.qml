@@ -49,14 +49,14 @@ Item {
     Column {
         id: stack
         width: Math.min(900, Math.max(420, root.width * 0.6))
-        anchors.horizontalCenter: parent.horizontalCenter
-        y: Math.round(parent.height * 0.20)
+        anchors.horizontalCenter: root.horizontalCenter
+        y: Math.round(root.height * 0.20)
         spacing: 6
 
         Rectangle {
             id: cmdBox
             visible: cmdlineState.visible
-            width: parent.width
+            width: stack.width
             height: Math.max(42, cmdRow.implicitHeight + 18)
             radius: 6
             color: root.bgColor
@@ -65,7 +65,7 @@ Item {
 
             Row {
                 id: cmdRow
-                anchors.fill: parent
+                anchors.fill: cmdBox
                 anchors.leftMargin: 14
                 anchors.rightMargin: 14
                 anchors.topMargin: 9
@@ -79,7 +79,8 @@ Item {
                     color: root.textColor
                     font.family: root.monoFont
                     font.pixelSize: root.fontSize
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenter: cmdRow.verticalCenter
+                    renderType: Text.NativeRendering
                 }
 
                 // Firstchar glyph — `:`, `/`, `?`, `=`. Accent color so
@@ -91,8 +92,9 @@ Item {
                     font.family: root.monoFont
                     font.pixelSize: root.fontSize
                     font.weight: Font.Bold
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenter: cmdRow.verticalCenter
                     rightPadding: 4
+                    renderType: Text.NativeRendering
                 }
 
                 // Text before cursor.
@@ -102,7 +104,8 @@ Item {
                     color: root.textColor
                     font.family: root.monoFont
                     font.pixelSize: root.fontSize
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenter: cmdRow.verticalCenter
+                    renderType: Text.NativeRendering
                 }
 
                 // 2px bar cursor. Simpler than block-over-char and avoids
@@ -120,7 +123,8 @@ Item {
                     color: root.textColor
                     font.family: root.monoFont
                     font.pixelSize: root.fontSize
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenter: cmdRow.verticalCenter
+                    renderType: Text.NativeRendering
                 }
             }
         }
@@ -132,7 +136,7 @@ Item {
             // Scoped to `cmdlineState.visible` so the popup disappears
             // when the cmdline closes even if the model still has items.
             visible: cmdlineState.visible && completionModel.visible && popupList.count > 0
-            width: parent.width
+            width: stack.width
             height: Math.min(root.maxPopupRows, popupList.count) * root.rowHeight + 12
             radius: 6
             color: root.popupBgColor
@@ -160,6 +164,9 @@ Item {
                     radius: 3
 
                     Text {
+                        // parent here is the Rectangle delegate for this
+                        // ListView row — immediate-sibling anchor is the
+                        // intended target, no named ancestor to point at.
                         anchors.fill: parent
                         anchors.leftMargin: 10
                         anchors.rightMargin: 10
@@ -169,6 +176,7 @@ Item {
                         font.family: root.monoFont
                         font.pixelSize: root.fontSize - 1
                         elide: Text.ElideRight
+                        renderType: Text.NativeRendering
                     }
                 }
             }

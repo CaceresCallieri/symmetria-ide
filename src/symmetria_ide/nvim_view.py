@@ -693,12 +693,19 @@ class NvimView(QQuickPaintedItem):
 
     # --- QML-visible properties ----------------------------------------
 
-    @Property(QObject, notify=backendChanged)
-    def backend(self) -> NvimBackend | None:
+    # `backend` is writable from QML (Main.qml sets `backend: nvimBackend`),
+    # so PySide6 needs both a getter and a setter. Use the named-functions
+    # `Property(type, fget, fset, notify=...)` form rather than the
+    # `@Property` / `@backend.setter` decorator pair: pyright only models
+    # builtins.property as a descriptor with a `.setter` attribute, so the
+    # decorator form trips reportRedeclaration on the second `def backend`.
+    # The named form reads as a plain class attribute to pyright and is
+    # the canonical PySide6 pattern for read/write properties.
+
+    def _get_backend(self) -> NvimBackend | None:
         return self._backend
 
-    @backend.setter
-    def backend(self, value: NvimBackend | None) -> None:
+    def _set_backend(self, value: NvimBackend | None) -> None:
         if value is self._backend:
             return
         if self._backend is not None:
@@ -728,6 +735,8 @@ class NvimView(QQuickPaintedItem):
             value.viewport_scrolled.connect(self._on_viewport_scrolled)
             self._push_current_size()
         self.backendChanged.emit()
+
+    backend = Property(QObject, _get_backend, _set_backend, notify=backendChanged)
 
     @Property(float, notify=cellMetricsChanged)
     def cellWidth(self) -> float:

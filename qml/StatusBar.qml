@@ -20,10 +20,10 @@ Rectangle {
     // Hairline divider between editor and status bar — white at 12%
     // alpha, matching the matte pill's border treatment in the shell.
     Rectangle {
-        width: parent.width
+        width: root.width
         height: 1
         color: "#1fffffff"
-        anchors.top: parent.top
+        anchors.top: root.top
     }
 
     property color colorDim: "#7a7a7a"
@@ -66,6 +66,7 @@ Rectangle {
                 font.pixelSize: 11
                 font.weight: Font.Bold
                 font.letterSpacing: 0.8
+                renderType: Text.NativeRendering
             }
         }
 
@@ -77,6 +78,7 @@ Rectangle {
             font.family: root.monoFont
             font.pixelSize: 13
             Layout.alignment: Qt.AlignVCenter
+            renderType: Text.NativeRendering
         }
 
         // Branch — prefixed with a git-like glyph.
@@ -89,12 +91,14 @@ Rectangle {
                 color: root.colorAccent
                 font.family: root.monoFont
                 font.pixelSize: 13
+                renderType: Text.NativeRendering
             }
             Text {
                 text: statusState.branch
                 color: root.colorNormal
                 font.family: root.monoFont
                 font.pixelSize: 13
+                renderType: Text.NativeRendering
             }
         }
 
@@ -108,6 +112,7 @@ Rectangle {
             Layout.alignment: Qt.AlignVCenter
             Layout.fillWidth: true
             elide: Text.ElideMiddle
+            renderType: Text.NativeRendering
         }
 
         // Right-aligned cursor position.
@@ -118,6 +123,7 @@ Rectangle {
             font.family: root.monoFont
             font.pixelSize: 12
             Layout.alignment: Qt.AlignVCenter
+            renderType: Text.NativeRendering
         }
     }
 }

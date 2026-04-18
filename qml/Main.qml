@@ -56,12 +56,12 @@ Window {
             // whichkey/init.lua).
             WhichKeyOverlay {
                 id: whichKeyOverlay
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
+                anchors.left: editor.left
+                anchors.right: editor.right
+                anchors.bottom: editor.bottom
                 // Clamp to half the viewport so huge menus never hog
                 // the whole editor; scroll support is a v2 follow-up.
-                height: Math.min(implicitHeight, parent.height * 0.5)
+                height: Math.min(implicitHeight, editor.height * 0.5)
                 z: 20
             }
         }

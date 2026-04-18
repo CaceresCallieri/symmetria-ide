@@ -70,9 +70,9 @@ Rectangle {
     // column-major order: column = floor(i / rowsPerColumn), row = i % rowsPerColumn.
     Item {
         id: content
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.top: parent.top
+        anchors.left: root.left
+        anchors.right: root.right
+        anchors.top: root.top
         anchors.leftMargin: root.horizontalPadding
         anchors.rightMargin: root.horizontalPadding
         anchors.topMargin: root.verticalPadding
@@ -88,7 +88,7 @@ Rectangle {
                 y: (index % root.rowsPerColumn) * root.rowHeight
 
                 Row {
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenter: entry.verticalCenter
                     spacing: 6
 
                     // Key label. Fixed minimum width so arrows align
@@ -100,6 +100,7 @@ Rectangle {
                         color: root.keyColor
                         font.family: root.monoFont
                         font.pixelSize: root.fontSize
+                        renderType: Text.NativeRendering
                     }
 
                     Text {
@@ -107,6 +108,7 @@ Rectangle {
                         color: root.arrowColor
                         font.family: root.monoFont
                         font.pixelSize: root.fontSize
+                        renderType: Text.NativeRendering
                     }
 
                     // Icon slot. Absent → empty string, collapses the
@@ -118,6 +120,7 @@ Rectangle {
                         color: model.iconColor !== "" ? model.iconColor : root.leafColor
                         font.family: root.monoFont
                         font.pixelSize: root.fontSize
+                        renderType: Text.NativeRendering
                     }
 
                     Text {
@@ -132,6 +135,7 @@ Rectangle {
                         // don't overflow into the next column.
                         width: Math.max(0, root.columnWidth - 60
                                - (model.icon !== "" ? 24 : 0))
+                        renderType: Text.NativeRendering
                     }
                 }
             }
@@ -141,46 +145,53 @@ Rectangle {
     // --- Footer: ESC close / ⏎ back hints.
     Row {
         id: footer
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: parent.bottom
+        anchors.horizontalCenter: root.horizontalCenter
+        anchors.bottom: root.bottom
         anchors.bottomMargin: 6
         spacing: 18
         height: root.footerHeight
 
         Row {
             spacing: 5
-            anchors.verticalCenter: parent.verticalCenter
+            // parent here is `footer` — anonymous inner Row uses its
+            // immediate parent's verticalCenter so the ESC/⏎ groups
+            // align on the footer row's midline.
+            anchors.verticalCenter: footer.verticalCenter
             Text {
                 text: "ESC"
                 color: root.keyColor
                 font.family: root.monoFont
                 font.pixelSize: root.fontSize - 1
                 font.weight: Font.Medium
+                renderType: Text.NativeRendering
             }
             Text {
                 text: "close"
                 color: root.dimColor
                 font.family: root.monoFont
                 font.pixelSize: root.fontSize - 1
+                renderType: Text.NativeRendering
             }
         }
 
         Row {
             visible: whichKeyState.canGoBack
             spacing: 5
-            anchors.verticalCenter: parent.verticalCenter
+            anchors.verticalCenter: footer.verticalCenter
             Text {
                 text: "⏎"
                 color: root.keyColor
                 font.family: root.monoFont
                 font.pixelSize: root.fontSize - 1
                 font.weight: Font.Medium
+                renderType: Text.NativeRendering
             }
             Text {
                 text: "back"
                 color: root.dimColor
                 font.family: root.monoFont
                 font.pixelSize: root.fontSize - 1
+                renderType: Text.NativeRendering
             }
         }
     }
