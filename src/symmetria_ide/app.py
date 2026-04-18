@@ -17,7 +17,6 @@ import logging
 import os
 import signal
 import sys
-from pathlib import Path
 
 from PySide6.QtCore import (
     Property,
@@ -25,15 +24,14 @@ from PySide6.QtCore import (
     QModelIndex,
     QObject,
     Qt,
-    QTimer,
     QUrl,
     Signal,
     Slot,
 )
 from PySide6.QtGui import QGuiApplication, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine, QmlElement
-from PySide6.QtQuick import QQuickWindow
 
+from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .nvim_backend import NvimBackend
 from .nvim_view import NvimView  # noqa: F401 — side-effect: registers @QmlElement
 
@@ -693,75 +691,61 @@ class AppController(QObject):
         return self._whichkey_model
 
 
-def _qml_dir() -> Path:
-    """Resolve the qml/ directory — works both in-tree and when installed.
+def _register_qml_types() -> None:
+    """Named audit point for QML type registration.
 
-    In-tree layout (development): project_root/qml/Main.qml
-      __file__ is  project_root/src/symmetria_ide/app.py
-      parents[2]   is project_root/
+    All `@QmlElement`-decorated classes self-register as a side effect
+    of their class definition being evaluated. That happens when their
+    module is imported. This function exists so future maintainers have
+    a discoverable home for any *explicit* `qmlRegisterType(...)` calls
+    that can't be expressed with the decorator — and so we can assert,
+    at the top of `run()`, that all QmlElement classes we care about
+    have already been imported.
 
-    Installed layout: pyproject.toml package-data copies qml/ into the
-      package directory alongside this file (symmetria_ide/qml/).
-      parents[0] is the package directory.
-
-    Note: Phase 0 is always run in-tree. The installed fallback path is
-    provided for completeness but is untested until packaging is wired up.
+    The `NvimView` symbol is referenced here (not just imported at
+    module scope with a `noqa: F401`) so that a future import-pruner
+    can't strip the side-effect import without also touching this
+    function.
     """
-    in_tree = Path(__file__).resolve().parents[2] / "qml"
-    if in_tree.exists():
-        return in_tree
-    # Installed case: qml/ is expected alongside this module file.
-    packaged = Path(__file__).resolve().parent / "qml"
-    return packaged
+    _ = NvimView
 
 
-def _configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)-5s %(name)s — %(message)s",
-    )
+def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
+    """Build the QML engine, wire controller context properties, load Main.qml.
 
+    Returns the loaded engine, or `None` if `Main.qml` failed to load
+    (missing root objects). Caller is responsible for mapping `None`
+    onto a non-zero exit code.
 
-def _configure_headless_mode(
-    controller: "AppController",
-    engine: "QQmlApplicationEngine",
-    app: "QGuiApplication",
-    shot_path: str | None,
-    test_keys: str | None,
-) -> None:
-    """Wire smoke-test timers when headless env vars are set.
-
-    `SYMMETRIA_IDE_SCREENSHOT=/path.png` — grabs the window from Qt's
-    scene graph after a warmup delay and saves it (works under Wayland
-    without compositor capture permissions).
-    `SYMMETRIA_IDE_TEST_KEYS=<keys>` — injects a keycode string before
-    the screenshot is taken.
-    `SYMMETRIA_IDE_WARMUP_MS` / `SYMMETRIA_IDE_SETTLE_MS` — tune timing.
+    The nine context properties here are the stable QML surface between
+    Python and QML — keeping them in one place makes it obvious what
+    QML sees and makes adding a tenth (or dropping one) a single-line
+    change.
     """
-    warmup_ms = int(os.environ.get("SYMMETRIA_IDE_WARMUP_MS", "1500"))
-    settle_ms = int(os.environ.get("SYMMETRIA_IDE_SETTLE_MS", "800"))
+    engine = QQmlApplicationEngine()
 
-    def _send_keys() -> None:
-        if test_keys:
-            log.info("injecting test keys: %r", test_keys)
-            controller.backend.input(test_keys)
+    # Make backend + capsules available to QML as a single `controller`
+    # context property — keeps the QML surface small.
+    engine.rootContext().setContextProperty("controller", controller)
+    engine.rootContext().setContextProperty("nvimBackend", controller.backend)
+    engine.rootContext().setContextProperty("capsuleModel", controller.capsules)
+    engine.rootContext().setContextProperty("statusState", controller.status)
+    engine.rootContext().setContextProperty("cmdlineState", controller.cmdline)
+    engine.rootContext().setContextProperty("popupmenuModel", controller.popupmenu)
+    engine.rootContext().setContextProperty("completionModel", controller.completion)
+    engine.rootContext().setContextProperty("whichKeyState", controller.whichkey_state)
+    engine.rootContext().setContextProperty("whichKeyModel", controller.whichkey_model)
 
-    def _grab_and_exit() -> None:
-        if shot_path:
-            for obj in engine.rootObjects():
-                if isinstance(obj, QQuickWindow):
-                    img = obj.grabWindow()
-                    ok = img.save(shot_path)
-                    log.info("screenshot saved to %s: %s", shot_path, ok)
-                    break
-        app.quit()
-
-    QTimer.singleShot(warmup_ms, _send_keys)
-    QTimer.singleShot(warmup_ms + settle_ms, _grab_and_exit)
+    qml_root = QML_DIR / "Main.qml"
+    engine.load(QUrl.fromLocalFile(str(qml_root)))
+    if not engine.rootObjects():
+        log.error("failed to load Main.qml at %s", qml_root)
+        return None
+    return engine
 
 
 def run() -> int:
-    _configure_logging()
+    configure_logging()
     # Ctrl-C in the terminal should kill the app, not be caught by Qt.
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
@@ -780,25 +764,10 @@ def run() -> int:
     # window class, so window rules can match on `symmetria-ide`.
     app.setDesktopFileName("symmetria-ide")
 
+    _register_qml_types()
     controller = AppController()
-    engine = QQmlApplicationEngine()
-
-    # Make backend + capsules available to QML as a single `controller`
-    # context property — keeps the QML surface small.
-    engine.rootContext().setContextProperty("controller", controller)
-    engine.rootContext().setContextProperty("nvimBackend", controller.backend)
-    engine.rootContext().setContextProperty("capsuleModel", controller.capsules)
-    engine.rootContext().setContextProperty("statusState", controller.status)
-    engine.rootContext().setContextProperty("cmdlineState", controller.cmdline)
-    engine.rootContext().setContextProperty("popupmenuModel", controller.popupmenu)
-    engine.rootContext().setContextProperty("completionModel", controller.completion)
-    engine.rootContext().setContextProperty("whichKeyState", controller.whichkey_state)
-    engine.rootContext().setContextProperty("whichKeyModel", controller.whichkey_model)
-
-    qml_root = _qml_dir() / "Main.qml"
-    engine.load(QUrl.fromLocalFile(str(qml_root)))
-    if not engine.rootObjects():
-        log.error("failed to load Main.qml at %s", qml_root)
+    engine = _build_engine(controller)
+    if engine is None:
         return 1
 
     controller.start()
@@ -811,16 +780,11 @@ def run() -> int:
     shot_path = os.environ.get("SYMMETRIA_IDE_SCREENSHOT")
     test_keys = os.environ.get("SYMMETRIA_IDE_TEST_KEYS")
     if shot_path or test_keys:
-        _configure_headless_mode(controller, engine, app, shot_path, test_keys)
+        configure_headless_mode(controller, engine, app, shot_path, test_keys)
 
-    # Everything allocated up to here is long-lived (Qt wrappers, QML
-    # engine state, controller, backend). Freeze those objects into the
-    # permanent generation so the cyclic collector skips them on every
-    # subsequent pass. Combined with the gc-disabled window in
-    # `NvimBackend._dispatch_redraw`, this shrinks the "GC runs while
-    # Qt renders" race surface that was causing SIGSEGVs under Python
-    # 3.14 (see nvim_backend.py for full context).
+    # gotcha #10: gc.freeze() must sit immediately before app.exec() —
+    # later allocations wouldn't be frozen; earlier moves would miss
+    # state that still needs freezing. See CLAUDE.md gotcha #10.
     gc.collect()
     gc.freeze()
-
     return app.exec()
