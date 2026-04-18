@@ -1,70 +1,83 @@
--- Native which-key overlay for Symmetria IDE.
+-- Native which-key overlay for Symmetria IDE — Lua emitter.
 --
--- This is the Lua emitter for the native which-key replacement. It
--- fires `vim.rpcnotify(0, "whichkey", payload)` notifications that the
+-- Fires `vim.rpcnotify(0, "whichkey", payload)` notifications that the
 -- Python backend (nvim_backend.py `_h_whichkey`) routes into
 -- `WhichKeyModel` + `WhichKeyState` (app.py), rendered by
--- `qml/WhichKeyOverlay.qml`. End-to-end pipe, no dependency on
--- which-key.nvim's rendering code.
+-- `qml/WhichKeyOverlay.qml`. Zero dependency on which-key.nvim's
+-- rendering code — we own the data source (nvim_get_keymap) and the
+-- UI.
 --
--- Commit C1 (scaffolding): emits a single mocked `show` payload on
--- VimEnter so the Lua → RPC → Python model → QML render path can be
--- visually verified. The mock items mirror the user's real <leader>
--- menu so the overlay ships looking approximately like the reference
--- screenshot from day one.
+-- C2 (this commit) replaces the C1 mock with real tree-driven
+-- emissions. The trie is rebuilt on BufEnter / LspAttach / LspDetach
+-- so buffer-local maps are always in sync. A single `<leader>`
+-- emission still fires on VimEnter for visual verification; C3
+-- replaces that demo firing with proper trigger keymaps + a state
+-- machine that drives emissions from actual key presses.
 --
--- Subsequent commits replace the mock:
---   C2 — tree.lua builds the trie from vim.api.nvim_get_keymap().
---   C3 — state.lua + triggers.lua drive emissions from prefix presses.
---   C4 — neutralize which-key.nvim so the two don't duel.
+-- ### Kill switch
 --
--- Kill switch: `vim.g.symmetria_whichkey_native = 1` gates the whole
--- module. Clear it (or don't set it) to fall back to stock which-key.
+-- Gated by `vim.g.symmetria_whichkey_native = 1`. Clear the flag to
+-- disable all emissions and let stock which-key.nvim run as normal.
+
+local Tree = require("orchestrator.whichkey.tree")
+local Icons = require("orchestrator.whichkey.icons")
 
 local M = {}
 
--- Emit a fully-formed whichkey "show" payload to the Python side.
----@param items table   list of { key, desc, is_group, icon, icon_color }
----@param trail string  breadcrumb text (e.g. "<leader>"); reserved for C2+
----@param can_go_back boolean  true if <BS> should navigate up
-function M.emit_show(items, trail, can_go_back)
+-- Cached trie, rebuilt on autocmd. Guarded against concurrent reads
+-- only by Lua's single-threaded execution within nvim.
+---@type table?
+local current_tree = nil
+
+-- Build fresh trie for a given mode (always "n" in v1).
+---@param mode string
+local function rebuild(mode)
+  current_tree = Tree.rebuild(mode or "n")
+end
+
+---@return table root
+function M.tree()
+  if not current_tree then
+    rebuild("n")
+  end
+  return current_tree
+end
+
+-- Emit a fully-formed "show" payload, given a prefix node. Helper
+-- for the demo and (in C3) the state machine.
+---@param prefix table  trie node to expand as the menu
+local function emit_show_for_node(prefix)
+  local items = Tree.items_for(prefix, Icons.for_node)
+  -- `can_go_back` is true only when there's a *real* ancestor to pop
+  -- to. Root's direct children (e.g. <leader> itself) have root as
+  -- their parent, but root has no desc / no render, so <BS> at that
+  -- depth should close rather than navigate. Root is identified by
+  -- `parent == nil` on the trie, so a grandparent check works.
+  local can_go_back = prefix.parent ~= nil and prefix.parent.parent ~= nil
   pcall(vim.rpcnotify, 0, "whichkey", {
     op = "show",
     mode = "n",
-    trail = trail or "",
-    can_go_back = can_go_back and true or false,
-    items = items or {},
+    trail = prefix.keys or "",
+    can_go_back = can_go_back,
+    items = items,
   })
+end
+
+-- Public: emit menu for the given keystroke-path. `path_keys` is the
+-- already-normalized lhs (e.g. `" "` for `<leader>`, `" b"` for the
+-- buffer submenu). No-op if the path has no children.
+---@param path_keys string
+function M.show(path_keys)
+  local root = M.tree()
+  local node = Tree.find(root, Tree.split_keys(path_keys or ""))
+  if not node or not Tree.is_group(node) then
+    return
+  end
+  emit_show_for_node(node)
 end
 
 function M.emit_hide()
   pcall(vim.rpcnotify, 0, "whichkey", { op = "hide" })
-end
-
--- Scaffolding mock: matches the user's real <leader> menu from the
--- reference screenshot. Removed in C2 once the real tree-driven payload
--- lands.
-local function mock_items()
-  return {
-    { key = "g", desc = "Open lazy git",                    is_group = false, icon = "",  icon_color = "#e8ab6f" },
-    { key = "L", desc = "Trigger linting for current file", is_group = false, icon = "",  icon_color = "#7fb3d5" },
-    { key = "+", desc = "Increment number",                 is_group = false, icon = "",   icon_color = ""        },
-    { key = "-", desc = "Decrement number",                 is_group = false, icon = "",   icon_color = ""        },
-    { key = "a", desc = "12 keymaps",                       is_group = true,  icon = "",   icon_color = ""        },
-    { key = "b", desc = "Buffer navigation",                is_group = true,  icon = "",  icon_color = "#b4b4b4" },
-    { key = "c", desc = "Copy path",                        is_group = true,  icon = "",  icon_color = "#b4b4b4" },
-    { key = "e", desc = "File explorers",                   is_group = true,  icon = "",  icon_color = "#7fb3d5" },
-    { key = "f", desc = "11 keymaps",                       is_group = true,  icon = "",   icon_color = ""        },
-    { key = "G", desc = "GitHub",                           is_group = true,  icon = "",  icon_color = "#e8ab6f" },
-    { key = "m", desc = "4 keymaps",                        is_group = true,  icon = "",   icon_color = ""        },
-    { key = "n", desc = "1 keymap",                         is_group = true,  icon = "",   icon_color = ""        },
-    { key = "o", desc = "Obsidian macros",                  is_group = true,  icon = "",   icon_color = ""        },
-    { key = "p", desc = "Plugins keymaps",                  is_group = true,  icon = "",   icon_color = ""        },
-    { key = "s", desc = "5 keymaps",                        is_group = true,  icon = "",   icon_color = ""        },
-    { key = "S", desc = "Session managing",                 is_group = true,  icon = "",  icon_color = "#b4b4b4" },
-    { key = "t", desc = "5 keymaps",                        is_group = true,  icon = "",   icon_color = ""        },
-    { key = "x", desc = "6 keymaps",                        is_group = true,  icon = "",   icon_color = ""        },
-  }
 end
 
 function M.setup()
@@ -72,28 +85,46 @@ function M.setup()
     return
   end
 
-  local grp = vim.api.nvim_create_augroup("SymWhichKeyScaffold", { clear = true })
+  rebuild("n")
 
-  -- Deferred so VimEnter fully completes before the mock fires; avoids
-  -- racing the UI-attached flag and other VimEnter autocmds.
+  local grp = vim.api.nvim_create_augroup("SymWhichKey", { clear = true })
+
+  -- Keep the trie fresh. BufEnter catches buffer-local maps from
+  -- plugins that attach per-buffer (LSP, treesitter); LspAttach /
+  -- LspDetach cover LSP-installed maps that arrive async after
+  -- BufEnter fires.
+  vim.api.nvim_create_autocmd({ "BufEnter", "LspAttach", "LspDetach" }, {
+    group = grp,
+    callback = function()
+      rebuild("n")
+    end,
+  })
+
+  -- C2 demo: show the <leader> menu once on startup so the overlay
+  -- renders with REAL user keymaps (not the C1 mock). C3 replaces
+  -- this with trigger keymaps that fire on prefix press.
   vim.api.nvim_create_autocmd("VimEnter", {
     group = grp,
     callback = function()
       vim.defer_fn(function()
-        M.emit_show(mock_items(), "<leader>", false)
-      end, 250)
+        -- Mapleader in this codebase is " " (space). Show that subtree.
+        M.show(" ")
+      end, 300)
     end,
   })
 
-  -- <Esc> while the mock is visible hides it — gives the user an
-  -- escape hatch during scaffolding-only operation. State machine in
-  -- C3 will supersede this.
+  -- Temporary escape hatch: Esc hides the demo overlay. C3 replaces
+  -- with the state-machine's proper Esc handling.
   vim.keymap.set("n", "<Esc>", function()
     M.emit_hide()
-    -- fall through to whatever <Esc> would normally do (clear search
-    -- highlight etc.); feedkeys with 'n' to avoid remapping.
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
   end, { desc = "Symmetria whichkey (scaffold) hide overlay + normal <Esc>" })
+
+  -- Testing hook: `:lua _G.symmetria_whichkey_show(" ")` or any
+  -- prefix path. Stays in place for headless smoke tests even after
+  -- C3's state machine lands.
+  _G.symmetria_whichkey_show = M.show
+  _G.symmetria_whichkey_hide = M.emit_hide
 end
 
 return M
