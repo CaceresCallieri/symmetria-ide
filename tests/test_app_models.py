@@ -472,15 +472,13 @@ class TestWhichKeyModel:
         assert model.rowCount() == 0
 
     def test_role_names_cover_all_roles(self):
-        from symmetria_ide.app import WhichKeyModel
-
-        model = WhichKeyModel()
+        model = self._make()
         names = model.roleNames()
-        assert names[WhichKeyModel.KeyRole] == b"key"
-        assert names[WhichKeyModel.DescRole] == b"desc"
-        assert names[WhichKeyModel.IsGroupRole] == b"isGroup"
-        assert names[WhichKeyModel.IconRole] == b"icon"
-        assert names[WhichKeyModel.IconColorRole] == b"iconColor"
+        assert names[model.KeyRole] == b"key"
+        assert names[model.DescRole] == b"desc"
+        assert names[model.IsGroupRole] == b"isGroup"
+        assert names[model.IconRole] == b"icon"
+        assert names[model.IconColorRole] == b"iconColor"
 
     def test_show_populates_items(self):
         model = self._make()
@@ -509,9 +507,7 @@ class TestWhichKeyModel:
         assert model.rowCount() == 2
 
     def test_role_data_round_trip(self):
-        from symmetria_ide.app import WhichKeyModel
-
-        model = WhichKeyModel()
+        model = self._make()
         model.apply(
             {
                 "op": "show",
@@ -528,26 +524,24 @@ class TestWhichKeyModel:
         )
 
         idx = model.index(0)
-        assert model.data(idx, WhichKeyModel.KeyRole) == "b"
-        assert model.data(idx, WhichKeyModel.DescRole) == "Buffers"
-        assert model.data(idx, WhichKeyModel.IsGroupRole) is True
-        assert model.data(idx, WhichKeyModel.IconRole) == "\uf1c0"
-        assert model.data(idx, WhichKeyModel.IconColorRole) == "#b4b4b4"
+        assert model.data(idx, model.KeyRole) == "b"
+        assert model.data(idx, model.DescRole) == "Buffers"
+        assert model.data(idx, model.IsGroupRole) is True
+        assert model.data(idx, model.IconRole) == "\uf1c0"
+        assert model.data(idx, model.IconColorRole) == "#b4b4b4"
 
     def test_missing_fields_default_to_empty_or_false(self):
-        from symmetria_ide.app import WhichKeyModel
-
-        model = WhichKeyModel()
+        model = self._make()
         # Partial entry — only `key` provided; apply should default the
         # rest rather than KeyError'ing out.
         model.apply({"op": "show", "items": [{"key": "x"}]})
 
         idx = model.index(0)
-        assert model.data(idx, WhichKeyModel.KeyRole) == "x"
-        assert model.data(idx, WhichKeyModel.DescRole) == ""
-        assert model.data(idx, WhichKeyModel.IsGroupRole) is False
-        assert model.data(idx, WhichKeyModel.IconRole) == ""
-        assert model.data(idx, WhichKeyModel.IconColorRole) == ""
+        assert model.data(idx, model.KeyRole) == "x"
+        assert model.data(idx, model.DescRole) == ""
+        assert model.data(idx, model.IsGroupRole) is False
+        assert model.data(idx, model.IconRole) == ""
+        assert model.data(idx, model.IconColorRole) == ""
 
     def test_non_dict_items_are_filtered(self):
         model = self._make()
@@ -596,9 +590,7 @@ class TestWhichKeyModel:
         assert model.rowCount() == 1
 
         idx = model.index(0)
-        from symmetria_ide.app import WhichKeyModel
-
-        assert model.data(idx, WhichKeyModel.KeyRole) == "c"
+        assert model.data(idx, model.KeyRole) == "c"
 
     def test_data_invalid_index_returns_none(self):
         model = self._make()
@@ -612,8 +604,8 @@ class TestWhichKeyModel:
         model = self._make()
         model.apply({"op": "show", "items": [{"key": "a"}]})
 
-        # index(5) on a 1-row model produces an invalid QModelIndex and
-        # the guard returns None. Note: model.index() enforces bounds at
-        # the QAbstractListModel layer for a valid row-count.
+        # index(5) on a 1-row model returns a QModelIndex with row=5
+        # but isValid() == False — the data() guard catches this via
+        # `not index.isValid()` and returns None.
         idx = model.index(5)
         assert model.data(idx, model.KeyRole) is None

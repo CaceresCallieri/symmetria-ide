@@ -3,7 +3,7 @@
 # pre-commit hooks (.pre-commit-config.yaml), same flags, same file set.
 # Drift between local and CI surfaces the moment CI disagrees with a hook.
 #
-# Pyright runs report-only (matches the local hook) — ~38 known PySide6
+# Pyright runs report-only (matches the local hook) — ~59 known PySide6
 # stubs false positives (CLAUDE.md gotcha #7) would otherwise wedge CI.
 # Flip to blocking once the baseline drops to zero.
 #
@@ -65,14 +65,14 @@ jobs:
           # day it happens.
           pip install "ruff>=0.6" "pyright>=1.1.400" "pip-audit>=2.7"
 
-      - name: Install stylua
+      - name: stylua — format check
         uses: JohnnyMorganz/stylua-action@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           version: latest
           args: --check runtime/
 
-      - name: Install selene
+      - name: selene — Lua lint
         uses: NTBBloodbath/selene-action@v1.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -103,7 +103,7 @@ jobs:
         run: pip-audit --disable-pip
 
       # Offscreen Qt platform plugin keeps tests headless — no xvfb,
-      # no Wayland. 108 tests cover pure-Python Grid, key translator,
+      # no Wayland. 125 tests cover pure-Python Grid, key translator,
       # animation springs, and model classes (see docs/dev-workflow.md).
       - name: pytest — offscreen unit tests
         env:
