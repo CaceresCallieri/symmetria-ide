@@ -90,6 +90,54 @@ function M.emit_hide()
   pcall(vim.rpcnotify, 0, "whichkey", { op = "hide" })
 end
 
+-- If which-key.nvim is installed alongside our native overlay, neuter
+-- its trigger installation so the two don't duel for the same prefix
+-- keymaps. We let which-key remain loadable (user config may still
+-- `require` it for unrelated reasons) but clear its `triggers` config
+-- so its state machine never attempts to bind `<leader>` etc.
+--
+-- Also warn loudly if the user has registered specs via
+-- `require('which-key').add(...)`. Our overlay sources all its data
+-- from `nvim_get_keymap()`, so any which-key-only metadata (icons,
+-- group names that aren't attached to real keymaps) would be silently
+-- ignored. The user's current config (13 lines, no `add()` calls)
+-- doesn't hit this, but future config drift might.
+local function neutralize_whichkey_nvim()
+  local ok, wk = pcall(require, "which-key")
+  if not ok then
+    return
+  end
+
+  -- Disable which-key's own trigger installation. `triggers = {}` is
+  -- a sentinel v3 understands as "install zero triggers regardless of
+  -- preset". Merged non-destructively with whatever the user passed
+  -- to its earlier setup() call.
+  pcall(wk.setup, { triggers = {} })
+
+  -- Best-effort tear down of any triggers already installed. In v3
+  -- this module exposes `_triggers` + `del` but not a bulk uninstall;
+  -- iterating is safe because `del` no-ops on already-removed keys.
+  local ok_tr, wk_triggers = pcall(require, "which-key.triggers")
+  if ok_tr and type(wk_triggers) == "table" and type(wk_triggers._triggers) == "table" then
+    for _, trigger in pairs(wk_triggers._triggers) do
+      pcall(wk_triggers.del, trigger)
+    end
+  end
+
+  -- Warn the user if they've queued which-key specs. Those would have
+  -- carried icons / group overrides that we don't ingest. Not a hard
+  -- failure — the overlay still works from `nvim_get_keymap()` data.
+  if type(wk._queue) == "table" and #wk._queue > 0 then
+    vim.notify(
+      "[symmetria-whichkey] " .. #wk._queue
+        .. " which-key.add() spec(s) detected — metadata (icons, group names)"
+        .. " is not read by the native overlay. Attach via `desc` on"
+        .. " `vim.keymap.set` instead.",
+      vim.log.levels.WARN
+    )
+  end
+end
+
 function M.setup()
   if vim.g.symmetria_whichkey_native ~= 1 then
     return
@@ -113,11 +161,15 @@ function M.setup()
   })
 
   -- VimEnter is when user config has finished loading, so keymaps
-  -- are stable. Install our triggers here (not on require) so we see
-  -- the post-config map set.
+  -- are stable. Neutralize which-key.nvim (if installed), then
+  -- rebuild the trie and install our triggers. Running these in
+  -- order inside a single autocmd avoids a race: which-key's own
+  -- ModeChanged-driven installer otherwise competes with ours for
+  -- the same prefix keymaps, and the loser is undefined.
   vim.api.nvim_create_autocmd("VimEnter", {
     group = grp,
     callback = function()
+      neutralize_whichkey_nvim()
       rebuild("n")
       Triggers.install("n")
     end,
