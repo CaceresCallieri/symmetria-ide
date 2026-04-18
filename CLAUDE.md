@@ -18,7 +18,8 @@ A custom IDE wrapper built on NeoVim, in the Symmetria ecosystem.
 ## Source layout
 
 - `src/symmetria_ide/grid.py` — pure-Python Grid state (applies `grid_line`, `grid_scroll`, etc.).
-- `src/symmetria_ide/nvim_backend.py` — pynvim worker thread; RPC from GUI thread must be marshaled via `nvim.async_call` (see gotcha #1 below).
+- `src/symmetria_ide/nvim_backend.py` — pynvim worker thread lifecycle + GUI-facing API (`input`, `resize`, `stop`); RPC from GUI thread must be marshaled via `nvim.async_call` (see gotcha #1 below).
+- `src/symmetria_ide/nvim_events.py` — `redraw` handler functions + notification routing. Free functions bound as methods on `NvimBackend` at class scope so `backend._h_*` / `backend._dispatch_redraw` behave identically to pre-split. `_REDRAW_HANDLERS` is re-exported from `nvim_backend` for the dispatch test scaffold.
 - `src/symmetria_ide/nvim_view.py` — `QQuickPaintedItem` rendering the grid; coalesces runs of same-highlight cells into single `fillRect` + `drawText` calls.
 - `src/symmetria_ide/keys.py` — Qt key event → NeoVim keycode translator (unit-tested).
 - `src/symmetria_ide/app.py` — `QGuiApplication`, `StatusBarState` (well-known capsules with per-field notify signals), `CapsuleModel` (generic extension slot), `AppController`.

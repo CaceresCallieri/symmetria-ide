@@ -7,6 +7,16 @@ handle the thread hop automatically).
 
 The GUI side calls `input(keys)` to forward keystrokes, and
 `resize(cols, rows)` when the visible grid dimensions change.
+
+Event dispatch (the `_h_*` handlers and `_dispatch_redraw` /
+`_dispatch_notification`) lives in `nvim_events.py` so this module can
+focus on worker-thread lifecycle, subprocess spawning, and the
+GUI-facing API. Extracted handlers are re-bound as methods at class
+scope below so the existing test scaffold (which exercises
+`backend._h_cmdline_show(...)` etc. directly) keeps working without
+changes. `_REDRAW_HANDLERS` is re-exported at module scope for the
+same reason — dispatch tests mutate the table via
+`nvim_backend._REDRAW_HANDLERS[...]`.
 """
 
 from __future__ import annotations
@@ -20,7 +30,14 @@ from typing import Any
 import pynvim
 from PySide6.QtCore import QObject, Signal, Slot
 
+from . import nvim_events
 from .grid import Grid
+
+# Re-exported so tests can do `nvim_backend._REDRAW_HANDLERS[...]`.
+# Must be the SAME dict as `nvim_events._REDRAW_HANDLERS` — Python imports
+# mutable objects by reference, so mutations via either namespace are
+# visible to `_dispatch_redraw`.
+from .nvim_events import _REDRAW_HANDLERS  # noqa: F401
 
 
 log = logging.getLogger(__name__)
@@ -71,6 +88,37 @@ class NvimBackend(QObject):
     # See `runtime/lua/orchestrator/whichkey/init.lua` for the emitter.
     whichkey_event = Signal(dict)
     closed = Signal()
+
+    # --- Dispatch bindings --------------------------------------------
+    #
+    # Each assignment below makes a free function from `nvim_events`
+    # behave as a bound method of `NvimBackend`. Python's descriptor
+    # protocol handles the self-binding at attribute-access time:
+    # `backend._h_cmdline_show(...)` resolves to
+    # `nvim_events._h_cmdline_show(backend, ...)` — identical semantics
+    # to before extraction. Tests that call these directly, or shadow
+    # them via `backend._dispatch_notification = capture_state`, keep
+    # working without modification.
+    _dispatch_redraw = nvim_events._dispatch_redraw
+    _dispatch_notification = nvim_events._dispatch_notification
+    _resolved_mode_info = nvim_events._resolved_mode_info
+
+    _h_grid_resize = nvim_events._h_grid_resize
+    _h_grid_clear = nvim_events._h_grid_clear
+    _h_grid_line = nvim_events._h_grid_line
+    _h_grid_scroll = nvim_events._h_grid_scroll
+    _h_grid_cursor_goto = nvim_events._h_grid_cursor_goto
+    _h_hl_attr_define = nvim_events._h_hl_attr_define
+    _h_default_colors_set = nvim_events._h_default_colors_set
+    _h_mode_info_set = nvim_events._h_mode_info_set
+    _h_mode_change = nvim_events._h_mode_change
+    _h_flush = nvim_events._h_flush
+    _h_cmdline_show = nvim_events._h_cmdline_show
+    _h_cmdline_pos = nvim_events._h_cmdline_pos
+    _h_cmdline_hide = nvim_events._h_cmdline_hide
+    _h_popupmenu_show = nvim_events._h_popupmenu_show
+    _h_popupmenu_select = nvim_events._h_popupmenu_select
+    _h_popupmenu_hide = nvim_events._h_popupmenu_hide
 
     def __init__(
         self,
@@ -287,266 +335,8 @@ class NvimBackend(QObject):
             if gc_was_enabled:
                 gc.enable()
 
-    def _dispatch_notification(self, name: str, args: list[Any]) -> None:
-        if name == "redraw":
-            self._dispatch_redraw(args)
-            return
-        if name == "capsule":
-            if not args or not isinstance(args[0], dict):
-                log.warning("capsule notification with unexpected payload: %r", args)
-                return
-            payload: dict = args[0]
-            log.debug("capsule notification: %r", payload)
-            self.capsule_updated.emit(payload)
-            return
-        if name == "completions":
-            if not args or not isinstance(args[0], dict):
-                log.warning(
-                    "completions notification with unexpected payload: %r",
-                    args,
-                )
-                return
-            self.completions_updated.emit(args[0])
-            return
-        if name == "scroll":
-            if not args or not isinstance(args[0], dict):
-                log.warning("scroll notification with unexpected payload: %r", args)
-                return
-            try:
-                delta = int(args[0].get("delta", 0))
-            except (TypeError, ValueError):
-                log.warning("scroll payload has non-int delta: %r", args[0])
-                return
-            if delta != 0:
-                self.viewport_scrolled.emit(delta)
-            return
-        if name == "whichkey":
-            if not args or not isinstance(args[0], dict):
-                log.warning("whichkey notification with unexpected payload: %r", args)
-                return
-            self.whichkey_event.emit(args[0])
-            return
-        log.debug("unhandled notification: %s (args=%r)", name, args)
-
     def _on_err(self, msg: str) -> None:
         log.warning("nvim stderr: %s", msg.rstrip())
-
-    def _dispatch_redraw(self, batches: list[Any]) -> None:
-        """Apply one `redraw` notification's batches to the grid.
-
-        Each batch is `[event_name, *args_lists]`. NeoVim packs
-        multiple identical events into one batch for efficiency (the
-        first entry is the name, every subsequent entry is one call's
-        args), so we iterate call-by-call.
-
-        GC is suspended for the duration. `apply_line` is allocation-heavy
-        (one `Cell` per updated grid position; ~3600/frame on a 120x30
-        grid), and Python 3.14 tracks even tuples-of-primitives so every
-        allocation counts toward `gc.threshold`. Collection cycles that
-        fire mid-dispatch race with the Qt scene-graph render thread
-        running `paint()` — the crash trace shows `Cell.__init__` →
-        GC on the worker thread while `_paint_row` sits in a
-        `painter.setPen(...)` C++ call on `QSGRenderThread`. Deferring
-        GC to outside this critical section closes the window.
-        """
-        gc_was_enabled = gc.isenabled()
-        if gc_was_enabled:
-            gc.disable()
-        try:
-            for batch in batches:
-                event = batch[0]
-                calls = batch[1:]
-                handler = _REDRAW_HANDLERS.get(event)
-                if handler is None:
-                    continue
-                for call in calls:
-                    try:
-                        handler(self, *call)
-                    except Exception:  # noqa: BLE001
-                        log.exception("failed to apply %s %r", event, call)
-        finally:
-            if gc_was_enabled:
-                gc.enable()
-
-    # --- Redraw handlers (invoked from _dispatch_redraw) ---------------
-
-    def _h_grid_resize(self, grid: int, cols: int, rows: int) -> None:  # noqa: ARG002
-        self.grid.resize(cols, rows)
-
-    def _h_grid_clear(self, grid: int) -> None:  # noqa: ARG002
-        self.grid.clear()
-
-    def _h_grid_line(
-        self,
-        grid: int,  # noqa: ARG002
-        row: int,
-        col_start: int,
-        cells: list,
-        wrap: bool = False,  # noqa: ARG002, FBT002
-    ) -> None:
-        self.grid.apply_line(row, col_start, cells)
-
-    def _h_grid_scroll(
-        self,
-        grid: int,  # noqa: ARG002
-        top: int,
-        bot: int,
-        left: int,
-        right: int,
-        rows: int,
-        cols: int,  # noqa: ARG002 — redundant with `right - left`; NeoVim sends it anyway.
-    ) -> None:
-        self.grid.scroll(top, bot, left, right, rows)
-
-    def _h_grid_cursor_goto(self, grid: int, row: int, col: int) -> None:  # noqa: ARG002
-        self.grid.set_cursor(row, col)
-
-    def _h_hl_attr_define(
-        self,
-        hl_id: int,
-        rgb_attr: dict,
-        _cterm_attr: dict | None = None,
-        _info: list | None = None,
-    ) -> None:
-        self.grid.define_hl(hl_id, rgb_attr)
-
-    def _h_default_colors_set(
-        self,
-        fg: int,
-        bg: int,
-        sp: int,
-        _cterm_fg: int = 0,
-        _cterm_bg: int = 0,
-    ) -> None:
-        self.grid.set_default_colors(fg, bg, sp)
-
-    def _h_mode_info_set(self, _cursor_style_enabled: bool, mode_info: list) -> None:
-        self._mode_info = mode_info
-        # Re-emit the resolved descriptor — mode_info_set can arrive
-        # either before the first mode_change (startup) or after it
-        # (e.g. user runs `:set guicursor=...` mid-session). Either way
-        # the view wants the current resolved view, not the raw list.
-        self.cursor_mode_updated.emit(self._resolved_mode_info())
-
-    def _h_mode_change(self, mode: str, mode_idx: int) -> None:
-        self.grid.mode = mode
-        self._mode_idx = int(mode_idx) if mode_idx is not None else 0
-        self.cursor_mode_updated.emit(self._resolved_mode_info())
-
-    def _resolved_mode_info(self) -> dict[str, Any]:
-        """Look up the current mode's cursor descriptor.
-
-        Returns a best-effort dict. Missing keys (some mode_info entries
-        from older nvim versions omit blink fields) are left absent so
-        the view can apply its own defaults without special-casing.
-        """
-        if not self._mode_info:
-            return {}
-        idx = self._mode_idx
-        if not (0 <= idx < len(self._mode_info)):
-            return {}
-        entry = self._mode_info[idx]
-        if not isinstance(entry, dict):
-            return {}
-        # Shallow copy — the mode_info list is owned by the worker
-        # thread and we don't want GUI-side mutations to leak back.
-        return dict(entry)
-
-    def _h_flush(self) -> None:
-        self.redraw_flushed.emit()
-
-    # --- Ext-cmdline / ext-popupmenu handlers --------------------------
-    #
-    # These events arrive through the same `redraw` notification as
-    # grid_line/grid_scroll, but they describe cmdline + wildmenu state
-    # the native UI renders on top of the grid. NeoVim still owns the
-    # cmdline *logic* (typing, history, completion); we only render.
-
-    def _h_cmdline_show(
-        self,
-        content: list,
-        pos: int,
-        firstc: str,
-        prompt: str,
-        indent: int,  # noqa: ARG002 — we don't render prompt indent yet
-        level: int,
-        _hl_id: int = 0,  # NeoVim 0.10+ passes firstchar hl_id here
-    ) -> None:
-        # content is [[attrs, text], ...] in older NeoVim and
-        # [[attrs, text, hl_id], ...] in 0.10+. Flatten for MVP;
-        # per-chunk highlights can come later by preserving the tuples.
-        parts: list[str] = []
-        for chunk in content or ():
-            if isinstance(chunk, (list, tuple)) and len(chunk) >= 2:
-                parts.append(str(chunk[1]))
-        self.cmdline_updated.emit(
-            {
-                "kind": "show",
-                "text": "".join(parts),
-                "pos": int(pos or 0),
-                "firstchar": str(firstc or ""),
-                "prompt": str(prompt or ""),
-                "level": int(level or 0),
-            }
-        )
-
-    def _h_cmdline_pos(self, pos: int, level: int, *_rest: Any) -> None:
-        # *_rest swallows any trailing args newer NeoVim versions may
-        # add — keeps the handler forward-compatible.
-        self.cmdline_updated.emit(
-            {
-                "kind": "pos",
-                "pos": int(pos or 0),
-                "level": int(level or 0),
-            }
-        )
-
-    def _h_cmdline_hide(self, level: int = 0, *_rest: Any) -> None:
-        # Some NeoVim versions pass `abort` (0.9) then added more
-        # fields; *_rest absorbs whatever else comes through.
-        self.cmdline_updated.emit(
-            {
-                "kind": "hide",
-                "level": int(level or 0),
-            }
-        )
-
-    def _h_popupmenu_show(
-        self,
-        items: list,
-        selected: int,
-        row: int,  # noqa: ARG002 — cmdline-anchored popup is positioned by QML
-        col: int,  # noqa: ARG002
-        _grid: int = -1,
-        *_rest: Any,
-    ) -> None:
-        flattened: list[dict[str, str]] = []
-        for it in items or ():
-            if not isinstance(it, (list, tuple)):
-                continue
-            word = str(it[0]) if len(it) >= 1 else ""
-            kind = str(it[1]) if len(it) >= 2 else ""
-            menu = str(it[2]) if len(it) >= 3 else ""
-            # `info` (it[3]) can be large documentation; omit for now.
-            flattened.append({"word": word, "kind": kind, "menu": menu})
-        self.popupmenu_updated.emit(
-            {
-                "kind": "show",
-                "items": flattened,
-                "selected": int(selected if selected is not None else -1),
-            }
-        )
-
-    def _h_popupmenu_select(self, selected: int) -> None:
-        self.popupmenu_updated.emit(
-            {
-                "kind": "select",
-                "selected": int(selected if selected is not None else -1),
-            }
-        )
-
-    def _h_popupmenu_hide(self) -> None:
-        self.popupmenu_updated.emit({"kind": "hide"})
 
     # --- GUI-thread-facing API -----------------------------------------
     #
@@ -595,25 +385,3 @@ class NvimBackend(QObject):
             nvim.async_call(_do)
         except Exception:  # noqa: BLE001
             log.exception("async_call(resize) failed")
-
-
-# Map redraw event name → bound-method lookup. Keeping this outside the
-# class avoids an attribute lookup per event on a hot path.
-_REDRAW_HANDLERS = {
-    "grid_resize": NvimBackend._h_grid_resize,
-    "grid_clear": NvimBackend._h_grid_clear,
-    "grid_line": NvimBackend._h_grid_line,
-    "grid_scroll": NvimBackend._h_grid_scroll,
-    "grid_cursor_goto": NvimBackend._h_grid_cursor_goto,
-    "hl_attr_define": NvimBackend._h_hl_attr_define,
-    "default_colors_set": NvimBackend._h_default_colors_set,
-    "mode_info_set": NvimBackend._h_mode_info_set,
-    "mode_change": NvimBackend._h_mode_change,
-    "flush": NvimBackend._h_flush,
-    "cmdline_show": NvimBackend._h_cmdline_show,
-    "cmdline_pos": NvimBackend._h_cmdline_pos,
-    "cmdline_hide": NvimBackend._h_cmdline_hide,
-    "popupmenu_show": NvimBackend._h_popupmenu_show,
-    "popupmenu_select": NvimBackend._h_popupmenu_select,
-    "popupmenu_hide": NvimBackend._h_popupmenu_hide,
-}
