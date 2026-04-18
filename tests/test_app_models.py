@@ -32,7 +32,7 @@ def qt_app():
 
 class TestCmdlineState:
     def _make(self):
-        from symmetria_ide.app import CmdlineState
+        from symmetria_ide.cmdline_models import CmdlineState
 
         return CmdlineState()
 
@@ -180,7 +180,7 @@ class TestCmdlineState:
 
 class TestCompletionModel:
     def _make(self):
-        from symmetria_ide.app import CompletionModel
+        from symmetria_ide.cmdline_models import CompletionModel
 
         return CompletionModel()
 
@@ -231,7 +231,7 @@ class TestCompletionModel:
         assert model.selected == 1
 
     def test_word_role_data(self):
-        from symmetria_ide.app import CompletionModel
+        from symmetria_ide.cmdline_models import CompletionModel
 
         model = CompletionModel()
         model.apply({"items": ["edit", "enew"], "selected": -1})
@@ -258,7 +258,7 @@ class TestCompletionModel:
 
 class TestPopupmenuModel:
     def _make(self):
-        from symmetria_ide.app import PopupmenuModel
+        from symmetria_ide.cmdline_models import PopupmenuModel
 
         return PopupmenuModel()
 
@@ -321,7 +321,7 @@ class TestPopupmenuModel:
         assert model.selected == -1
 
     def test_word_kind_menu_roles(self):
-        from symmetria_ide.app import PopupmenuModel
+        from symmetria_ide.cmdline_models import PopupmenuModel
 
         model = PopupmenuModel()
         model.apply(
@@ -344,7 +344,7 @@ class TestPopupmenuModel:
 
 class TestWhichKeyState:
     def _make(self):
-        from symmetria_ide.app import WhichKeyState
+        from symmetria_ide.whichkey_models import WhichKeyState
 
         return WhichKeyState()
 
@@ -463,7 +463,7 @@ class TestWhichKeyState:
 
 class TestWhichKeyModel:
     def _make(self):
-        from symmetria_ide.app import WhichKeyModel
+        from symmetria_ide.whichkey_models import WhichKeyModel
 
         return WhichKeyModel()
 
