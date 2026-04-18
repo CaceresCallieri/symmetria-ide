@@ -101,8 +101,11 @@ class NvimBackend(QObject):
     # working without modification.
     _dispatch_redraw = nvim_events._dispatch_redraw
     _dispatch_notification = nvim_events._dispatch_notification
+    # Helper used by _h_mode_info_set and _h_mode_change — not a dispatch
+    # entrypoint itself, but bound here so tests can call it directly.
     _resolved_mode_info = nvim_events._resolved_mode_info
 
+    # Per-event handlers (one per NeoVim UI event name):
     _h_grid_resize = nvim_events._h_grid_resize
     _h_grid_clear = nvim_events._h_grid_clear
     _h_grid_line = nvim_events._h_grid_line

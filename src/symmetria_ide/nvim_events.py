@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import gc
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -61,6 +62,7 @@ def _h_grid_line(
     col_start: int,
     cells: list,
     wrap: bool = False,  # noqa: ARG001, FBT002
+    *_rest: Any,  # absorbs any arg added beyond wrap in future NeoVim versions (gotcha #9)
 ) -> None:
     self.grid.apply_line(row, col_start, cells)
 
@@ -255,7 +257,7 @@ def _h_popupmenu_hide(self: NvimBackend) -> None:
 # wrapper at `_REDRAW_HANDLERS["flush"]`) — import-by-reference from
 # `nvim_backend.py` means both namespaces point at the same dict, so
 # mutations via either name are observed by `_dispatch_redraw`.
-_REDRAW_HANDLERS: dict[str, Any] = {
+_REDRAW_HANDLERS: dict[str, Callable[..., None]] = {
     "grid_resize": _h_grid_resize,
     "grid_clear": _h_grid_clear,
     "grid_line": _h_grid_line,

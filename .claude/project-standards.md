@@ -20,6 +20,7 @@ Findings in these files/directories get prioritized. When two findings are equal
 
 - `src/symmetria_ide/nvim_view.py` — `QQuickPaintedItem` render hot path. Gotchas #10, #11, #12, #13, #14.
 - `src/symmetria_ide/nvim_backend.py` — pynvim worker thread + signal boundary. Gotchas #1, #2, #9.
+- `src/symmetria_ide/nvim_events.py` — `redraw` event dispatch hot path + notification routing. Gotchas #9, #10. Extracted from `nvim_backend.py` in issue #4; applies equal scrutiny to GC-suspension rules and handler forward-compat.
 - `src/symmetria_ide/app.py` — `QGuiApplication`, QML engine, model wiring, shutdown order.
 - `qml/*.qml` — any file here must pass qmllint and follow the property-binding rules below.
 - `runtime/init.lua` — capsule emitter, completion pipeline, plugin neutralization (noice/nvim-cmp).
