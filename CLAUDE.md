@@ -9,6 +9,7 @@ A custom IDE wrapper built on NeoVim, in the Symmetria ecosystem.
 - **Framework:** PySide6 (Qt 6 + Python + QML), migrating to gpui/Rust long-term.
 - **Core embed:** NeoVim via `--embed` + msgpack-RPC through `pynvim`. User's real `~/.config/nvim` loads by default (plugins, colorscheme, keymaps all work).
 - **Status bar:** native QML with mode badge, project, branch, file path, cursor position. Lualine is hidden from the viewport (laststatus=0 re-asserted on VimEnter).
+- **Which-key overlay:** native QML panel driven by our own state machine + trie built from `nvim_get_keymap()` (plus which-key.nvim's preset catalog for built-in motion descriptions). Which-key.nvim itself is neutralized on VimEnter.
 - **Constraints:** keyboard-first, Symmetria aesthetic, NeoVim motions preserved.
 - **Runtime deps on Arch:** `sudo pacman -S --needed pyside6 python-pynvim`.
 - **Run:** `PYTHONPATH=src python -m symmetria_ide`.
@@ -21,8 +22,15 @@ A custom IDE wrapper built on NeoVim, in the Symmetria ecosystem.
 - `src/symmetria_ide/nvim_view.py` — `QQuickPaintedItem` rendering the grid; coalesces runs of same-highlight cells into single `fillRect` + `drawText` calls.
 - `src/symmetria_ide/keys.py` — Qt key event → NeoVim keycode translator (unit-tested).
 - `src/symmetria_ide/app.py` — `QGuiApplication`, `StatusBarState` (well-known capsules with per-field notify signals), `CapsuleModel` (generic extension slot), `AppController`.
-- `qml/Main.qml`, `qml/StatusBar.qml` — UI.
-- `runtime/init.lua` — status-line replacement + capsule emitter. Will be replaced by real `orchestrator.nvim` later; the protocol (below) is the contract.
+- `qml/Main.qml`, `qml/StatusBar.qml`, `qml/CommandLine.qml`, `qml/WhichKeyOverlay.qml` — UI.
+- `runtime/init.lua` — status-line replacement + capsule emitter + cmdline completion pipeline. Loads the orchestrator modules below.
+- `runtime/lua/orchestrator/whichkey/` — native which-key overlay (Lua side):
+  - `init.lua` — setup, VimEnter hooks, `show`/`hide` emitters, which-key.nvim neutralization.
+  - `tree.lua` — trie over normalized keystrokes, built from `nvim_get_keymap` + `buf_get_keymap` + preset catalog.
+  - `presets.lua` — imports `which-key.plugins.presets` and flattens into keymap-shaped records (filters single-char motions). Memoized.
+  - `state.lua` — event-driven menu state machine (NOT `getcharstr`-based — see gotcha #15). Installs per-child menu keymaps on open, tears them down on close. Leaf execution via `vim.cmd.normal` (synchronous).
+  - `triggers.lua` — installs a `vim.keymap.set` for each top-level trie prefix that's a group. Self-healing reconciler verifies the actual keymap at each slot via `maparg` (gotcha #17).
+  - `icons.lua` — handcrafted key-path → nerd-font-glyph map (v1; mini.icons integration is a v2 follow-up).
 
 ## The capsule protocol
 
@@ -49,6 +57,32 @@ We also force-disable `nvim-cmp`'s cmdline source from our `VimEnter` handler (`
 
 To add a new well-known capsule, add the field + notify signal to `StatusBarState` and bind it in `StatusBar.qml`. To add a plugin-defined one, just emit it from Lua — it falls through to `CapsuleModel` and a future delegate can render it.
 
+## The which-key protocol
+
+Lua emits `vim.rpcnotify(0, "whichkey", payload)` where payload is:
+
+```
+{ op = "show" | "hide",
+  mode = "n",
+  trail = "<leader>" | " b" | ...,  -- accumulated path from root
+  can_go_back = bool,                -- true iff <BS> should pop to parent
+  items = {                          -- only on "show"
+    { key = "b", desc = "Buffer navigation", is_group = true,
+      icon = "", icon_color = "#b4b4b4" },
+    ...
+  } }
+```
+
+Python routes to `WhichKeyState` (visibility + trail + canGoBack) and `WhichKeyModel` (`QAbstractListModel` with roles key/desc/isGroup/icon/iconColor). Both connect to the same `whichkey_event` signal on `NvimBackend` — each ignores payloads it doesn't care about.
+
+The **data source for items** is the union of (in this order, earliest wins the desc upsert, latest wins rhs/callback):
+
+1. **Preset catalog** — `which-key.nvim`'s hand-curated `plugins/presets.lua` (loaded lazily, memoized) contributes descriptions for built-in nvim motions that `nvim_get_keymap` doesn't return: `gg`, `gU`, `gf`, `zz`, `[s`, `<C-w>h`, etc. Single-char motions (`h`, `j`, `k`, `l`, `w`, etc.) are filtered out — they're direct motions, not menu content.
+2. **`vim.api.nvim_get_keymap(mode)`** — user-defined global keymaps.
+3. **`vim.api.nvim_buf_get_keymap(0, mode)`** — buffer-local keymaps (LSP, treesitter, etc.). Shadows globals.
+
+The trie is rebuilt on `BufEnter`, `LspAttach`, `LspDetach`, and once on `VimEnter`. Triggers are installed only for top-level trie prefixes that are groups AND don't clash with a user's real keymap (`user_has_real_mapping` skips anything with a non-empty rhs or a callback).
+
 ## Non-obvious gotchas (burned in Phase 0, don't relearn)
 
 1. **pynvim is not thread-safe.** Any RPC call from the Qt GUI thread raises `NvimError: request from non-main thread`. Always marshal through `nvim.async_call`.
@@ -74,6 +108,10 @@ To add a new well-known capsule, add the field + notify signal to `StatusBarStat
 12. **Cursor animation spring stores the REMAINING DELTA, not the absolute position** (`CursorAnimation` in `nvim_view.py`). This is the same algorithm as `ScrollAnimation` but with a crucial twist ported from Neovide's `cursor_renderer/mod.rs`: on `set_destination`, we seed `_position_x = dest - current_painted_position` — the spring then decays that delta to 0, and `current = destination - position` inverts it back to pixel space. DO NOT "fix" this by having it store absolute position like the scroll spring does: the redirect-mid-flight semantics rely on the delta seeding, and you'd lose velocity continuity on chained cursor moves (typing a word would feel like stutter-steps instead of a single glide). The short-jump speedup (≤2 cells horizontal AND 0 vertical → `CURSOR_SHORT_ANIMATION_LENGTH=0.048s`) is picked at `set_destination` time based on the delta, not applied globally.
 13. **Cursor blink uses a LINEAR wall-clock ramp, not a spring** (`CursorBlink` in `nvim_view.py`). Sampled from `time.perf_counter()` inside `_paint_cursor`, NOT accumulated per frame from `dt`. Ported from Neovide's `cursor_renderer/blink.rs`: accumulating per-frame `dt` stair-steps the opacity when the frame clock stalls (tab-away/tab-back, compositor hiccup). Any of `blinkwait/blinkon/blinkoff == 0` disables blinking (`:h guicursor` semantics). Blink phase resets on mode *shape* change only — NOT on cursor move — so typing `hjkl` rapidly does not restart the blink timer. This is the "GUI editor" feel (Neovide-matching), opposite of the "terminal" feel that resets blink on every keystroke. If you "fix" this by restarting the blink phase on every flush, the cursor will never reach its OFF phase during active editing, defeating the blink entirely.
 14. **Frame driver gates on ALL animation sources.** `_animation_is_active()` must return True for scroll spring OR cursor spring OR blink; disconnecting `frameSwapped` when only one is "done" while another is still active freezes that animation at its current frame. Easy regression target when adding a 4th animation source: remember to OR it into `_animation_is_active`.
+15. **`vim.fn.getcharstr()` DEADLOCKS in embedded mode.** Which-key.nvim's state machine loops on `getcharstr()` (`state.lua:242-275`) — works fine in a TTY nvim where nvim owns the whole event loop, but in our `--embed` setup it holds nvim's main thread, preventing `rpcnotify` payloads from flushing to the Python UI client. Symptom: the first emit leaks through on initial show, then subsequent descent/emit never reaches Python, and eventually the Qt event loop on the Python side also stalls. **Rule for any future modal UI:** do NOT use synchronous `getcharstr` loops in Lua. Dispatch must go through nvim's keymap system (per-child ephemeral keymaps, like `orchestrator.whichkey.state`) or through autocmds so the main thread returns to the event loop between transitions.
+16. **`vim.schedule` / `vim.defer_fn` don't fire during prefix-wait.** After a multi-key feedkeys like `"gg"`, nvim can end up in `timeoutlen` prefix-wait with chars still in typeahead. In that state, scheduled callbacks and timer callbacks queue up but DON'T execute until nvim reaches full safe-state — which may never happen until user input arrives. This burned us hard in early which-key iterations: `execute_leaf` uninstalled triggers, feedkeys-ed the keys, and tried to reinstall via schedule/defer — the reinstall never ran, leaving the trigger dead. **Never design a "feedkeys → cleanup" pattern that relies on scheduled callbacks.** Use synchronous mechanisms: `vim.cmd.normal` / `vim.cmd.normal!` executes the keys and returns before control leaves the current Lua call. No typeahead queue, no deferred cleanup, no race.
+17. **Menu keymaps OVERWRITE triggers; `install()` must self-heal via `maparg`.** When `orchestrator.whichkey.state._install_for(g_node)` calls `vim.keymap.set("n", "g", ...)` to register the menu-child handler for the preset `gg → First line`, it REPLACES the trigger keymap at `g`. On menu close, `clear_menu_keymaps` deletes the menu keymap — and since the trigger was never re-installed, the `g` slot is now EMPTY. The next press of `g` dispatches nothing ("pressed gg → worked, then g → broken forever"). Fix stack: (a) `M.close()` calls `triggers.install("n")` after clearing menu keymaps; (b) `triggers.install()` does NOT trust its `_installed` cache — it verifies the actual keymap at each wanted slot via `vim.fn.maparg(keys, mode, false, true)` and reinstalls if our `TRIGGER_DESC` isn't present. The `_installed` cache lies after menu-overwrite; only `maparg` tells the truth.
+18. **`nvim_get_keymap()` does NOT return NeoVim's built-in motion chains.** `gg`, `gu`, `gU`, `gf`, `ge`, `zz`, `zt`, `[s`, `]s`, `<C-w>h`, etc. are hardcoded in nvim C core — they're not keymaps at all, so they never appear in `nvim_get_keymap` output. A trie built purely from that API will show empty submenus under `g`, `z`, `[`, `]`, `<C-w>`. Which-key.nvim fills this gap by shipping a hand-curated preset catalog (`lua/which-key/plugins/presets.lua`). `orchestrator.whichkey.presets` loads that catalog and flattens it into our trie, filtering single-char motions (`h/j/k/l/w/b/e`) since those are direct motions, not menu content. The preset module is LAZY-LOADED by lazy.nvim (`event = "VeryLazy"`), so a `require` at very-early startup fails; we retry on each rebuild until we get a non-empty catalog and cache it. Observed: after certain `:edit` transitions the module becomes unloadable again — the cache is what keeps descriptions rich across buffer switches.
 
 ## Running tests
 
