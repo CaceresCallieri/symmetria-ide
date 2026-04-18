@@ -97,20 +97,34 @@ end
 -- through nvim. Triggers are suspended across the feedkeys so our
 -- top-level trigger doesn't re-fire on the leading <leader>.
 ---@param node table
+-- Execute a leaf by feeding its key sequence back through nvim.
+--
+-- ### Why we don't uninstall triggers anymore
+--
+-- Earlier iterations uninstalled our top-level triggers, fed the
+-- leaf keys with `m` (remap), and tried to reinstall via
+-- `vim.schedule` / `vim.defer_fn` / `CursorMoved` autocmd. NONE of
+-- those fired reliably in our embedded setup after a feedkeys like
+-- "gg" — nvim ended up in prefix-wait with trailing chars in
+-- typeahead, which blocks timer and schedule callbacks until a full
+-- safe-state is reached. That left the trigger uninstalled for
+-- arbitrarily long and manifested as "press gg → then pressing g
+-- does nothing."
+--
+-- The fix: KEEP TRIGGERS INSTALLED. For built-in preset leaves
+-- (rhs="" / no callback — just nvim-core motions like `gg`, `gf`,
+-- `gU`) we feed with flag "n" (no remap), which bypasses our own
+-- trigger and runs the native command. For user keymap leaves (rhs
+-- is a real command or callback) we feed with "m" (remap); nvim's
+-- longest-match semantics resolve the full lhs (e.g. `<leader>bn`)
+-- to the user's action BEFORE our shorter prefix trigger fires —
+-- provided triggers are `nowait = false` (see triggers.lua).
 local function execute_leaf(node)
-  local triggers = require("orchestrator.whichkey.triggers")
-  triggers.uninstall_all()
-
   local keys = vim.api.nvim_replace_termcodes(node.keys, true, true, true)
-  -- `m` = apply mappings (so the user's `<leader>bn` = `<cmd>bnext<CR>`
-  -- resolves). `t` would mark as typed (we don't need that).
-  vim.api.nvim_feedkeys(keys, "m", false)
-
-  -- Re-install triggers on the next tick, after nvim has consumed
-  -- our feedkeys. Scheduling on the event loop guarantees ordering.
-  vim.schedule(function()
-    triggers.install("n")
-  end)
+  local has_real_action = (type(node.rhs) == "string" and node.rhs ~= "")
+    or type(node.callback) == "function"
+  local flag = has_real_action and "m" or "n"
+  vim.api.nvim_feedkeys(keys, flag, false)
 end
 
 -- Handler invoked when the user presses a known child key in the menu.

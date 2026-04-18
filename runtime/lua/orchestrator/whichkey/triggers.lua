@@ -62,9 +62,6 @@ local function install_one(mode, keys)
   -- nvim blocks on input, and it keeps Python's Qt event loop from
   -- stalling during the transition from "no menu" to "menu open".
   vim.keymap.set(mode, keys, function()
-    -- pcall so a bug in state.start (e.g. stale tree reference after
-    -- a rebuild race) doesn't leave the user's `<leader>` keymap
-    -- broken — the error gets logged, nvim keeps behaving normally.
     local ok, err = pcall(require("orchestrator.whichkey.state").start,
       { keys = keys })
     if not ok then
@@ -74,7 +71,15 @@ local function install_one(mode, keys)
       )
     end
   end, {
-    nowait = true,
+    -- Deliberately `nowait = false` so nvim waits for longer
+    -- matches. When execute_leaf later feedkeys a full user sequence
+    -- like `<leader>bn` with the `m` flag, nvim matches the USER's
+    -- `<leader>bn` keymap (longer) instead of firing our shorter
+    -- `<leader>` trigger. Net effect: we pay a `timeoutlen`-wait on
+    -- the first key (500ms default) before the menu opens, but in
+    -- exchange we don't need to uninstall/reinstall the trigger
+    -- around every leaf execution (which was impossible to do
+    -- reliably — see state.lua::execute_leaf).
     silent = true,
     desc = TRIGGER_DESC,
   })
