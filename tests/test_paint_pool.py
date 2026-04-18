@@ -28,34 +28,8 @@ path, exposing us to the render-thread SEGV class of bug.
 from __future__ import annotations
 
 import inspect
-import sys
 
-import pytest
-from PySide6.QtCore import QCoreApplication
-
-
-@pytest.fixture(scope="session", autouse=True)
-def qt_app():
-    """Create a QCoreApplication for the session (QColor/QRectF need it)."""
-    app = QCoreApplication.instance() or QCoreApplication(sys.argv)
-    yield app
-
-
-def _construction_source(cls) -> str:
-    """Return `__init__` concatenated with every `_init_*` helper source.
-
-    Same helper shape as test_transparent_mode.py — construction is split
-    across `_init_buffers`, `_init_springs`, `_init_signals` so a check
-    that only reads `__init__` would miss pool allocations that live in
-    one of the helpers (issue #10, the init-split refactor).
-    """
-    parts = [inspect.getsource(cls.__init__)]
-    for name in dir(cls):
-        if name.startswith("_init_"):
-            member = getattr(cls, name)
-            if callable(member):
-                parts.append(inspect.getsource(member))
-    return "\n".join(parts)
+from conftest import construction_source
 
 
 class TestPooledRectsInConstruction:
@@ -69,7 +43,7 @@ class TestPooledRectsInConstruction:
     def test_run_rect_is_pre_allocated(self):
         from symmetria_ide.nvim_view import NvimView
 
-        src = _construction_source(NvimView)
+        src = construction_source(NvimView)
         assert "self._run_rect = QRectF()" in src, (
             "Construction must pre-allocate `self._run_rect = QRectF()`. "
             "_flush_run relies on receiving this pooled rect; if it's gone, "
@@ -79,7 +53,7 @@ class TestPooledRectsInConstruction:
     def test_clip_rect_is_pre_allocated(self):
         from symmetria_ide.nvim_view import NvimView
 
-        src = _construction_source(NvimView)
+        src = construction_source(NvimView)
         assert "self._clip_rect = QRectF()" in src, (
             "Construction must pre-allocate `self._clip_rect = QRectF()`. "
             "paint() sets its bounds via setRect per frame (issue #1)."
@@ -88,7 +62,7 @@ class TestPooledRectsInConstruction:
     def test_cursor_rect_is_pre_allocated(self):
         from symmetria_ide.nvim_view import NvimView
 
-        src = _construction_source(NvimView)
+        src = construction_source(NvimView)
         assert "self._cursor_rect = QRectF()" in src, (
             "Construction must pre-allocate `self._cursor_rect = QRectF()`. "
             "All three _paint_cursor branches mutate it via setRect "
@@ -107,7 +81,7 @@ class TestPooledRunCharsInConstruction:
     def test_run_chars_is_pre_allocated(self):
         from symmetria_ide.nvim_view import NvimView
 
-        src = _construction_source(NvimView)
+        src = construction_source(NvimView)
         # Match the literal type annotation used in the source so a
         # future rename (e.g., switching to a deque) is caught.
         assert "self._run_chars: list[str] = []" in src, (
@@ -138,6 +112,11 @@ class TestPaintHotPathHasNoFreshQRectF:
         )
 
     def test_paint_row_does_not_allocate_qrectf(self):
+        # _paint_row itself has never contained a QRectF(...) allocation —
+        # it delegates to _flush_run which received the rect.  This guard
+        # exists to catch a future developer who might add a rect allocation
+        # directly inside _paint_row instead of passing the pooled run_rect
+        # through to _flush_run.
         from symmetria_ide.nvim_view import NvimView
 
         src = inspect.getsource(NvimView._paint_row)
@@ -225,6 +204,10 @@ class TestFlushRunAcceptsPooledRect:
         # breaks and this guard fires before any visual regression.
         # `from __future__ import annotations` stringifies annotations, so
         # the attribute is a `str` here, not a class.
+        # Note: this assertion is intentionally strict about the literal
+        # type name. A type alias (e.g. `Rect = QRectF`) would also fail
+        # here — the intent is to keep the annotation as `QRectF` directly
+        # so that readers and tools resolve it to the concrete Qt type.
         rect_param = sig.parameters["rect"]
         assert rect_param.annotation == "QRectF", (
             "_flush_run's `rect` parameter must be annotated as QRectF. "

@@ -26,36 +26,10 @@ constraint and are what the existing test suite uses for similar gotchas.
 from __future__ import annotations
 
 import inspect
-import sys
+
 import pytest
 
-from PySide6.QtCore import QCoreApplication
-
-
-def _construction_source(cls) -> str:
-    """Return `__init__` source concatenated with every `_init_*` helper.
-
-    The NvimView constructor groups setup into `_init_buffers`,
-    `_init_springs`, and `_init_signals` helpers (see issue #10). Tests
-    verifying "a call exists during construction" must inspect that whole
-    path, not just `__init__`, or they'll regress the moment a line
-    crosses a helper boundary. This helper stays resilient as new
-    `_init_*` helpers are added.
-    """
-    parts = [inspect.getsource(cls.__init__)]
-    for name in dir(cls):
-        if name.startswith("_init_"):
-            member = getattr(cls, name)
-            if callable(member):
-                parts.append(inspect.getsource(member))
-    return "\n".join(parts)
-
-
-@pytest.fixture(scope="session", autouse=True)
-def qt_app():
-    """Create a QCoreApplication for the test session (required by Qt)."""
-    app = QCoreApplication.instance() or QCoreApplication(sys.argv)
-    yield app
+from conftest import construction_source
 
 
 @pytest.fixture(autouse=True)
@@ -204,7 +178,7 @@ class TestAmbientTintNotInlinedInPaint:
         """Construction must assign self._ambient_tint_color = QColor(0, 0, 0, 153)."""
         from symmetria_ide.nvim_view import NvimView
 
-        init_src = _construction_source(NvimView)
+        init_src = construction_source(NvimView)
         assert "_ambient_tint_color" in init_src, (
             "Construction must pre-allocate self._ambient_tint_color. "
             "Without this, paint() would inline the QColor each frame."
@@ -227,7 +201,7 @@ class TestTransparentFillColor:
         """Construction must call setFillColor(QColor(0, 0, 0, 0))."""
         from symmetria_ide.nvim_view import NvimView
 
-        init_src = _construction_source(NvimView)
+        init_src = construction_source(NvimView)
         assert "setFillColor(QColor(0, 0, 0, 0))" in init_src, (
             "Construction must call setFillColor(QColor(0, 0, 0, 0)) so the "
             "QQuickPaintedItem backing store is cleared to transparent (not white) "
