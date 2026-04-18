@@ -408,4 +408,15 @@ vim.api.nvim_create_autocmd("CmdlineEnter", {
 -- payload.
 M.push_state()
 
+-- --- Native which-key overlay ---------------------------------------
+--
+-- Opt in to the native which-key replacement (see
+-- `runtime/lua/orchestrator/whichkey/init.lua`). Kept behind a global
+-- flag so it can be disabled quickly if our overlay breaks — unsetting
+-- `g:symmetria_whichkey_native` lets stock which-key.nvim run as normal.
+vim.g.symmetria_whichkey_native = 1
+pcall(function()
+  require("orchestrator.whichkey").setup()
+end)
+
 return M

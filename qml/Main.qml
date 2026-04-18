@@ -47,6 +47,23 @@ Window {
                 id: cmdlineOverlay
                 anchors.fill: parent
             }
+
+            // Native which-key overlay. Bottom-anchored inside the
+            // editor so it visually sits above the status bar and
+            // animates alongside editor resizes. Driven entirely by
+            // `whichKeyState` + `whichKeyModel`; Lua side controls
+            // show/hide via rpcnotify (see runtime/lua/orchestrator/
+            // whichkey/init.lua).
+            WhichKeyOverlay {
+                id: whichKeyOverlay
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                // Clamp to half the viewport so huge menus never hog
+                // the whole editor; scroll support is a v2 follow-up.
+                height: Math.min(implicitHeight, parent.height * 0.5)
+                z: 20
+            }
         }
 
         StatusBar {

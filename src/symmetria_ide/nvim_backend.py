@@ -65,6 +65,11 @@ class NvimBackend(QObject):
     cmdline_updated = Signal(dict)
     popupmenu_updated = Signal(dict)
     completions_updated = Signal(dict)
+    # Native which-key overlay payload. Shape:
+    #   { op: "show"|"hide", mode, trail, can_go_back, items: [...] }
+    # Each item is { key, desc, is_group, icon, icon_color }.
+    # See `runtime/lua/orchestrator/whichkey/init.lua` for the emitter.
+    whichkey_event = Signal(dict)
     closed = Signal()
 
     def __init__(
@@ -213,8 +218,9 @@ class NvimBackend(QObject):
             self._nvim.subscribe("capsule")
             self._nvim.subscribe("completions")
             self._nvim.subscribe("scroll")
+            self._nvim.subscribe("whichkey")
             log.info(
-                "subscribed to 'capsule' + 'completions' + 'scroll' notifications"
+                "subscribed to 'capsule' + 'completions' + 'scroll' + 'whichkey' notifications"
             )
         except Exception:  # noqa: BLE001
             log.exception("subscribe(capsule/completions) failed")
@@ -272,6 +278,14 @@ class NvimBackend(QObject):
                 return
             if delta != 0:
                 self.viewport_scrolled.emit(delta)
+            return
+        if name == "whichkey":
+            if not args or not isinstance(args[0], dict):
+                log.warning(
+                    "whichkey notification with unexpected payload: %r", args
+                )
+                return
+            self.whichkey_event.emit(args[0])
             return
         log.debug("unhandled notification: %s (args=%r)", name, args)
 
