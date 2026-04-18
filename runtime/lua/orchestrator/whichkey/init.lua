@@ -21,16 +21,17 @@
 
 local Tree = require("orchestrator.whichkey.tree")
 local Icons = require("orchestrator.whichkey.icons")
--- Preload state + triggers eagerly at init time. If we waited until
--- the keymap callback fired, `require("orchestrator.whichkey.state")`
--- could fail: user config (lazy.nvim in particular) can mutate `rtp`
--- AFTER init.lua runs but BEFORE the trigger fires, so Lua's nvim-rtp
+-- Preload state + triggers + presets eagerly at init time. If we
+-- waited until the keymap callback fired, `require(...)` could fail:
+-- user config (lazy.nvim in particular) can mutate `rtp` AFTER
+-- init.lua runs but BEFORE the trigger fires, so Lua's nvim-rtp
 -- searcher may no longer find our runtime/lua/ path. Loading here
 -- while our rtp entry is still fresh caches these modules in
 -- `package.loaded`, so the later require() hits the cache regardless
 -- of what happened to `rtp` in between.
 local State = require("orchestrator.whichkey.state")
 local Triggers = require("orchestrator.whichkey.triggers")
+local Presets = require("orchestrator.whichkey.presets")
 
 local M = {}
 
@@ -186,7 +187,7 @@ function M.setup()
 
   -- Silence unused-local linter noise — the locals exist for side-
   -- effect module loading, not for direct reference.
-  local _ = Triggers and State
+  local _ = Triggers and State and Presets
 end
 
 return M

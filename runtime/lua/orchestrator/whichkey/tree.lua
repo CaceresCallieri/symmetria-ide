@@ -101,11 +101,27 @@ function M.insert(root, km)
 end
 
 -- Build a fresh trie from the current nvim keymap tables.
+--
+-- Insert order matters for the desc-guarded upsert in `insert()`:
+--   1. Presets (which-key's catalog of built-in nvim chords) go in
+--      FIRST. They have empty rhs / no callback — pure metadata.
+--   2. User global keymaps go in SECOND. Their rhs/callback overwrite
+--      preset's empty values; their desc replaces preset's only when
+--      non-empty (so users without desc still keep the preset label).
+--   3. User buffer-local keymaps go in LAST, shadowing globals.
+--
+-- Presets come from `orchestrator.whichkey.presets` which loads the
+-- catalog from which-key.nvim if available (graceful no-op if not).
 ---@param mode string  e.g. "n"
 ---@return table root
 function M.rebuild(mode)
   local root = M.new_root()
-  -- Globals first so buffer-local maps (inserted after) shadow them.
+  local ok, Presets = pcall(require, "orchestrator.whichkey.presets")
+  if ok then
+    for _, km in ipairs(Presets.load()) do
+      M.insert(root, km)
+    end
+  end
   for _, km in ipairs(vim.api.nvim_get_keymap(mode) or {}) do
     M.insert(root, km)
   end
