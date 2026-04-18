@@ -43,6 +43,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication  # noqa: E402
 
 from symmetria_ide.nvim_backend import NvimBackend  # noqa: E402
+from symmetria_ide import nvim_backend as _mod  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -167,7 +168,7 @@ class TestCmdlineArityForwardCompat:
     user running a different nvim version than the CI runner.
     """
 
-    def test_cmdline_show_accepts_9_arity_six_args(self) -> None:
+    def test_cmdline_show_accepts_v09_six_args(self) -> None:
         """NeoVim 0.9: content, pos, firstc, prompt, indent, level."""
         backend = NvimBackend()
         recorder = _SignalRecorder()
@@ -334,15 +335,11 @@ class TestGcSuspensionInvariants:
             gc_states.append(gc.isenabled())
             original_flush()
 
-        backend._h_flush = record_and_call  # type: ignore[assignment]
-
         # `_h_flush` is called via the _REDRAW_HANDLERS dispatch table
         # which looks up the bound method by name on the class — so we
         # need to monkeypatch the module-level table, not the instance.
-        from symmetria_ide import nvim_backend as mod
-
-        saved = mod._REDRAW_HANDLERS["flush"]
-        mod._REDRAW_HANDLERS["flush"] = lambda self: record_and_call()
+        saved = _mod._REDRAW_HANDLERS["flush"]
+        _mod._REDRAW_HANDLERS["flush"] = lambda self: record_and_call()
         try:
             # NeoVim wire format: `[event_name, [args], [args], ...]` — for a
             # zero-arg event like `flush`, the batch is `["flush", []]`
@@ -350,7 +347,7 @@ class TestGcSuspensionInvariants:
             # zero calls and never invoke the handler).
             backend._dispatch_redraw([["flush", []]])
         finally:
-            mod._REDRAW_HANDLERS["flush"] = saved
+            _mod._REDRAW_HANDLERS["flush"] = saved
 
         assert gc_states == [False], (
             "GC must be disabled inside _dispatch_redraw (gotcha #10). "
@@ -516,14 +513,12 @@ class TestRedrawDispatch:
         backend.redraw_flushed.connect(flush_recorder)
 
         # Inject a handler that raises for grid_clear; flush must still fire.
-        from symmetria_ide import nvim_backend as mod
+        saved = _mod._REDRAW_HANDLERS["grid_clear"]
 
-        saved = mod._REDRAW_HANDLERS["grid_clear"]
-
-        def broken(_self, *_args, **_kw) -> None:
+        def broken(_self, *_args) -> None:
             raise RuntimeError("synthetic handler failure")
 
-        mod._REDRAW_HANDLERS["grid_clear"] = broken
+        _mod._REDRAW_HANDLERS["grid_clear"] = broken
         try:
             backend._dispatch_redraw(
                 [
@@ -532,7 +527,7 @@ class TestRedrawDispatch:
                 ]
             )
         finally:
-            mod._REDRAW_HANDLERS["grid_clear"] = saved
+            _mod._REDRAW_HANDLERS["grid_clear"] = saved
 
         assert flush_recorder.payloads == [None], (
             "Subsequent events in the batch must still fire even when an "
@@ -557,20 +552,18 @@ class TestRedrawDispatch:
         # grid_resize is a lightweight redraw handler — use it to count calls.
         call_count = [0]
 
-        from symmetria_ide import nvim_backend as mod
-
-        saved = mod._REDRAW_HANDLERS["grid_resize"]
+        saved = _mod._REDRAW_HANDLERS["grid_resize"]
 
         def counting(_self, *_args) -> None:
             call_count[0] += 1
 
-        mod._REDRAW_HANDLERS["grid_resize"] = counting
+        _mod._REDRAW_HANDLERS["grid_resize"] = counting
         try:
             backend._dispatch_redraw(
                 [["grid_resize", [1, 80, 24], [1, 120, 30], [1, 160, 48]]]
             )
         finally:
-            mod._REDRAW_HANDLERS["grid_resize"] = saved
+            _mod._REDRAW_HANDLERS["grid_resize"] = saved
 
         assert call_count[0] == 3
 
@@ -643,3 +636,158 @@ class TestModeInfoResolution:
         backend._h_mode_info_set(True, [{"cursor_shape": "block"}])
 
         assert recorder.payloads == [{"cursor_shape": "block"}]
+
+
+# ---------------------------------------------------------------------------
+# Popupmenu select / hide handlers — missing from initial coverage
+# ---------------------------------------------------------------------------
+
+
+class TestPopupmenuHandlers:
+    """`_h_popupmenu_select` and `_h_popupmenu_hide` emit correct payloads.
+
+    These one-liner handlers are trivial individually, but a regression
+    (accidentally removing the emit, or passing the wrong kind) would
+    silently break the cmdline autocomplete popup — no other test catches it.
+    """
+
+    def test_popupmenu_select_emits_select_kind(self) -> None:
+        """Selection change sends `kind: "select"` with the new index."""
+        backend = NvimBackend()
+        recorder = _SignalRecorder()
+        backend.popupmenu_updated.connect(recorder)
+
+        backend._h_popupmenu_select(2)
+
+        assert len(recorder.payloads) == 1
+        assert recorder.payloads[0] == {"kind": "select", "selected": 2}
+
+    def test_popupmenu_select_handles_none_selected(self) -> None:
+        """`None` selected value (NeoVim clears selection) → -1."""
+        backend = NvimBackend()
+        recorder = _SignalRecorder()
+        backend.popupmenu_updated.connect(recorder)
+
+        backend._h_popupmenu_select(None)  # type: ignore[arg-type]
+
+        assert recorder.payloads[0]["selected"] == -1
+
+    def test_popupmenu_hide_emits_hide_kind(self) -> None:
+        backend = NvimBackend()
+        recorder = _SignalRecorder()
+        backend.popupmenu_updated.connect(recorder)
+
+        backend._h_popupmenu_hide()
+
+        assert len(recorder.payloads) == 1
+        assert recorder.payloads[0] == {"kind": "hide"}
+
+
+# ---------------------------------------------------------------------------
+# Grid handler smoke tests — verify happy-path routing + grid mutation
+# ---------------------------------------------------------------------------
+
+
+class TestGridHandlers:
+    """Smoke tests for the grid-mutating redraw handlers.
+
+    These tests are not exhaustive — `test_grid.py` owns the grid logic
+    itself. The goal here is to confirm each handler:
+      (a) routes correctly through `_dispatch_redraw`,
+      (b) mutates `backend.grid` in the expected direction,
+      (c) does not raise on minimal valid input.
+    """
+
+    def test_grid_resize_updates_grid_dimensions(self) -> None:
+        backend = NvimBackend()
+        backend._dispatch_redraw([["grid_resize", [1, 80, 24]]])
+        assert backend.grid.cols == 80
+        assert backend.grid.rows == 24
+
+    def test_grid_clear_resets_grid(self) -> None:
+        """After clear the grid cells should be at default state."""
+        backend = NvimBackend()
+        # Resize first so the grid has a real shape, then clear.
+        backend._dispatch_redraw([["grid_resize", [1, 10, 5]]])
+        backend._dispatch_redraw([["grid_clear", [1]]])
+        # No assertion on internals — just confirm it doesn't raise.
+
+    def test_grid_cursor_goto_updates_cursor_position(self) -> None:
+        backend = NvimBackend()
+        backend._dispatch_redraw([["grid_resize", [1, 80, 24]]])
+        backend._dispatch_redraw([["grid_cursor_goto", [1, 5, 12]]])
+        assert backend.grid.cursor_row == 5
+        assert backend.grid.cursor_col == 12
+
+    def test_hl_attr_define_stores_highlight(self) -> None:
+        """Highlight entries must survive a round-trip through the dispatch."""
+        backend = NvimBackend()
+        rgb_attr = {"foreground": 0xFF0000, "background": 0x000000}
+        backend._dispatch_redraw([["hl_attr_define", [1, rgb_attr, {}, []]]])
+        # Confirm hl_id 1 is now resolvable — accessing grid.hl(1) or
+        # equivalent. We use the internal map directly since it's on the
+        # same (test) thread.
+        assert 1 in backend.grid.hl_attrs
+
+    def test_default_colors_set_stores_defaults(self) -> None:
+        backend = NvimBackend()
+        backend._dispatch_redraw(
+            [["default_colors_set", [0xFFFFFF, 0x000000, 0xFF00FF, 0, 0]]]
+        )
+        assert backend.grid.default_fg == 0xFFFFFF
+        assert backend.grid.default_bg == 0x000000
+
+    def test_grid_line_updates_cell_content(self) -> None:
+        """A single-cell grid_line write must land in the grid."""
+        backend = NvimBackend()
+        backend._dispatch_redraw([["grid_resize", [1, 10, 5]]])
+        # grid_line cell format: [[text, hl_id?, repeat?]] — text is the first element
+        backend._dispatch_redraw([["grid_line", [1, 0, 0, [["A"]], False]]])
+        assert backend.grid.cells[0][0].char == "A"
+
+    def test_grid_line_accepts_future_wrap_flag(self) -> None:
+        """NeoVim 0.11 adds an 8th arg (wrap flag); the handler must not raise.
+
+        `_h_grid_line`'s signature has `wrap: bool = False` as the 5th
+        positional arg after the grid call tuple is unpacked. Any arg
+        beyond that position must also be absorbed without error.
+        Gotcha #9: handlers need `*_rest` for the NEXT undocumented
+        addition after the named default. Verify the named default path here.
+        """
+        backend = NvimBackend()
+        backend._dispatch_redraw([["grid_resize", [1, 10, 5]]])
+        # Simulate the 0.11 wire format with wrap=True explicitly.
+        backend._h_grid_line(1, 0, 0, [["B"]], True)
+        assert backend.grid.cells[0][0].char == "B"
+
+
+# ---------------------------------------------------------------------------
+# grid_line forward-compat — *_rest absorption (gotcha #9, 0.11 future arg)
+# ---------------------------------------------------------------------------
+
+
+class TestGridLineForwardCompat:
+    """`_h_grid_line` must accept a hypothetical 6th positional arg beyond
+    `wrap` — i.e. whatever NeoVim 0.12+ might add after the documented
+    0.11 wrap flag — without raising.
+
+    The current signature has `wrap: bool = False` but no `*_rest`. This
+    test documents that the current named-default approach handles the
+    KNOWN addition (wrap); a follow-up should add `*_rest` if a 6th arg
+    ever materialises. For now we verify the 5-arg (wrap) form is stable.
+    """
+
+    def test_grid_line_five_arg_form_does_not_raise(self) -> None:
+        """5-arg form (with explicit wrap) is stable today."""
+        backend = NvimBackend()
+        backend._dispatch_redraw([["grid_resize", [1, 10, 5]]])
+        # Via dispatch so we exercise the full handler(self, *call) path.
+        backend._dispatch_redraw([["grid_line", [1, 1, 0, [["X"]], False]]])
+        assert backend.grid.cells[1][0].char == "X"
+
+    def test_grid_line_four_arg_form_does_not_raise(self) -> None:
+        """4-arg form (no wrap, NeoVim <0.11) uses the `wrap=False` default."""
+        backend = NvimBackend()
+        backend._dispatch_redraw([["grid_resize", [1, 10, 5]]])
+        backend._dispatch_redraw([["grid_line", [1, 2, 0, [["Y"]]]]])
+        assert backend.grid.cells[2][0].char == "Y"
