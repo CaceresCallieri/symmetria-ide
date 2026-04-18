@@ -22,10 +22,11 @@
 -- own work.
 
 local Tree = require("orchestrator.whichkey.tree")
+local Constants = require("orchestrator.whichkey.constants")
 
 local M = {}
 
-local TRIGGER_DESC = "symmetria-whichkey-trigger"
+local TRIGGER_DESC = Constants.TRIGGER_DESC
 
 ---@type table<string, { mode: string, keys: string }>
 M._installed = {}

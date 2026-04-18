@@ -39,6 +39,7 @@
 -- the trigger again before the menu closes).
 
 local Tree = require("orchestrator.whichkey.tree")
+local Constants = require("orchestrator.whichkey.constants")
 
 local M = {}
 
@@ -49,6 +50,7 @@ M._node = nil
 M._installed_menu_keymaps = {}
 
 local MENU_DESC = "sym-whichkey-menu-key"
+local TRIGGER_DESC = Constants.TRIGGER_DESC
 
 -- `vim.keymap.set` REPLACES any existing keymap at the slot. When we
 -- install a menu keymap for child `s` of the `g` menu, we overwrite
@@ -65,13 +67,20 @@ local MENU_DESC = "sym-whichkey-menu-key"
 ---@param key string
 local function install_menu_key(mode, key, handler)
   local prev = vim.fn.maparg(key, mode, false, true)
-  local had_prev = type(prev) == "table" and not vim.tbl_isempty(prev)
-  -- Skip saving if what was there is OUR trigger keymap — otherwise
-  -- restore would double-install (trigger gets reinstalled by
-  -- `triggers.install` after close, and the saved copy would stomp it
-  -- again on the NEXT menu open in a way that fights reconciliation).
-  local TRIGGER_DESC = "symmetria-whichkey-trigger"
-  if had_prev and type(prev.desc) == "string" and prev.desc:find(TRIGGER_DESC, 1, true) then
+  -- `had_prev` is false when: no prior keymap exists, OR the prior
+  -- keymap is our own trigger (TRIGGER_DESC in desc) — triggers are
+  -- reconciled by triggers.install(), not by save/restore here.
+  local is_trigger = type(prev) == "table"
+    and type(prev.desc) == "string"
+    and prev.desc:find(TRIGGER_DESC, 1, true) ~= nil
+  local had_prev = type(prev) == "table"
+    and not vim.tbl_isempty(prev)
+    and not is_trigger
+  -- Buffer-local keymaps (buffer > 0) are owned by LSP/treesitter and
+  -- will be reinstalled on LspAttach/BufEnter — restoring them here
+  -- via mapset() would promote them to global scope, stomping unrelated
+  -- buffers. Skip them; the owning plugin handles their lifecycle.
+  if had_prev and type(prev.buffer) == "number" and prev.buffer > 0 then
     had_prev = false
   end
   vim.keymap.set(mode, key, handler, {
@@ -92,9 +101,16 @@ local function clear_menu_keymaps()
     if km.prev then
       -- `vim.fn.mapset(mode, abbr, dict)` restores a keymap from the
       -- dict returned by `maparg(..., true)`. Works for callback-based
-      -- keymaps (flash's global `s` is a Lua callback), expr maps, and
-      -- buffer-local maps (dict carries `buffer` field).
-      pcall(vim.fn.mapset, km.mode, false, km.prev)
+      -- keymaps (flash's global `s` is a Lua callback) and expr maps.
+      -- Buffer-local keymaps are already filtered out in install_menu_key.
+      local ok, err = pcall(vim.fn.mapset, km.mode, false, km.prev)
+      if not ok then
+        vim.notify(
+          "[symmetria-whichkey] failed to restore keymap `"
+            .. tostring(km.key) .. "` (" .. km.mode .. "): " .. tostring(err),
+          vim.log.levels.WARN
+        )
+      end
     end
   end
   M._installed_menu_keymaps = {}
