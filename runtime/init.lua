@@ -233,15 +233,78 @@ vim.api.nvim_create_autocmd("VimEnter", {
 local last_topline = nil
 local last_buf = nil
 
+-- Convert a logical-line range to an approximate display-row count.
+-- With `wrap = true` (or folds collapsing ranges of lines into one
+-- display row), a WinScrolled delta measured in logical lines does not
+-- match the actual grid-row shift that nvim performed. The Python-side
+-- scrollback rotation and spring displacement operate on grid rows, so
+-- feeding them the logical count produces under/oversized animations
+-- and paints scrollback content from the wrong offset during decay.
+-- Computing the display-row span directly here — using the same pieces
+-- nvim itself uses to lay out wrapped lines (`strdisplaywidth` ÷ window
+-- width, with folds and blank lines handled explicitly) — gives Python
+-- the unit it was actually designed for.
+--
+-- Not perfect: ignores 'showbreak' / 'breakindent' / virtual text /
+-- extmarks, and approximates Unicode east-asian widths via
+-- `strdisplaywidth`. It is accurate to within ±1 row per wrapped line
+-- in practice, which is well inside the spring's error tolerance.
+local function display_rows_between(lnum_from, lnum_to, winwidth)
+  if lnum_from == lnum_to or winwidth <= 0 then
+    return 0
+  end
+  local sign = 1
+  local lo, hi = lnum_from, lnum_to
+  if lnum_to < lnum_from then
+    sign = -1
+    lo, hi = lnum_to, lnum_from
+  end
+  local rows = 0
+  local ln = lo
+  while ln < hi do
+    local fold_end = vim.fn.foldclosedend(ln)
+    if fold_end > 0 then
+      -- Closed fold: entire range from `ln..fold_end` collapses to one
+      -- display row, regardless of how many logical lines are inside.
+      rows = rows + 1
+      ln = fold_end + 1
+    else
+      local line = vim.fn.getline(ln)
+      local disp = vim.fn.strdisplaywidth(line)
+      if disp == 0 then
+        rows = rows + 1
+      else
+        rows = rows + math.max(1, math.ceil(disp / winwidth))
+      end
+      ln = ln + 1
+    end
+  end
+  return rows * sign
+end
+
 vim.api.nvim_create_autocmd("WinScrolled", {
   group = grp,
   callback = function()
     local buf = vim.api.nvim_get_current_buf()
     local topline = vim.fn.line("w0")
     if last_topline ~= nil and buf == last_buf then
-      local delta = topline - last_topline
-      if delta ~= 0 then
-        pcall(vim.rpcnotify, 0, "scroll", { delta = delta })
+      local delta_logical = topline - last_topline
+      if delta_logical ~= 0 then
+        -- With wrap on, logical-line delta ≠ display-row delta. Python's
+        -- scrollback/spring expect display rows (that is what the grid
+        -- actually shifts). Without wrap, the two are identical, and
+        -- without folds, `display_rows_between` reduces to `|delta_logical|`.
+        local wrap = vim.wo.wrap
+        local winwidth = vim.fn.winwidth(0)
+        local delta_display
+        if wrap then
+          delta_display = display_rows_between(last_topline, topline, winwidth)
+        else
+          delta_display = delta_logical
+        end
+        if delta_display ~= 0 then
+          pcall(vim.rpcnotify, 0, "scroll", { delta = delta_display })
+        end
       end
     end
     last_buf = buf
