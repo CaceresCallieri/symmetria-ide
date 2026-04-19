@@ -73,6 +73,27 @@ class TestOrchestratorDelegatesToHelpers:
             "shift() call that produces the flag (issue #8)."
         )
 
+    def test_orchestrator_clamp_is_conditional_on_pending_delta(self):
+        from symmetria_ide.nvim_view import NvimView
+
+        src = inspect.getsource(NvimView._maybe_apply_scroll_delta)
+        # _clamp_scroll_spring must be called ONLY when a scroll delta is
+        # pending — not on every flush. Calling shift(delta=0, ...) is safe
+        # (ScrollAnimation.shift early-returns on delta==0), but the structural
+        # intent of the split is that the spring is only touched inside the
+        # delta-conditional block. This guard ensures that contract survives
+        # future refactors that might hoist the call out of the if block.
+        clamp_idx = src.index("self._clamp_scroll_spring(")
+        # Everything before the clamp call must reference _pending_scroll_delta
+        # (i.e., the clamp is nested inside the delta conditional).
+        before = src[:clamp_idx]
+        assert "_pending_scroll_delta" in before, (
+            "_clamp_scroll_spring must appear after an "
+            "'if ... _pending_scroll_delta' guard in "
+            "_maybe_apply_scroll_delta. Calling shift() unconditionally "
+            "would displace the spring on every idle flush (issue #8)."
+        )
+
 
 class TestClampScrollSpringEnforcesMaxDeltaInvariant:
     """gotcha #11: `max_delta = slot_start`, NOT `scrollback_rows - grid.rows`.

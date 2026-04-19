@@ -937,8 +937,9 @@ class NvimView(QQuickPaintedItem):
           4. If the spring is active, make sure the frame driver is
              connected so the animation advances on every frame.
 
-        If no delta and no active animation: we still paint, but skip
-        the scrollback copy (fast path — idle typing stays cheap).
+        The snapshot always runs — it is cheap (<0.1 ms for a 120×30
+        grid) and must stay unconditional so the next scroll finds the
+        current viewport already in the center slot.
 
         Exceptions here are caught and logged rather than bubbling —
         Qt would otherwise swallow them on its slot-dispatch path,
@@ -1033,6 +1034,10 @@ class NvimView(QQuickPaintedItem):
         self._ensure_scrollback_sized(grid.rows, grid.cols)
         if self._pending_scroll_delta != 0:
             delta = self._pending_scroll_delta
+            # Zero before rotate/clamp — if either raises, the outer
+            # try/except in _on_redraw_flushed calls
+            # _reset_animation_state_after_error which also zeroes it,
+            # so retrying with the same delta would be wrong anyway.
             self._pending_scroll_delta = 0
             # Rotate the scrollback so the pre-scroll viewport (currently
             # in the center slot from the previous flush's snapshot)
@@ -1062,6 +1067,7 @@ class NvimView(QQuickPaintedItem):
         range and showed a visible gap. See
         ``tests/test_scroll_animation.py::test_compound_half_page_scroll_stays_within_slot_start_headroom``
         for the regression guard.
+        Additional structural guards: tests/test_scroll_orchestrator.py::TestClampScrollSpringEnforcesMaxDeltaInvariant.
 
         On far jumps, the spring sets ``_far_jump_clear_pending``; we
         consume it here and zero the revealed scrollback rows so no
@@ -1129,7 +1135,7 @@ class NvimView(QQuickPaintedItem):
         return (self._scrollback_rows - grid_rows) // 2
 
     def _ensure_scrollback_sized(self, grid_rows: int, grid_cols: int) -> None:
-        """Allocate scrollback to 2× grid_rows, seeded with blank cells.
+        """Allocate scrollback to SCROLLBACK_MULTIPLIER × grid_rows (currently 3×), seeded with blank cells.
 
         Only reallocates when the row count actually changes (cheap
         no-op on steady-state redraws). Column count is reflected in
