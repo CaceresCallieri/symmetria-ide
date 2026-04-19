@@ -186,6 +186,23 @@ class TestDrawCursorShapeHonoursGotcha10:
             "(gotcha #10 / issue #1)."
         )
 
+    def test_draw_shape_does_not_read_cursor_mode(self):
+        from symmetria_ide.nvim_view import NvimView
+
+        src = inspect.getsource(NvimView._draw_cursor_shape)
+        # Shape resolution lives in _resolve_cursor_shape; _draw_cursor_shape
+        # receives `shape` as a parameter. If someone adds a
+        # self._cursor_mode.get(...) call here, the separation silently
+        # collapses and the gotcha #10 audit surface acquires gotcha-state
+        # entanglement — shape resolution and pooled-rect dispatch become
+        # intermixed again (issue #9).
+        assert "self._cursor_mode" not in src, (
+            "_draw_cursor_shape must not access self._cursor_mode. Shape "
+            "resolution is the responsibility of _resolve_cursor_shape(); "
+            "this helper receives `shape` as a parameter. Direct access "
+            "here re-entangles the audit surfaces split by issue #9."
+        )
+
     def test_draw_shape_covers_three_branches(self):
         from symmetria_ide.nvim_view import NvimView
 
@@ -202,6 +219,16 @@ class TestDrawCursorShapeHonoursGotcha10:
             "_draw_cursor_shape must handle the `horizontal` branch "
             "(cmdline/replace hor20). Missing this branch collapses "
             "cmdline/replace cursors to blocks."
+        )
+        # The block branch (the `else`) reverses-video the full cell and
+        # overlays the glyph via `drawText`. If this glyph-draw call were
+        # removed, the cursor would paint a solid fg-colored rectangle with
+        # no character visible — a silent visual regression in normal mode.
+        assert "painter.drawText(" in src, (
+            "_draw_cursor_shape must call painter.drawText in the block "
+            "branch to overlay the glyph on the reverse-video background. "
+            "Without it, the block cursor paints a solid rectangle with no "
+            "character visible (normal-mode cursor shows a blank box)."
         )
 
 
