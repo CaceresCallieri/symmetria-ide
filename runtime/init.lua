@@ -300,6 +300,15 @@ local function display_rows_between(lnum_from, lnum_to, text_width)
   return rows * sign
 end
 
+-- Expose the helper as a global so tests (via `nvim.exec_lua`) can
+-- exercise it against real nvim state: real `foldclosedend`, real
+-- `strdisplaywidth`, real `getwininfo().textoff`. This is the same IPC
+-- boundary pattern as `_G.symmetria_push_state` and the whichkey test
+-- hooks — deliberate per CLAUDE.md gotcha #2. Not used by the Python
+-- runtime; the WinScrolled handler calls the local name directly.
+-- selene: allow(global_usage)  -- IPC boundary; gotcha #2
+_G.symmetria_display_rows_between = display_rows_between
+
 vim.api.nvim_create_autocmd("WinScrolled", {
   group = grp,
   callback = function()
