@@ -70,7 +70,13 @@ Item {
                 anchors.rightMargin: 14
                 anchors.topMargin: 9
                 anchors.bottomMargin: 9
-                spacing: 4
+                // Spacing is 0 so the cursor bar sits FLUSH against the
+                // last pre-cursor glyph. Gaps where we actually want them
+                // (prompt→firstchar, firstchar→text) are added via per-
+                // item rightPadding below. A non-zero Row.spacing applies
+                // uniformly between every child and visibly offsets the
+                // caret from the text it's supposed to anchor to.
+                spacing: 0
 
                 // `input("Name: ")` prompt shows before firstchar.
                 Text {
@@ -80,6 +86,7 @@ Item {
                     font.family: root.monoFont
                     font.pixelSize: root.fontSize
                     anchors.verticalCenter: cmdRow.verticalCenter
+                    rightPadding: 4
                     renderType: Text.NativeRendering
                 }
 
