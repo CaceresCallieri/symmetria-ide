@@ -67,9 +67,6 @@ local TRIGGER_DESC = Constants.TRIGGER_DESC
 ---@param key string
 local function install_menu_key(mode, key, handler)
   local prev = vim.fn.maparg(key, mode, false, true)
-  -- `had_prev` is false when: no prior keymap exists, OR the prior
-  -- keymap is our own trigger (TRIGGER_DESC in desc) — triggers are
-  -- reconciled by triggers.install(), not by save/restore here.
   local is_trigger = type(prev) == "table"
     and type(prev.desc) == "string"
     and prev.desc:find(TRIGGER_DESC, 1, true) ~= nil
@@ -81,7 +78,17 @@ local function install_menu_key(mode, key, handler)
   if had_prev and type(prev.buffer) == "number" and prev.buffer > 0 then
     had_prev = false
   end
+  local bufnr = vim.api.nvim_get_current_buf()
+  -- `buffer = bufnr` makes the menu keymap buffer-local. This is
+  -- load-bearing, not stylistic: `nowait = true` is ONLY authoritative
+  -- for buffer-local mappings (`:h :map-<nowait>`). A global menu
+  -- keymap with `nowait = true` is silently ignored when a longer
+  -- mapping (global or buffer-local) exists — most commonly LSP's
+  -- buffer-local `gd` / `gi` / `gr`, or a plugin's `gcc`. Users saw
+  -- this as ~500–800ms latency between pressing the 2nd key of a
+  -- chord (e.g. `gg`) and the action firing (gotcha #20).
   vim.keymap.set(mode, key, handler, {
+    buffer = bufnr,
     nowait = true,
     silent = true,
     desc = MENU_DESC,
@@ -89,13 +96,18 @@ local function install_menu_key(mode, key, handler)
   table.insert(M._installed_menu_keymaps, {
     mode = mode,
     key = key,
+    bufnr = bufnr,
     prev = had_prev and prev or nil,
   })
 end
 
 local function clear_menu_keymaps()
   for _, km in ipairs(M._installed_menu_keymaps) do
-    pcall(vim.keymap.del, km.mode, km.key)
+    -- Buffer-local delete: must pass the original buffer (pre-stored
+    -- at install time) because `vim.keymap.del` otherwise targets the
+    -- current buffer, which may have changed if a leaf execution
+    -- (`gf`, `<C-]>`, etc.) switched buffers before teardown ran.
+    pcall(vim.keymap.del, km.mode, km.key, { buffer = km.bufnr })
     if km.prev then
       -- `vim.fn.mapset(mode, abbr, dict)` restores a keymap from the
       -- dict returned by `maparg(..., true)`. Works for callback-based

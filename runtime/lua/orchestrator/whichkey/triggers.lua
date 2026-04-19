@@ -57,86 +57,97 @@ end
 ---@param mode string
 ---@param keys string
 local function install_one(mode, keys)
-  -- Wrap in vim.schedule so the keymap handler returns IMMEDIATELY.
-  -- `state.start` runs its getcharstr loop in the next main-loop tick;
-  -- this ensures the initial rpcnotify flushes to the UI channel before
-  -- nvim blocks on input, and it keeps Python's Qt event loop from
-  -- stalling during the transition from "no menu" to "menu open".
+  local bufnr = vim.api.nvim_get_current_buf()
+  -- `buffer = bufnr` + `nowait = true` is the only combination that
+  -- actually suppresses the `timeoutlen` wait. A global trigger with
+  -- `nowait = true` is silently ignored when a longer mapping exists
+  -- — LSP's buffer-local `gd`/`gi`/`gr`/`gy`/`gD` and plugin maps
+  -- like `gcc` all trigger that case — causing the menu to appear
+  -- ~500–800ms late OR a fast `gg` to bypass the menu entirely
+  -- (gotcha #20). Triggers are reinstalled per-buffer on
+  -- BufEnter/LspAttach/LspDetach by the setup() autocmd in init.lua,
+  -- which is already how this reconciler is driven.
   vim.keymap.set(mode, keys, function()
     local ok, err = pcall(require("orchestrator.whichkey.state").start, { keys = keys })
     if not ok then
       vim.notify("[symmetria-whichkey] state.start failed: " .. tostring(err), vim.log.levels.ERROR)
     end
   end, {
-    -- `nowait = true` so the menu opens INSTANTLY on the prefix
-    -- key (no `timeoutlen` wait). Execution of leaves via
-    -- `vim.cmd.normal` (see state.lua::execute_leaf) is synchronous
-    -- and doesn't require keymap uninstall/reinstall — so we don't
-    -- have the recursion / reinstall-reliability concerns that
-    -- pushed earlier iterations to `nowait = false`.
+    buffer = bufnr,
     nowait = true,
     silent = true,
     desc = TRIGGER_DESC,
   })
-  M._installed[mode .. ":" .. keys] = { mode = mode, keys = keys }
+  M._installed[bufnr .. ":" .. mode .. ":" .. keys] = { bufnr = bufnr, mode = mode, keys = keys }
 end
 
----@param mode string
----@param keys string
-local function uninstall_one(mode, keys)
-  pcall(vim.keymap.del, mode, keys)
-  M._installed[mode .. ":" .. keys] = nil
+---@param entry { bufnr: integer, mode: string, keys: string }
+local function uninstall_one(entry)
+  pcall(vim.keymap.del, entry.mode, entry.keys, { buffer = entry.bufnr })
+  M._installed[entry.bufnr .. ":" .. entry.mode .. ":" .. entry.keys] = nil
 end
 
 -- Reconcile installed triggers with the current trie's top-level
--- prefixes. Called after every rebuild AND after each menu close —
--- the menu's `_install_for` calls `vim.keymap.set` on keys that are
--- also triggers (e.g. `g` for the `gg → First line` preset leaf),
--- which overwrites the trigger keymap. `M._installed` still remembers
--- we "installed" them, so the diff below would skip re-adding. To
--- recover from menu-overwrite, we verify each wanted trigger's
--- CURRENT keymap matches the trigger desc; if not, re-install.
+-- prefixes FOR THE CURRENT BUFFER. Called on BufEnter / LspAttach /
+-- LspDetach / VimEnter, and after each menu close — the menu's
+-- `_install_for` calls `vim.keymap.set` on keys that are also
+-- triggers (e.g. `g` for the `gg → First line` preset leaf), which
+-- overwrites the trigger keymap for that buffer. `M._installed` still
+-- remembers we "installed" them, so the diff below would skip
+-- re-adding. To recover from menu-overwrite, we verify each wanted
+-- trigger's CURRENT keymap via `maparg` and reinstall if our
+-- TRIGGER_DESC isn't present.
+--
+-- Per-buffer: triggers are buffer-local (gotcha #20), so the cache
+-- key is `"bufnr:mode:keys"` and reconciliation runs against the
+-- current buffer only. Stale entries in other buffers persist until
+-- those buffers are unloaded; that's harmless — buffer-local keymaps
+-- die with their buffer.
 ---@param mode string
 function M.install(mode)
   mode = mode or "n"
   local root = require("orchestrator.whichkey").tree()
+  local bufnr = vim.api.nvim_get_current_buf()
 
-  ---@type table<string, { mode: string, keys: string }>
+  ---@type table<string, true>
   local wanted = {}
   for key, child in pairs(root.children) do
     if Tree.is_group(child) then
-      wanted[mode .. ":" .. key] = { mode = mode, keys = key }
+      wanted[key] = true
     end
   end
 
-  -- Remove triggers no longer wanted (prefix disappeared from the trie).
-  for id, t in pairs(M._installed) do
-    if not wanted[id] then
-      uninstall_one(t.mode, t.keys)
+  -- Remove triggers for THIS buffer no longer wanted (prefix
+  -- disappeared from the trie). Other buffers' cached entries are
+  -- left alone — they'll age out with their buffer.
+  for _, entry in pairs(M._installed) do
+    if entry.bufnr == bufnr and entry.mode == mode and not wanted[entry.keys] then
+      uninstall_one(entry)
     end
   end
 
-  -- Add or restore triggers. `force_add` captures the case where the
-  -- keymap slot was overwritten by a menu keymap and later deleted,
-  -- leaving the slot empty — in that case `M._installed[id]` still
-  -- says the trigger is there, but it actually isn't.
-  for _, t in pairs(wanted) do
-    local current = vim.fn.maparg(t.keys, t.mode, false, true)
+  -- Add or restore triggers for this buffer.
+  for key in pairs(wanted) do
+    local current = vim.fn.maparg(key, mode, false, true)
     local ours_present = type(current) == "table"
       and current.desc
       and current.desc:find(TRIGGER_DESC, 1, true) ~= nil
     if not ours_present then
-      -- The slot either was never ours or got clobbered. Clear it first
-      -- (in case some other keymap sits there) and install fresh.
+      -- The slot either was never ours or got clobbered. Clear any
+      -- non-user-intended stale map first (respecting its own scope),
+      -- then install fresh as buffer-local.
       if
         type(current) == "table"
         and not vim.tbl_isempty(current)
-        and not user_has_real_mapping(t.mode, t.keys)
+        and not user_has_real_mapping(mode, key)
       then
-        pcall(vim.keymap.del, t.mode, t.keys)
+        local del_opts = (type(current.buffer) == "number" and current.buffer > 0)
+            and { buffer = current.buffer }
+          or nil
+        pcall(vim.keymap.del, mode, key, del_opts)
       end
-      if not user_has_real_mapping(t.mode, t.keys) then
-        install_one(t.mode, t.keys)
+      if not user_has_real_mapping(mode, key) then
+        install_one(mode, key)
       end
     end
   end
@@ -144,8 +155,8 @@ end
 
 -- Tear down everything. Used by C4 (kill-switch path) and on tests.
 function M.uninstall_all()
-  for _, t in pairs(M._installed) do
-    uninstall_one(t.mode, t.keys)
+  for _, entry in pairs(M._installed) do
+    uninstall_one(entry)
   end
   M._installed = {}
 end
