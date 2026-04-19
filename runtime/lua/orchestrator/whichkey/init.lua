@@ -154,11 +154,26 @@ function M.setup()
   -- LSP-installed maps that arrive async after BufEnter. Each event
   -- rebuilds the tree and reconciles the installed trigger keymaps
   -- against the new top-level prefix set.
+  --
+  -- ### Why `vim.schedule` (gotcha #21)
+  --
+  -- Our orchestrator is loaded from runtime/init.lua during nvim
+  -- startup, so our autocmd is registered FIRST. User plugins like
+  -- nvim-lspconfig are lazy-loaded on `BufReadPre`/`BufNewFile` and
+  -- register their own `LspAttach` handlers SECOND. Autocmds fire in
+  -- registration order — so on LspAttach, we'd rebuild the trie
+  -- BEFORE the user's handler calls `vim.keymap.set("n", "gd", ...,
+  -- { buffer = ev.buf })`. The buffer-local keymaps exist, we just
+  -- read them one tick too early. Deferring via `vim.schedule`
+  -- guarantees the rebuild runs after ALL synchronous handlers for
+  -- this event have fired, regardless of registration order.
   vim.api.nvim_create_autocmd({ "BufEnter", "LspAttach", "LspDetach" }, {
     group = grp,
     callback = function()
-      rebuild("n")
-      Triggers.install("n")
+      vim.schedule(function()
+        rebuild("n")
+        Triggers.install("n")
+      end)
     end,
   })
 
