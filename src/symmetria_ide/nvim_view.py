@@ -1580,83 +1580,115 @@ class NvimView(QQuickPaintedItem):
         cw: float,
         ch: float,
     ) -> None:
-        """Animated cursor with shape and smooth blink.
+        """Thin orchestrator for cursor rendering (issue #9).
 
-        Draws at the spring's animated pixel position (see
-        `_update_cursor_destination` for the target formula — during an
-        active scroll animation the target is offset by the live scroll
-        spring value so the cursor chases a moving destination, which
-        produces Neovide's layered-cadence feel).
+        Delegates to three named audit surfaces:
+            - `_compute_blink_opacity()` — gotcha #13 (wall-clock ramp).
+            - `_resolve_cursor_shape()`  — reads `mode_info_set` state.
+            - `_draw_cursor_shape(...)`  — gotcha #10 (pooled rect).
 
-        Shape comes from `_cursor_mode["cursor_shape"]` + `cell_percentage`
-        (NeoVim `mode_info_set`):
-            - "block": full reverse-video cell, glyph visible.
-            - "vertical": thin bar at leading edge, `cell_percentage`% of
-              cell width (insert mode's `ver25`).
-            - "horizontal": thin bar at cell bottom, `cell_percentage`%
-              of cell height (cmdline/replace `hor20`, etc.).
-
-        Opacity comes from the blink state machine. Static cursors
-        (any of blinkwait/on/off == 0) are always fully opaque.
+        Bootstrap seed stays inline — it's a one-shot guard against
+        drawing at `(0, 0)` before `set_destination` ever lands.
+        Regression guards: ``tests/test_cursor_paint.py``.
         """
         cur_row = grid.cursor_row
         cur_col = grid.cursor_col
         if not (0 <= cur_row < grid.rows and 0 <= cur_col < grid.cols):
             return
-        # Bootstrap: if the spring hasn't been seeded yet (first paint
-        # before the first flush-driven `set_destination`), snap to the
-        # cell now so we don't draw at (0, 0).
         if not self._cursor_anim.seeded:
-            self._cursor_anim.set_destination(
-                cur_col * cw,
-                cur_row * ch,
-                cw,
-                ch,
-            )
+            self._cursor_anim.set_destination(cur_col * cw, cur_row * ch, cw, ch)
         x = self._cursor_anim.current_x
         y = self._cursor_anim.current_y
 
-        # Resolve shape / cell_percentage / opacity. Defaults match a
-        # plain block cursor when mode_info_set hasn't arrived yet.
-        shape = self._cursor_mode.get("cursor_shape", "block")
-        cell_pct = int(self._cursor_mode.get("cell_percentage", 100) or 100)
-        opacity = self._cursor_blink.opacity_at(time.perf_counter())
+        shape, cell_pct = self._resolve_cursor_shape()
+        opacity = self._compute_blink_opacity()
 
-        # Qt doesn't have a painter-wide opacity on fills/text directly;
-        # setOpacity() works but it's a state change — save/restore so we
-        # don't leak this into the next paint call (which handles the
-        # grid and doesn't want a dimmed pass).
+        # setOpacity is painter state — save/restore so it doesn't leak
+        # into subsequent paint calls that expect a fully opaque pass.
         painter.save()
         try:
             painter.setOpacity(opacity)
-            # Pooled cursor rect — setRect mutates in place instead of
-            # allocating a fresh QRectF per paint (gotcha #10 / issue #1).
-            rect = self._cursor_rect
-            if shape == "vertical":
-                # Bar at the cell's leading edge. `cell_percentage` is
-                # thickness as a fraction of cell width (25 → 25% → a
-                # 1.75-px bar at 7px-wide cells; Qt handles sub-pixel).
-                bar_w = max(1.0, cw * cell_pct / 100.0)
-                rect.setRect(x, y, bar_w, ch)
-                painter.fillRect(rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
-                # No glyph overlay for vertical bars — the underlying
-                # grid paint already shows the character at that cell.
-            elif shape == "horizontal":
-                # Underline at the cell's bottom edge. Thickness is
-                # `cell_percentage`% of cell height.
-                bar_h = max(1.0, ch * cell_pct / 100.0)
-                rect.setRect(x, y + ch - bar_h, cw, bar_h)
-                painter.fillRect(rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
-            else:
-                # Block (default) — reverse-video the cell: fg-colored
-                # background with the cell glyph in bg color on top.
-                cursor_cell = grid.cells[cur_row][cur_col]
-                rect.setRect(x, y, cw, ch)
-                painter.fillRect(rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
-                painter.setPen(_rgb_to_qcolor(grid.default_bg, 0x1E1E1E))
-                painter.drawText(rect, _TEXT_ALIGN_FLAGS, cursor_cell.char)
+            self._draw_cursor_shape(
+                painter, grid, shape, cell_pct, x, y, cw, ch, cur_row, cur_col
+            )
         finally:
             painter.restore()
+
+    def _compute_blink_opacity(self) -> float:
+        """Sample the blink ramp at the current wall-clock instant.
+
+        gotcha #13: blink is a LINEAR wall-clock ramp sampled from
+        ``time.perf_counter()`` — NOT a per-frame ``dt`` accumulation.
+        Accumulating per-frame would stair-step the opacity when the
+        frame clock stalls (tab-away/tab-back, compositor hiccup).
+
+        The ``CursorBlink`` state machine returns ``1.0`` whenever any
+        of ``blinkwait/blinkon/blinkoff`` is ``0`` (``:h guicursor``
+        semantics — disables blinking).
+
+        Regression guard: ``tests/test_cursor_paint.py`` asserts this
+        helper calls ``self._cursor_blink.opacity_at(time.perf_counter())``.
+        """
+        return self._cursor_blink.opacity_at(time.perf_counter())
+
+    def _resolve_cursor_shape(self) -> tuple[str, int]:
+        """Resolve the current cursor shape + cell_percentage.
+
+        Reads from ``_cursor_mode`` which is populated by
+        ``mode_info_set``. Before that event arrives (very early
+        bootstrap), defaults match a plain block cursor: ``("block", 100)``.
+
+        ``cell_percentage`` meaning depends on shape:
+            - ``"vertical"``: bar width as a fraction of cell width.
+            - ``"horizontal"``: bar height as a fraction of cell height.
+            - ``"block"``: unused (always full cell).
+        """
+        shape = self._cursor_mode.get("cursor_shape", "block")
+        cell_pct = int(self._cursor_mode.get("cell_percentage", 100) or 100)
+        return shape, cell_pct
+
+    def _draw_cursor_shape(
+        self,
+        painter: QPainter,
+        grid: Grid,
+        shape: str,
+        cell_pct: int,
+        x: float,
+        y: float,
+        cw: float,
+        ch: float,
+        cur_row: int,
+        cur_col: int,
+    ) -> None:
+        """Dispatch the three cursor-shape branches via the pooled rect.
+
+        gotcha #10 discipline: every branch mutates ``self._cursor_rect``
+        via ``setRect(...)`` — allocating a fresh ``QRectF`` per paint
+        would reintroduce the render-thread SEGV class fixed in issue #1.
+
+        Shapes come from NeoVim's ``mode_info_set``:
+            - ``"vertical"``: leading-edge bar, width = cell_pct% of cw.
+              (insert mode's ``ver25``). No glyph overlay — underlying
+              grid paint already shows the cell's character.
+            - ``"horizontal"``: bottom-edge underline, height = cell_pct%
+              of ch. (cmdline/replace ``hor20``.)
+            - anything else → ``"block"``: reverse-video the full cell.
+        """
+        rect = self._cursor_rect
+        if shape == "vertical":
+            bar_w = max(1.0, cw * cell_pct / 100.0)
+            rect.setRect(x, y, bar_w, ch)
+            painter.fillRect(rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
+        elif shape == "horizontal":
+            bar_h = max(1.0, ch * cell_pct / 100.0)
+            rect.setRect(x, y + ch - bar_h, cw, bar_h)
+            painter.fillRect(rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
+        else:
+            cursor_cell = grid.cells[cur_row][cur_col]
+            rect.setRect(x, y, cw, ch)
+            painter.fillRect(rect, _rgb_to_qcolor(grid.default_fg, 0xD0D0D0))
+            painter.setPen(_rgb_to_qcolor(grid.default_bg, 0x1E1E1E))
+            painter.drawText(rect, _TEXT_ALIGN_FLAGS, cursor_cell.char)
 
     # --- Keyboard ------------------------------------------------------
 
