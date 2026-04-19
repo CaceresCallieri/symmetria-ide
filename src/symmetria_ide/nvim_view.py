@@ -1007,19 +1007,23 @@ class NvimView(QQuickPaintedItem):
     def _maybe_apply_scroll_delta(self) -> None:
         """Meat of _on_redraw_flushed — extracted so try/except can wrap it.
 
-        **Always snapshots the current viewport into the scrollback
-        center slot**, even when no scroll is pending. This is the
-        critical invariant: when a scroll *does* arrive, the rotation
-        needs the pre-scroll viewport to already be present in the
-        center slot so it can carry those rows into the outer slots
-        where they'll animate out of frame. Without this, the first
-        scroll starts with a blank scrollback and the outgoing rows
-        render as background gaps while they slide off.
+        Orchestrates three steps per flush:
 
-        Snapshot cost: one list-per-row shallow copy (~grid.rows ×
-        grid.cols cell refs). For a 120×30 grid that's ~3600 refs per
-        flush, measured at under 0.1ms. Cheap relative to the paint
-        itself.
+            1. If a scroll is pending: rotate scrollback, clamp the
+               spring (gotcha #11 `max_delta = slot_start`), and clear
+               the freshly-revealed rows on far jumps.
+            2. **Always** snapshot the current viewport into the center
+               slot — even when no scroll is pending. This is the
+               critical invariant: when a scroll *does* arrive, rotation
+               needs the pre-scroll viewport already present in the
+               center slot so those rows can ride into the outer slots
+               and animate out of frame. Without this, the first scroll
+               starts with a blank scrollback and outgoing rows render
+               as background gaps while they slide off.
+            3. Start the frame driver if the spring is now active.
+
+        Each step is its own helper so the gotcha #11 invariants can
+        be audited independently from the snapshot-race tolerance.
         """
         if self._backend is None:
             return
@@ -1029,54 +1033,76 @@ class NvimView(QQuickPaintedItem):
         self._ensure_scrollback_sized(grid.rows, grid.cols)
         if self._pending_scroll_delta != 0:
             delta = self._pending_scroll_delta
+            self._pending_scroll_delta = 0
             # Rotate the scrollback so the pre-scroll viewport (currently
             # in the center slot from the previous flush's snapshot)
             # moves to the outer slots where the animation will render
             # it sliding out. After rotation, the center slot still
-            # holds stale content — the snapshot below overwrites it
+            # holds stale content — step 2's snapshot overwrites it
             # with the post-scroll viewport for the animation target.
             self._rotate_scrollback(delta)
-            # max_delta is the animation's position cap in LINES. We can
-            # only paint with a displaced position as large as the number
-            # of rows of scrollback *on one side* of the center slot — if
-            # `|position|` exceeds `slot_start`, the paint loop reads
-            # `src = buf_start + dr` at indices past the buffer ends, the
-            # range guard skips those iterations, and the viewport shows
-            # a blank strip of `default_bg` at the leading edge. Using
-            # `scrollback_rows - grid.rows` (2x slot_start) allowed twice
-            # the displacement we can actually render — compound scrolls
-            # landed in that invalid range and showed a visible gap.
-            max_delta = self._scrollback_center_slot(grid.rows)
-            self._scroll_anim.shift(delta, max_delta)
-            self._pending_scroll_delta = 0
-            if self._scroll_anim.consume_far_jump_clear():
-                self._clear_scrollback_excluding_viewport(grid.rows)
-        # Always snapshot — whether or not a scroll happened this flush.
-        # Overwrite the pre-allocated destination row IN PLACE rather
-        # than allocating a new list per row. This keeps allocation
-        # pressure low (reusing lists instead of churning them), which
-        # matters a lot under Python 3.14's GC interacting with
-        # pynvim's greenlet-based RPC dispatch on the worker thread.
-        # GIL guarantees list item assignment is atomic, so this is
-        # safe vs. the worker thread's concurrent redraw batch.
+            self._clamp_scroll_spring(delta, grid.rows)
+        if not self._snapshot_viewport_into_center_slot(grid):
+            return
+        if self._scroll_anim.active:
+            self._maybe_start_frame_driver()
+
+    def _clamp_scroll_spring(self, delta: int, grid_rows: int) -> None:
+        """Shift the spring by ``delta`` lines, clamped to renderable headroom.
+
+        **gotcha #11 invariant: ``max_delta = slot_start``**, NOT
+        ``scrollback_rows - grid_rows``. We can only paint with a
+        displaced position as large as the scrollback rows on ONE side
+        of the center slot. If ``|position|`` exceeds ``slot_start``,
+        the paint loop reads ``src = buf_start + dr`` at indices past
+        the buffer ends, the range guard skips those iterations, and
+        the viewport shows a blank strip of ``default_bg`` at the
+        leading edge. The old (wrong) value ``scrollback_rows - grid_rows``
+        is 2× slot_start — compound scrolls landed in that invalid
+        range and showed a visible gap. See
+        ``tests/test_scroll_animation.py::test_compound_half_page_scroll_stays_within_slot_start_headroom``
+        for the regression guard.
+
+        On far jumps, the spring sets ``_far_jump_clear_pending``; we
+        consume it here and zero the revealed scrollback rows so no
+        stale content leaks into the short decorative flourish.
+        """
+        max_delta = self._scrollback_center_slot(grid_rows)
+        self._scroll_anim.shift(delta, max_delta)
+        if self._scroll_anim.consume_far_jump_clear():
+            self._clear_scrollback_excluding_viewport(grid_rows)
+
+    def _snapshot_viewport_into_center_slot(self, grid: Grid) -> bool:
+        """Copy the live viewport into the scrollback center slot.
+
+        Called every flush — the snapshot is the animation's *target*
+        for the next paint. Returns False on an IndexError race (worker
+        thread reassigned ``grid.cells`` mid-snapshot during a resize);
+        the caller bails and the next flush resyncs.
+
+        **Pool discipline (gotcha #10):** overwrite the pre-allocated
+        destination row IN PLACE rather than allocating a new list per
+        row. Churning lists raises allocation pressure on Python 3.14's
+        GC, which interacts badly with pynvim's greenlet-based RPC on
+        the worker thread (render-thread SEGV class of bug). GIL
+        guarantees list-item assignment is atomic, so in-place writes
+        are safe vs. the worker's concurrent redraw batch.
+        """
         slot_start = self._scrollback_center_slot(grid.rows)
         for r in range(grid.rows):
             try:
                 src_row = grid.cells[r]
                 dst_row = self._scrollback[slot_start + r]
             except IndexError:
-                # Race: worker thread reassigned grid.cells mid-snapshot
-                # (resize). Bail — the next flush will resync.
-                return
+                return False
             # Length mismatch tolerated: scrollback rows are pre-sized
             # to whatever cols the view was sized at; grid.cols may
             # differ transiently across a resize. Cap at the smaller
-            # end and the paint path handles short rows.
+            # end; the paint path handles short rows.
             limit = min(len(src_row), len(dst_row))
             for c in range(limit):
                 dst_row[c] = src_row[c]
-        if self._scroll_anim.active:
-            self._maybe_start_frame_driver()
+        return True
 
     def _reset_animation_state_after_error(self) -> None:
         """Snap to a clean state after an exception in the scroll path.
