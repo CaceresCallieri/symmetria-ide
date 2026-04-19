@@ -223,21 +223,49 @@ class TestScanCapFallback:
     """
 
     def test_small_range_below_cap_uses_real_computation(self, nvim) -> None:
-        """At the boundary − 1, the scan runs normally."""
+        """Well below the 500-line cap, the scan runs normally."""
         nvim.current.buffer[:] = ["line"] * 400
         # 400-line range: 400 short lines × 1 row each = 400.
         assert _display_rows(nvim, 1, 401, 80) == 400
 
     def test_range_above_cap_returns_logical_delta(self, nvim) -> None:
-        """Above the cap we trust the caller to accept a coarse delta."""
-        # 600-line buffer, all short — real computation would return 600.
-        nvim.current.buffer[:] = ["line"] * 600
-        # But a range of 600 > 500 cap should short-circuit to 600
-        # (the logical-line count, equal to rows here because wrap=off,
-        # coincidentally matching; the contract is "returns |hi-lo|").
+        """Above the cap the helper falls back to the logical delta.
+
+        The buffer contains lines that are 240 chars each — 3 display rows
+        per line — so the scan branch would return 600 × 3 = 1800. The
+        fallback branch returns the logical delta of 600. Using long lines
+        makes the two branches return distinguishably different values, so
+        the test actually proves the fallback was taken rather than
+        coincidentally matching a scan result on short lines.
+        """
+        nvim.current.buffer[:] = ["x" * 240] * 600
+        # 600 long lines → hi - lo = 600 > 500 cap → fallback → returns 600.
+        # If the cap were raised above 600, the scan would run and return
+        # ~1800 (3 display rows × 600 lines), causing this assertion to fail.
         assert _display_rows(nvim, 1, 601, 80) == 600
+
+    def test_range_at_exact_cap_uses_scan(self, nvim) -> None:
+        """At exactly MAX_SCAN_LINES (500), the scan still runs (> not >=).
+
+        hi - lo == 500 is NOT > 500, so the scan branch fires. With long
+        lines the scan returns ~1500 (3 × 500) while the fallback would
+        return 500 — the distinguishable values confirm which branch ran.
+        """
+        nvim.current.buffer[:] = ["x" * 240] * 500
+        # hi - lo = 500, which is NOT > 500, so scan runs → 3 × 500 = 1500.
+        assert _display_rows(nvim, 1, 501, 80) == 1500
+
+    def test_range_one_over_cap_triggers_fallback(self, nvim) -> None:
+        """At MAX_SCAN_LINES + 1 (501), the fallback fires for the first time.
+
+        hi - lo == 501 IS > 500, so fallback activates and returns the
+        logical delta (501). A scan on 501 long lines would return ~1503,
+        so the 501 assertion proves the fallback was reached.
+        """
+        nvim.current.buffer[:] = ["x" * 240] * 501
+        assert _display_rows(nvim, 1, 502, 80) == 501
 
     def test_cap_preserves_sign_on_reverse(self, nvim) -> None:
         """Fallback still negates for reverse ranges."""
-        nvim.current.buffer[:] = ["line"] * 600
+        nvim.current.buffer[:] = ["x" * 240] * 600
         assert _display_rows(nvim, 601, 1, 80) == -600
