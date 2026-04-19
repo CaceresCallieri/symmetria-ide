@@ -36,6 +36,10 @@ vim.opt.laststatus = 0
 vim.opt.showmode = false
 
 local function emit_capsule(id, label, value)
+  -- pcall intentional: rpcnotify fails if the Python client is not yet
+  -- connected or has disconnected. Swallowing is correct here; dropped
+  -- capsules are recovered by the explicit push_state() re-request
+  -- Python makes after subscribing (CLAUDE.md gotcha #2).
   pcall(vim.rpcnotify, 0, "capsule", {
     id = id,
     label = label,
@@ -249,15 +253,30 @@ local last_buf = nil
 -- extmarks, and approximates Unicode east-asian widths via
 -- `strdisplaywidth`. It is accurate to within ±1 row per wrapped line
 -- in practice, which is well inside the spring's error tolerance.
-local function display_rows_between(lnum_from, lnum_to, winwidth)
-  if lnum_from == lnum_to or winwidth <= 0 then
+local function display_rows_between(lnum_from, lnum_to, text_width)
+  -- text_width is the actual wrappable column count: vim.fn.winwidth(0)
+  -- minus non-text decorations (number column, sign column, fold column).
+  -- WinScrolled only fires for visible, rendered windows so text_width < 1
+  -- is a startup-race defense that should never trigger in practice.
+  if lnum_from == lnum_to or text_width < 1 then
     return 0
   end
+  -- `sign` tracks scroll direction; `rows` accumulates the absolute
+  -- display-row count over [lo, hi). Direction is restored at return.
   local sign = 1
   local lo, hi = lnum_from, lnum_to
   if lnum_to < lnum_from then
     sign = -1
     lo, hi = lnum_to, lnum_from
+  end
+  -- Cap the scan at MAX_SCAN_LINES to bound worst-case cost for
+  -- pathological gg/G jumps across thousands of lines. Beyond the cap
+  -- we fall back to the logical delta (the pre-fix behavior), which
+  -- slightly undershoots the animation but avoids blocking the event
+  -- loop for hundreds of ms on huge buffers.
+  local MAX_SCAN_LINES = 500
+  if hi - lo > MAX_SCAN_LINES then
+    return (hi - lo) * sign
   end
   local rows = 0
   local ln = lo
@@ -271,11 +290,10 @@ local function display_rows_between(lnum_from, lnum_to, winwidth)
     else
       local line = vim.fn.getline(ln)
       local disp = vim.fn.strdisplaywidth(line)
-      if disp == 0 then
-        rows = rows + 1
-      else
-        rows = rows + math.max(1, math.ceil(disp / winwidth))
-      end
+      -- math.max(1, ...) ensures blank lines (disp == 0) count as 1 row,
+      -- which is the same as `if disp == 0 then rows + 1` but avoids the
+      -- special case: ceil(0 / text_width) = 0 and max(1, 0) = 1.
+      rows = rows + math.max(1, math.ceil(disp / text_width))
       ln = ln + 1
     end
   end
@@ -294,19 +312,28 @@ vim.api.nvim_create_autocmd("WinScrolled", {
         -- scrollback/spring expect display rows (that is what the grid
         -- actually shifts). Without wrap, the two are identical, and
         -- without folds, `display_rows_between` reduces to `|delta_logical|`.
-        local wrap = vim.wo.wrap
-        local winwidth = vim.fn.winwidth(0)
         local delta_display
-        if wrap then
-          delta_display = display_rows_between(last_topline, topline, winwidth)
+        if vim.wo.wrap then
+          -- `getwininfo[1].textoff` is the total width of non-text columns
+          -- (line numbers, sign column, fold column). Subtracting it gives
+          -- the column count nvim actually wraps at — using raw winwidth(0)
+          -- inflates the denominator and systematically underestimates the
+          -- display-row count on buffers with number/relativenumber enabled.
+          local info = vim.fn.getwininfo(vim.fn.win_getid())
+          local text_width = vim.fn.winwidth(0) - (info[1] and info[1].textoff or 0)
+          delta_display = display_rows_between(last_topline, topline, text_width)
         else
+          -- wrap=off: every logical line is exactly one display row.
+          -- delta_display == delta_logical, which is already ~= 0 per outer guard.
           delta_display = delta_logical
         end
-        if delta_display ~= 0 then
-          pcall(vim.rpcnotify, 0, "scroll", { delta = delta_display })
-        end
+        -- pcall intentional: rpcnotify fails if Python client is disconnected.
+        pcall(vim.rpcnotify, 0, "scroll", { delta = delta_display })
       end
     end
+    -- Unconditional update: keeps the baseline in sync for the next event.
+    -- The BufEnter/WinEnter autocmd below primes last_buf/last_topline before
+    -- the first WinScrolled fires; this path keeps them current thereafter.
     last_buf = buf
     last_topline = topline
   end,
@@ -362,6 +389,10 @@ vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
 local last_items = {}
 
 local function emit_completions()
+  -- All rpcnotify calls below use pcall intentionally: they fail if the
+  -- Python client is not yet connected or has disconnected, and silently
+  -- dropping a completion update is correct (the cmdline will re-emit on
+  -- the next keystroke).
   local line = vim.fn.getcmdline()
 
   -- Skip completions when the cmdline is empty (e.g. just opened with `:`)
