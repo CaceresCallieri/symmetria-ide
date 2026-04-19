@@ -92,7 +92,7 @@ class TestPooledRunCharsInConstruction:
 
 
 class TestPaintHotPathHasNoFreshQRectF:
-    """paint() / _paint_row / _flush_run / _paint_cursor must NOT allocate QRectF.
+    """paint() / _paint_visible_rows / _paint_row / _flush_run / _paint_cursor must NOT allocate QRectF.
 
     Grep-style structural check — if any of these functions starts
     containing `QRectF(` again, a future refactor reintroduced the
@@ -144,6 +144,22 @@ class TestPaintHotPathHasNoFreshQRectF:
             "_paint_cursor must not construct QRectF(...). All three shape "
             "branches (vertical / horizontal / block) must mutate "
             "self._cursor_rect via setRect (issue #1)."
+        )
+
+    def test_paint_visible_rows_does_not_allocate_qrectf(self):
+        # _paint_visible_rows is the extraction introduced in issue #6. It owns
+        # the self._clip_rect.setRect() call (exact-grid clip invariant from
+        # gotcha #11). This guard ensures a future refactor never replaces that
+        # setRect call with a fresh QRectF(...) allocation — which would
+        # reintroduce the render-thread SEGV class from gotcha #10.
+        from symmetria_ide.nvim_view import NvimView
+
+        src = inspect.getsource(NvimView._paint_visible_rows)
+        assert "QRectF(" not in src, (
+            "_paint_visible_rows must not construct QRectF(...). "
+            "The exact-grid clip (gotcha #11) must use self._clip_rect.setRect() "
+            "— not a fresh allocation — to avoid the render-thread GC race "
+            "(gotcha #10 / issue #1)."
         )
 
 

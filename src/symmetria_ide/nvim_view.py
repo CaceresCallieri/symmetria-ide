@@ -1364,10 +1364,6 @@ class NvimView(QQuickPaintedItem):
           hazard on the Qt render thread.
         """
         painter.save()
-        # Pooled clip rect — setRect mutates the wrapper in place
-        # instead of allocating a fresh QRectF every frame (gotcha #10
-        # / issue #1). Dimensions are EXACT grid, not boundingRect(),
-        # per the gotcha #11 exact-grid clip invariant documented above.
         self._clip_rect.setRect(0.0, 0.0, grid.cols * cw, grid.rows * ch)
         painter.setClipRect(self._clip_rect)
         try:
