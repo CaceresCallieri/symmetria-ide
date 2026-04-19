@@ -1326,24 +1326,48 @@ class NvimView(QQuickPaintedItem):
             self._paint_cursor(painter, grid, cw, ch)
             return
 
-        # All other paints go through the scrollback. Even when not
-        # animating (pos=0), this reads from the scrollback center slot
-        # which was snapshotted at the last flush. Reading grid.cells
-        # here would expose a race: the worker thread mutates grid.cells
-        # between viewport_scrolled and redraw_flushed, and a paint at
-        # that moment would render the already-mutated NEW viewport
-        # without any animation, producing a single-frame snap that
-        # looks like "content disappears before leaving the viewport."
+        self._paint_visible_rows(painter, grid, cw, ch, default_fg, default_bg)
+        # Cursor pinned to cur_row * ch regardless of animation state.
+        # Read glyph from grid.cells (truth source).
+        self._paint_cursor(painter, grid, cw, ch)
+
+    def _paint_visible_rows(
+        self,
+        painter: QPainter,
+        grid: Grid,
+        cw: float,
+        ch: float,
+        default_fg: int,
+        default_bg: int,
+    ) -> None:
+        """Animated viewport paint through the scrollback center slot.
+
+        Every non-bootstrap paint routes through here. Even when not
+        animating (``scroll_anim.position == 0``) we read from the
+        scrollback slot rather than ``grid.cells``: the worker thread
+        mutates ``grid.cells`` between ``viewport_scrolled`` and
+        ``redraw_flushed``, so a paint during that window would render
+        the already-mutated NEW viewport with no animation — producing
+        a single-frame snap that looks like "content disappears before
+        leaving the viewport."
+
+        Gotcha #11 invariants enforced here (both defense-in-depth):
+
+        - **Exact-grid clip** (NOT ``boundingRect()``). QML float sizing
+          can overshoot ``grid.rows * ch`` by a fraction of a pixel,
+          letting a full row of stale scrollback content leak through
+          at the bottom edge. Tight clipping complements the
+          residual-gated trailing-row guard in
+          ``_paint_rows_from_scrollback``.
+        - **Pooled ``_clip_rect``** mutated via ``setRect``. Allocating
+          a fresh ``QRectF`` per frame is a gotcha #10 / issue #1
+          hazard on the Qt render thread.
+        """
         painter.save()
-        # Clip to EXACT grid dimensions, not boundingRect(). QML float
-        # sizing can make the widget's actual painted area marginally
-        # larger than `grid.rows * ch`, and boundingRect() reflects that
-        # — enough slack for a full row of stale scrollback content to
-        # leak through at the bottom edge. Tight clipping is defense in
-        # depth on top of the row-iteration guard in
-        # `_paint_rows_from_scrollback`.
-        # Pooled clip rect — setRect mutates the wrapper in place instead
-        # of allocating a fresh QRectF every frame (gotcha #10 / issue #1).
+        # Pooled clip rect — setRect mutates the wrapper in place
+        # instead of allocating a fresh QRectF every frame (gotcha #10
+        # / issue #1). Dimensions are EXACT grid, not boundingRect(),
+        # per the gotcha #11 exact-grid clip invariant documented above.
         self._clip_rect.setRect(0.0, 0.0, grid.cols * cw, grid.rows * ch)
         painter.setClipRect(self._clip_rect)
         try:
@@ -1373,10 +1397,6 @@ class NvimView(QQuickPaintedItem):
             )
         finally:
             painter.restore()
-
-        # Cursor pinned to cur_row * ch regardless of animation state.
-        # Read glyph from grid.cells (truth source).
-        self._paint_cursor(painter, grid, cw, ch)
 
     def _paint_rows_from_grid(
         self,
