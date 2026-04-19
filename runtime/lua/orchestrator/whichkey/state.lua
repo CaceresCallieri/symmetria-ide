@@ -67,6 +67,10 @@ local TRIGGER_DESC = Constants.TRIGGER_DESC
 ---@param key string
 local function install_menu_key(mode, key, handler)
   local prev = vim.fn.maparg(key, mode, false, true)
+  -- Triggers at top-level prefixes are reconciled by `triggers.install()`,
+  -- not by save/restore here — we can always recreate them, so don't treat
+  -- them as "prior keymaps to restore". Everything else (flash.nvim's `s`,
+  -- user leap mappings, etc.) is preserved via had_prev / mapset.
   local is_trigger = type(prev) == "table"
     and type(prev.desc) == "string"
     and prev.desc:find(TRIGGER_DESC, 1, true) ~= nil

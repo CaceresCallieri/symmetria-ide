@@ -1,8 +1,11 @@
--- Auto-installs nvim keymaps that fire `state.start()` whenever the
--- user presses a top-level prefix (e.g. `<leader>`). Once inside the
--- state machine, keystrokes are read via `vim.fn.getcharstr()` rather
--- than keymap dispatch, so we only need triggers at the ROOT of each
--- prefix chain — not at every intermediate node.
+-- Auto-installs buffer-local nvim keymaps that fire `state.start()`
+-- whenever the user presses a top-level prefix (e.g. `<leader>`).
+-- Triggers are buffer-local so that `nowait = true` is authoritative
+-- (see gotcha #20 in CLAUDE.md — global `nowait` is silently ignored
+-- when a longer mapping exists, causing 500–800 ms chord latency).
+-- We only need triggers at the ROOT of each prefix chain; the state
+-- machine drives all subsequent transitions via its own per-child
+-- ephemeral keymaps (see state.lua — no `getcharstr` loop is used).
 --
 -- ### Coexistence with user mappings
 --
@@ -13,13 +16,14 @@
 -- "suppressible" — those are just which-key-style hints and do no
 -- real work, so we safely replace them with our trigger.
 --
--- ### Reconciliation on trie rebuild
+-- ### Per-buffer reconciliation
 --
 -- After each trie rebuild (BufEnter, LspAttach, LspDetach), we diff
--- the wanted set of triggers against the installed set and
--- add/remove accordingly. Triggers are identified by a "mode:keys"
--- id and tagged with `desc = TRIGGER_DESC` so we can recognize our
--- own work.
+-- the wanted set of triggers against the installed set FOR THE CURRENT
+-- BUFFER and add/remove accordingly. Triggers are identified by a
+-- `"bufnr:mode:keys"` cache key and tagged with `desc = TRIGGER_DESC`
+-- so we can recognize our own work. Stale entries for unloaded buffers
+-- age out naturally — buffer-local keymaps die with their buffer.
 
 local Tree = require("orchestrator.whichkey.tree")
 local Constants = require("orchestrator.whichkey.constants")
@@ -28,7 +32,7 @@ local M = {}
 
 local TRIGGER_DESC = Constants.TRIGGER_DESC
 
----@type table<string, { mode: string, keys: string }>
+---@type table<string, { bufnr: integer, mode: string, keys: string }>
 M._installed = {}
 
 ---@param mode string
