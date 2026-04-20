@@ -11,6 +11,7 @@ dimensions to `NvimBackend.resize`, so NeoVim itself reflows to match.
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import time
@@ -800,6 +801,7 @@ class NvimView(QQuickPaintedItem):
     # --- Font setup ----------------------------------------------------
 
     @staticmethod
+    @functools.cache
     def _default_font() -> QFont:
         """Pick the first installed monospace font we recognize.
 
@@ -829,6 +831,12 @@ class NvimView(QQuickPaintedItem):
              the primary actually lacks. Non-mono symbol font may
              render icons marginally wider than a cell, which is an
              aesthetic issue but does not break grid layout.
+
+        Requires a live ``QGuiApplication`` — ``QFontDatabase.families()``
+        is undefined without one. In production this is guaranteed (called
+        from ``NvimView.__init__`` and ``_build_engine``, both after
+        ``QGuiApplication(sys.argv)``). In tests, ensure the session-scoped
+        ``qt_app`` fixture (see ``tests/conftest.py``) runs first.
         """
         preferred = [
             # Patched variants first — these are self-sufficient and
@@ -861,10 +869,9 @@ class NvimView(QQuickPaintedItem):
         #      so fontconfig's system-wide emoji fallback chain will NOT
         #      fire even though NotoColorEmoji is installed. Include it
         #      explicitly.
-        fallbacks: list[str] = []
-        for candidate in ("Symbols Nerd Font", "Noto Color Emoji"):
-            if candidate in families:
-                fallbacks.append(candidate)
+        fallbacks = [
+            c for c in ("Symbols Nerd Font", "Noto Color Emoji") if c in families
+        ]
 
         for name in preferred:
             if name in families:
@@ -879,9 +886,11 @@ class NvimView(QQuickPaintedItem):
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         font.setPointSize(DEFAULT_FONT_POINT_SIZE)
         if fallbacks:
-            # `systemFont` returns a font whose first family is whatever
-            # fontconfig picked (e.g. "DejaVu Sans Mono"). Preserve it
-            # and append our fallback cascade.
+            # `systemFont` returns a font whose first family is whatever fontconfig
+            # picked (e.g. "DejaVu Sans Mono"). Preserve it and append our fallback
+            # cascade. Note: `font.families()` returns [] for a freshly-constructed
+            # systemFont on some Qt builds — fall back to `font.family()` so the
+            # list is never seeded with an empty string.
             current_families = font.families() or [font.family()]
             font.setFamilies([*current_families, *fallbacks])
         return font

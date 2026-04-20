@@ -307,9 +307,9 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     (missing root objects). Caller is responsible for mapping `None`
     onto a non-zero exit code.
 
-    The nine context properties here are the stable QML surface between
+    The ten context properties here are the stable QML surface between
     Python and QML — keeping them in one place makes it obvious what
-    QML sees and makes adding a tenth (or dropping one) a single-line
+    QML sees and makes adding a new one (or removing one) a single-line
     change.
     """
     engine = QQmlApplicationEngine()
@@ -335,8 +335,17 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # we can't do per-glyph cascade from QML. Passing the resolved
     # family name as a context property prevents drift between grid
     # and overlays, which is the main risk of each QML file having
-    # its own hardcoded font string.
-    ctx.setContextProperty("editorFontFamily", NvimView._default_font().family())
+    # its own hardcoded font string. Full pitfall notes are in
+    # `qml/CommandLine.qml` (the canonical font comment).
+    #
+    # Use .families()[0] rather than .family(): when `setFamilies` is
+    # called with a multi-family list, families()[0] is always the
+    # primary resolved entry. .family() is equivalent for the preferred
+    # path but may differ in edge cases (e.g. systemFont fallback on
+    # some Qt builds where family() returns "").
+    _resolved_font = NvimView._default_font()
+    _primary_family = (_resolved_font.families() or [_resolved_font.family()])[0]
+    ctx.setContextProperty("editorFontFamily", _primary_family)
 
     qml_root = QML_DIR / "Main.qml"
     engine.load(QUrl.fromLocalFile(str(qml_root)))
