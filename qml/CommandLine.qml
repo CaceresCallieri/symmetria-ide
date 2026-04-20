@@ -35,7 +35,7 @@ Item {
     property color firstCharColor: "#c8a37a"
     property color textColor: "#e8e8e8"
     property color cursorColor: "#e8e8e8"
-    property color popupBgColor: "#201F1F"
+    property color popupBgColor: "#201F1F"  // intentionally equals bgColor — popup uses the same matte base as the cmdline strip
     property color popupBorderColor: "#1fffffff"  // white @ 12% alpha
     // Selected popup row — matte at intensity 0.7 ("strong") on the
     // same m3surfaceContainerHigh base, so the lift over `popupBgColor`

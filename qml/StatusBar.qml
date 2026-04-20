@@ -69,7 +69,7 @@ Rectangle {
                     case "REPLACE": return "#D2602D"
                     case "COMMAND": return "#6D94E9"
                     case "TERMINAL": return "#5BDFD8"
-                    default: return "#C28B12"
+                    default: return "#C28B12"   // NORMAL + any unrecognised mode (SELECT, S-LINE, etc.)
                 }
             }
             Text {

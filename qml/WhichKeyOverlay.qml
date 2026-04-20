@@ -2,7 +2,7 @@
 //
 // Bottom-anchored panel (above the StatusBar, below the editor) that
 // mirrors the user's reference layout: a grid of `<key> → [icon] desc`
-// entries arranged into columns, with an ESC/⏎ footer. Data is entirely
+// entries arranged into columns, with an ESC/<BS> footer. Data is entirely
 // driven by `whichKeyModel` + `whichKeyState`; the emitter lives in
 // `runtime/lua/orchestrator/whichkey/init.lua` and the model/state
 // wiring is in `src/symmetria_ide/app.py`.
@@ -24,6 +24,7 @@ Rectangle {
     // --- Palette — kept in lockstep with CommandLine.qml / StatusBar.qml
     // so overlay chrome stays visually consistent across components.
     // `#201F1F` = Symmetria Shell mattePill(m3surfaceContainerHigh, 0.3).
+    // Keep in sync with CommandLine.qml's `bgColor` and StatusBar.qml's `color`.
     color: "#201F1F"
     border.color: "#1fffffff"
     border.width: 1
@@ -146,7 +147,7 @@ Rectangle {
         }
     }
 
-    // --- Footer: ESC close / ⏎ back hints.
+    // --- Footer: ESC close / <BS> back hints.
     Row {
         id: footer
         anchors.horizontalCenter: root.horizontalCenter
@@ -182,7 +183,7 @@ Rectangle {
             spacing: 5
             anchors.verticalCenter: footer.verticalCenter
             Text {
-                text: "⏎"
+                text: "⌫"
                 color: root.keyColor
                 font.family: root.monoFont
                 font.pixelSize: root.fontSize - 1
