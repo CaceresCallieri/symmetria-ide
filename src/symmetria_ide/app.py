@@ -327,6 +327,17 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     ctx.setContextProperty("whichKeyState", controller.whichkey_state)
     ctx.setContextProperty("whichKeyModel", controller.whichkey_model)
 
+    # Resolve the editor font ONCE in Python so every QML overlay binds
+    # to the same family the grid (`NvimView._default_font`) chose.
+    # QML's `font.family` is a single QString — it does NOT parse
+    # comma-separated strings as a fallback list, and `font.families`
+    # (plural) is not exposed on QML's font value type in Qt 6.11 — so
+    # we can't do per-glyph cascade from QML. Passing the resolved
+    # family name as a context property prevents drift between grid
+    # and overlays, which is the main risk of each QML file having
+    # its own hardcoded font string.
+    ctx.setContextProperty("editorFontFamily", NvimView._default_font().family())
+
     qml_root = QML_DIR / "Main.qml"
     engine.load(QUrl.fromLocalFile(str(qml_root)))
     if not engine.rootObjects():

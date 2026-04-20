@@ -33,7 +33,10 @@ Rectangle {
     property color leafColor: "#e8e8e8"
     property color groupColor: "#e8ab6f"   // amber — matches arrow accent
     property color dimColor: "#7a7a7a"
-    property string monoFont: "Iosevka, JetBrains Mono, monospace"
+    // Font family — see CommandLine.qml for rationale. Bound to
+    // `editorFontFamily` (Python context property) so grid + overlays
+    // all pick the same family.
+    property string monoFont: editorFontFamily
     property int fontSize: 13
     property int rowHeight: 22
     property int desiredColWidth: 280

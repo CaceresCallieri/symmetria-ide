@@ -39,7 +39,21 @@ Item {
     property color popupSelBgColor: "#3a3335"     // slightly lifted matte
     property color popupSelFgColor: "#f5f5f5"
     property color popupFgColor: "#b0b0b0"
-    property string monoFont: "Iosevka, JetBrains Mono, monospace"
+    // Font family — bound to the context property `editorFontFamily`
+    // exposed from Python (`AppController` → `app.py`), which runs the
+    // actual `QFontDatabase` check and picks the same primary family
+    // the grid (`NvimView._default_font`) chose. Keeping one resolver
+    // in Python prevents drift between grid and overlay glyph choice.
+    //
+    // Pitfall: QML's `font.family` is a single QString — a comma-
+    // separated string is NOT parsed as a fallback list (would be
+    // treated as one literal family name). `font.families` (plural)
+    // does NOT exist on QML's font value type in Qt 6.11 despite
+    // being on `QFont` at the C++ level. So per-glyph cascade needs
+    // a different mechanism (theme provider binding whole QFont) —
+    // filed as a follow-up; for now the single resolved family gives
+    // us correct nerd-font rendering on this machine.
+    property string monoFont: editorFontFamily
     property int fontSize: 14
     property int rowHeight: 24
     property int maxPopupRows: 10

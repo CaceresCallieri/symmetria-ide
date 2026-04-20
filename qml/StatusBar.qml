@@ -30,7 +30,10 @@ Rectangle {
     property color colorNormal: "#b0b0b0"
     property color colorStrong: "#e0e0e0"
     property color colorAccent: "#c8a37a"
-    property string monoFont: "Iosevka, JetBrains Mono, monospace"
+    // Font family — see CommandLine.qml for rationale. Bound to
+    // `editorFontFamily` (Python context property) so grid + overlays
+    // all pick the same family.
+    property string monoFont: editorFontFamily
 
     RowLayout {
         anchors.fill: parent

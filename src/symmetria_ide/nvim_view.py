@@ -806,8 +806,36 @@ class NvimView(QQuickPaintedItem):
         Falls back to whatever Qt resolves as the system fixed-pitch
         font. Keeping this deliberately conservative — Phase 0 does not
         expose font configuration to the user yet.
+
+        ### Nerd Font glyph fallback
+
+        Plugins like fff.nvim, which-key, gitsigns, dap-ui etc. emit
+        Private-Use-Area codepoints (U+E000–U+F8FF and assorted icon
+        blocks up to U+F0000+) for file / status / category icons. A
+        plain `QFont(name)` only renders glyphs the FAMILY provides;
+        Qt's `StyleHint.Monospace` is a *substitution hint* for
+        families that can't be found at all, NOT a per-glyph fallback.
+        Terminal nvim dodges this because terminals configure a multi-
+        family cascade — we need to do the same explicitly.
+
+        Strategy:
+          1. Prefer Nerd-Font-patched monospace variants outright so
+             the primary family already carries icon glyphs.
+          2. As defense in depth (and for users with only plain
+             Iosevka / JetBrains Mono installed), append
+             `Symbols Nerd Font` via `setFamilies([primary, fallback])`
+             so Qt does per-glyph cascade. Harmless when the primary
+             is already patched — cascade only kicks in for glyphs
+             the primary actually lacks. Non-mono symbol font may
+             render icons marginally wider than a cell, which is an
+             aesthetic issue but does not break grid layout.
         """
         preferred = [
+            # Patched variants first — these are self-sufficient and
+            # what the user's Ghostty config likely also resolves to.
+            "JetBrainsMono Nerd Font Mono",
+            "CaskaydiaCove Nerd Font Mono",
+            # Plain families below — glyph fallback kicks in for icons.
             "Iosevka",
             "JetBrains Mono",
             "Fira Code",
@@ -816,15 +844,46 @@ class NvimView(QQuickPaintedItem):
             "Hack",
             "DejaVu Sans Mono",
         ]
+        families = QFontDatabase.families()
+        # Ordered cascade of fallback families. Each is appended only if
+        # installed on the system so Qt doesn't waste cycles probing a
+        # missing family on every glyph miss.
+        #   1. Symbols Nerd Font — PUA icon coverage for glyphs the
+        #      patched-mono primary somehow lacks. Most common case: the
+        #      -Mono variant drops some wider material-design icons that
+        #      only exist in the non-mono "JetBrainsMono Nerd Font" or
+        #      the standalone "Symbols Nerd Font".
+        #   2. Noto Color Emoji — emoji codepoints like U+1FABF (goose
+        #      used by fff.nvim as its prompt). Programming fonts don't
+        #      include emoji; without this entry emoji render as tofu.
+        #      Qt's `setFamilies` is ordered-and-exclusive — once set it
+        #      walks ONLY this list (plus minimal style-hint fallback),
+        #      so fontconfig's system-wide emoji fallback chain will NOT
+        #      fire even though NotoColorEmoji is installed. Include it
+        #      explicitly.
+        fallbacks: list[str] = []
+        for candidate in ("Symbols Nerd Font", "Noto Color Emoji"):
+            if candidate in families:
+                fallbacks.append(candidate)
+
         for name in preferred:
-            if name in QFontDatabase.families():
+            if name in families:
                 font = QFont(name)
                 font.setPointSize(DEFAULT_FONT_POINT_SIZE)
                 font.setStyleHint(QFont.StyleHint.Monospace)
                 font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+                if fallbacks:
+                    font.setFamilies([name, *fallbacks])
                 return font
+
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         font.setPointSize(DEFAULT_FONT_POINT_SIZE)
+        if fallbacks:
+            # `systemFont` returns a font whose first family is whatever
+            # fontconfig picked (e.g. "DejaVu Sans Mono"). Preserve it
+            # and append our fallback cascade.
+            current_families = font.families() or [font.family()]
+            font.setFamilies([*current_families, *fallbacks])
         return font
 
     # --- QML-visible properties ----------------------------------------
