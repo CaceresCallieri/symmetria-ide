@@ -23,7 +23,8 @@ Rectangle {
 
     // --- Palette — kept in lockstep with CommandLine.qml / StatusBar.qml
     // so overlay chrome stays visually consistent across components.
-    color: "#252323"
+    // `#201F1F` = Symmetria Shell mattePill(m3surfaceContainerHigh, 0.3).
+    color: "#201F1F"
     border.color: "#1fffffff"
     border.width: 1
     radius: 6

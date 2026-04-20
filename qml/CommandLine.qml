@@ -24,19 +24,23 @@ Item {
 
     // Palette — matches Symmetria Shell matte-pill chrome (derived from
     // `~/.config/quickshell/symmetria/services/Colours.qml` mattePill()
-    // at intensity 0.5). The cmdline and popup are overlays *on top of*
-    // the transparent editor; using the same opaque matte as the
-    // StatusBar keeps UI chrome visually coherent and readable
+    // at intensity 0.3 = Colours.glass.subtle, the canonical value used
+    // by the shell's bar pills). The cmdline and popup are overlays *on
+    // top of* the transparent editor; using the same opaque matte as
+    // the StatusBar keeps UI chrome visually coherent and readable
     // regardless of the wallpaper behind. Keep in sync with
-    // StatusBar.qml's `color`.
-    property color bgColor: "#252323"
+    // StatusBar.qml's `color` and WhichKeyOverlay.qml's `color`.
+    property color bgColor: "#201F1F"
     property color borderColor: "#1fffffff"       // white @ 12% alpha
     property color firstCharColor: "#c8a37a"
     property color textColor: "#e8e8e8"
     property color cursorColor: "#e8e8e8"
-    property color popupBgColor: "#252323"
+    property color popupBgColor: "#201F1F"
     property color popupBorderColor: "#1fffffff"  // white @ 12% alpha
-    property color popupSelBgColor: "#3a3335"     // slightly lifted matte
+    // Selected popup row — matte at intensity 0.7 ("strong") on the
+    // same m3surfaceContainerHigh base, so the lift over `popupBgColor`
+    // (subtle=0.3) stays proportionate to the shell's pill hierarchy.
+    property color popupSelBgColor: "#282728"
     property color popupSelFgColor: "#f5f5f5"
     property color popupFgColor: "#b0b0b0"
     // Font family — bound to the context property `editorFontFamily`
