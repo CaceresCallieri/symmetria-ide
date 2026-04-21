@@ -1,0 +1,2 @@
+- [Notification system is Symmetria Shell, not swaync](notification_system.md) — do not invoke swaync-client or makoctl
+- [Dev launches target workspace 6](dev_workspace.md) — open Symmetria IDE on Hyprland workspace 6 during iteration
