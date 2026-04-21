@@ -1,0 +1,143 @@
+// Symmetria IDE design tokens — single source of truth for chrome
+// typography, palette, spacing, and sizing. Every chrome component
+// (StatusBar, CommandLine, WhichKeyOverlay, and future panes like the
+// agent pane and file picker) binds against this singleton so the
+// visual language stays coherent without cross-file literal drift.
+//
+// Resolution: `pragma Singleton` + `qmldir` sibling (`qml/design/qmldir`)
+// registers this as the module's single Theme instance. Siblings import
+// it via `import "design"` — Qt auto-discovers the qmldir inside that
+// directory relative to the importing file's location.
+//
+// Font cascade note: `family` binds to the `editorFontFamily` context
+// property exposed from Python (`app.py::_build_engine`). Python runs
+// the actual `QFontDatabase` cascade via `NvimView._default_font()` and
+// exposes the primary resolved family as a single QString — QML's
+// `font.family` is single-valued, and `font.families` (plural) is not
+// on the QML font value type in Qt 6.11 (see CLAUDE.md gotcha #23).
+// Binding Theme.font.family means every chrome component picks up the
+// grid's resolved primary family without drift.
+//
+// Color provenance:
+//   - Chrome bg/border: Symmetria Shell mattePill() at intensity 0.3
+//     ("subtle" — the canonical value used by the shell's bar pills).
+//     Source: `~/.config/quickshell/symmetria/services/Colours.qml`.
+//   - Mode badges + accents: user's wine_theme nvim colorscheme, from
+//     `~/.config/nvim/lua/jc/plugins/theme/wine_theme/lua/lush_theme/
+//     wine_theme.lua`. Badge label color is `wine_theme.bg_primary`
+//     so the badge reads as painted in the editor's own background.
+//
+// Typography scale: fonts are deliberately ~20% smaller than a
+// terminal-style chrome would default to — the IDE's identity favours
+// a refined, quiet chrome over a busy tui. Adjust the rungs below to
+// scale the whole UI uniformly.
+
+pragma Singleton
+
+import QtQuick
+
+QtObject {
+    id: theme
+
+    // ─── Typography ──────────────────────────────────────────────
+    readonly property QtObject font: QtObject {
+        // Primary family resolved by Python — see header note.
+        readonly property string family: editorFontFamily
+
+        // Size rungs. Current usage:
+        //   xs — mode badge labels, ultra-compact affordances.
+        //   sm — body text: status fields, which-key entries, popup rows.
+        //   md — cmdline input (the one place chrome text leads visually).
+        //   lg — reserved for titles in future panes.
+        readonly property QtObject size: QtObject {
+            readonly property int xs: 9
+            readonly property int sm: 10
+            readonly property int md: 11
+            readonly property int lg: 13
+        }
+
+        readonly property QtObject weight: QtObject {
+            readonly property int normal: Font.Normal
+            readonly property int medium: Font.Medium
+            readonly property int bold: Font.Bold
+        }
+    }
+
+    // ─── Color ───────────────────────────────────────────────────
+    readonly property QtObject color: QtObject {
+        // Backgrounds — matte pill palette.
+        readonly property QtObject bg: QtObject {
+            readonly property color chrome: "#201F1F"      // mattePill(m3surfaceContainerHigh, 0.3)
+            readonly property color selected: "#282728"    // mattePill(m3surfaceContainerHigh, 0.7)
+        }
+
+        // Borders.
+        readonly property QtObject border: QtObject {
+            readonly property color hairline: "#1fffffff"  // white @ 12% alpha — matte pill border
+        }
+
+        // Neutral text ramp. Five rungs cover the useful range from
+        // "almost invisible" (dim) to "selected row foreground"
+        // (selected). Most chrome text uses `normal` or `strong`.
+        readonly property QtObject text: QtObject {
+            readonly property color dim: "#7a7a7a"
+            readonly property color normal: "#b0b0b0"
+            readonly property color strong: "#e0e0e0"
+            readonly property color emphasis: "#e8e8e8"
+            readonly property color selected: "#f5f5f5"
+        }
+
+        // Warm accents — amber family. Both derive from wine_theme
+        // highlights so they feel continuous with the editor palette.
+        readonly property QtObject accent: QtObject {
+            readonly property color primary: "#c8a37a"     // cmdline firstchar, branch glyph
+            readonly property color bright: "#e8ab6f"      // which-key group headers
+        }
+
+        // Mode badge palette — wine_theme derivations. See the mapping
+        // block above StatusBar.qml's mode badge for the original
+        // colorscheme sources.
+        readonly property QtObject mode: QtObject {
+            readonly property color normal: "#C28B12"      // wine_theme.keyword
+            readonly property color insert: "#62BA46"      // wine_theme.string
+            readonly property color visual: "#D86DE9"      // wine_theme.term_bright_magenta
+            readonly property color replace: "#D2602D"     // wine_theme.error_red
+            readonly property color command: "#6D94E9"     // wine_theme.accent_blue
+            readonly property color terminal: "#5BDFD8"    // wine_theme.term_bright_cyan
+            // Label text color for every badge — wine_theme.bg_primary
+            // so the badge reads as the editor background "cut out" of
+            // the mode color.
+            readonly property color badgeLabel: "#131313"
+        }
+    }
+
+    // ─── Spacing ─────────────────────────────────────────────────
+    // Four-rung scale. Use these for margins, gaps, and padding so
+    // rhythm stays uniform across panes. Values are ~20% smaller than
+    // a default terminal chrome would use.
+    readonly property QtObject spacing: QtObject {
+        readonly property int xs: 4
+        readonly property int sm: 6
+        readonly property int md: 10
+        readonly property int lg: 14
+    }
+
+    // ─── Radius ──────────────────────────────────────────────────
+    readonly property QtObject radius: QtObject {
+        readonly property int sm: 3
+        readonly property int md: 5
+        readonly property int pill: 999      // fully rounded — use on badges via `height / 2`
+    }
+
+    // ─── Component sizing ────────────────────────────────────────
+    // Repeated concrete dimensions that multiple chrome components
+    // need in common. One-off pixel values that only appear in a
+    // single file stay local to that file.
+    readonly property QtObject size: QtObject {
+        readonly property int statusBarHeight: 24     // was 30
+        readonly property int modeBadgeHeight: 18     // was 22
+        readonly property int popupRowHeight: 20      // was 24
+        readonly property int whichKeyRowHeight: 18   // was 22
+        readonly property int whichKeyFooterHeight: 24 // was 28
+    }
+}

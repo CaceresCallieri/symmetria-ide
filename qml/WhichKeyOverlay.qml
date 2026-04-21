@@ -15,38 +15,29 @@
 // within each column (column-major order, matching which-key's default).
 // Column count = floor(width / DESIRED_COL_WIDTH). Row height fixed so
 // the panel's implicit height is `rowsPerColumn * rowHeight + footer`.
+//
+// All color and typography values bind against the `Theme` singleton
+// (`qml/design/Theme.qml`). Local literals belong in Theme, not here.
 
 import QtQuick
+
+import "design"
 
 Rectangle {
     id: root
 
-    // --- Palette — kept in lockstep with CommandLine.qml / StatusBar.qml
-    // so overlay chrome stays visually consistent across components.
-    // `#201F1F` = Symmetria Shell mattePill(m3surfaceContainerHigh, 0.3).
-    // Keep in sync with CommandLine.qml's `bgColor` and StatusBar.qml's `color`.
-    color: "#201F1F"
-    border.color: "#1fffffff"
+    color: Theme.color.bg.chrome
+    border.color: Theme.color.border.hairline
     border.width: 1
-    radius: 6
-
-    property color keyColor: "#e0e0e0"
-    property color arrowColor: "#c8a37a"
-    property color leafColor: "#e8e8e8"
-    property color groupColor: "#e8ab6f"   // amber — matches arrow accent
-    property color dimColor: "#7a7a7a"
-    // Font family — see CommandLine.qml for rationale. Bound to
-    // `editorFontFamily` (Python context property) so grid + overlays
-    // all pick the same family.
-    property string monoFont: editorFontFamily
-    property int fontSize: 13
-    property int rowHeight: 22
-    property int desiredColWidth: 280
-    property int horizontalPadding: 24
-    property int verticalPadding: 14
-    property int footerHeight: 28
+    radius: Theme.radius.md
 
     // --- Layout math. Kept as properties so bindings stay reactive.
+    property int desiredColWidth: 224
+    property int horizontalPadding: Theme.spacing.lg
+    property int verticalPadding: Theme.spacing.md
+    property int rowHeight: Theme.size.whichKeyRowHeight
+    property int footerHeight: Theme.size.whichKeyFooterHeight
+
     property int innerWidth: Math.max(0, width - 2 * horizontalPadding)
     property int columnCount: Math.max(1, Math.floor(innerWidth / desiredColWidth))
     property int columnWidth: columnCount > 0 ? Math.floor(innerWidth / columnCount) : innerWidth
@@ -94,25 +85,25 @@ Rectangle {
 
                 Row {
                     anchors.verticalCenter: entry.verticalCenter
-                    spacing: 6
+                    spacing: Theme.spacing.sm
 
                     // Key label. Fixed minimum width so arrows align
                     // across rows within a column.
                     Text {
-                        width: 22
+                        width: 18
                         horizontalAlignment: Text.AlignLeft
                         text: model.key
-                        color: root.keyColor
-                        font.family: root.monoFont
-                        font.pixelSize: root.fontSize
+                        color: Theme.color.text.strong
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
                         renderType: Text.NativeRendering
                     }
 
                     Text {
                         text: "→"
-                        color: root.arrowColor
-                        font.family: root.monoFont
-                        font.pixelSize: root.fontSize
+                        color: Theme.color.accent.primary
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
                         renderType: Text.NativeRendering
                     }
 
@@ -122,9 +113,9 @@ Rectangle {
                     Text {
                         visible: model.icon !== ""
                         text: model.icon
-                        color: model.iconColor !== "" ? model.iconColor : root.leafColor
-                        font.family: root.monoFont
-                        font.pixelSize: root.fontSize
+                        color: model.iconColor !== "" ? model.iconColor : Theme.color.text.emphasis
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
                         renderType: Text.NativeRendering
                     }
 
@@ -132,14 +123,14 @@ Rectangle {
                         // Groups render with a leading `+` (matches
                         // which-key convention the user knows by sight).
                         text: (model.isGroup ? "+" : "") + model.desc
-                        color: model.isGroup ? root.groupColor : root.leafColor
-                        font.family: root.monoFont
-                        font.pixelSize: root.fontSize
+                        color: model.isGroup ? Theme.color.accent.bright : Theme.color.text.emphasis
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
                         elide: Text.ElideRight
                         // Cap to remaining column width so long descriptions
                         // don't overflow into the next column.
-                        width: Math.max(0, root.columnWidth - 60
-                               - (model.icon !== "" ? 24 : 0))
+                        width: Math.max(0, root.columnWidth - 52
+                               - (model.icon !== "" ? 20 : 0))
                         renderType: Text.NativeRendering
                     }
                 }
@@ -152,49 +143,49 @@ Rectangle {
         id: footer
         anchors.horizontalCenter: root.horizontalCenter
         anchors.bottom: root.bottom
-        anchors.bottomMargin: 6
-        spacing: 18
+        anchors.bottomMargin: Theme.spacing.sm
+        spacing: Theme.spacing.lg
         height: root.footerHeight
 
         Row {
-            spacing: 5
+            spacing: Theme.spacing.xs
             // footer is the outer Row (immediate parent) — explicit id
             // reference instead of parent, per §3 P2 id-naming convention.
             anchors.verticalCenter: footer.verticalCenter
             Text {
                 text: "ESC"
-                color: root.keyColor
-                font.family: root.monoFont
-                font.pixelSize: root.fontSize - 1
-                font.weight: Font.Medium
+                color: Theme.color.text.strong
+                font.family: Theme.font.family
+                font.pixelSize: Theme.font.size.xs
+                font.weight: Theme.font.weight.medium
                 renderType: Text.NativeRendering
             }
             Text {
                 text: "close"
-                color: root.dimColor
-                font.family: root.monoFont
-                font.pixelSize: root.fontSize - 1
+                color: Theme.color.text.dim
+                font.family: Theme.font.family
+                font.pixelSize: Theme.font.size.xs
                 renderType: Text.NativeRendering
             }
         }
 
         Row {
             visible: whichKeyState.canGoBack
-            spacing: 5
+            spacing: Theme.spacing.xs
             anchors.verticalCenter: footer.verticalCenter
             Text {
                 text: "⌫"
-                color: root.keyColor
-                font.family: root.monoFont
-                font.pixelSize: root.fontSize - 1
-                font.weight: Font.Medium
+                color: Theme.color.text.strong
+                font.family: Theme.font.family
+                font.pixelSize: Theme.font.size.xs
+                font.weight: Theme.font.weight.medium
                 renderType: Text.NativeRendering
             }
             Text {
                 text: "back"
-                color: root.dimColor
-                font.family: root.monoFont
-                font.pixelSize: root.fontSize - 1
+                color: Theme.color.text.dim
+                font.family: Theme.font.family
+                font.pixelSize: Theme.font.size.xs
                 renderType: Text.NativeRendering
             }
         }

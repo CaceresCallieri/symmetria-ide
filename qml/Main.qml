@@ -8,6 +8,7 @@ import QtQuick.Window
 import QtQuick.Layouts
 
 import Symmetria.Ide 1.0
+import "design"
 
 Window {
     id: root
@@ -18,8 +19,8 @@ Window {
     // Transparent clear so the compositor shows the wallpaper through
     // the editor viewport (matches Ghostty + other transparent terminals
     // on Hyprland). The status bar and cmdline overlay are opaque —
-    // they paint the Symmetria Shell matte-pill color (`#252323`) on
-    // top. See StatusBar.qml / CommandLine.qml for the palette source.
+    // they paint `Theme.color.bg.chrome` (Symmetria Shell matte-pill)
+    // on top. See `qml/design/Theme.qml` for the palette source.
     color: "transparent"
     minimumWidth: 800
     minimumHeight: 400
@@ -69,7 +70,7 @@ Window {
         StatusBar {
             id: statusBar
             Layout.fillWidth: true
-            Layout.preferredHeight: 30
+            Layout.preferredHeight: Theme.size.statusBarHeight
         }
     }
 
