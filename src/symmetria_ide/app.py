@@ -348,6 +348,11 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     ctx.setContextProperty("editorFontFamily", _primary_family)
 
     qml_root = QML_DIR / "Main.qml"
+    # IMPORTANT: always use fromLocalFile here, not a QRC resource URL.
+    # The "import \"design\"" singleton in Main.qml (and its siblings) resolves
+    # via a relative sibling directory lookup — Qt's resource-URL import resolver
+    # uses a different search strategy and will NOT find qml/design/qmldir if
+    # Main.qml is loaded from qrc:/. Keep this as a file-URL load.
     engine.load(QUrl.fromLocalFile(str(qml_root)))
     if not engine.rootObjects():
         log.error("failed to load Main.qml at %s", qml_root)

@@ -37,6 +37,12 @@ Rectangle {
     property int verticalPadding: Theme.spacing.md
     property int rowHeight: Theme.size.whichKeyRowHeight
     property int footerHeight: Theme.size.whichKeyFooterHeight
+    // Reserved horizontal budget per row for the key label, arrow, and spacing cells.
+    // = key label width (18) + spacing (Theme.spacing.sm×2 = 12) + arrow glyph (~12) + spacing (Theme.spacing.sm = 6) + border = ~52
+    // Adjust if key label width or row spacing changes.
+    property int keyColumnReserved: 52
+    // Extra width consumed by the icon slot when a glyph is present.
+    property int iconSlotWidth: 20
 
     property int innerWidth: Math.max(0, width - 2 * horizontalPadding)
     property int columnCount: Math.max(1, Math.floor(innerWidth / desiredColWidth))
@@ -55,6 +61,11 @@ Rectangle {
     // `whichKeyModel.rowCount()` is a function call, not a bindable
     // property. Re-seed `itemCount` via a Connection so the layout
     // rebinds when the model resets. See CLAUDE.md gotcha #3.
+    //
+    // Only `onModelReset` is wired here because WhichKeyModel always performs
+    // full item replacement via beginResetModel/endResetModel — it never emits
+    // rowsInserted or rowsRemoved. If that ever changes, add the corresponding
+    // handlers here to keep itemCount in sync.
     Connections {
         target: whichKeyModel
         function onModelReset() {
@@ -129,8 +140,8 @@ Rectangle {
                         elide: Text.ElideRight
                         // Cap to remaining column width so long descriptions
                         // don't overflow into the next column.
-                        width: Math.max(0, root.columnWidth - 52
-                               - (model.icon !== "" ? 20 : 0))
+                        width: Math.max(0, root.columnWidth - root.keyColumnReserved
+                               - (model.icon !== "" ? root.iconSlotWidth : 0))
                         renderType: Text.NativeRendering
                     }
                 }

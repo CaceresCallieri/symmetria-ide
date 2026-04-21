@@ -44,7 +44,7 @@ Rectangle {
             visible: statusState.mode !== ""
             Layout.alignment: Qt.AlignVCenter
             Layout.preferredHeight: Theme.size.modeBadgeHeight
-            Layout.preferredWidth: modeLabel.implicitWidth + 16
+            Layout.preferredWidth: modeLabel.implicitWidth + 16  // 8px horizontal inset per side
             radius: height / 2
             color: {
                 switch (statusState.mode) {

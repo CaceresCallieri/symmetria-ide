@@ -126,7 +126,7 @@ QtObject {
     readonly property QtObject radius: QtObject {
         readonly property int sm: 3
         readonly property int md: 5
-        readonly property int pill: 999      // fully rounded — use on badges via `height / 2`
+        // Badge pills use `radius: height / 2` directly — no token needed.
     }
 
     // ─── Component sizing ────────────────────────────────────────

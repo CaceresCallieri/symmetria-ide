@@ -32,6 +32,16 @@ Item {
     // size, but the visible dimension comes from Theme.
     property int rowHeight: Theme.size.popupRowHeight
     property int maxPopupRows: 10
+    // Uniform inset around the popup list (top+bottom+left+right). The height formula
+    // uses 2 * popupInset so this is the single value to change when tuning density.
+    property int popupInset: 5
+    // Vertical padding inside the cmdline input box = top + bottom anchors (Theme.spacing.sm each)
+    // + 2px breathing room for NativeRendering line-height expansion.
+    // Must stay in sync with cmdRow's anchors.topMargin + anchors.bottomMargin.
+    property int cmdBoxPaddingVertical: 2 * Theme.spacing.sm + 2  // = 14 at spacing.sm=6
+    // Minimum cmdBox height — generous floor so the box never collapses below
+    // a comfortable click target even for single-line content.
+    property int cmdBoxMinHeight: Theme.font.size.md + cmdBoxPaddingVertical + 9  // = 34 at font.md=11
 
     // Cmdline + popup stacked together so the popup drops directly
     // beneath the input line.
@@ -46,7 +56,7 @@ Item {
             id: cmdBox
             visible: cmdlineState.visible
             width: stack.width
-            height: Math.max(34, cmdRow.implicitHeight + 14)
+            height: Math.max(root.cmdBoxMinHeight, cmdRow.implicitHeight + root.cmdBoxPaddingVertical)
             radius: Theme.radius.md
             color: Theme.color.bg.chrome
             border.color: Theme.color.border.hairline
@@ -133,7 +143,7 @@ Item {
             // when the cmdline closes even if the model still has items.
             visible: cmdlineState.visible && completionModel.visible && popupList.count > 0
             width: stack.width
-            height: Math.min(root.maxPopupRows, popupList.count) * root.rowHeight + 10
+            height: Math.min(root.maxPopupRows, popupList.count) * root.rowHeight + 2 * root.popupInset
             radius: Theme.radius.md
             color: Theme.color.bg.chrome
             border.color: Theme.color.border.hairline
@@ -143,7 +153,7 @@ Item {
             ListView {
                 id: popupList
                 anchors.fill: parent
-                anchors.margins: 5
+                anchors.margins: root.popupInset
                 model: completionModel
                 // Selection comes from the Lua runtime via wildmenumode()
                 // detection: during Tab cycling the list stays stable and
