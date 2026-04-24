@@ -1,2 +1,6 @@
 - [Notification system is Symmetria Shell, not swaync](notification_system.md) — do not invoke swaync-client or makoctl
 - [Dev launches target workspace 6](dev_workspace.md) — open Symmetria IDE on Hyprland workspace 6 during iteration
+- [Project governance layer](project_governance.md) — read .claude/project-standards.md, CONTRIBUTING.md, and Theme.qml before planning non-trivial work
+- [New UI surfaces start as placeholders](ui_surface_discipline.md) — minimal delegate, Theme tokens, defer aesthetic decisions until real data exists
+- [Phase 2 current state (2026-04-24)](phase2_current_state.md) — placeholder spike + composer + orchestrator `<leader>a[Nn]` hijack all landed; next up is multi-turn stdin JSONL or permission UI
+- [Lazy-plugin keymap hijack pattern](lazy_keymap_hijack_pattern.md) — User LazyLoad autocmd is the race-winning install point when target plugin is lazy-loaded via `keys = {...}` spec (verified in symmetria-ide, commits faeb363 + 8b96302)
