@@ -29,41 +29,62 @@ Window {
         anchors.fill: parent
         spacing: 0
 
-        NvimView {
-            id: editor
+        // Editor + agent pane as horizontal siblings. Agent pane is
+        // passive display during the placeholder spike — focus stays
+        // on NvimView (keyboard-first non-negotiable). The 60/40
+        // proportions are a starting point, not a product decision;
+        // a draggable divider + keyboard focus-switch arrive with
+        // the composer. Using `Layout.preferredWidth` so the
+        // RowLayout keeps both panes visible when the window
+        // resizes rather than degrading to one zero-width pane.
+        RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            backend: nvimBackend
-            focus: true
+            spacing: 0
 
-            Component.onCompleted: forceActiveFocus()
+            NvimView {
+                id: editor
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.preferredWidth: root.width * 0.6
+                backend: nvimBackend
+                focus: true
 
-            // Floating cmdline + wildmenu overlay — parented to the
-            // editor so it clips within the viewport (not over the
-            // status bar) and so its anchors.fill tracks editor resizes.
-            // Focus stays on the NvimView; keys flow to NeoVim, which
-            // emits ext_cmdline/ext_popupmenu events that this overlay
-            // reads via cmdlineState / popupmenuModel.
-            CommandLine {
-                id: cmdlineOverlay
-                anchors.fill: parent
+                Component.onCompleted: forceActiveFocus()
+
+                // Floating cmdline + wildmenu overlay — parented to the
+                // editor so it clips within the viewport (not over the
+                // status bar) and so its anchors.fill tracks editor resizes.
+                // Focus stays on the NvimView; keys flow to NeoVim, which
+                // emits ext_cmdline/ext_popupmenu events that this overlay
+                // reads via cmdlineState / popupmenuModel.
+                CommandLine {
+                    id: cmdlineOverlay
+                    anchors.fill: parent
+                }
+
+                // Native which-key overlay. Bottom-anchored inside the
+                // editor so it visually sits above the status bar and
+                // animates alongside editor resizes. Driven entirely by
+                // `whichKeyState` + `whichKeyModel`; Lua side controls
+                // show/hide via rpcnotify (see runtime/lua/orchestrator/
+                // whichkey/init.lua).
+                WhichKeyOverlay {
+                    id: whichKeyOverlay
+                    anchors.left: editor.left
+                    anchors.right: editor.right
+                    anchors.bottom: editor.bottom
+                    // Clamp to half the viewport so huge menus never hog
+                    // the whole editor; scroll support is a v2 follow-up.
+                    height: Math.min(implicitHeight, editor.height * 0.5)
+                    z: 20
+                }
             }
 
-            // Native which-key overlay. Bottom-anchored inside the
-            // editor so it visually sits above the status bar and
-            // animates alongside editor resizes. Driven entirely by
-            // `whichKeyState` + `whichKeyModel`; Lua side controls
-            // show/hide via rpcnotify (see runtime/lua/orchestrator/
-            // whichkey/init.lua).
-            WhichKeyOverlay {
-                id: whichKeyOverlay
-                anchors.left: editor.left
-                anchors.right: editor.right
-                anchors.bottom: editor.bottom
-                // Clamp to half the viewport so huge menus never hog
-                // the whole editor; scroll support is a v2 follow-up.
-                height: Math.min(implicitHeight, editor.height * 0.5)
-                z: 20
+            AgentPane {
+                id: agentPane
+                Layout.fillHeight: true
+                Layout.preferredWidth: root.width * 0.4
             }
         }
 

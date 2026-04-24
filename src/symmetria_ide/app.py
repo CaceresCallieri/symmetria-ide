@@ -39,6 +39,10 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
 )
 from .nvim_backend import NvimBackend
 from .nvim_view import NvimView  # noqa: F401 — side-effect: @QmlElement registration
+from .session_host import SessionHost
+from .session_models import (  # noqa: F401 — side-effect: @QmlElement registration
+    SessionModel,
+)
 from .whichkey_models import (  # noqa: F401 — side-effect: @QmlElement registration
     WhichKeyModel,
     WhichKeyState,
@@ -219,6 +223,8 @@ class AppController(QObject):
         self._completion = CompletionModel(self)
         self._whichkey_state = WhichKeyState(self)
         self._whichkey_model = WhichKeyModel(self)
+        self._session_host = SessionHost(self)
+        self._session_model = SessionModel(self)
         self._backend.capsule_updated.connect(self._route_capsule)
         self._backend.cmdline_updated.connect(self._cmdline.apply)
         self._backend.popupmenu_updated.connect(self._popupmenu.apply)
@@ -227,6 +233,21 @@ class AppController(QObject):
         # handles visibility/trail, model handles the items list.
         self._backend.whichkey_event.connect(self._whichkey_state.apply)
         self._backend.whichkey_event.connect(self._whichkey_model.apply)
+        # queued: SessionHost worker threads -> SessionModel (GUI thread).
+        # Explicit QueuedConnection documents the thread hop per
+        # project-standards §4 P2 — cross-thread connect sites carry a
+        # one-line comment so a future agent grepping for
+        # "cross-thread" / "queued" finds every such site. AutoConnection
+        # would resolve to Queued in practice because the emitter and
+        # receiver live on different threads, but explicit is safer when
+        # the emitter might later be reused from the GUI thread.
+        self._session_host.event_received.connect(
+            self._session_model.apply, Qt.ConnectionType.QueuedConnection
+        )
+        self._session_host.closed.connect(
+            self._session_model.on_host_closed, Qt.ConnectionType.QueuedConnection
+        )
+        self._session_host.stderr_line.connect(self._log_session_stderr)
 
     @Slot(dict)
     def _route_capsule(self, payload: dict) -> None:
@@ -234,11 +255,36 @@ class AppController(QObject):
             return
         self._capsules.update(payload)
 
+    @Slot(str)
+    def _log_session_stderr(self, line: str) -> None:
+        """Forward `claude`'s stderr into the app log.
+
+        The agent pane doesn't render stderr for the placeholder —
+        it's diagnostic only (auth failures, CLI warnings). Logging at
+        WARNING surfaces it without the pane having to grow another
+        row type, and keeps the signal trivially greppable during
+        exploration.
+        """
+        if line:
+            log.warning("session stderr: %s", line)
+
     def start(self) -> None:
         self._backend.start()
+        # Agent pane is editor-first by design: the `claude` subprocess
+        # only spawns when the operator opts in via the env var.
+        # Unset = classic editor-only workflow, no subprocess, pane
+        # renders its empty-state message.
+        prompt = os.environ.get("SYMMETRIA_IDE_AGENT_PROMPT") or ""
+        if prompt:
+            log.info("SYMMETRIA_IDE_AGENT_PROMPT set — spawning session host")
+            self._session_host.start(prompt)
         self.backendReady.emit()
 
     def shutdown(self) -> None:
+        # Stop the session host first — the subprocess is the noisier
+        # of the two and we'd rather have its workers joined before
+        # nvim's shutdown handshake owns the event loop.
+        self._session_host.stop()
         self._backend.stop()
 
     @property
@@ -273,6 +319,14 @@ class AppController(QObject):
     def whichkey_model(self) -> WhichKeyModel:
         return self._whichkey_model
 
+    @property
+    def session_host(self) -> SessionHost:
+        return self._session_host
+
+    @property
+    def session_model(self) -> SessionModel:
+        return self._session_model
+
 
 def _register_qml_types() -> None:
     """Named audit point for QML type registration.
@@ -298,6 +352,7 @@ def _register_qml_types() -> None:
     _ = PopupmenuModel
     _ = WhichKeyModel
     _ = WhichKeyState
+    _ = SessionModel
 
 
 def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
@@ -326,6 +381,8 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     ctx.setContextProperty("completionModel", controller.completion)
     ctx.setContextProperty("whichKeyState", controller.whichkey_state)
     ctx.setContextProperty("whichKeyModel", controller.whichkey_model)
+    ctx.setContextProperty("sessionHost", controller.session_host)
+    ctx.setContextProperty("sessionModel", controller.session_model)
 
     # Resolve the editor font ONCE in Python so every QML overlay binds
     # to the same family the grid (`NvimView._default_font`) chose.
