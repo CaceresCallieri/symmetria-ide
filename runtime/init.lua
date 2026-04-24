@@ -530,50 +530,105 @@ end)
 
 -- --- Agent-pane triggers ---------------------------------------------
 --
--- The user's orchestrator.nvim plugin owns the `<leader>a*` prefix
--- (which-key menu under lowercase `a`: AI picker, Continue/New/
--- Resume Claude, jump-to-last-edit, show-edits quickfix, toggle
--- prompt editor, etc.). We hijack a minimal subset —
--- `<leader>aN` / `<leader>an` ("New Claude" / "New Claude skip
--- perms") — so those semantic entry points open the native agent
--- pane instead of orchestrator's terminal flow. Other entries
--- (`j` jump-to-edit, `e` edits quickfix, `P` / `p` prompt nav)
--- stay orchestrator-owned; they are nvim-side affordances that
--- complement the agent pane rather than competing with it.
+-- Hijack the `<leader>aN` / `<leader>an` slots (orchestrator.nvim's
+-- "New Claude" / "New Claude skip perms") so they open the native
+-- agent pane instead of orchestrator's terminal launcher.
 --
--- Case matters: we install at lowercase `<leader>a` because that's
--- the orchestrator prefix. An earlier iteration landed on uppercase
--- `<leader>A` and was dead code (the slot is unused, so no menu
--- ever triggered our handler).
---
--- Install order matters: orchestrator.nvim is typically lazy-loaded
--- (lazy.nvim `event = "VeryLazy"`), so a sync install at `require`
--- time would lose the race and get overwritten. We schedule on
--- `VimEnter` so our installation lands AFTER the user's plugin
--- setup phase finishes (same mitigation gotcha #21 uses for the
--- whichkey trie + LspAttach race).
+-- Hijack discipline (gotchas #17, #21):
+--   1. orchestrator.nvim is commonly lazy-loaded via `lazy.nvim`'s
+--      `keys = {"<leader>a*", ...}` spec, which means the plugin
+--      registers its keymaps ON FIRST KEYPRESS — strictly AFTER our
+--      `VimEnter+schedule` install completes. A plain install loses
+--      the race on that first-tap reload.
+--   2. Countermeasure: verify ownership via `vim.fn.maparg` on every
+--      `BufEnter` and re-install if our desc isn't there. Trusting
+--      an internal install cache lies after the lazy reload; only
+--      `maparg` tells the truth (same reasoning as gotcha #17's
+--      whichkey-menu / trigger self-heal).
+--   3. Observability: the handler `vim.notify`s on fire so the
+--      operator can confirm it ran (orchestrator's terminal flow
+--      runs silently, so absent our notify = our handler didn't run).
+--      `SYMMETRIA_AGENT_TRACE=1` env var promotes the logs to INFO.
 --
 -- Continue / Resume Claude routing (`<leader>aC`, `<leader>aR`) is
 -- deferred until `SessionHost` supports `claude -c` / `claude -r`
--- flags — until then, orchestrator's terminal flow handles those
--- slots, which is acceptable for the placeholder iteration.
+-- flags — orchestrator's terminal flow handles those slots today.
+
+local SYMMETRIA_AGENT_DESC = "New Claude (Symmetria agent pane)"
+local SYMMETRIA_AGENT_DESC_SKIP = "New Claude skip perms (Symmetria agent pane)"
+
 local function open_agent_new()
+  vim.notify("[symmetria] agent hijack fired", vim.log.levels.INFO)
   pcall(vim.rpcnotify, 0, "agent", { op = "show", action = "new" })
 end
 
+local function slot_owned_by_us(keys)
+  local mapping = vim.fn.maparg(keys, "n", false, true)
+  if type(mapping) ~= "table" then
+    return false
+  end
+  local desc = mapping.desc or ""
+  return desc == SYMMETRIA_AGENT_DESC or desc == SYMMETRIA_AGENT_DESC_SKIP
+end
+
+local function install_agent_keymaps(reason)
+  local wanted = {
+    { keys = "<leader>aN", desc = SYMMETRIA_AGENT_DESC },
+    { keys = "<leader>an", desc = SYMMETRIA_AGENT_DESC_SKIP },
+  }
+  for _, spec in ipairs(wanted) do
+    if not slot_owned_by_us(spec.keys) then
+      vim.keymap.set("n", spec.keys, open_agent_new, {
+        silent = true,
+        desc = spec.desc,
+      })
+      -- Diagnostic trail — visible in Python's app log via the
+      -- existing `agent` rpcnotify channel. Captured via pcall so a
+      -- disconnected Python client never blocks the keymap install.
+      pcall(vim.rpcnotify, 0, "agent", {
+        op = "debug",
+        event = "keymap_install",
+        keys = spec.keys,
+        reason = reason,
+      })
+    end
+  end
+end
+
+local agent_grp = vim.api.nvim_create_augroup("symmetria_agent_keys", { clear = true })
+
+-- First install: VimEnter + vim.schedule (defers one tick past
+-- plugin-setup order so we land last among non-lazy plugins).
 vim.api.nvim_create_autocmd("VimEnter", {
-  group = vim.api.nvim_create_augroup("symmetria_agent_keys", { clear = true }),
+  group = agent_grp,
   callback = function()
     vim.schedule(function()
-      vim.keymap.set("n", "<leader>aN", open_agent_new, {
-        silent = true,
-        desc = "New Claude (Symmetria agent pane)",
-      })
-      vim.keymap.set("n", "<leader>an", open_agent_new, {
-        silent = true,
-        desc = "New Claude skip perms (Symmetria agent pane)",
-      })
+      install_agent_keymaps("VimEnter")
     end)
+  end,
+})
+
+-- Self-heal on every buffer transition. Cheap reconciliation point
+-- for the general case where some plugin re-registers at an
+-- unpredictable lifecycle event.
+vim.api.nvim_create_autocmd("BufEnter", {
+  group = agent_grp,
+  callback = function()
+    install_agent_keymaps("BufEnter")
+  end,
+})
+
+-- Self-heal whenever lazy.nvim finishes loading a plugin. Orchestrator
+-- is commonly lazy-loaded via `keys = {"<leader>a*", ...}`, which means
+-- its keymaps land WHEN THE USER FIRST PRESSES <leader>a — a window
+-- BufEnter cannot cover. `User LazyLoad` fires synchronously inside
+-- lazy.nvim's load path, BEFORE the keypress is re-dispatched for
+-- lookup, so installing here wins the slot back for the trailing `N`.
+vim.api.nvim_create_autocmd("User", {
+  group = agent_grp,
+  pattern = "LazyLoad",
+  callback = function(ev)
+    install_agent_keymaps("LazyLoad:" .. tostring(ev.data or ""))
   end,
 })
 
