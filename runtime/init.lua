@@ -528,19 +528,47 @@ pcall(function()
   require("orchestrator.whichkey").setup()
 end)
 
--- --- Agent-pane toggle -----------------------------------------------
+-- --- Agent-pane triggers ---------------------------------------------
 --
--- `<leader>A` flips the agent view on. Python's AppController owns
--- the state; we're the trigger, not the authority. The emitter is
--- `toggle` so the same keystroke opens when hidden and closes when
--- visible — one muscle-memory path for both directions.
+-- The user's orchestrator.nvim plugin owns the `<leader>A*` prefix
+-- (which-key shows: AI picker, Continue/New/Resume Claude, jump-to-
+-- last-edit, show-edits quickfix, toggle prompt editor, etc.). We
+-- hijack a minimal subset — `<leader>AN` / `<leader>An` ("New
+-- Claude" / "New Claude skip perms") — so those semantic entry
+-- points open the native agent pane instead of orchestrator's
+-- terminal flow. Other entries stay owned by orchestrator because
+-- they are nvim-side affordances (quickfix, jumps) that complement
+-- the agent pane rather than competing with it.
 --
--- Capital `A` chosen to minimise collisions with user-defined maps
--- at `<leader>a*` (many orchestrator.nvim and lazy.nvim prefixes
--- live there). Rebindable by the user from their own init.lua since
--- we don't `nowait` or enforce buffer-local.
-vim.keymap.set("n", "<leader>A", function()
-  pcall(vim.rpcnotify, 0, "agent", { op = "toggle" })
-end, { silent = true, desc = "Symmetria: toggle agent pane" })
+-- Install order matters: orchestrator.nvim is typically lazy-loaded
+-- (lazy.nvim `event = "VeryLazy"`), so a sync install at `require`
+-- time would lose the race and get overwritten. We schedule on
+-- `VimEnter` so our installation lands AFTER the user's plugin
+-- setup phase finishes (same mitigation gotcha #21 uses for the
+-- whichkey trie + LspAttach race).
+--
+-- Continue / Resume Claude routing (`<leader>AC`, `<leader>AR`) is
+-- deferred until `SessionHost` supports `claude -c` / `claude -r`
+-- flags — until then, orchestrator's terminal flow handles those
+-- slots, which is acceptable for the placeholder iteration.
+local function open_agent_new()
+  pcall(vim.rpcnotify, 0, "agent", { op = "show", action = "new" })
+end
+
+vim.api.nvim_create_autocmd("VimEnter", {
+  group = vim.api.nvim_create_augroup("symmetria_agent_keys", { clear = true }),
+  callback = function()
+    vim.schedule(function()
+      vim.keymap.set("n", "<leader>AN", open_agent_new, {
+        silent = true,
+        desc = "New Claude (Symmetria agent pane)",
+      })
+      vim.keymap.set("n", "<leader>An", open_agent_new, {
+        silent = true,
+        desc = "New Claude skip perms (Symmetria agent pane)",
+      })
+    end)
+  end,
+})
 
 return M

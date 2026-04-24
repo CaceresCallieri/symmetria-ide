@@ -315,12 +315,22 @@ class AppController(QObject):
     def _on_agent_event(self, payload: dict) -> None:
         """Route a Lua-emitted agent lifecycle event.
 
-        Payload shape: `{op: "show" | "hide" | "toggle"}`. Anything
-        else is ignored with a debug log — additive protocol
+        Payload shape: `{op: "show"|"hide"|"toggle", action?: "new"}`.
+        Unknown ops log at DEBUG and no-op — additive protocol
         evolution doesn't crash the controller.
+
+        `action="new"` on a `show` event resets the pane to a fresh
+        slate: stops any in-flight subprocess + clears the event log.
+        Used by the `<leader>AN` hijack so "New Claude" reads as
+        "start from scratch", not "append to whatever was there".
         """
         op = str(payload.get("op") or "").strip()
+        action = str(payload.get("action") or "").strip()
         if op == "show":
+            if action == "new":
+                if self._session_host.is_running:
+                    self._session_host.stop()
+                self._session_model.clear()
             self.show_agent()
         elif op == "hide":
             self.hide_agent()
