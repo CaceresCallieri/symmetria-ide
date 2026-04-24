@@ -109,6 +109,31 @@ QtObject {
             // the mode color.
             readonly property color badgeLabel: "#131313"
         }
+
+        // Agent pane role accents. Distinct rung so the agent surface
+        // reads as its own context — neither editor chrome nor a mode
+        // badge — while staying inside the wine_theme family.
+        //
+        //   user      — shares tone with `accent.primary` so the user's
+        //               turns feel continuous with other user-authored
+        //               affordances (branch glyph, cmdline firstchar).
+        //               Kept as a dedicated rung rather than aliasing
+        //               `accent.primary` so the two can drift independently
+        //               without touching unrelated chrome.
+        //   assistant — `wine_theme.term_cyan`, the dim sibling of
+        //               `mode.terminal`'s bright `term_bright_cyan`.
+        //               Same palette family (external-process / otherness),
+        //               different tone; does not collide with any
+        //               existing mode color.
+        //   system    — fully covered by `text.dim`; session-lifecycle,
+        //               rate-limit, and result envelope rows borrow it
+        //               rather than getting their own rung. Mentioned
+        //               here so future readers know the omission is
+        //               intentional, not an oversight.
+        readonly property QtObject agent: QtObject {
+            readonly property color user: "#c8a37a"        // warm amber, shares tone with accent.primary
+            readonly property color assistant: "#3DB6B0"   // wine_theme.term_cyan — dim sibling of mode.terminal
+        }
     }
 
     // ─── Spacing ─────────────────────────────────────────────────
