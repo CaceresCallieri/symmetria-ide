@@ -528,4 +528,19 @@ pcall(function()
   require("orchestrator.whichkey").setup()
 end)
 
+-- --- Agent-pane toggle -----------------------------------------------
+--
+-- `<leader>A` flips the agent view on. Python's AppController owns
+-- the state; we're the trigger, not the authority. The emitter is
+-- `toggle` so the same keystroke opens when hidden and closes when
+-- visible — one muscle-memory path for both directions.
+--
+-- Capital `A` chosen to minimise collisions with user-defined maps
+-- at `<leader>a*` (many orchestrator.nvim and lazy.nvim prefixes
+-- live there). Rebindable by the user from their own init.lua since
+-- we don't `nowait` or enforce buffer-local.
+vim.keymap.set("n", "<leader>A", function()
+  pcall(vim.rpcnotify, 0, "agent", { op = "toggle" })
+end, { silent = true, desc = "Symmetria: toggle agent pane" })
+
 return M

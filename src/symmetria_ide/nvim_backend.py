@@ -87,6 +87,12 @@ class NvimBackend(QObject):
     # Each item is { key, desc, is_group, icon, icon_color }.
     # See `runtime/lua/orchestrator/whichkey/init.lua` for the emitter.
     whichkey_event = Signal(dict)
+    # Agent-pane lifecycle triggered from Lua (via rpcnotify). Payload:
+    #   { op: "show"|"hide"|"toggle" }
+    # `show` opens full-window agent view; `hide` returns to editor;
+    # `toggle` flips based on current state. AppController owns the
+    # state — this signal is advisory, routing only.
+    agent_event = Signal(dict)
     closed = Signal()
 
     # --- Dispatch bindings --------------------------------------------
@@ -294,8 +300,9 @@ class NvimBackend(QObject):
             self._nvim.subscribe("completions")
             self._nvim.subscribe("scroll")
             self._nvim.subscribe("whichkey")
+            self._nvim.subscribe("agent")
             log.info(
-                "subscribed to 'capsule' + 'completions' + 'scroll' + 'whichkey' notifications"
+                "subscribed to 'capsule' + 'completions' + 'scroll' + 'whichkey' + 'agent' notifications"
             )
         except Exception:  # noqa: BLE001
             log.exception("subscribe(capsule/completions) failed")

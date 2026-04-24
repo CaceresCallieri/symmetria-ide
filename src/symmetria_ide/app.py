@@ -206,9 +206,18 @@ class AppController(QObject):
     (for unknown/extension capsules). Every incoming capsule is tried
     against `StatusBarState.apply` first; if unhandled, it goes into
     the generic model.
+
+    Also owns the agent-pane visibility state. The agent view is a
+    full-window mode (not a side panel): when `agentVisible` is True
+    the editor is hidden and the `AgentPane` takes over. Triggered
+    by the `<leader>A` Lua keymap (runtime/init.lua emits an `agent`
+    rpcnotify) or programmatically via `show_agent` / `hide_agent`.
+    The composer's Escape keypress in `AgentPane.qml` calls
+    `hide_agent` to return focus to the editor.
     """
 
     backendReady = Signal()
+    agentVisibleChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -248,6 +257,13 @@ class AppController(QObject):
             self._session_model.on_host_closed, Qt.ConnectionType.QueuedConnection
         )
         self._session_host.stderr_line.connect(self._log_session_stderr)
+        # Lua-driven agent-pane lifecycle. The rpcnotify emitter lives
+        # in `runtime/init.lua`; BackendEvents routes it here. No Qt
+        # thread hop — pynvim's worker already ran the notification
+        # through the auto-queued `nvim_backend._on_notification`
+        # path before emitting `agent_event`.
+        self._backend.agent_event.connect(self._on_agent_event)
+        self._agent_visible = False
 
     @Slot(dict)
     def _route_capsule(self, payload: dict) -> None:
@@ -268,16 +284,95 @@ class AppController(QObject):
         if line:
             log.warning("session stderr: %s", line)
 
+    # --- Agent-pane visibility + submission ----------------------------
+
+    @Property(bool, notify=agentVisibleChanged)
+    def agentVisible(self) -> bool:
+        return self._agent_visible
+
+    @Slot()
+    def show_agent(self) -> None:
+        """Open full-window agent view. Focus routing is QML's job."""
+        if self._agent_visible:
+            return
+        self._agent_visible = True
+        self.agentVisibleChanged.emit()
+
+    @Slot()
+    def hide_agent(self) -> None:
+        """Return to editor view. Focus routing is QML's job."""
+        if not self._agent_visible:
+            return
+        self._agent_visible = False
+        self.agentVisibleChanged.emit()
+
+    @Slot()
+    def toggle_agent(self) -> None:
+        self._agent_visible = not self._agent_visible
+        self.agentVisibleChanged.emit()
+
+    @Slot(dict)
+    def _on_agent_event(self, payload: dict) -> None:
+        """Route a Lua-emitted agent lifecycle event.
+
+        Payload shape: `{op: "show" | "hide" | "toggle"}`. Anything
+        else is ignored with a debug log — additive protocol
+        evolution doesn't crash the controller.
+        """
+        op = str(payload.get("op") or "").strip()
+        if op == "show":
+            self.show_agent()
+        elif op == "hide":
+            self.hide_agent()
+        elif op == "toggle":
+            self.toggle_agent()
+        else:
+            log.debug("unhandled agent op: %r", op)
+
+    @Slot(str)
+    def submit_prompt(self, prompt: str) -> None:
+        """Kick off a `claude -p` run with `prompt`.
+
+        Placeholder-era behaviour: each submit stops any in-flight
+        subprocess and spawns a fresh one with the new prompt via
+        argv (so `claude` exits after responding and the one-shot
+        flow we already validated in Step 1 holds). The event log
+        accumulates across submissions so the pane reads as a
+        running history — a terminal `result` row separates each run.
+
+        Multi-turn routing through `send_user_message` + stdin-based
+        stream-json input lands with the richer composer iteration;
+        this slot is the minimum to make the placeholder testable
+        without relaunching the app.
+        """
+        text = prompt.strip()
+        if not text:
+            return
+        if self._session_host.is_running:
+            # Stop the current subprocess cleanly first — each submit
+            # is a fresh `claude -p` invocation in the placeholder.
+            self._session_host.stop()
+        log.info("submit_prompt: %s", text[:100])
+        self._session_host.start(text)
+
     def start(self) -> None:
         self._backend.start()
-        # Agent pane is editor-first by design: the `claude` subprocess
-        # only spawns when the operator opts in via the env var.
-        # Unset = classic editor-only workflow, no subprocess, pane
-        # renders its empty-state message.
+        # Agent view is editor-first by default. Two opt-in vectors on
+        # startup:
+        #   SYMMETRIA_IDE_AGENT_PROMPT="..." — spawn one claude run
+        #     with the given prompt AND open the agent view so the
+        #     events are immediately visible. Used by headless smoke.
+        #   SYMMETRIA_IDE_AGENT_VIEW=1      — open the agent view
+        #     with an empty composer ready for interactive typing.
+        # Neither set = classic editor-only workflow. User can still
+        # open the agent view at any time via `<leader>A`.
         prompt = os.environ.get("SYMMETRIA_IDE_AGENT_PROMPT") or ""
+        want_view = bool(prompt) or os.environ.get("SYMMETRIA_IDE_AGENT_VIEW") == "1"
         if prompt:
             log.info("SYMMETRIA_IDE_AGENT_PROMPT set — spawning session host")
             self._session_host.start(prompt)
+        if want_view:
+            self.show_agent()
         self.backendReady.emit()
 
     def shutdown(self) -> None:

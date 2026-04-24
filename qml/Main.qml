@@ -29,28 +29,28 @@ Window {
         anchors.fill: parent
         spacing: 0
 
-        // Editor + agent pane as horizontal siblings. Agent pane is
-        // passive display during the placeholder spike — focus stays
-        // on NvimView (keyboard-first non-negotiable). The 60/40
-        // proportions are a starting point, not a product decision;
-        // a draggable divider + keyboard focus-switch arrive with
-        // the composer. Using `Layout.preferredWidth` so the
-        // RowLayout keeps both panes visible when the window
-        // resizes rather than degrading to one zero-width pane.
-        RowLayout {
+        // Editor / agent view swap. Full-window mode, not a side
+        // panel: when `controller.agentVisible` is True the editor
+        // hides entirely and the agent pane takes over the main
+        // content area; the StatusBar stays visible across both
+        // modes for visual continuity (project / branch / mode
+        // read as relevant context in either view). Only one of
+        // the two Items has `visible: true` at a time so Qt's
+        // scene graph skips the hidden subtree entirely.
+        Item {
+            id: mainContent
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 0
 
             NvimView {
                 id: editor
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                Layout.preferredWidth: root.width * 0.6
+                anchors.fill: parent
+                visible: !controller.agentVisible
                 backend: nvimBackend
-                focus: true
+                focus: visible
 
                 Component.onCompleted: forceActiveFocus()
+                onVisibleChanged: if (visible) forceActiveFocus()
 
                 // Floating cmdline + wildmenu overlay — parented to the
                 // editor so it clips within the viewport (not over the
@@ -83,8 +83,8 @@ Window {
 
             AgentPane {
                 id: agentPane
-                Layout.fillHeight: true
-                Layout.preferredWidth: root.width * 0.4
+                anchors.fill: parent
+                visible: controller.agentVisible
             }
         }
 
@@ -95,8 +95,15 @@ Window {
         }
     }
 
-    // Ensure focus returns to the editor whenever the window regains it —
-    // critical so the user never loses keystroke flow to NeoVim after
-    // alt-tabbing away.
-    onActiveChanged: if (active) editor.forceActiveFocus()
+    // Focus handoff when the window regains activation: whichever
+    // view is currently visible grabs focus, so alt-tabbing back
+    // never leaves the user typing into a dead surface.
+    onActiveChanged: {
+        if (!active)
+            return
+        if (controller.agentVisible)
+            agentPane.forceActiveFocus()
+        else
+            editor.forceActiveFocus()
+    }
 }
