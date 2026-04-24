@@ -344,7 +344,7 @@ class AppController(QObject):
             self.toggle_agent()
         elif op == "debug":
             event = str(payload.get("event") or "")
-            log.info("agent debug: %s %r", event, payload)
+            log.debug("agent debug: %s %r", event, payload)
         else:
             log.debug("unhandled agent op: %r", op)
 

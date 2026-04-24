@@ -548,23 +548,26 @@ end)
 --   3. Observability: the handler `vim.notify`s on fire so the
 --      operator can confirm it ran (orchestrator's terminal flow
 --      runs silently, so absent our notify = our handler didn't run).
---      `SYMMETRIA_AGENT_TRACE=1` env var promotes the logs to INFO.
 --
 -- Continue / Resume Claude routing (`<leader>aC`, `<leader>aR`) is
 -- deferred until `SessionHost` supports `claude -c` / `claude -r`
 -- flags — orchestrator's terminal flow handles those slots today.
 
 local SYMMETRIA_AGENT_DESC = "New Claude (Symmetria agent pane)"
+-- HACK: <leader>an is wired to the same handler as <leader>aN; "skip perms"
+-- semantics (orchestrator's --dangerously-skip-permissions equivalent) are
+-- deferred until SessionHost supports passing that flag through to `claude`.
+-- Keeping the slot separate (with its own desc) so the eventual divergence
+-- is a code change, not a keymap-table surgery.
 local SYMMETRIA_AGENT_DESC_SKIP = "New Claude skip perms (Symmetria agent pane)"
 
 local function open_agent_new()
-  vim.notify("[symmetria] agent hijack fired", vim.log.levels.INFO)
   pcall(vim.rpcnotify, 0, "agent", { op = "show", action = "new" })
 end
 
 local function slot_owned_by_us(keys)
   local mapping = vim.fn.maparg(keys, "n", false, true)
-  if type(mapping) ~= "table" then
+  if type(mapping) ~= "table" or vim.tbl_isempty(mapping) then
     return false
   end
   local desc = mapping.desc or ""
@@ -578,13 +581,22 @@ local function install_agent_keymaps(reason)
   }
   for _, spec in ipairs(wanted) do
     if not slot_owned_by_us(spec.keys) then
+      -- `buffer = 0` + `nowait = true` per gotcha #20: `nowait` is only
+      -- honored on buffer-local maps when a competing longer map exists
+      -- globally (which is exactly orchestrator.nvim's situation for
+      -- <leader>a*). The BufEnter autocmd above re-installs on every
+      -- buffer transition, which is the right lifecycle for buffer-local
+      -- keymaps (they die with their buffer).
       vim.keymap.set("n", spec.keys, open_agent_new, {
+        buffer = 0,
         silent = true,
+        nowait = true,
         desc = spec.desc,
       })
       -- Diagnostic trail — visible in Python's app log via the
-      -- existing `agent` rpcnotify channel. Captured via pcall so a
-      -- disconnected Python client never blocks the keymap install.
+      -- existing `agent` rpcnotify channel.
+      -- pcall intentional: rpcnotify fails if Python client is disconnected
+      -- (same pattern as capsule/scroll/completions emitters — see emit_capsule).
       pcall(vim.rpcnotify, 0, "agent", {
         op = "debug",
         event = "keymap_install",
@@ -618,17 +630,25 @@ vim.api.nvim_create_autocmd("BufEnter", {
   end,
 })
 
--- Self-heal whenever lazy.nvim finishes loading a plugin. Orchestrator
+-- Self-heal whenever lazy.nvim finishes loading orchestrator. The plugin
 -- is commonly lazy-loaded via `keys = {"<leader>a*", ...}`, which means
 -- its keymaps land WHEN THE USER FIRST PRESSES <leader>a — a window
 -- BufEnter cannot cover. `User LazyLoad` fires synchronously inside
 -- lazy.nvim's load path, BEFORE the keypress is re-dispatched for
 -- lookup, so installing here wins the slot back for the trailing `N`.
+--
+-- Narrowed to orchestrator-matching plugin names (lazy.nvim passes the
+-- plugin spec name as `ev.data`) so the broad-hook install cost stays
+-- zero for the 30–80 other plugins that LazyLoad per session. BufEnter
+-- self-heal remains the fallback if the plugin is ever renamed.
 vim.api.nvim_create_autocmd("User", {
   group = agent_grp,
   pattern = "LazyLoad",
   callback = function(ev)
-    install_agent_keymaps("LazyLoad:" .. tostring(ev.data or ""))
+    local name = ev.data or ""
+    if type(name) == "string" and name:lower():find("orchestrator", 1, true) then
+      install_agent_keymaps("LazyLoad:" .. name)
+    end
   end,
 })
 
