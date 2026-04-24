@@ -530,15 +530,21 @@ end)
 
 -- --- Agent-pane triggers ---------------------------------------------
 --
--- The user's orchestrator.nvim plugin owns the `<leader>A*` prefix
--- (which-key shows: AI picker, Continue/New/Resume Claude, jump-to-
--- last-edit, show-edits quickfix, toggle prompt editor, etc.). We
--- hijack a minimal subset — `<leader>AN` / `<leader>An` ("New
--- Claude" / "New Claude skip perms") — so those semantic entry
--- points open the native agent pane instead of orchestrator's
--- terminal flow. Other entries stay owned by orchestrator because
--- they are nvim-side affordances (quickfix, jumps) that complement
--- the agent pane rather than competing with it.
+-- The user's orchestrator.nvim plugin owns the `<leader>a*` prefix
+-- (which-key menu under lowercase `a`: AI picker, Continue/New/
+-- Resume Claude, jump-to-last-edit, show-edits quickfix, toggle
+-- prompt editor, etc.). We hijack a minimal subset —
+-- `<leader>aN` / `<leader>an` ("New Claude" / "New Claude skip
+-- perms") — so those semantic entry points open the native agent
+-- pane instead of orchestrator's terminal flow. Other entries
+-- (`j` jump-to-edit, `e` edits quickfix, `P` / `p` prompt nav)
+-- stay orchestrator-owned; they are nvim-side affordances that
+-- complement the agent pane rather than competing with it.
+--
+-- Case matters: we install at lowercase `<leader>a` because that's
+-- the orchestrator prefix. An earlier iteration landed on uppercase
+-- `<leader>A` and was dead code (the slot is unused, so no menu
+-- ever triggered our handler).
 --
 -- Install order matters: orchestrator.nvim is typically lazy-loaded
 -- (lazy.nvim `event = "VeryLazy"`), so a sync install at `require`
@@ -547,7 +553,7 @@ end)
 -- setup phase finishes (same mitigation gotcha #21 uses for the
 -- whichkey trie + LspAttach race).
 --
--- Continue / Resume Claude routing (`<leader>AC`, `<leader>AR`) is
+-- Continue / Resume Claude routing (`<leader>aC`, `<leader>aR`) is
 -- deferred until `SessionHost` supports `claude -c` / `claude -r`
 -- flags — until then, orchestrator's terminal flow handles those
 -- slots, which is acceptable for the placeholder iteration.
@@ -559,11 +565,11 @@ vim.api.nvim_create_autocmd("VimEnter", {
   group = vim.api.nvim_create_augroup("symmetria_agent_keys", { clear = true }),
   callback = function()
     vim.schedule(function()
-      vim.keymap.set("n", "<leader>AN", open_agent_new, {
+      vim.keymap.set("n", "<leader>aN", open_agent_new, {
         silent = true,
         desc = "New Claude (Symmetria agent pane)",
       })
-      vim.keymap.set("n", "<leader>An", open_agent_new, {
+      vim.keymap.set("n", "<leader>an", open_agent_new, {
         silent = true,
         desc = "New Claude skip perms (Symmetria agent pane)",
       })
