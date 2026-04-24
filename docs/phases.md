@@ -36,20 +36,35 @@ Each phase ends with a go/no-go checkpoint. If a phase's deliverable does not fe
 
 **Checkpoint (unchanged, for when we return):** can the full File Manager workflow (including fuzzy search) happen inside the IDE window with no regression?
 
-## Phase 2 — Claude Code frontend  *(next, biggest payoff)*
+## Phase 2 — Agent pane *(in progress — placeholder spike landed)*
 
-**Goal:** Claude Code runs inside the IDE's agent pane with native rendering for images, HTML diagrams, and conversation blocks.
+**Goal:** Claude Code runs inside the IDE's agent pane with structured access to every turn — images, tool calls, URLs, code blocks — instead of the terminal's byte stream.
 
-**Deliverables:**
+**Architecture pivot from the original spec:** the original Phase 2 used `ptyprocess` + `pyte` to spawn `claude` in a pseudoterminal and recover structure from ANSI-decorated frames. Discourse before implementation reframed the approach: `claude` itself supports a bidirectional typed-event protocol via `claude -p --output-format stream-json`. That keeps every Claude Code behaviour intact (hooks, skills, MCP, permission modes, session persistence, subagents, slash commands, compaction) and exposes each turn as structured events (`assistant_message`, `tool_use`, `tool_result`, `stream_event/content_block_delta`, `result`, …) — hostile to recover from terminal bytes, trivial to consume directly. `subprocess` + `json` are stdlib, so the pivot dropped the `ptyprocess` / `pyte` optional-dep group entirely.
 
-- pty spawn (`ptyprocess`) + `pyte` cell model.
-- QML terminal view rendering pyte state.
-- Warp-style block model — each prompt/response is a navigable, selectable block.
-- Inline image rendering when Claude Code references an image path.
-- Inline HTML diagram rendering via embedded `QtWebEngineView` (no external browser tab).
-- Keyboard navigation across history blocks.
+**Placeholder spike — landed:**
 
-**Checkpoint:** can a full Claude Code session happen here with better observability than the terminal?
+- `src/symmetria_ide/session_host.py` — `SessionHost(QObject)` mirrors `NvimBackend` post-`nvim_events` shape. Daemon stdout + stderr workers, `threading.Event` cooperative shutdown, GC suspension around signal emission per gotcha #10, `parse_stream_json_line` extracted as a pure function for unit coverage.
+- `src/symmetria_ide/session_models.py` — `SessionModel(QAbstractListModel)` renders one row per stream-json event, with partial-text coalescing for streaming assistant content. `AgentRow` is `@dataclass(slots=True, frozen=True)` per §1 P1.
+- `qml/AgentPane.qml` — flat `ListView` with typed-property delegates, bound entirely against `Theme.color.agent.*` / `Theme.font.*` / `Theme.spacing.*`. Empty-state affordance when no subprocess is running.
+- `qml/design/Theme.qml` — `Theme.color.agent.{user,assistant}` rung added with wine_theme-sourced provenance.
+- `qml/Main.qml` — `RowLayout { NvimView(60%), AgentPane(40%) }` with `StatusBar` full-width below. Focus stays on the editor.
+- `src/symmetria_ide/app.py` — `AppController` owns `SessionHost` + `SessionModel`, wires the cross-thread signals with explicit `Qt.QueuedConnection`, exposes `sessionHost` + `sessionModel` context properties. `start()` conditionally spawns `claude` based on the `SYMMETRIA_IDE_AGENT_PROMPT` env var.
+- Tests: 36 new (`test_session_models.py` + `test_session_host_parser.py`) covering role routing, partial coalescing, `dataChanged` role scoping, malformed-JSON tolerance, BOM/UTF-8 edge cases.
+
+**Still to come (deferred after the placeholder):**
+
+- Composer — native Qt text input, Enter-to-send, image paste, `@mention` file finder, slash-command palette.
+- Turn grouping + tool-call drill-in. Flat list is the right shape for the spike (learn the vocabulary first); the grouped view designs better with real event data in hand.
+- Inline permission-request UI replacing the terminal y/n prompt.
+- Image rendering (user-passed AND assistant-generated) and HTML/CSS diagram rendering via embedded `QtWebEngineView`.
+- URL chips + code-fence copy actions on every delegate.
+- Focus switching between editor and agent pane via a keyboard binding.
+- Multi-turn flow (flip `start()` to `--input-format stream-json`; wire the existing `send_user_message` stub to the composer).
+
+**Mobile / VPS outlook** (informing today's boundaries, not yet building): `SessionHost`'s interface is designed net-serialisable — dict-typed events, no Qt types at the core boundary — so a future transport (WebSocket, gRPC, Tailscale) can wrap it without rewrites. Mobile client lands as a thin remote viewer once the desktop loop is complete.
+
+**Checkpoint:** does a full Claude Code session happen here with better observability than the terminal? — still open until the composer + permission UI land. The placeholder tells us the event vocabulary and the rendering feel are ready to design against.
 
 ## Phase 3 — NeoVim chrome extraction
 

@@ -17,8 +17,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-# Phase 2 terminal emulation (not yet imported in Phase 0).
-terminal = ["ptyprocess>=0.7", "pyte>=0.8"]
+# Phase 2 originally planned a pty + pyte terminal emulation bridge
+# (`ptyprocess`, `pyte`). The placeholder spike pivoted to
+# `claude -p --output-format stream-json` driven as a subprocess —
+# see `docs/phases.md` and `docs/tech-stack.md`. `subprocess` and
+# `json` are stdlib, so Phase 2 picked up zero new runtime deps.
 
 [project.scripts]
 symmetria-ide = "symmetria_ide.__main__:main"

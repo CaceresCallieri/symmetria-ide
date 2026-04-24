@@ -17,6 +17,7 @@ The app supports a headless-ish test mode driven by env vars. It bypasses the co
 ```
 SYMMETRIA_IDE_SCREENSHOT=/tmp/out.png            # save PNG and exit
 SYMMETRIA_IDE_TEST_KEYS="iHello<Esc>:w<CR>"       # inject NeoVim-notation keystrokes before screenshot
+SYMMETRIA_IDE_AGENT_PROMPT="what is 2+2?"         # spawn claude -p with this prompt; agent pane populates
 SYMMETRIA_IDE_WARMUP_MS=1500                      # ms to wait after app launches before sending keys
 SYMMETRIA_IDE_SETTLE_MS=800                       # ms between key injection and screenshot
 PYTHONPATH=src python -m symmetria_ide
@@ -25,6 +26,21 @@ PYTHONPATH=src python -m symmetria_ide
 Key-notation examples: `i`, `<Esc>`, `<CR>`, `:e file.txt<CR>`, `100G`, `<C-w>v`. Same syntax as nvim itself (see `:help key-notation`).
 
 Use this pattern when you need to verify a UI change without opening a window the user can see. Screenshots land cleanly even if workspace 6 isn't active.
+
+## Phase 2 placeholder spike
+
+The agent pane is editor-first by design: `SYMMETRIA_IDE_AGENT_PROMPT` unset means no `claude` subprocess spawns and the pane renders its empty-state affordance ("agent pane — set SYMMETRIA_IDE_AGENT_PROMPT to populate"). Set the env var to opt in.
+
+```
+SYMMETRIA_IDE_AGENT_PROMPT="explain the capsule protocol" \
+  PYTHONPATH=src python -m symmetria_ide
+```
+
+Runs the real `claude -p --output-format stream-json --include-partial-messages --verbose <prompt>` subprocess. Every JSONL event lands in `SessionModel` and renders as a flat `ListView` row. One-shot per launch — multi-turn arrives with the composer.
+
+Prerequisite: `claude auth status` must return `loggedIn: true`. If not, run `claude auth` first; the pane surfaces auth failures via the `stderr_line` signal (logged at WARNING by `AppController._log_session_stderr`).
+
+Combined with `SYMMETRIA_IDE_SCREENSHOT` + a longer warmup, this doubles as a headless verification of the agent pane wiring (allow 5–8 s warmup so the first streamed event arrives before the screenshot fires).
 
 ## Hyprland window routing (workspace 6)
 

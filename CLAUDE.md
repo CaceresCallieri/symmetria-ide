@@ -22,8 +22,11 @@ A custom IDE wrapper built on NeoVim, in the Symmetria ecosystem.
 - `src/symmetria_ide/nvim_events.py` — `redraw` handler functions + notification routing. Free functions bound as methods on `NvimBackend` at class scope so `backend._h_*` / `backend._dispatch_redraw` behave identically to pre-split. `_REDRAW_HANDLERS` is re-exported from `nvim_backend` for the dispatch test scaffold.
 - `src/symmetria_ide/nvim_view.py` — `QQuickPaintedItem` rendering the grid; coalesces runs of same-highlight cells into single `fillRect` + `drawText` calls.
 - `src/symmetria_ide/keys.py` — Qt key event → NeoVim keycode translator (unit-tested).
-- `src/symmetria_ide/app.py` — `QGuiApplication`, `StatusBarState` (well-known capsules with per-field notify signals), `CapsuleModel` (generic extension slot), `AppController`.
-- `qml/Main.qml`, `qml/StatusBar.qml`, `qml/CommandLine.qml`, `qml/WhichKeyOverlay.qml` — UI.
+- `src/symmetria_ide/app.py` — `QGuiApplication`, `StatusBarState` (well-known capsules with per-field notify signals), `CapsuleModel` (generic extension slot), `AppController`. Owns `SessionHost` + `SessionModel` alongside the nvim backend; spawns `claude -p` when `SYMMETRIA_IDE_AGENT_PROMPT` is set.
+- `src/symmetria_ide/session_host.py` — `claude -p --output-format stream-json` subprocess + daemon stdout/stderr worker threads; GC-suspends around signal emission per gotcha #10; mirrors `NvimBackend` post-refactor shape (`_stop_event`, `daemon=True` workers).
+- `src/symmetria_ide/session_models.py` — `SessionModel(QAbstractListModel)` ingests stream-json events as a flat row list with partial-text coalescing for streaming assistant content; `AgentRow` is `@dataclass(slots=True, frozen=True)`.
+- `qml/Main.qml`, `qml/StatusBar.qml`, `qml/CommandLine.qml`, `qml/WhichKeyOverlay.qml`, `qml/AgentPane.qml` — UI.
+- `qml/design/Theme.qml` + `qml/design/qmldir` — design tokens singleton (palette, typography, spacing, sizing). Every chrome component binds against `Theme.*`; local literals forbidden.
 - `runtime/init.lua` — status-line replacement + capsule emitter + cmdline completion pipeline. Loads the orchestrator modules below.
 - `runtime/lua/orchestrator/whichkey/` — native which-key overlay (Lua side):
   - `init.lua` — setup, VimEnter hooks, `show`/`hide` emitters, which-key.nvim neutralization.
@@ -57,6 +60,33 @@ Tab navigation works via a `c`-mode keymap installed at each `CmdlineEnter` (sch
 We also force-disable `nvim-cmp`'s cmdline source from our `VimEnter` handler (`cmp.setup.cmdline(":", { enabled = false })`, plus `/` and `?`) so its floating popup doesn't render at the default bottom-row cmdline position. `noice.nvim` users still need to add their own `vim.g.symmetria_ide` guard since we don't override noice post-setup.
 
 To add a new well-known capsule, add the field + notify signal to `StatusBarState` and bind it in `StatusBar.qml`. To add a plugin-defined one, just emit it from Lua — it falls through to `CapsuleModel` and a future delegate can render it.
+
+## The stream-json protocol
+
+Distinct from the capsule / completion / which-key pipelines above — this one connects our Python backend to a live `claude` subprocess, not to nvim.
+
+`SessionHost.start(prompt)` spawns `claude -p --output-format stream-json --include-partial-messages --verbose <prompt>`. A daemon worker thread iterates `proc.stdout.readline()`, parses each JSONL line via `parse_stream_json_line`, and emits `event_received(dict)` onto the GUI thread (Qt auto-queued cross-thread delivery). A second daemon reads stderr and emits `stderr_line(str)`; `AppController._log_session_stderr` forwards those to the app log.
+
+Top-level `type` discriminators observed in the protocol:
+
+| type                | payload shape                             | `SessionModel` row treatment                                  |
+|---------------------|-------------------------------------------|---------------------------------------------------------------|
+| `system`            | `subtype` ∈ {init, hook_*, …}             | role=`system`, text summarises subtype                        |
+| `stream_event`      | nested `event.type` (SSE frame)           | only `content_block_delta.text_delta` extends the streaming row |
+| `assistant`         | `message.content[]` (text + tool_use)     | role=`assistant`, tool_use blocks render as `[tool: <name>]`  |
+| `user`              | `message.content` (str or blocks)         | role=`user`, flattened text                                    |
+| `result`            | `duration_ms`, `total_cost_usd`, …        | role=`system`, "done · Nms · $X"                               |
+| `rate_limit_event`  | `rate_limit_info.{status,rateLimitType}`  | role=`system`, dim info row                                    |
+| anything else       | —                                         | empty-role row with kind as prefix so new envelopes surface visibly |
+
+Partial coalescing: when a `stream_event.content_block_delta` with `delta.type == "text_delta"` arrives, `SessionModel` extends the most recent streaming row's text via `dataclasses.replace` + list swap, and emits `dataChanged` with an explicit role list scoped to `TextRole` (gotcha #3 — empty role lists force full re-bind; scoped lists let QML re-evaluate only the changed binding). Any non-stream-event event resets the coalesce index so the next `text_delta` opens a fresh row.
+
+Thread safety:
+- `SessionHost._run_stdout_loop` suspends GC around the emit (gotcha #10 — Python 3.14 cyclic GC racing `QSGRenderThread` is the same class of SEGV the nvim side solved; we apply the same mitigation here).
+- The cross-thread `event_received → SessionModel.apply` connect uses explicit `Qt.QueuedConnection` per project-standards §4 P2, with a one-line grep-able comment at the connect site.
+- `_stop_event` + daemon workers satisfy project-standards §1 P0 ("every long-running thread is daemon=True OR owns an explicit shutdown Event"). We satisfy both, matching `NvimBackend`.
+
+The placeholder renders events flat, one row each. Turn grouping + tool-call drill-in are deferred — designing them against guessed vocabulary is the waste the spike exists to avoid; real event cadence informs the eventual UI.
 
 ## The which-key protocol
 
@@ -128,13 +158,27 @@ PYTHONPATH=src python -m pytest tests/ -v
 
 ## Phase 2 starting points
 
-When picking up Phase 2 (Claude Code agent pane):
+The placeholder spike has landed. See `docs/phases.md` for the full sequencing; below is the fast-onboarding summary for picking up the follow-up work.
 
-- Terminal deps to add: `ptyprocess` (installed system-wide via `python-ptyprocess` on Arch), `pyte` (not yet installed — `pip install pyte` or check for an Arch package).
-- Reference pattern: `src/symmetria_ide/nvim_backend.py` shows the "worker thread + Qt signal" shape that the pty/pyte bridge should also follow.
-- The agent pane is a sibling of the editor in `Main.qml` — add a new `AgentPane.qml` and wire a key binding at the window root to toggle focus.
-- Warp's block model is the reference: each prompt+response pair is a navigable block with selectable content. `pyte.Screen` gives us cell output; we group into blocks by watching for shell prompt markers.
-- Keep the IPC layer agent-agnostic (per `docs/future.md`): the frontend speaks prompt/response over pty/stdio, so OpenCode/PyAgent/custom harnesses can slot in later.
+**What's wired today:**
+- `SessionHost` spawns `claude -p --output-format stream-json --include-partial-messages --verbose <prompt>` when `SYMMETRIA_IDE_AGENT_PROMPT` is set. Editor-first when unset.
+- `SessionModel` renders events flat, one row per event, with partial-text coalescing for streaming assistant turns.
+- `AgentPane.qml` is a sibling of `NvimView` inside `Main.qml`'s `RowLayout` (60/40). Theme-tokens only; no literals.
+- Tests cover model routing, partial coalescing, role-scoped `dataChanged`, and the JSONL line parser's malformed-input tolerance.
+
+**What's deliberately deferred (each a natural next chunk):**
+- **Composer.** Native Qt text input; wire into the existing `SessionHost.send_user_message` stub. Flip `start()` to also pass `--input-format stream-json` so the subprocess stays alive between turns.
+- **Permission UI.** `claude` emits permission-request events on tool use; render inline approve/deny cards rather than stalling on a terminal y/n prompt.
+- **Turn grouping + tool-call drill-in.** Flat list is intentional for the placeholder; real event cadence now informs what the grouped view should look like.
+- **Media rendering.** User-passed images, assistant-generated diagrams (inline `QtWebEngineView`), URL chips, code-fence copy actions.
+- **Focus switching.** No mouse; add a keyboard binding to hop between editor and agent pane (and back).
+
+**Design rules that hold across every follow-up:**
+- Cross-thread signals use explicit `Qt.QueuedConnection` with a grep-able comment at the connect site (§4 P2).
+- Every worker thread is `daemon=True` AND owns a `threading.Event` (§1 P0).
+- GC is suspended around worker-thread signal emission (gotcha #10) whenever the payload construction allocates.
+- Chrome binds against `Theme.*` — new tokens land in `qml/design/Theme.qml` with provenance comments, not inline in delegates (§3 P1).
+- Keep the IPC layer agent-agnostic (per `docs/future.md`): `SessionHost`'s interface is dict-typed events, no Qt types at the core boundary — future mobile / VPS transports wrap the same protocol.
 
 ## Where to look first
 

@@ -5,6 +5,8 @@ All notable changes to Symmetria IDE are documented here. Format based on [Keep 
 ## [Unreleased]
 
 ### Added
+- Agent pane placeholder spike (Phase 2). `claude -p --output-format stream-json` spawns as a subprocess; `SessionHost` pumps JSONL events onto the GUI thread through a queued cross-thread connection; `SessionModel` renders one row per event with partial-text coalescing; `AgentPane.qml` displays the flat event list bound entirely against `Theme.color.agent.*` / `Theme.font.*` / `Theme.spacing.*`. Opt in via the `SYMMETRIA_IDE_AGENT_PROMPT` env var; editor-first workflows see no behaviour change when unset. 36 new tests.
+- `Theme.color.agent.{user,assistant}` rung for the agent pane — `user` shares tone with `accent.primary`; `assistant` uses `wine_theme.term_cyan` (dim sibling of `mode.terminal`).
 - Native which-key overlay (Lua emitter + QML panel) with trie built from `nvim_get_keymap` plus which-key.nvim's preset catalog.
 - Native QML command-line overlay with independent completion pipeline (`getcompletion()`-driven, bypasses `nvim-cmp`/`wilder.nvim` popups).
 - Smooth-scroll animation (critically-damped spring over 2× scrollback buffer, Neovide-parity).
@@ -32,6 +34,6 @@ Deferred.
 
 ## Phase 2 — Agent pane
 
-Starting next. Claude Code (or OpenCode/custom harness) as a sibling pane via pty/pyte bridge. Reference patterns: `nvim_backend.py` worker-thread shape, Warp's block model.
+**Placeholder spike landed.** Claude Code drives the pane via `claude -p --output-format stream-json` — a typed-event JSONL protocol instead of the originally planned `pty + pyte` bridge. Every Claude Code behaviour (hooks, skills, MCP, permissions, sessions) stays intact while the frontend consumes structured events directly. See `docs/phases.md` for the full pivot rationale and remaining deliverables (composer, permission UI, turn grouping, image + diagram rendering).
 
 [Unreleased]: https://github.com/CaceresCallieri/symmetria-ide/compare/main...HEAD

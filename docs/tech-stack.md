@@ -12,10 +12,13 @@
 | UI framework         | PySide6 (Qt 6.7+)                | First-party Qt Python bindings, LGPL, healthy. |
 | Declarative UI       | QML                              | Already used across the Symmetria ecosystem. |
 | NeoVim RPC           | `pynvim`                         | Canonical msgpack-RPC client. |
-| pty spawning         | `ptyprocess`                     | Spawns Claude Code and shells. |
-| Terminal emulation   | `pyte`                           | Python VT emulator — becomes the terminal backend. |
+| Agent bridge         | `subprocess` + `json` (stdlib)   | Phase 2 reads `claude -p --output-format stream-json` as JSONL events. No third-party deps. |
 | Browser embed        | `QtWebEngine`                    | Chromium-based, shipped with Qt. |
 | Live QML reload      | `pyside6_live_coding` (dev only) | Fast iteration in Phase 0. |
+
+### Retired from the stack
+
+- **`ptyprocess` + `pyte`** — originally planned to drive Claude Code through a pty and reconstruct structure from ANSI-decorated frames. Dropped in favour of the stream-json pivot (see `docs/phases.md`). Every turn's structure (tool_use, tool_result, stream_event.content_block_delta, result, rate_limit_event, …) is directly readable as JSONL events, eliminating the terminal-emulation surface entirely. `[project.optional-dependencies].terminal` was removed from `pyproject.toml` as part of the pivot.
 
 ## Why PySide6
 

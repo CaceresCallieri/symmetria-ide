@@ -25,10 +25,10 @@ Federation is harder to keep coherent today: inter-app communication under Hyprl
  │
  ├─ File manager drawer         ← deferred pending QuickShell→Qt decision
  │
- ├─ Agent pane                                                 (Phase 2 — NEXT)
- │   ├─ pty + pyte              ← terminal emulation for Claude Code
- │   ├─ Warp-style block model  ← conversation history as navigable blocks
- │   └─ Inline image / HTML diagram renderers
+ ├─ Agent pane                                                 (Phase 2 — placeholder spike landed)
+ │   ├─ claude -p --output-format stream-json  ← subprocess + JSONL event stream
+ │   ├─ Flat event ListView (placeholder)      ← turn grouping + drill-in follow
+ │   └─ Inline image / HTML diagram renderers  ← deferred until composer lands
  │
  └─ Browser pane                ← QtWebEngine, cmux-pattern agent control     (Phase 4)
 ```
@@ -84,17 +84,40 @@ NeoVim's `ui-ext` capabilities (`ui_attach` with `ext_cmdline`, `ext_messages`, 
 ```
  [Python backend]
     ├─ spawns  → [nvim --embed]        (msgpack-RPC over stdio, via pynvim)
-    ├─ spawns  → [claude-code pty]     (ptyprocess + pyte)
+    ├─ spawns  → [claude -p ... stream-json]  (subprocess + JSONL events via session_host.py)
     ├─ hosts   → orchestrator bridge   (reads capsule state via nvim RPC)
     └─ exposes → QML signals / props   (backend ↔ UI data binding)
 
  [QML frontend]
-    ├─ NativeStatusBar.qml
-    ├─ NeovimView.qml                  (renders nvim grid events)
-    ├─ FileManager/                    (imported from Symmetria File Manager)
-    ├─ TerminalView.qml                (renders pyte cell model)
-    └─ BrowserPane.qml                 (wraps QtWebEngineView)
+    ├─ StatusBar.qml
+    ├─ NvimView                        (renders nvim grid events; QQuickPaintedItem)
+    ├─ FileManager/                    (imported from Symmetria File Manager — Phase 1, deferred)
+    ├─ AgentPane.qml                   (flat stream-json event list; placeholder)
+    └─ BrowserPane.qml                 (wraps QtWebEngineView — Phase 4)
 ```
+
+## Realized Phase 2 placeholder (agent pane, stream-json pivot)
+
+```
+claude -p --output-format stream-json --include-partial-messages
+    ↓ subprocess stdout (JSONL, one event per line)
+SessionHost (daemon worker thread, mirrors NvimBackend shape)
+    ↓ parse_stream_json_line → event dict
+    ↓ gc.disable / enable around emit            (gotcha #10)
+    ↓ event_received(dict)                       (Qt queued connection)
+SessionModel (GUI thread, QAbstractListModel)
+    ↓ apply() routes on top-level `type` discriminator
+    ↓ append / extend-last-streaming-row + dataChanged(roles=[TextRole])
+AgentPane.qml (flat ListView with typed-property delegate, Theme-tokens only)
+
+Main.qml: ColumnLayout { RowLayout { NvimView(60%), AgentPane(40%) }, StatusBar }
+```
+
+**Critical invariants that carried over from Phase 0:**
+- Gotcha #10 applies to any worker thread that allocates during signal emission — `SessionHost._run_stdout_loop` suspends GC around every emit. Same pattern, same reason.
+- Project-standards §4 P0: cross-thread connections use explicit `Qt.QueuedConnection` with a grep-able comment. `AppController.__init__` marks every agent-pane connect site.
+- Project-standards §1 P0: every long-running thread is `daemon=True` AND carries an explicit `threading.Event` for cooperative shutdown. `SessionHost._stop_event` mirrors `NvimBackend._stop_event`.
+- Gotcha #3: `dataChanged` for partial-text extension is emitted with an explicit role list scoped to `TextRole`, never an empty list.
 
 ## Keyboard handling
 
