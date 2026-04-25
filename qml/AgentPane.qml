@@ -88,6 +88,19 @@ Rectangle {
             // conversation already filled the viewport.
             onCountChanged: events.positionViewAtEnd()
 
+            // positionViewAtEnd is NOT enough on its own: it fires from
+            // onCountChanged when the user-message row is inserted, but at
+            // that point QML's lazy binding evaluation hasn't yet updated the
+            // footer's height (awaitingResponse just became true in the same
+            // call frame). A second scroll-to-end fires here once the footer
+            // height binding settles so the spinner is always fully visible.
+            Connections {
+                target: controller
+                function onAwaitingResponseChanged() {
+                    if (controller.awaitingResponse) events.positionViewAtEnd()
+                }
+            }
+
             delegate: Item {
                 id: entry
 
@@ -196,14 +209,19 @@ Rectangle {
             // Reserve a stable height (`visible ? ... : 0`) so the
             // viewport doesn't jump as the row toggles.
             footer: Item {
+                // Single binding point for the spinner state — both
+                // `height` and `visible` reference this so the same
+                // expression isn't duplicated and the intent is obvious.
+                readonly property bool isLoading: controller.awaitingResponse
+
                 width: events.width
                 // visible-gated height keeps the footer from claiming
                 // a row of empty space between turns. `+ Theme.spacing.sm`
                 // gives the spinner a small breath off the last row.
-                height: controller.awaitingResponse
+                height: isLoading
                     ? loaderText.implicitHeight + Theme.spacing.sm * 2
                     : 0
-                visible: controller.awaitingResponse
+                visible: isLoading
 
                 Text {
                     id: loaderText
