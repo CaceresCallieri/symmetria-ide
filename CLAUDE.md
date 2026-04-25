@@ -186,7 +186,7 @@ PYTHONPATH=src python -m pytest tests/ -v
 
 ## Phase 2 starting points
 
-Phase 2 status (what's wired, what's deferred, key invariants) lives in `.claude/memory/project/active/phase2_current_state.md` — refreshed each session as state changes. `docs/phases.md` carries the full phase sequencing.
+Phase 2 status (what's wired, what's deferred, key invariants) lives in `.claude/memory/project/active/phase2_current_state.md` — update that file when Phase 2 state changes (it does not auto-refresh). `docs/phases.md` carries the full phase sequencing.
 
 Cross-cutting design rules that hold across every Phase 2 follow-up:
 - Cross-thread signals use explicit `Qt.QueuedConnection` with a grep-able comment at the connect site (§4 P2).

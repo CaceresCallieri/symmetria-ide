@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+set -euo pipefail
+
+# Registered in .claude/settings.json under PostToolUse:Skill with an absolute
+# path. Claude Code does not expand env vars or relative paths in hook command
+# strings, so if this repo moves to a different home or user, update the
+# command path in .claude/settings.json to match the new absolute location.
 
 # Memory sweep checkpoint — fires AFTER /commit is invoked. The /commit skill
 # marks a logical end-of-work boundary: the right moment to ask "did this
@@ -11,11 +17,16 @@
 # Filtering: PostToolUse fires on every Skill invocation. We parse stdin
 # JSON and only inject when tool_input.skill == "commit". Silent exit otherwise.
 
-# Read stdin once
+# Guard: jq is required to parse stdin — silently skip if absent
+command -v jq >/dev/null 2>&1 || exit 0
+
+# Read stdin once; cat returns "" with exit 0 if stdin is closed/empty
 INPUT="$(cat)"
 
-# Extract skill name
-SKILL_NAME="$(printf '%s' "$INPUT" | jq -r '.tool_input.skill // empty' 2>/dev/null)"
+# Extract skill name; printf avoids echo interpreting backslashes in the JSON.
+# || true: jq exits non-zero on invalid JSON — with pipefail this would abort
+# the script. We want a silent no-op instead, so the || true keeps exit code 0.
+SKILL_NAME="$(printf '%s' "$INPUT" | jq -r '.tool_input.skill // empty' 2>/dev/null || true)"
 
 # Only fire for the commit skill — silent no-op for everything else
 if [ "$SKILL_NAME" != "commit" ]; then

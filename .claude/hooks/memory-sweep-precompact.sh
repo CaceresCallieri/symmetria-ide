@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+set -euo pipefail
+
+# Registered in .claude/settings.json under PreCompact with an absolute path.
+# Claude Code does not expand env vars or relative paths in hook command
+# strings, so if this repo moves to a different home or user, update the
+# command path in .claude/settings.json to match the new absolute location.
 
 # Memory sweep checkpoint — fires before context compaction (manual /compact
 # or auto-compact at context limit). Last chance to persist learnings before
