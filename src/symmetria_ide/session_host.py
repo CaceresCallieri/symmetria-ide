@@ -29,7 +29,7 @@ events whose top-level `type` and inner fields match what
 `SessionModel.apply` already routes (`assistant`, `system`,
 `stream_event`, `result`, `rate_limit_event`), plus a sidecar-
 synthesized `permission_request` envelope when the SDK's
-`canUseTool` callback fires (Step 5).
+`canUseTool` callback fires.
 
 **Thread discipline (project-standards §1 P0 + §4 P0).**
 
@@ -76,21 +76,6 @@ def _sidecar_dist_path() -> Path:
     return Path(__file__).resolve().parents[2] / "sidecar" / "dist" / "index.js"
 
 
-# Argv used on every `start()` call. We invoke `node` directly with the
-# bundled sidecar entry point — the sidecar's package.json declares
-# `"type": "module"` so node resolves the bundle as ESM, and `esbuild`
-# externalised `@anthropic-ai/claude-agent-sdk` so the SDK loads from
-# `sidecar/node_modules/` at runtime rather than being inlined into the
-# bundle (which would be ~2MB and would break native binary opt-deps).
-def _sidecar_argv() -> tuple[str, ...]:
-    """Return the argv tuple for spawning the sidecar.
-
-    Computed lazily so test environments can stub `_sidecar_dist_path`
-    to point at a fixture without import-time path coupling.
-    """
-    return ("node", str(_sidecar_dist_path()))
-
-
 # Timeout (seconds) for cooperative SIGTERM shutdown before we SIGKILL.
 # Matches NvimBackend's `proc.wait(timeout=…)` budget — if the sidecar
 # hasn't exited within this window the process is unresponsive and we
@@ -98,7 +83,7 @@ def _sidecar_argv() -> tuple[str, ...]:
 _SHUTDOWN_GRACE_SECONDS = 2.0
 
 
-def parse_stream_json_line(line: str) -> dict | None:
+def parse_jsonl_line(line: str) -> dict | None:
     """Parse one stdout line into a wire-protocol event dict.
 
     Returns ``None`` for blank / whitespace-only lines and for lines
@@ -108,8 +93,7 @@ def parse_stream_json_line(line: str) -> dict | None:
 
     BOM-tolerance: the sidecar never prepends a BOM in practice, but
     we strip one defensively so a future change doesn't silently
-    wedge the parser. Same defence carried over from the prior
-    `claude -p` implementation.
+    wedge the parser. Same defence carried over from the prior claude CLI implementation.
     """
     stripped = line.strip().lstrip("\ufeff")
     if not stripped:
@@ -117,10 +101,10 @@ def parse_stream_json_line(line: str) -> dict | None:
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError:
-        log.exception("malformed stream-json line: %r", line[:200])
+        log.exception("malformed sidecar JSONL line: %r", line[:200])
         return None
     if not isinstance(parsed, dict):
-        log.warning("stream-json line is not an object: %r", parsed)
+        log.warning("sidecar JSONL line is not an object: %r", parsed)
         return None
     return parsed
 
@@ -145,7 +129,7 @@ class SessionHost(QObject):
 
     # Payload is the full parsed JSONL event dict. Wired to
     # `SessionModel.apply` via an explicit `Qt.QueuedConnection` in
-    # `AppController.__init__` (Step 6).
+    # `AppController.__init__`.
     event_received = Signal(dict)
 
     # Emitted once when the subprocess has exited AND both worker
@@ -229,7 +213,11 @@ class SessionHost(QObject):
         # be cleared before starting workers or they will exit immediately
         # after the first event (the event-loop break at line ~352).
         self._stop_event.clear()
-        argv = list(_sidecar_argv())
+        # Argv: invoke node directly. The sidecar's package.json declares
+        # "type": "module" so node resolves the bundle as ESM; esbuild
+        # externalised @anthropic-ai/claude-agent-sdk so the SDK loads from
+        # sidecar/node_modules/ at runtime (not inlined into the ~2MB bundle).
+        argv = ["node", str(dist_path)]
         log.info("spawning sidecar: %s", " ".join(shlex.quote(a) for a in argv))
         try:
             self._proc = subprocess.Popen(  # noqa: S603 — argv is list, not shell
@@ -427,7 +415,7 @@ class SessionHost(QObject):
                     line = proc.stdout.readline()
                     if not line:
                         break  # EOF — subprocess closed stdout
-                    event = parse_stream_json_line(line)
+                    event = parse_jsonl_line(line)
                     if event is None:
                         continue
                     self.event_received.emit(event)

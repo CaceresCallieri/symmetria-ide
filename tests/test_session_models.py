@@ -558,3 +558,27 @@ def test_role_names_includes_permission_state_and_request_id():
     names = SessionModel().roleNames()
     assert names[SessionModel.PermissionStateRole] == b"permissionState"
     assert names[SessionModel.RequestIdRole] == b"requestId"
+
+
+def test_permission_request_falls_back_to_generic_text_when_no_title_and_no_tool_name():
+    """Third fallback: neither title nor tool_name present → 'Allow tool call?'.
+
+    Exercises the bottom-most branch in _row_from_permission_request's
+    text-construction logic. A sidecar event with an empty tool_name (e.g.
+    an unexpected SDK event shape) must still produce a readable row rather
+    than an empty body.
+    """
+    m = SessionModel()
+    m.apply(
+        {
+            "type": "permission_request",
+            "request_id": "no-tool",
+            "tool_name": "",
+            "tool_use_id": "tu-x",
+            "input": {},
+            "note": "sidecar-synthesized",
+        }
+    )
+    idx = m.index(0)
+    assert m.data(idx, SessionModel.TextRole) == "Allow tool call?"
+    assert m.data(idx, SessionModel.SubtypeRole) == ""

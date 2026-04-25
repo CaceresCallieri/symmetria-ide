@@ -88,15 +88,20 @@ const userMessages = (async function* (): AsyncIterable<SDKUserMessage> {
 // When the matching permission_response arrives on stdin we look it up,
 // resolve with the corresponding PermissionResult, and delete the entry.
 
-const pendingPermissions = new Map<
-  string,
-  (result: PermissionResult) => void
->();
+// Each entry stores the resolver AND the onAbort handler so
+// handleCommand can remove the abort listener on normal resolution,
+// preventing stale listeners from accumulating on opts.signal.
+type PendingPermission = {
+  resolve: (result: PermissionResult) => void;
+  onAbort: () => void;
+  signal: AbortSignal;
+};
+
+const pendingPermissions = new Map<string, PendingPermission>();
 
 const canUseTool: CanUseTool = (toolName, input, opts) => {
   return new Promise<PermissionResult>((resolve) => {
     const requestId = randomUUID();
-    pendingPermissions.set(requestId, resolve);
 
     // If the SDK aborts mid-decision (e.g. session shutdown, query
     // cancellation), resolve with deny so the caller's awaited tool
@@ -112,6 +117,7 @@ const canUseTool: CanUseTool = (toolName, input, opts) => {
       }
     };
     opts.signal.addEventListener("abort", onAbort, { once: true });
+    pendingPermissions.set(requestId, { resolve, onAbort, signal: opts.signal });
 
     writeEvent({
       type: "permission_request",
@@ -141,18 +147,22 @@ const handleCommand = (cmd: InboundCommand): void => {
     return;
   }
   if (cmd.type === "permission_response") {
-    const resolver = pendingPermissions.get(cmd.request_id);
-    if (resolver === undefined) {
+    const entry = pendingPermissions.get(cmd.request_id);
+    if (entry === undefined) {
       log(
         `permission_response for unknown request_id ${cmd.request_id} — ignored`,
       );
       return;
     }
     pendingPermissions.delete(cmd.request_id);
+    // Remove the abort listener — the permission was resolved via the
+    // normal (non-abort) path, so the { once: true } listener would
+    // otherwise linger on opts.signal until it is GC'd.
+    entry.signal.removeEventListener("abort", entry.onAbort);
     if (cmd.behavior === "allow") {
-      resolver({ behavior: "allow", updatedInput: {} });
+      entry.resolve({ behavior: "allow" });
     } else {
-      resolver({
+      entry.resolve({
         behavior: "deny",
         message: cmd.message ?? "denied by user",
       });

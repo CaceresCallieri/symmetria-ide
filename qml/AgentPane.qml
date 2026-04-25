@@ -1,4 +1,4 @@
-// Full-window agent surface — stream-json event log + composer.
+// Full-window agent surface — SDK sidecar event log + composer.
 //
 // Toggled on/off by `controller.agentVisible`. When visible, the
 // pane replaces the editor entirely (see Main.qml's `Item { NvimView
@@ -19,9 +19,9 @@
 //     Main.qml's `onVisibleChanged` handler then returns focus to
 //     the NvimView.
 //   - Enter submits via `controller.submit_prompt(text)` and clears
-//     the field. `controller.submit_prompt` spawns `claude -p`
-//     (placeholder one-shot flow); the event log accumulates across
-//     submissions so the pane reads as a running history.
+//     the field. `controller.submit_prompt` routes to the Node
+//     SDK sidecar; the event log accumulates across submissions so
+//     the pane reads as a running history.
 //
 // All colour and typography values bind against the `Theme`
 // singleton (`qml/design/Theme.qml`). `Theme.color.agent` is the

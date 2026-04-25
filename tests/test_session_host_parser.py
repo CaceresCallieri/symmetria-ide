@@ -1,16 +1,15 @@
-"""Unit tests for `parse_stream_json_line` — the pure JSONL parser.
+"""Unit tests for `parse_jsonl_line` — the pure JSONL parser.
 
 No subprocess. No threads. No Qt event loop. The parser is extracted
 from `SessionHost._run_stdout_loop` as a free function so we can
 cover every malformed-input edge case without orchestrating a live
-subprocess. Lifecycle testing lives outside this file — it needs a
-live `claude` binary and belongs in the integration suite once the
-composer work lands.
+subprocess. Lifecycle testing lives outside this file — it needs a live sidecar
+process with a valid SDK session and belongs in the integration suite.
 """
 
 from __future__ import annotations
 
-from symmetria_ide.session_host import parse_stream_json_line
+from symmetria_ide.session_host import parse_jsonl_line
 
 
 # ---------------------------------------------------------------------------
@@ -20,13 +19,13 @@ from symmetria_ide.session_host import parse_stream_json_line
 
 def test_well_formed_event_is_parsed():
     line = '{"type": "assistant", "uuid": "abc"}\n'
-    out = parse_stream_json_line(line)
+    out = parse_jsonl_line(line)
     assert out == {"type": "assistant", "uuid": "abc"}
 
 
 def test_trailing_and_leading_whitespace_is_stripped():
     line = '   \t{"type": "result"}  \n'
-    out = parse_stream_json_line(line)
+    out = parse_jsonl_line(line)
     assert out == {"type": "result"}
 
 
@@ -35,7 +34,7 @@ def test_utf8_payload_round_trips():
     # user-supplied text, etc.). Make sure the parser doesn't mangle
     # them.
     line = '{"type": "user", "message": {"content": "¡hola! 🎉 — ok"}}\n'
-    out = parse_stream_json_line(line)
+    out = parse_jsonl_line(line)
     assert out is not None
     assert out["message"]["content"] == "¡hola! 🎉 — ok"
 
@@ -46,7 +45,7 @@ def test_nested_objects_are_preserved():
         '{"type": "content_block_delta", '
         '"delta": {"type": "text_delta", "text": "hi"}}}\n'
     )
-    out = parse_stream_json_line(line)
+    out = parse_jsonl_line(line)
     assert out is not None
     assert out["event"]["delta"]["text"] == "hi"
 
@@ -57,36 +56,36 @@ def test_nested_objects_are_preserved():
 
 
 def test_blank_line_returns_none():
-    assert parse_stream_json_line("") is None
-    assert parse_stream_json_line("\n") is None
-    assert parse_stream_json_line("   \t   \n") is None
+    assert parse_jsonl_line("") is None
+    assert parse_jsonl_line("\n") is None
+    assert parse_jsonl_line("   \t   \n") is None
 
 
 def test_malformed_json_returns_none():
     # Unterminated brace — typical partial-line read symptom if
     # buffering ever fails us.
-    assert parse_stream_json_line('{"type": "assistant"\n') is None
+    assert parse_jsonl_line('{"type": "assistant"\n') is None
     # Syntactically invalid.
-    assert parse_stream_json_line("not json at all\n") is None
+    assert parse_jsonl_line("not json at all\n") is None
     # Truncated in the middle of a string.
-    assert parse_stream_json_line('{"type": "res\n') is None
+    assert parse_jsonl_line('{"type": "res\n') is None
 
 
 def test_json_that_isnt_an_object_returns_none():
     # Protocol contract is one object per line. Arrays, bare scalars,
     # null — all should be dropped, not converted.
-    assert parse_stream_json_line("[1, 2, 3]\n") is None
-    assert parse_stream_json_line("42\n") is None
-    assert parse_stream_json_line('"just a string"\n') is None
-    assert parse_stream_json_line("null\n") is None
-    assert parse_stream_json_line("true\n") is None
+    assert parse_jsonl_line("[1, 2, 3]\n") is None
+    assert parse_jsonl_line("42\n") is None
+    assert parse_jsonl_line('"just a string"\n') is None
+    assert parse_jsonl_line("null\n") is None
+    assert parse_jsonl_line("true\n") is None
 
 
 def test_bom_prefix_is_tolerated():
-    # BOM is never emitted by claude in practice, but we strip it
+    # BOM is never emitted by the sidecar in practice, but we strip it
     # defensively so a future change can't silently wedge us.
     line = "\ufeff" + '{"type": "assistant"}' + "\n"
-    out = parse_stream_json_line(line)
+    out = parse_jsonl_line(line)
     assert out == {"type": "assistant"}
 
 
@@ -95,7 +94,7 @@ def test_very_long_line_parses():
     # sure the parser doesn't cap or split them.
     long_text = "x" * 50_000
     line = f'{{"type": "stream_event", "text": "{long_text}"}}\n'
-    out = parse_stream_json_line(line)
+    out = parse_jsonl_line(line)
     assert out is not None
     assert out["text"] == long_text
     assert len(out["text"]) == 50_000

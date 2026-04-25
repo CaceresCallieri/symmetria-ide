@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from typing import TypedDict
 
 from PySide6.QtCore import (
     QAbstractListModel,
@@ -46,37 +45,6 @@ QML_IMPORT_MAJOR_VERSION = 1
 
 
 log = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Payload typing
-# ---------------------------------------------------------------------------
-#
-# Stream-json events have a `type` discriminator that decides which
-# other fields to read. Rather than exhaustively type every subtype,
-# we TypedDict-document only the envelope fields we route on, and
-# carry the rest as free-form `dict`. Project-standards §1 P1 prefers
-# TypedDict for RPC payloads — this is minimum-viable adherence, not
-# a full schema. Adding richer subtype dicts is cheap later and
-# doesn't require touching the model surface.
-
-
-class StreamJsonEvent(TypedDict, total=False):
-    """Envelope shared by every line on `claude -p` stream-json stdout.
-
-    All keys are optional from Python's perspective — every event
-    carries `type`, most carry `session_id`/`uuid`, and the rest is
-    subtype-specific. Fields we don't read today stay unannotated and
-    flow through the `AgentRow.raw` escape hatch.
-    """
-
-    type: str
-    subtype: str
-    uuid: str
-    session_id: str
-    message: dict
-    event: dict
-    parent_tool_use_id: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -133,9 +101,9 @@ class AgentRow:
 
 @QmlElement
 class SessionModel(QAbstractListModel):
-    """Flat list of stream-json events for the agent pane.
+    """Flat list of sidecar JSONL events for the agent pane.
 
-    **Shape — placeholder spike.** One row per event, with partial
+    **Shape.** One row per event, with partial
     coalescing for streaming assistant text (see
     `_handle_stream_event`). Turn grouping and tool-call drill-in are
     deferred to a follow-up iteration; both need the real event
@@ -239,11 +207,11 @@ class SessionModel(QAbstractListModel):
 
     @Slot(dict)
     def apply(self, event: dict) -> None:
-        """Ingest one stream-json event. GUI-thread only.
+        """Ingest one sidecar JSONL event. GUI-thread only.
 
         Routes on the top-level `type` discriminator. Unknown types
         append an empty-role row rather than being silently dropped —
-        during the placeholder spike this gives us a visible signal
+        this gives us a visible signal
         that the protocol shipped a new envelope we haven't mapped
         yet.
         """
@@ -436,9 +404,7 @@ class SessionModel(QAbstractListModel):
 #
 # Kept as free functions so tests can exercise them without
 # instantiating the model. Each takes the full event dict and returns
-# an `AgentRow`. Shape choices are driven by the Step 1 protocol
-# discovery samples (/tmp/claude-stream-baseline.jsonl during the
-# spike, not committed).
+# an `AgentRow`.
 
 
 def _row_from_assistant(event: dict) -> AgentRow:

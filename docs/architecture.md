@@ -105,7 +105,7 @@ sidecar/dist/index.js (Node sidecar; @anthropic-ai/claude-agent-sdk)
     ↑ JSONL stdin: user_message / permission_response          (from Python via _stdin_lock)
     ↓ JSONL stdout: translated SDK messages + permission_request envelopes
 SessionHost (daemon worker thread, mirrors NvimBackend shape)
-    ↓ parse_stream_json_line → event dict
+    ↓ parse_jsonl_line → event dict
     ↓ gc.disable / enable around emit            (gotcha #10)
     ↓ event_received(dict)                       (Qt queued connection)
 SessionModel (GUI thread, QAbstractListModel)

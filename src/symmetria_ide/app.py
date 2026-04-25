@@ -271,7 +271,12 @@ class AppController(QObject):
         self._session_host.closed.connect(
             self._on_session_closed, Qt.ConnectionType.QueuedConnection
         )
-        self._session_host.stderr_line.connect(self._log_session_stderr)
+        # queued: SessionHost stderr worker thread -> AppController (GUI thread).
+        # stderr_line is emitted from _run_stderr_loop (daemon thread); explicit
+        # QueuedConnection per project-standards §4 P2.
+        self._session_host.stderr_line.connect(
+            self._log_session_stderr, Qt.ConnectionType.QueuedConnection
+        )
         # Lua-driven agent-pane lifecycle. The rpcnotify emitter lives
         # in `runtime/init.lua`; BackendEvents routes it here. No Qt
         # thread hop — pynvim's worker already ran the notification
