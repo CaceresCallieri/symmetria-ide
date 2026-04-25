@@ -81,14 +81,12 @@ Rectangle {
             cacheBuffer: 300
 
             // Always auto-stick to bottom while new events arrive.
-            // Scroll-position memory is a follow-up — during the
-            // placeholder the reader is typically watching the
-            // stream land in real time, not navigating backwards.
-            onCountChanged: {
-                if (events.count > 0) {
-                    events.positionViewAtIndex(events.count - 1, ListView.End)
-                }
-            }
+            // Use `positionViewAtEnd` (not `positionViewAtIndex(count-1)`)
+            // so the footer — the loading indicator — counts as part
+            // of the "bottom" the view follows. Otherwise the spinner
+            // would render off-screen below the last row whenever the
+            // conversation already filled the viewport.
+            onCountChanged: events.positionViewAtEnd()
 
             delegate: Item {
                 id: entry
@@ -183,6 +181,56 @@ Rectangle {
                 font.family: Theme.font.family
                 font.pixelSize: Theme.font.size.sm
                 renderType: Text.NativeRendering
+            }
+
+            // Loading indicator anchored to the end of the list. Sits
+            // directly under the last response row so it reads as
+            // "Claude is still working on this turn" rather than as
+            // a generic chrome element. ListView manages footer
+            // lifecycle and includes it when computing `contentHeight`,
+            // so `positionViewAtEnd` above scrolls past it correctly.
+            //
+            // Aesthetic is intentionally minimal — the boolean is the
+            // infrastructure; a richer indicator (animated dots,
+            // branded glyph) is a follow-up once turn grouping lands.
+            // Reserve a stable height (`visible ? ... : 0`) so the
+            // viewport doesn't jump as the row toggles.
+            footer: Item {
+                width: events.width
+                // visible-gated height keeps the footer from claiming
+                // a row of empty space between turns. `+ Theme.spacing.sm`
+                // gives the spinner a small breath off the last row.
+                height: controller.awaitingResponse
+                    ? loaderText.implicitHeight + Theme.spacing.sm * 2
+                    : 0
+                visible: controller.awaitingResponse
+
+                Text {
+                    id: loaderText
+
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.topMargin: Theme.spacing.sm
+                    text: "Claude is thinking…"
+                    color: Theme.color.agent.assistant
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                    font.weight: Theme.font.weight.medium
+                    font.letterSpacing: 0.6
+                    renderType: Text.NativeRendering
+
+                    // Slow opacity pulse — cheap, no extra QtQuick
+                    // controls, no rotation animation. Auto-pauses
+                    // when the footer's `visible` is false (Qt
+                    // freezes property animations on hidden ancestors)
+                    // so it costs nothing the rest of the time.
+                    SequentialAnimation on opacity {
+                        running: controller.awaitingResponse
+                        loops: Animation.Infinite
+                        NumberAnimation { from: 1.0; to: 0.4; duration: 700 }
+                        NumberAnimation { from: 0.4; to: 1.0; duration: 700 }
+                    }
+                }
             }
         }
 

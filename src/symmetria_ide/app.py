@@ -218,6 +218,7 @@ class AppController(QObject):
 
     backendReady = Signal()
     agentVisibleChanged = Signal()
+    awaitingResponseChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -253,8 +254,22 @@ class AppController(QObject):
         self._session_host.event_received.connect(
             self._session_model.apply, Qt.ConnectionType.QueuedConnection
         )
+        # queued: SessionHost worker thread -> AppController (GUI thread).
+        # Second slot on the same signal — drives the "awaiting response"
+        # boolean off when a `result` envelope (turn-complete) arrives.
+        # Lives next to the model's apply so a future grep for
+        # `event_received.connect` finds both consumers in one place.
+        self._session_host.event_received.connect(
+            self._on_session_event, Qt.ConnectionType.QueuedConnection
+        )
         self._session_host.closed.connect(
             self._session_model.on_host_closed, Qt.ConnectionType.QueuedConnection
+        )
+        # Subprocess died (clean exit, crash, or stop()) — clear the
+        # spinner so the UI doesn't lie about activity. Queued because
+        # `closed` is emitted from the stdout worker thread on EOF.
+        self._session_host.closed.connect(
+            self._on_session_closed, Qt.ConnectionType.QueuedConnection
         )
         self._session_host.stderr_line.connect(self._log_session_stderr)
         # Lua-driven agent-pane lifecycle. The rpcnotify emitter lives
@@ -264,6 +279,12 @@ class AppController(QObject):
         # path before emitting `agent_event`.
         self._backend.agent_event.connect(self._on_agent_event)
         self._agent_visible = False
+        # Spinner state — True from `submit_prompt` until either the
+        # turn-complete `result` envelope arrives or the subprocess
+        # exits. The UI binds visibility against this; the boolean is
+        # the entire infrastructure (delegate aesthetic is intentionally
+        # cheap so the placeholder can iterate later).
+        self._awaiting_response = False
 
     @Slot(dict)
     def _route_capsule(self, payload: dict) -> None:
@@ -290,6 +311,23 @@ class AppController(QObject):
     def agentVisible(self) -> bool:
         return self._agent_visible
 
+    @Property(bool, notify=awaitingResponseChanged)
+    def awaitingResponse(self) -> bool:
+        return self._awaiting_response
+
+    def _set_awaiting_response(self, value: bool) -> None:
+        """Single mutation point for the spinner boolean.
+
+        Centralised so every on/off edge funnels through one
+        idempotent guard — repeated edges (two `result` envelopes,
+        spurious `closed` after `stop()`) don't re-emit the signal
+        and trigger pointless QML re-bindings.
+        """
+        if self._awaiting_response == value:
+            return
+        self._awaiting_response = value
+        self.awaitingResponseChanged.emit()
+
     @Slot()
     def show_agent(self) -> None:
         """Open full-window agent view. Focus routing is QML's job."""
@@ -310,6 +348,31 @@ class AppController(QObject):
     def toggle_agent(self) -> None:
         self._agent_visible = not self._agent_visible
         self.agentVisibleChanged.emit()
+
+    @Slot(dict)
+    def _on_session_event(self, event: dict) -> None:
+        """OFF edge for the spinner — drop on `result` envelope.
+
+        `result` is `claude`'s canonical turn-complete signal (carries
+        `duration_ms` + `total_cost_usd`). Watching for it here keeps
+        the spinner state coupled to the protocol rather than to UI
+        heuristics like "stop spinning when streaming text appears" —
+        protocol coupling means tool-using turns (which produce text
+        AND continue working) keep the spinner on through the whole
+        round-trip.
+        """
+        if str(event.get("type") or "") == "result":
+            self._set_awaiting_response(False)
+
+    @Slot()
+    def _on_session_closed(self) -> None:
+        """Defensive OFF edge — subprocess exited without a `result`.
+
+        Crashes, SIGTERM from `<leader>aN`, or auth failures all reach
+        the GUI through `closed` rather than a `result` envelope. Without
+        this slot the spinner would stay lit indefinitely after a crash.
+        """
+        self._set_awaiting_response(False)
 
     @Slot(dict)
     def _on_agent_event(self, payload: dict) -> None:
@@ -337,6 +400,13 @@ class AppController(QObject):
                 if self._session_host.is_running:
                     self._session_host.stop()
                 self._session_model.clear()
+                # Belt-and-suspenders: `_on_session_closed` will fire
+                # via the queued `closed` signal once the worker
+                # reaches EOF, but the QueuedConnection means it lands
+                # on a later event-loop tick. Resetting synchronously
+                # here keeps the spinner from briefly lingering when
+                # the user mashes <leader>aN.
+                self._set_awaiting_response(False)
             self.show_agent()
         elif op == "hide":
             self.hide_agent()
@@ -385,6 +455,11 @@ class AppController(QObject):
         self._session_model.apply(
             {"type": "user", "message": {"role": "user", "content": text}}
         )
+        # ON edge for the spinner. Set BEFORE dispatching to the host
+        # so the UI flips into "thinking" the same frame the user
+        # message renders — no perceptible gap between submit and
+        # acknowledgement.
+        self._set_awaiting_response(True)
         if self._session_host.is_running:
             log.info("submit_prompt (continue): %s", text[:100])
             self._session_host.send_user_message(text)
