@@ -13,7 +13,7 @@ $ sudo pacman -S --needed pyside6 python-pynvim
 $ PYTHONPATH=src python -m symmetria_ide
 ```
 
-Phase 1 (File Manager integration) is next.
+Phase 1 (File Manager integration) is deferred; Phase 2 (Claude Code agent pane) is currently the active phase.
 
 ## Concept
 
