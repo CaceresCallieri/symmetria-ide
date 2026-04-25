@@ -419,8 +419,31 @@ def _row_from_assistant(event: dict) -> AgentRow:
 
 
 def _row_from_user(event: dict) -> AgentRow:
+    """Translate a `user` envelope into a row.
+
+    Anthropic's protocol overloads the `user` role: a fresh user turn
+    carries text (or `image` / etc.) blocks; a tool result is sent back
+    to the model as a `user` envelope with `tool_result` content blocks.
+    The sidecar drops pure-text `user` echoes (Python's optimistic
+    render is the single source of truth — see CLAUDE.md
+    `## The agent backend`), so anything that reaches us here is
+    overwhelmingly a tool result. We still tolerate text-only envelopes
+    defensively — if a future SDK change leaks one through, it should
+    render as a user echo, not crash or silently disappear.
+    """
     message = event.get("message") or {}
     content = message.get("content")
+    tool_blocks = _extract_tool_result_blocks(content)
+    if tool_blocks:
+        text, is_error = _flatten_tool_results(tool_blocks)
+        return AgentRow(
+            kind="tool_result",
+            role="tool",
+            text=text,
+            partial=False,
+            subtype="error" if is_error else "",
+            raw=event,
+        )
     if isinstance(content, str):
         text = content
     elif isinstance(content, list):
@@ -550,6 +573,49 @@ def _extract_assistant_text(message: dict) -> str:
     if not isinstance(content, list):
         return ""
     return _flatten_content_blocks(content)
+
+
+def _extract_tool_result_blocks(content: object) -> list[dict]:
+    """Return the tool_result blocks from a user message's content list.
+
+    Returns an empty list if `content` isn't a list, has no
+    tool_result blocks, or is a string (the legacy text-only shape).
+    Used by `_row_from_user` to disambiguate fresh user turns from
+    tool-result envelopes — see CLAUDE.md `## The agent backend`.
+    """
+    if not isinstance(content, list):
+        return []
+    return [
+        block
+        for block in content
+        if isinstance(block, dict) and str(block.get("type") or "") == "tool_result"
+    ]
+
+
+def _flatten_tool_results(blocks: list[dict]) -> tuple[str, bool]:
+    """Concatenate tool_result block content into one displayable string.
+
+    Per Anthropic's API, a `tool_result` block's `content` is either a
+    string (most common — Edit/Write/Read return text) or a list of
+    inner content blocks (text, image — Bash with image output, MCP
+    tools returning structured data). We render strings verbatim,
+    flatten inner blocks via `_flatten_content_blocks`, and join multiple
+    tool_result blocks (rare — usually one per envelope) with blank
+    lines so the boundary is visible without invented headers. Returns
+    `(text, is_error)` where `is_error` is `True` if any block carries
+    `is_error: true` so the QML delegate can dim/recolor accordingly.
+    """
+    parts: list[str] = []
+    is_error = False
+    for block in blocks:
+        if block.get("is_error"):
+            is_error = True
+        inner = block.get("content")
+        if isinstance(inner, str):
+            parts.append(inner)
+        elif isinstance(inner, list):
+            parts.append(_flatten_content_blocks(inner))
+    return ("\n\n".join(p for p in parts if p), is_error)
 
 
 def _flatten_content_blocks(content: list) -> str:

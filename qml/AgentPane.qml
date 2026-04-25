@@ -293,12 +293,18 @@ Rectangle {
                     if (k === "permission_request") return Theme.color.agent.permissionBorder
                     if (r === "user") return Theme.color.agent.user
                     if (r === "assistant") return Theme.color.agent.assistant
+                    // Tool-result rows borrow text.dim for their role
+                    // label — they're machine output (reference material),
+                    // intentionally quieter than user / assistant turns.
+                    // Same rationale Theme.qml gives for system rows.
                     return Theme.color.text.dim
                 }
 
                 function _bodyColor(r) {
                     if (r === "user") return Theme.color.text.strong
                     if (r === "assistant") return Theme.color.text.emphasis
+                    // tool / system / unknown all borrow text.dim — see
+                    // _roleColor comment.
                     return Theme.color.text.dim
                 }
 
@@ -306,6 +312,7 @@ Rectangle {
                     if (k === "permission_request") return "Permission"
                     if (r === "user") return "You"
                     if (r === "assistant") return "Claude"
+                    if (r === "tool") return s === "error" ? "Tool · error" : "Tool result"
                     if (r === "system") {
                         if (k === "result") return "Result"
                         if (k === "rate_limit_event") return "Rate limit"

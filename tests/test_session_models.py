@@ -388,6 +388,138 @@ def test_row_from_user_handles_list_content_too():
 
 
 # ---------------------------------------------------------------------------
+# tool_result routing — Anthropic's protocol overloads the `user` role.
+# Tool results arrive in `user` envelopes and must NOT render as user echoes;
+# they should appear as their own machine-output rows. The sidecar's content-
+# aware filter passes them through; SessionModel disambiguates via content
+# shape.
+# ---------------------------------------------------------------------------
+
+
+def test_row_from_user_with_tool_result_block_renders_as_tool_role():
+    row = _row_from_user(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_001",
+                        "content": "The file /home/jc/foo.md has been updated.",
+                    }
+                ]
+            },
+        }
+    )
+    assert row.kind == "tool_result"
+    assert row.role == "tool"
+    assert "/home/jc/foo.md has been updated" in row.text
+    assert row.subtype == ""  # not flagged as error
+
+
+def test_row_from_user_with_error_tool_result_marks_subtype_error():
+    row = _row_from_user(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_002",
+                        "content": "File not found: /tmp/missing.txt",
+                        "is_error": True,
+                    }
+                ]
+            },
+        }
+    )
+    assert row.kind == "tool_result"
+    assert row.role == "tool"
+    assert row.subtype == "error"
+    assert "File not found" in row.text
+
+
+def test_row_from_user_with_tool_result_inner_content_blocks_flattens_text():
+    """tool_result.content can itself be a list of inner blocks (image+text)."""
+    row = _row_from_user(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_003",
+                        "content": [
+                            {"type": "text", "text": "ls output:"},
+                            {"type": "text", "text": "\nfoo.md\nbar.py"},
+                        ],
+                    }
+                ]
+            },
+        }
+    )
+    assert row.role == "tool"
+    assert "ls output:" in row.text
+    assert "foo.md" in row.text
+
+
+def test_row_from_user_with_multiple_tool_results_concatenates_with_blank_line():
+    """Rare shape — usually one tool_result per envelope, but the protocol allows many."""
+    row = _row_from_user(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_a",
+                        "content": "first result",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_b",
+                        "content": "second result",
+                    },
+                ]
+            },
+        }
+    )
+    assert row.role == "tool"
+    assert row.text == "first result\n\nsecond result"
+
+
+def test_row_from_user_pure_text_still_renders_as_user_defensively():
+    """Sidecar drops these, but if one ever leaks through it should still look right."""
+    row = _row_from_user({"type": "user", "message": {"content": "hello"}})
+    assert row.kind == "user"
+    assert row.role == "user"
+    assert row.text == "hello"
+
+
+def test_apply_routes_user_tool_result_through_apply_path():
+    """End-to-end: apply(user-with-tool-result) lands a tool row in the model."""
+    m = SessionModel()
+    m.apply(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_x",
+                        "content": "edit applied",
+                    }
+                ]
+            },
+        }
+    )
+    assert m.rowCount() == 1
+    assert m.data(m.index(0), SessionModel.RoleRole) == "tool"
+    assert m.data(m.index(0), SessionModel.KindRole) == "tool_result"
+    assert m.data(m.index(0), SessionModel.TextRole) == "edit applied"
+
+
+# ---------------------------------------------------------------------------
 # Row value object — invariants
 # ---------------------------------------------------------------------------
 

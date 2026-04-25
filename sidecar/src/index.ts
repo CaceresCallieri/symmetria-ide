@@ -88,13 +88,21 @@ const userMessages = (async function* (): AsyncIterable<SDKUserMessage> {
 // When the matching permission_response arrives on stdin we look it up,
 // resolve with the corresponding PermissionResult, and delete the entry.
 
-// Each entry stores the resolver AND the onAbort handler so
-// handleCommand can remove the abort listener on normal resolution,
-// preventing stale listeners from accumulating on opts.signal.
+// Each entry stores the resolver, the onAbort handler (so handleCommand
+// can remove the abort listener on normal resolution and prevent stale
+// listeners from accumulating on opts.signal), and the original tool
+// `input`. The SDK's allow path threads `updatedInput` through to the
+// actual tool invocation; if we resolve with `{ behavior: "allow" }`
+// alone, `updatedInput` is `undefined` and each tool's own Zod schema
+// (e.g. Edit's required {file_path, old_string, new_string}) rejects.
+// `updatedInput?` in sdk.d.ts:1769 is a declarative lie — runtime is
+// strict. Echoing the original input is the safe default for the
+// placeholder UX (no "edit-and-approve" path yet).
 type PendingPermission = {
   resolve: (result: PermissionResult) => void;
   onAbort: () => void;
   signal: AbortSignal;
+  input: Record<string, unknown>;
 };
 
 const pendingPermissions = new Map<string, PendingPermission>();
@@ -117,7 +125,12 @@ const canUseTool: CanUseTool = (toolName, input, opts) => {
       }
     };
     opts.signal.addEventListener("abort", onAbort, { once: true });
-    pendingPermissions.set(requestId, { resolve, onAbort, signal: opts.signal });
+    pendingPermissions.set(requestId, {
+      resolve,
+      onAbort,
+      signal: opts.signal,
+      input,
+    });
 
     writeEvent({
       type: "permission_request",
@@ -160,7 +173,9 @@ const handleCommand = (cmd: InboundCommand): void => {
     // otherwise linger on opts.signal until it is GC'd.
     entry.signal.removeEventListener("abort", entry.onAbort);
     if (cmd.behavior === "allow") {
-      entry.resolve({ behavior: "allow" });
+      // Echo the original input as updatedInput — see PendingPermission
+      // comment for why this is mandatory despite the `?` in the type.
+      entry.resolve({ behavior: "allow", updatedInput: entry.input });
     } else {
       entry.resolve({
         behavior: "deny",
@@ -215,16 +230,34 @@ const options: Options = {
   permissionMode: "default",
 };
 
+// Anthropic's message protocol overloads the `user` role for two semantically
+// distinct things: (a) what the human said, (b) tool_result blocks fed back to
+// the model. We must let (b) through so the agent pane can show what each tool
+// returned, but suppress (a) since Python's optimistic-render in submit_prompt
+// is the single source of truth for user-prompt rows. Disambiguation is by
+// content shape — a `user` envelope carrying any `tool_result` block is type
+// (b) and gets passed through; one whose content is purely text is type (a)
+// and is dropped.
+const containsToolResult = (msg: SDKMessage): boolean => {
+  if (msg.type !== "user") return false;
+  const content = msg.message?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (block) =>
+      typeof block === "object" &&
+      block !== null &&
+      (block as { type?: unknown }).type === "tool_result",
+  );
+};
+
 const translateMessage = (msg: SDKMessage): OutboundEvent | null => {
-  // The Python optimistic-render in submit_prompt is the single source of
-  // truth for user rows. Drop SDK echoes (both fresh and replay) so the agent
-  // pane doesn't render duplicate user turns.
-  if (msg.type === "user") return null;
+  if (msg.type === "user" && !containsToolResult(msg)) return null;
 
   // Everything else is a passthrough — SessionModel._row_from_* routes by
   // top-level `type` and the inner fields match what those helpers already
   // consume (assistant.message.content, system.subtype, result.duration_ms,
-  // stream_event.event.type=content_block_delta, rate_limit_event.*).
+  // stream_event.event.type=content_block_delta, rate_limit_event.*,
+  // user.message.content[*tool_result*]).
   return msg as unknown as OutboundEvent;
 };
 
