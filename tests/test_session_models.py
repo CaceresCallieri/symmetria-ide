@@ -15,7 +15,9 @@ from symmetria_ide.session_models import (
     AgentRow,
     SessionModel,
     _extract_assistant_text,
+    _extract_tool_result_blocks,
     _flatten_content_blocks,
+    _flatten_tool_results,
     _row_from_result,
     _row_from_system,
     _row_from_user,
@@ -714,3 +716,166 @@ def test_permission_request_falls_back_to_generic_text_when_no_title_and_no_tool
     idx = m.index(0)
     assert m.data(idx, SessionModel.TextRole) == "Allow tool call?"
     assert m.data(idx, SessionModel.SubtypeRole) == ""
+
+
+# ---------------------------------------------------------------------------
+# Direct coverage for _extract_tool_result_blocks and _flatten_tool_results
+# These helpers are exercised indirectly through _row_from_user above, but
+# direct tests anchor edge cases that _row_from_user doesn't reach.
+# ---------------------------------------------------------------------------
+
+
+def test_extract_tool_result_blocks_returns_empty_for_non_list_content():
+    assert _extract_tool_result_blocks(None) == []
+    assert _extract_tool_result_blocks("string") == []
+    assert _extract_tool_result_blocks(42) == []
+
+
+def test_extract_tool_result_blocks_returns_empty_for_empty_list():
+    assert _extract_tool_result_blocks([]) == []
+
+
+def test_extract_tool_result_blocks_filters_non_dict_entries():
+    assert _extract_tool_result_blocks([None, 42, "str"]) == []
+
+
+def test_extract_tool_result_blocks_returns_only_tool_result_typed_blocks():
+    content = [
+        {"type": "text", "text": "hi"},
+        {"type": "tool_result", "content": "ok"},
+        {"type": "tool_use", "name": "Read"},
+    ]
+    result = _extract_tool_result_blocks(content)
+    assert len(result) == 1
+    assert result[0]["type"] == "tool_result"
+
+
+def test_flatten_tool_results_empty_list_returns_empty_string():
+    text, is_error = _flatten_tool_results([])
+    assert text == ""
+    assert is_error is False
+
+
+def test_flatten_tool_results_string_content():
+    text, is_error = _flatten_tool_results(
+        [{"type": "tool_result", "content": "hello"}]
+    )
+    assert text == "hello"
+    assert is_error is False
+
+
+def test_flatten_tool_results_list_content_flattens_inner_text_blocks():
+    text, is_error = _flatten_tool_results(
+        [
+            {
+                "type": "tool_result",
+                "content": [
+                    {"type": "text", "text": "line 1"},
+                    {"type": "text", "text": "line 2"},
+                ],
+            }
+        ]
+    )
+    assert "line 1" in text
+    assert "line 2" in text
+    assert is_error is False
+
+
+def test_flatten_tool_results_missing_content_field_is_empty():
+    """Block missing 'content' key entirely — not str, not list, skipped."""
+    text, is_error = _flatten_tool_results([{"type": "tool_result"}])
+    assert text == ""
+    assert is_error is False
+
+
+def test_flatten_tool_results_none_content_is_empty():
+    """Block with explicit content=None — not str, not list, skipped."""
+    text, is_error = _flatten_tool_results([{"type": "tool_result", "content": None}])
+    assert text == ""
+    assert is_error is False
+
+
+def test_flatten_tool_results_non_str_non_list_content_is_empty():
+    """Block with unexpected content type (e.g. int) — skipped gracefully."""
+    text, is_error = _flatten_tool_results([{"type": "tool_result", "content": 42}])
+    assert text == ""
+    assert is_error is False
+
+
+def test_flatten_tool_results_is_error_propagates_even_when_content_empty():
+    """is_error=True must set the flag even when the content string is empty."""
+    text, is_error = _flatten_tool_results(
+        [{"type": "tool_result", "content": "", "is_error": True}]
+    )
+    assert text == ""
+    assert is_error is True
+
+
+def test_flatten_tool_results_joins_multiple_blocks_skipping_empty():
+    """Multiple blocks: empty string parts are excluded from the join."""
+    text, is_error = _flatten_tool_results(
+        [
+            {"type": "tool_result", "content": "a"},
+            {"type": "tool_result", "content": ""},  # empty — skipped in join
+            {"type": "tool_result", "content": "b"},
+        ]
+    )
+    assert text == "a\n\nb"
+    assert is_error is False
+
+
+# ---------------------------------------------------------------------------
+# _row_from_user robustness — null/missing message field
+# ---------------------------------------------------------------------------
+
+
+def test_row_from_user_with_null_message_is_safe():
+    """message=None is guarded by `event.get('message') or {}` — must not raise."""
+    row = _row_from_user({"type": "user", "message": None})
+    assert row.role == "user"
+    assert row.text == ""
+
+
+def test_row_from_user_with_missing_message_key_is_safe():
+    """No message key at all — same guard applies."""
+    row = _row_from_user({"type": "user"})
+    assert row.role == "user"
+    assert row.text == ""
+
+
+# ---------------------------------------------------------------------------
+# Mixed-envelope edge case: text blocks + tool_result blocks in same message.
+# Protocol-wise this shouldn't occur, but the predicate in containsToolResult
+# (sidecar) + _extract_tool_result_blocks (Python) agree: the envelope is
+# treated as a tool-result envelope and only the tool_result content surfaces.
+# ---------------------------------------------------------------------------
+
+
+def test_row_from_user_with_mixed_text_and_tool_result_blocks():
+    """Mixed envelope: tool_result wins; text blocks in the same list are discarded.
+
+    This matches what containsToolResult (sidecar) + _extract_tool_result_blocks
+    (Python) agree on: once any tool_result block is found, the envelope is a
+    tool-result envelope. Text blocks at the top level are discarded so the row
+    doesn't conflate a user comment with a tool response.
+    """
+    row = _row_from_user(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "this is a user comment"},
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_x",
+                        "content": "tool output",
+                    },
+                ]
+            },
+        }
+    )
+    assert row.kind == "tool_result"
+    assert row.role == "tool"
+    assert "tool output" in row.text
+    # Text block content is discarded — only tool_result content surfaces.
+    assert "user comment" not in row.text
