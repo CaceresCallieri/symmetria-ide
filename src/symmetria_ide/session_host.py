@@ -1,4 +1,4 @@
-"""Agent session host: spawn `claude -p --output-format stream-json`, pump events.
+"""Agent session host: spawn the Node SDK sidecar, pump events.
 
 Mirrors the structure of `nvim_backend.py` post-`nvim_events`
 extraction. A daemon worker thread reads the subprocess's stdout
@@ -6,16 +6,30 @@ line-by-line, parses each JSONL event, and emits
 `event_received(dict)` onto the GUI thread through Qt's auto-queued
 cross-thread delivery. A second daemon reads stderr and emits
 `stderr_line(str)` for diagnostic surfaces (authentication failures,
-CLI warnings, etc.).
+SDK errors, sidecar-internal logging, etc.).
 
-**Shape.** `start(prompt, cwd)` spawns `claude -p --input-format
-stream-json --output-format stream-json` with stdin kept open, then
-writes the initial prompt as the first JSONL user envelope via
-`send_user_message`. The subprocess stays alive across turns —
-every subsequent composer submit is another `send_user_message` call
-writing a new JSONL line. stdin is closed only on `stop()` (user
-pressed Escape + action="new", or app shutdown), which triggers a
-clean exit-0 and one final `result` event.
+**Shape.** `start(prompt, cwd)` spawns `node sidecar/dist/index.js`
+with stdin kept open, then writes the initial prompt as the first
+JSONL `user_message` command via `send_user_message`. The sidecar
+runs `@anthropic-ai/claude-agent-sdk`'s `query()` programmatically
+and translates SDK messages back to JSONL events on stdout that
+`SessionModel._row_from_*` already consumes. stdin is closed only on
+`stop()` (user pressed Escape + action="new", or app shutdown),
+which triggers the sidecar's clean drain + exit-0.
+
+**Wire protocol.** Mirrored from `sidecar/src/protocol.ts` — keep
+both in sync. Inbound (Python → sidecar): one JSON object per line:
+
+    {"type": "user_message", "content": "..."}
+    {"type": "permission_response", "request_id": "<uuid>",
+     "behavior": "allow" | "deny", "message"?: "..."}
+
+Outbound (sidecar → Python): SDK messages translated to JSONL
+events whose top-level `type` and inner fields match what
+`SessionModel.apply` already routes (`assistant`, `system`,
+`stream_event`, `result`, `rate_limit_event`), plus a sidecar-
+synthesized `permission_request` envelope when the SDK's
+`canUseTool` callback fires (Step 5).
 
 **Thread discipline (project-standards §1 P0 + §4 P0).**
 
@@ -50,46 +64,52 @@ from PySide6.QtCore import QObject, Signal, Slot
 log = logging.getLogger(__name__)
 
 
-# Argv tail used on every `start()` call. `-p` is required to enable
-# non-interactive streaming output; `--output-format stream-json`
-# produces one JSON event per stdout line; `--input-format stream-json`
-# reads JSONL user envelopes on stdin (one per turn) so the subprocess
-# stays alive across multiple user messages instead of exiting after
-# the first response; `--include-partial-messages` emits
-# content_block_delta frames as Claude generates them (gives the UI a
-# streaming feel); `--verbose` surfaces hook output and session-init
-# detail in the event stream — useful during exploration, revisit once
-# the pane has richer diagnostics of its own.
-_CLAUDE_BASE_ARGV: tuple[str, ...] = (
-    "claude",
-    "-p",
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--include-partial-messages",
-    "--verbose",
-)
+def _sidecar_dist_path() -> Path:
+    """Resolve the path to the bundled sidecar entry point.
+
+    Repo layout: `sidecar/dist/index.js` sits at the repo root, two
+    levels up from this module (`src/symmetria_ide/session_host.py`).
+    The bundle is gitignored — `npm run build` regenerates it. If the
+    file is missing, `start()` surfaces a clear error pointing the
+    user at the install command instead of a cryptic spawn failure.
+    """
+    return Path(__file__).resolve().parents[2] / "sidecar" / "dist" / "index.js"
+
+
+# Argv used on every `start()` call. We invoke `node` directly with the
+# bundled sidecar entry point — the sidecar's package.json declares
+# `"type": "module"` so node resolves the bundle as ESM, and `esbuild`
+# externalised `@anthropic-ai/claude-agent-sdk` so the SDK loads from
+# `sidecar/node_modules/` at runtime rather than being inlined into the
+# bundle (which would be ~2MB and would break native binary opt-deps).
+def _sidecar_argv() -> tuple[str, ...]:
+    """Return the argv tuple for spawning the sidecar.
+
+    Computed lazily so test environments can stub `_sidecar_dist_path`
+    to point at a fixture without import-time path coupling.
+    """
+    return ("node", str(_sidecar_dist_path()))
 
 
 # Timeout (seconds) for cooperative SIGTERM shutdown before we SIGKILL.
-# Matches NvimBackend's `proc.wait(timeout=…)` budget — if `claude`
+# Matches NvimBackend's `proc.wait(timeout=…)` budget — if the sidecar
 # hasn't exited within this window the process is unresponsive and we
 # force termination so the GUI shutdown path doesn't block on it.
 _SHUTDOWN_GRACE_SECONDS = 2.0
 
 
 def parse_stream_json_line(line: str) -> dict | None:
-    """Parse one stdout line into a stream-json event dict.
+    """Parse one stdout line into a wire-protocol event dict.
 
     Returns ``None`` for blank / whitespace-only lines and for lines
     that aren't valid JSON — the worker loop logs and continues in
     both cases rather than crashing. Extracted as a free function so
     tests exercise it without spawning a subprocess.
 
-    BOM-tolerance: `claude`'s stream never prepends a BOM in
-    practice, but we strip one defensively so a future change
-    doesn't silently wedge the parser.
+    BOM-tolerance: the sidecar never prepends a BOM in practice, but
+    we strip one defensively so a future change doesn't silently
+    wedge the parser. Same defence carried over from the prior
+    `claude -p` implementation.
     """
     stripped = line.strip().lstrip("\ufeff")
     if not stripped:
@@ -106,11 +126,12 @@ def parse_stream_json_line(line: str) -> dict | None:
 
 
 class SessionHost(QObject):
-    """Owns a `claude -p` subprocess and pumps its stream-json output.
+    """Owns the Node SDK sidecar subprocess and pumps its JSONL output.
 
     Thread layout:
-      GUI thread   — `start`, `stop`, `send_user_message`, signal
-                      connection setup, property reads.
+      GUI thread   — `start`, `stop`, `send_user_message`,
+                      `send_permission_response`, signal connection
+                      setup, property reads.
       stdout worker — blocks on `proc.stdout.readline`; parses JSONL;
                       emits `event_received(dict)`.
       stderr worker — blocks on `proc.stderr.readline`; emits
@@ -131,9 +152,9 @@ class SessionHost(QObject):
     # threads have joined. Wired to `SessionModel.on_host_closed`.
     closed = Signal()
 
-    # One stderr line at a time — `claude` prints auth failures and
-    # warnings here. Surface them to the UI as a dim info row (future)
-    # or via the app log (placeholder).
+    # One stderr line at a time — the sidecar prints lifecycle
+    # diagnostics and SDK auth failures here. Surface them to the UI
+    # as a dim info row (future) or via the app log (placeholder).
     stderr_line = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -172,14 +193,14 @@ class SessionHost(QObject):
 
     @Slot(str)
     def start(self, prompt: str, cwd: Path | None = None) -> None:
-        """Spawn `claude` in stream-json mode; deliver `prompt` as first turn.
+        """Spawn the Node sidecar; deliver `prompt` as first user message.
 
-        The subprocess is configured with `--input-format stream-json`
-        so stdin stays open across turns — we write the initial prompt
-        as the first JSONL user envelope via `send_user_message`, then
-        subsequent composer submits become additional JSONL lines on
-        the same stdin stream. `claude` only exits when stdin closes
-        (via `stop()`) or on error.
+        The sidecar keeps stdin open across turns — we write the
+        initial prompt as the first `user_message` command via
+        `send_user_message`, then subsequent composer submits become
+        additional JSONL lines on the same stdin stream. The sidecar
+        exits cleanly only when stdin closes (via `stop()`) or on
+        SDK error.
 
         No-op if called while a subprocess is already spawned.
         """
@@ -189,13 +210,27 @@ class SessionHost(QObject):
         if not prompt:
             log.warning("SessionHost.start with empty prompt — not spawning")
             return
+        # Build artifact must exist before we attempt to spawn. The
+        # sidecar's `dist/index.js` is gitignored — `npm run build`
+        # regenerates it. Bail with a clear log message instead of
+        # surfacing a confusing `node: cannot find module` error from
+        # a child process.
+        dist_path = _sidecar_dist_path()
+        if not dist_path.exists():
+            log.error(
+                "sidecar bundle not found at %s — run `cd sidecar && npm install && npm run build`",
+                dist_path,
+            )
+            self._stop_event.set()
+            self.closed.emit()
+            return
         # Reset the stop signal so `is_running` and `_run_stdout_loop`
         # see a clean slate — a prior `stop()` call sets this and it must
         # be cleared before starting workers or they will exit immediately
         # after the first event (the event-loop break at line ~352).
         self._stop_event.clear()
-        argv = list(_CLAUDE_BASE_ARGV)
-        log.info("spawning claude: %s", " ".join(shlex.quote(a) for a in argv))
+        argv = list(_sidecar_argv())
+        log.info("spawning sidecar: %s", " ".join(shlex.quote(a) for a in argv))
         try:
             self._proc = subprocess.Popen(  # noqa: S603 — argv is list, not shell
                 argv,
@@ -209,13 +244,13 @@ class SessionHost(QObject):
             )
         except FileNotFoundError:
             log.exception(
-                "failed to spawn claude — is the `claude` CLI installed and on PATH?"
+                "failed to spawn sidecar — is `node` installed and on PATH? (need >=20)"
             )
             self._stop_event.set()
             self.closed.emit()
             return
         except Exception:
-            log.exception("failed to spawn claude")
+            log.exception("failed to spawn sidecar")
             self._stop_event.set()
             self.closed.emit()
             return
@@ -262,7 +297,7 @@ class SessionHost(QObject):
             try:
                 proc.wait(timeout=_SHUTDOWN_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
-                log.warning("claude did not exit on SIGTERM — sending SIGKILL")
+                log.warning("sidecar did not exit on SIGTERM — sending SIGKILL")
                 try:
                     proc.kill()
                 except Exception:  # noqa: BLE001
@@ -287,17 +322,16 @@ class SessionHost(QObject):
 
     @Slot(str)
     def send_user_message(self, text: str) -> None:
-        """Write a JSONL user message to the subprocess's stdin.
+        """Write a JSONL `user_message` command to the sidecar's stdin.
 
-        Envelope shape (empirically verified against the real `claude`
-        CLI — see docs/phases.md's Step 1 protocol discovery):
+        Envelope shape (defined in `sidecar/src/protocol.ts` —
+        keep this in sync with the `InboundCommand` union):
 
-            {"type": "user", "message": {"role": "user", "content": "<text>"}}
+            {"type": "user_message", "content": "<text>"}
 
-        The inner `"role": "user"` is NOT optional — a prior iteration
-        omitted it and the subprocess silently discarded the turn.
-        Every field in this envelope is load-bearing; do not trim it
-        down without re-running the protocol check.
+        The sidecar wraps this in an `SDKUserMessage` and pushes it
+        onto the SDK's prompt async iterable, which makes the next
+        turn proceed.
 
         Serialisation: write + flush is wrapped in `_stdin_lock` so
         interleaved writes from concurrent callers can't corrupt the
@@ -308,20 +342,63 @@ class SessionHost(QObject):
         Silently returns if there's no running subprocess — callers
         should not need to branch on `is_running`.
         """
-        proc = self._proc
-        if proc is None:
-            log.debug("send_user_message with no running subprocess — dropped")
+        self._write_command({"type": "user_message", "content": text})
+
+    @Slot(str, str)
+    def send_permission_response(self, request_id: str, behavior: str) -> None:
+        """Write a JSONL `permission_response` command to the sidecar's stdin.
+
+        Envelope shape (mirrors `InboundCommand` in
+        `sidecar/src/protocol.ts`):
+
+            {"type": "permission_response",
+             "request_id": "<uuid>",
+             "behavior": "allow" | "deny"}
+
+        The sidecar matches `request_id` against its pending
+        `canUseTool` promise map and resolves with the corresponding
+        `PermissionResult`, unblocking whichever tool call was
+        awaiting approval.
+
+        Validates `behavior` and silently drops invalid values rather
+        than raising — keeps the QML invocation surface tolerant of
+        accidental coercion. Same `_stdin_lock` discipline as
+        `send_user_message`.
+        """
+        if behavior not in ("allow", "deny"):
+            log.warning(
+                "send_permission_response: invalid behavior %r — dropped", behavior
+            )
             return
-        payload = json.dumps(
-            {"type": "user", "message": {"role": "user", "content": text}}
+        self._write_command(
+            {
+                "type": "permission_response",
+                "request_id": request_id,
+                "behavior": behavior,
+            }
         )
-        line = payload + "\n"
+
+    def _write_command(self, payload: dict) -> None:
+        """Serialise + flush a JSONL command on stdin under the lock.
+
+        Single source of truth for the wire-write path — both
+        `send_user_message` and `send_permission_response` go through
+        here. Silently returns if the subprocess is gone; surfaces
+        broken-pipe via `log.exception` rather than re-raising so a
+        racing-shutdown caller doesn't crash the GUI thread.
+        """
+        proc = self._proc
+        if proc is None or proc.stdin is None:
+            log.debug("_write_command with no running subprocess — dropped")
+            return
+        stdin = proc.stdin  # local alias keeps pyright's Optional narrowing
+        line = json.dumps(payload) + "\n"
         with self._stdin_lock:
             try:
-                proc.stdin.write(line)
-                proc.stdin.flush()
+                stdin.write(line)
+                stdin.flush()
             except (BrokenPipeError, OSError):
-                log.exception("send_user_message failed — subprocess gone?")
+                log.exception("sidecar stdin write failed — subprocess gone?")
 
     # --- Worker threads -----------------------------------------------
 
@@ -361,7 +438,7 @@ class SessionHost(QObject):
                     gc.enable()
         except Exception:  # noqa: BLE001
             if not self._stop_event.is_set():
-                log.exception("stream-json stdout loop crashed")
+                log.exception("sidecar stdout loop crashed")
         finally:
             # Set unconditionally — covers both cooperative stop and
             # crash-exit paths. Anyone blocking on `stop_event.wait()`
@@ -388,4 +465,4 @@ class SessionHost(QObject):
                 self.stderr_line.emit(line.rstrip())
         except Exception:  # noqa: BLE001
             if not self._stop_event.is_set():
-                log.exception("stream-json stderr loop crashed")
+                log.exception("sidecar stderr loop crashed")

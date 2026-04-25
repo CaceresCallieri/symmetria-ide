@@ -15,14 +15,24 @@ Before writing code, read these. They override any habits you bring from other p
 Arch Linux runtime deps:
 
 ```
-sudo pacman -S --needed pyside6 python-pynvim
+sudo pacman -S --needed pyside6 python-pynvim nodejs npm
 ```
+
+Node `>=20` is required by the agent-pane sidecar (Arch's `nodejs` package ships >=22).
 
 Dev tooling (one-time):
 
 ```
 paru -S --needed ruff selene stylua python-pyright python-pip-audit
 ```
+
+Sidecar build (one-time after clone, repeat whenever `sidecar/src/**` changes):
+
+```
+cd sidecar && npm install && npm run build && cd ..
+```
+
+This produces `sidecar/dist/index.js` (gitignored). `SessionHost` checks for it at startup and surfaces a clear error if missing. See `docs/dev-workflow.md` for details.
 
 Run the IDE locally:
 
@@ -51,9 +61,12 @@ pyside6-qmllint qml/*.qml
 selene --config selene.toml runtime/
 stylua --check runtime/
 QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/ -v
+(cd sidecar && npm run typecheck && npm run build)
 ```
 
 Pyright baseline is ~39 errors — all documented PySide6-stubs false positives (see gotcha #7). Do NOT "fix" those by changing `@QAbstractItemModel` signatures — it breaks Qt's metaobject system. Run `pyright 2>&1 | tail -1` on `main` to get the current baseline; new errors above that count must be resolved before merge.
+
+The sidecar gates (`npm run typecheck` + `npm run build`) are mandatory whenever `sidecar/**` changes. `typecheck` runs `tsc --noEmit` against `tsconfig.json` (strict mode, `noUncheckedIndexedAccess`, `noImplicitOverride`). `build` rebuilds `dist/index.js` via esbuild — running it before commit prevents stale builds from drifting against source changes.
 
 ## PR checklist
 

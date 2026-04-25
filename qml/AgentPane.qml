@@ -111,6 +111,11 @@ Rectangle {
                 required property string text
                 required property bool partial
                 required property string subtype
+                // Populated only on permission_request rows. Drive the
+                // approve/deny card below; empty strings everywhere
+                // else collapse the card to height 0.
+                required property string permissionState
+                required property string requestId
 
                 width: events.width
                 implicitHeight: body.implicitHeight
@@ -125,7 +130,7 @@ Rectangle {
 
                         visible: entry.role !== ""
                         text: _formatRoleLabel(entry.role, entry.subtype, entry.kind)
-                        color: _roleColor(entry.role)
+                        color: _roleColor(entry.role, entry.kind)
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.xs
                         font.weight: Theme.font.weight.medium
@@ -148,9 +153,144 @@ Rectangle {
                         font.pixelSize: Theme.font.size.sm
                         renderType: Text.NativeRendering
                     }
+
+                    // --- Permission card variant ----------------------
+                    //
+                    // Visible-gated container that renders the inline
+                    // approve/deny affordance. Anchored under the body
+                    // text so the card reads as part of the permission
+                    // row's content, not as a sibling chrome element.
+                    // Uses Rectangle+MouseArea instead of QtQuick.Controls
+                    // Button so every pixel binds Theme tokens directly
+                    // — no fight with the controls theme.
+                    Item {
+                        id: permissionCard
+
+                        readonly property bool isPermission: entry.kind === "permission_request"
+                        readonly property bool isPending: entry.permissionState === "pending"
+                        readonly property bool isApproved: entry.permissionState === "approved"
+                        readonly property bool isDenied: entry.permissionState === "denied"
+
+                        visible: permissionCard.isPermission
+                        width: entry.width
+                        height: permissionCard.isPermission
+                            ? permissionFrame.implicitHeight + Theme.spacing.sm
+                            : 0
+
+                        Rectangle {
+                            id: permissionFrame
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.topMargin: Theme.spacing.sm
+                            implicitHeight: permissionInner.implicitHeight + Theme.spacing.md * 2
+                            color: Theme.color.bg.selected
+                            radius: Theme.radius.sm
+                            border.color: Theme.color.agent.permissionBorder
+                            border.width: 1
+
+                            Item {
+                                id: permissionInner
+                                anchors.fill: parent
+                                anchors.margins: Theme.spacing.md
+                                implicitHeight: pendingButtons.visible
+                                    ? pendingButtons.implicitHeight
+                                    : statusLabel.implicitHeight
+
+                                // Pending state: two clickable
+                                // affordances. Allow on the left, Deny
+                                // on the right — reading order matches
+                                // the safer-default pattern seen in
+                                // editor permission prompts (Allow
+                                // foregrounded, Deny secondary).
+                                Row {
+                                    id: pendingButtons
+                                    anchors.left: parent.left
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: Theme.spacing.md
+                                    visible: permissionCard.isPending
+
+                                    Rectangle {
+                                        id: allowBtn
+                                        implicitWidth: allowText.implicitWidth + Theme.spacing.lg * 2
+                                        implicitHeight: allowText.implicitHeight + Theme.spacing.sm * 2
+                                        color: Theme.color.agent.permissionApprove
+                                        radius: Theme.radius.sm
+
+                                        Text {
+                                            id: allowText
+                                            anchors.centerIn: parent
+                                            text: "Allow"
+                                            color: Theme.color.mode.badgeLabel
+                                            font.family: Theme.font.family
+                                            font.pixelSize: Theme.font.size.xs
+                                            font.weight: Theme.font.weight.medium
+                                            font.letterSpacing: 0.6
+                                            renderType: Text.NativeRendering
+                                        }
+
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: controller.respond_to_permission(
+                                                entry.requestId, "allow")
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        id: denyBtn
+                                        implicitWidth: denyText.implicitWidth + Theme.spacing.lg * 2
+                                        implicitHeight: denyText.implicitHeight + Theme.spacing.sm * 2
+                                        color: Theme.color.agent.permissionDeny
+                                        radius: Theme.radius.sm
+
+                                        Text {
+                                            id: denyText
+                                            anchors.centerIn: parent
+                                            text: "Deny"
+                                            color: Theme.color.mode.badgeLabel
+                                            font.family: Theme.font.family
+                                            font.pixelSize: Theme.font.size.xs
+                                            font.weight: Theme.font.weight.medium
+                                            font.letterSpacing: 0.6
+                                            renderType: Text.NativeRendering
+                                        }
+
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: controller.respond_to_permission(
+                                                entry.requestId, "deny")
+                                        }
+                                    }
+                                }
+
+                                // Resolved state: status label.
+                                Text {
+                                    id: statusLabel
+                                    anchors.left: parent.left
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    visible: !permissionCard.isPending
+                                    text: permissionCard.isApproved
+                                        ? "✓ approved"
+                                        : permissionCard.isDenied
+                                            ? "✗ denied"
+                                            : ""
+                                    color: permissionCard.isApproved
+                                        ? Theme.color.agent.permissionApprove
+                                        : Theme.color.agent.permissionDeny
+                                    font.family: Theme.font.family
+                                    font.pixelSize: Theme.font.size.sm
+                                    font.weight: Theme.font.weight.medium
+                                    renderType: Text.NativeRendering
+                                }
+                            }
+                        }
+                    }
                 }
 
-                function _roleColor(r) {
+                function _roleColor(r, k) {
+                    if (k === "permission_request") return Theme.color.agent.permissionBorder
                     if (r === "user") return Theme.color.agent.user
                     if (r === "assistant") return Theme.color.agent.assistant
                     return Theme.color.text.dim
@@ -163,6 +303,7 @@ Rectangle {
                 }
 
                 function _formatRoleLabel(r, s, k) {
+                    if (k === "permission_request") return "Permission"
                     if (r === "user") return "You"
                     if (r === "assistant") return "Claude"
                     if (r === "system") {

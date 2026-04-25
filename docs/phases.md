@@ -36,31 +36,35 @@ Each phase ends with a go/no-go checkpoint. If a phase's deliverable does not fe
 
 **Checkpoint (unchanged, for when we return):** can the full File Manager workflow (including fuzzy search) happen inside the IDE window with no regression?
 
-## Phase 2 — Agent pane *(in progress — placeholder spike landed)*
+## Phase 2 — Agent pane *(in progress — Node SDK sidecar landed)*
 
-**Goal:** Claude Code runs inside the IDE's agent pane with structured access to every turn — images, tool calls, URLs, code blocks — instead of the terminal's byte stream.
+**Goal:** Claude Code runs inside the IDE's agent pane with structured access to every turn — images, tool calls, URLs, code blocks, **and inline approve/deny on every permission request** — instead of the terminal's byte stream.
 
-**Architecture pivot from the original spec:** the original Phase 2 used `ptyprocess` + `pyte` to spawn `claude` in a pseudoterminal and recover structure from ANSI-decorated frames. Discourse before implementation reframed the approach: `claude` itself supports a bidirectional typed-event protocol via `claude -p --output-format stream-json`. That keeps every Claude Code behaviour intact (hooks, skills, MCP, permission modes, session persistence, subagents, slash commands, compaction) and exposes each turn as structured events (`assistant_message`, `tool_use`, `tool_result`, `stream_event/content_block_delta`, `result`, …) — hostile to recover from terminal bytes, trivial to consume directly. `subprocess` + `json` are stdlib, so the pivot dropped the `ptyprocess` / `pyte` optional-dep group entirely.
+**Architecture pivots:**
 
-**Placeholder spike — landed:**
+1. **`pty + pyte` → `claude -p --output-format stream-json`** (placeholder spike). Original Phase 2 used `ptyprocess` + `pyte` to spawn `claude` in a pseudoterminal and recover structure from ANSI-decorated frames. Pre-implementation discourse moved to the CLI's stream-json typed-event protocol — trivial to consume, kept every Claude Code behaviour intact. Dropped the `ptyprocess` / `pyte` optional-dep group.
+2. **`claude -p` CLI scrape → Node SDK sidecar**. `-p` mode self-resolves permissions server-side and exposes no in-band approve/deny surface — any tool-using turn would either auto-deny or stall depending on `permissionMode`. Pivoted to a TypeScript Node sidecar (`sidecar/`) running `@anthropic-ai/claude-agent-sdk` programmatically, with the SDK's `canUseTool` callback as the structured permission surface. Same path Zed's `claude-code-acp`, opencode, and the official VS Code extension take.
 
-- `src/symmetria_ide/session_host.py` — `SessionHost(QObject)` mirrors `NvimBackend` post-`nvim_events` shape. Daemon stdout + stderr workers, `threading.Event` cooperative shutdown, GC suspension around signal emission per gotcha #10, `parse_stream_json_line` extracted as a pure function for unit coverage.
-- `src/symmetria_ide/session_models.py` — `SessionModel(QAbstractListModel)` renders one row per stream-json event, with partial-text coalescing for streaming assistant content. `AgentRow` is `@dataclass(slots=True, frozen=True)` per §1 P1.
-- `qml/AgentPane.qml` — flat `ListView` with typed-property delegates, bound entirely against `Theme.color.agent.*` / `Theme.font.*` / `Theme.spacing.*`. Empty-state affordance when no subprocess is running.
-- `qml/design/Theme.qml` — `Theme.color.agent.{user,assistant}` rung added with wine_theme-sourced provenance.
-- `qml/Main.qml` — `RowLayout { NvimView(60%), AgentPane(40%) }` with `StatusBar` full-width below. Focus stays on the editor.
-- `src/symmetria_ide/app.py` — `AppController` owns `SessionHost` + `SessionModel`, wires the cross-thread signals with explicit `Qt.QueuedConnection`, exposes `sessionHost` + `sessionModel` context properties. `start()` conditionally spawns `claude` based on the `SYMMETRIA_IDE_AGENT_PROMPT` env var.
-- Tests: 36 new (`test_session_models.py` + `test_session_host_parser.py`) covering role routing, partial coalescing, `dataChanged` role scoping, malformed-JSON tolerance, BOM/UTF-8 edge cases.
+**Delivered:**
 
-**Still to come (deferred after the placeholder):**
+- `sidecar/` — TypeScript Node sidecar driving `@anthropic-ai/claude-agent-sdk@0.2.119` (exact pin, no caret). Built via esbuild (`npm run build` produces `dist/index.js`); SDK marked `external` so its native binary opt-deps resolve from `node_modules` at runtime. Wire protocol in `sidecar/src/protocol.ts`; the sidecar drops `SDKUserMessage` echoes (Python's optimistic-render is the single source of truth) and translates everything else passthrough into the JSONL shapes `SessionModel` already consumes. `canUseTool` synthesizes a `permission_request` envelope on stdout and awaits a matching `permission_response` on stdin.
+- `src/symmetria_ide/session_host.py` — spawns `node sidecar/dist/index.js` instead of `claude -p`. Same daemon stdout/stderr worker threads + `_stop_event` shutdown discipline. New `send_permission_response(request_id, behavior)` slot mirrors `send_user_message`; both go through a shared `_write_command` under `_stdin_lock`. Startup precondition checks `dist/index.js` exists and surfaces a clear error pointing the user at `cd sidecar && npm install && npm run build` if missing.
+- `src/symmetria_ide/session_models.py` — `AgentRow` extended with `permission_state` + `request_id` fields. New `_row_from_permission_request` helper, new `resolve_permission(request_id, behavior)` slot that emits `dataChanged([PermissionStateRole])` (gotcha #3 — empty role lists force full re-bind; scoped lists let QML re-evaluate only the changed binding). New roles: `PermissionStateRole`, `RequestIdRole`.
+- `src/symmetria_ide/app.py` — `AppController.respond_to_permission(request_id, decision)` slot is the QML-facing entry point; dispatches host-first (sidecar promise resolves before UI feedback), then model-resolves. The `awaitingResponse` spinner stays ON during a pending permission — only the SDK's `result` envelope flips it OFF.
+- `qml/AgentPane.qml` — delegate variant for `kind === "permission_request"` rows: `Rectangle + 2 Buttons + label` card, Theme-bound, keyboard-navigable. Three states (`pending` / `approved` / `denied`) drive button-vs-status-label rendering.
+- `qml/design/Theme.qml` — new `Theme.color.agent.{permissionBorder,permissionApprove,permissionDeny}` rung, aliased to mode.normal/insert/replace so the card's "awaiting / go / stop" semantics read continuous with the editor's own cues.
+- Tests: 20 new across `test_session_models.py` (permission row routing, scoped `dataChanged`, idempotency), `test_app_controller_awaiting.py` (respond_to_permission ordering + spinner-stays-on), and the new `test_session_host_permission.py` (envelope shapes for both inbound commands). Replaced `test_session_host_send.py` whose envelope assertions matched the retired `claude -p` shape.
 
-- Composer — native Qt text input, Enter-to-send, image paste, `@mention` file finder, slash-command palette.
-- Turn grouping + tool-call drill-in. Flat list is the right shape for the spike (learn the vocabulary first); the grouped view designs better with real event data in hand.
-- Inline permission-request UI replacing the terminal y/n prompt.
-- Image rendering (user-passed AND assistant-generated) and HTML/CSS diagram rendering via embedded `QtWebEngineView`.
-- URL chips + code-fence copy actions on every delegate.
-- Focus switching between editor and agent pane via a keyboard binding.
-- Multi-turn flow (flip `start()` to `--input-format stream-json`; wire the existing `send_user_message` stub to the composer).
+**Still to come (deferred):**
+
+- **Permission persistence** — "always allow X for project Y". SDK exposes `PermissionResult.updatedPermissions` with `addRules` for this; surface it as a third button on the permission card.
+- **Stop control** — wire the SDK's `Query.interrupt()` via a new sidecar `{type:"interrupt"}` inbound command.
+- **Turn grouping + tool-call drill-in.** Flat list is the right shape for the placeholder; the SDK's richer event vocabulary now informs what the grouped view should look like.
+- **Image rendering** (user-passed AND assistant-generated) and HTML/CSS diagram rendering via embedded `QtWebEngineView`.
+- **URL chips + code-fence copy actions** on every delegate.
+- **Focus switching** between editor and agent pane via a keyboard binding.
+- **Session resume UI** — SDK exposes `resume`/`sessionId` options on `query()`.
+- **MCP / hooks / slash commands via SDK options.** All available, none wired.
 
 **Mobile / VPS outlook** (informing today's boundaries, not yet building): `SessionHost`'s interface is designed net-serialisable — dict-typed events, no Qt types at the core boundary — so a future transport (WebSocket, gRPC, Tailscale) can wrap it without rewrites. Mobile client lands as a thin remote viewer once the desktop loop is complete.
 

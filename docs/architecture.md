@@ -25,10 +25,11 @@ Federation is harder to keep coherent today: inter-app communication under Hyprl
  │
  ├─ File manager drawer         ← deferred pending QuickShell→Qt decision
  │
- ├─ Agent pane                                                 (Phase 2 — placeholder spike landed)
- │   ├─ claude -p --output-format stream-json  ← subprocess + JSONL event stream
- │   ├─ Flat event ListView (placeholder)      ← turn grouping + drill-in follow
- │   └─ Inline image / HTML diagram renderers  ← deferred until composer lands
+ ├─ Agent pane                                                 (Phase 2 — Node SDK sidecar landed)
+ │   ├─ Node sidecar (sidecar/dist/index.js)   ← drives @anthropic-ai/claude-agent-sdk
+ │   ├─ JSONL on stdin/stdout                  ← user_message / permission_response in; SDK events out
+ │   ├─ Flat event ListView + permission card  ← canUseTool synthesizes permission_request
+ │   └─ Inline image / HTML diagram renderers  ← deferred until placeholder UX is exercised
  │
  └─ Browser pane                ← QtWebEngine, cmux-pattern agent control     (Phase 4)
 ```
@@ -83,24 +84,26 @@ NeoVim's `ui-ext` capabilities (`ui_attach` with `ext_cmdline`, `ext_messages`, 
 
 ```
  [Python backend]
-    ├─ spawns  → [nvim --embed]        (msgpack-RPC over stdio, via pynvim)
-    ├─ spawns  → [claude -p ... stream-json]  (subprocess + JSONL events via session_host.py)
-    ├─ hosts   → orchestrator bridge   (reads capsule state via nvim RPC)
-    └─ exposes → QML signals / props   (backend ↔ UI data binding)
+    ├─ spawns  → [nvim --embed]            (msgpack-RPC over stdio, via pynvim)
+    ├─ spawns  → [node sidecar/dist/index.js]  (JSONL on stdin/stdout via session_host.py;
+    │                                            sidecar drives @anthropic-ai/claude-agent-sdk)
+    ├─ hosts   → orchestrator bridge       (reads capsule state via nvim RPC)
+    └─ exposes → QML signals / props       (backend ↔ UI data binding)
 
  [QML frontend]
     ├─ StatusBar.qml
     ├─ NvimView                        (renders nvim grid events; QQuickPaintedItem)
     ├─ FileManager/                    (imported from Symmetria File Manager — Phase 1, deferred)
-    ├─ AgentPane.qml                   (flat stream-json event list; placeholder)
+    ├─ AgentPane.qml                   (flat event list + inline permission card)
     └─ BrowserPane.qml                 (wraps QtWebEngineView — Phase 4)
 ```
 
-## Realized Phase 2 placeholder (agent pane, stream-json pivot)
+## Realized Phase 2 (agent pane, Node SDK sidecar)
 
 ```
-claude -p --output-format stream-json --include-partial-messages
-    ↓ subprocess stdout (JSONL, one event per line)
+sidecar/dist/index.js (Node sidecar; @anthropic-ai/claude-agent-sdk)
+    ↑ JSONL stdin: user_message / permission_response          (from Python via _stdin_lock)
+    ↓ JSONL stdout: translated SDK messages + permission_request envelopes
 SessionHost (daemon worker thread, mirrors NvimBackend shape)
     ↓ parse_stream_json_line → event dict
     ↓ gc.disable / enable around emit            (gotcha #10)
@@ -108,7 +111,11 @@ SessionHost (daemon worker thread, mirrors NvimBackend shape)
 SessionModel (GUI thread, QAbstractListModel)
     ↓ apply() routes on top-level `type` discriminator
     ↓ append / extend-last-streaming-row + dataChanged(roles=[TextRole])
-AgentPane.qml (flat ListView with typed-property delegate, Theme-tokens only)
+    ↓ permission_request → row with permission_state="pending"
+AgentPane.qml (flat ListView with typed-property delegate; permission card variant)
+    ↓ approve/deny click → controller.respond_to_permission(requestId, decision)
+        → SessionHost.send_permission_response (sidecar resolves canUseTool promise)
+        → SessionModel.resolve_permission       (row flips to approved/denied; scoped dataChanged)
 
 Main.qml: ColumnLayout { RowLayout { NvimView(60%), AgentPane(40%) }, StatusBar }
 ```

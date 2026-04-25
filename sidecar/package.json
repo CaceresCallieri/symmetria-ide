@@ -1,0 +1,23 @@
+{
+  "name": "symmetria-ide-sidecar",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Node sidecar that drives @anthropic-ai/claude-agent-sdk programmatically; Python (SessionHost) spawns this process and talks JSONL on stdin/stdout. See ../CLAUDE.md '## The agent backend (Node SDK sidecar)' for the wire-protocol contract.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.2.119"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}

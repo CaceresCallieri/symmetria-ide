@@ -7,18 +7,23 @@
 
 ## Primary libraries
 
-| Concern              | Library                          | Notes |
-|----------------------|----------------------------------|-------|
-| UI framework         | PySide6 (Qt 6.7+)                | First-party Qt Python bindings, LGPL, healthy. |
-| Declarative UI       | QML                              | Already used across the Symmetria ecosystem. |
-| NeoVim RPC           | `pynvim`                         | Canonical msgpack-RPC client. |
-| Agent bridge         | `subprocess` + `json` (stdlib)   | Phase 2 reads `claude -p --output-format stream-json` as JSONL events. No third-party deps. |
-| Browser embed        | `QtWebEngine`                    | Chromium-based, shipped with Qt. |
-| Live QML reload      | `pyside6_live_coding` (dev only) | Fast iteration in Phase 0. |
+| Concern              | Library                                   | Notes |
+|----------------------|-------------------------------------------|-------|
+| UI framework         | PySide6 (Qt 6.7+)                         | First-party Qt Python bindings, LGPL, healthy. |
+| Declarative UI       | QML                                       | Already used across the Symmetria ecosystem. |
+| NeoVim RPC           | `pynvim`                                  | Canonical msgpack-RPC client. |
+| Agent bridge (Python) | `subprocess` + `json` (stdlib)            | Spawns the Node sidecar (`node sidecar/dist/index.js`); JSONL on stdin/stdout. No third-party Python deps. |
+| Agent bridge (sidecar runtime) | Node `>=20`                      | Required to run the sidecar. Arch ships `>=22` in `nodejs`. |
+| Agent bridge (sidecar source) | TypeScript 5.6+                   | `strict` + `noUncheckedIndexedAccess` + `noImplicitOverride`. Bundled to ESM via esbuild. |
+| Agent bridge (sidecar bundler) | esbuild ^0.24                     | One-step bundle of `src/index.ts` → `dist/index.js`. SDK marked `external` (native binary opt-deps resolve from `node_modules` at runtime). |
+| Agent SDK            | `@anthropic-ai/claude-agent-sdk@0.2.119`  | Exact pin (no caret) for reproducibility. Drives `query()` programmatically with the `canUseTool` callback for in-pane approve/deny. Same SDK used by Zed's `claude-code-acp`, opencode, and the official VS Code extension. |
+| Browser embed        | `QtWebEngine`                             | Chromium-based, shipped with Qt. |
+| Live QML reload      | `pyside6_live_coding` (dev only)          | Fast iteration in Phase 0. |
 
 ### Retired from the stack
 
-- **`ptyprocess` + `pyte`** — originally planned to drive Claude Code through a pty and reconstruct structure from ANSI-decorated frames. Dropped in favour of the stream-json pivot (see `docs/phases.md`). Every turn's structure (tool_use, tool_result, stream_event.content_block_delta, result, rate_limit_event, …) is directly readable as JSONL events, eliminating the terminal-emulation surface entirely. `[project.optional-dependencies].terminal` was removed from `pyproject.toml` as part of the pivot.
+- **`ptyprocess` + `pyte`** — originally planned to drive Claude Code through a pty and reconstruct structure from ANSI-decorated frames. Dropped in favour of the stream-json pivot — every turn's structure was directly readable as JSONL events, eliminating the terminal-emulation surface entirely. `[project.optional-dependencies].terminal` was removed from `pyproject.toml` as part of that pivot.
+- **`claude -p --output-format stream-json` (CLI subprocess scrape)** — used by the Phase 2 placeholder spike. Self-resolved permissions server-side and exposed no in-band approve/deny surface, so any tool-using turn would either auto-deny or stall. Replaced by the Node SDK sidecar (`@anthropic-ai/claude-agent-sdk`) whose `canUseTool` callback gives us the structured permission request as a typed async function. See `docs/phases.md` Phase 2 for the pivot rationale.
 
 ## Why PySide6
 

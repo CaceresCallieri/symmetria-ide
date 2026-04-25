@@ -36,12 +36,19 @@ class _FakeSessionHost:
         self.start_calls: list[str] = []
         self.send_calls: list[str] = []
         self.stop_calls = 0
+        # Permission-response capture — populated by
+        # `respond_to_permission` tests so we can assert the host
+        # received a (request_id, behavior) tuple in the right order.
+        self.permission_calls: list[tuple[str, str]] = []
 
     def start(self, prompt: str) -> None:
         self.start_calls.append(prompt)
 
     def send_user_message(self, text: str) -> None:
         self.send_calls.append(text)
+
+    def send_permission_response(self, request_id: str, behavior: str) -> None:
+        self.permission_calls.append((request_id, behavior))
 
     def stop(self) -> None:
         self.stop_calls += 1
@@ -228,3 +235,119 @@ def test_set_awaiting_response_is_idempotent(controller):
     # Real transition True -> False emits once.
     controller._set_awaiting_response(False)
     assert emissions == [True, False]
+
+
+# ---------------------------------------------------------------------------
+# Permission state machine — `respond_to_permission` slot
+# ---------------------------------------------------------------------------
+#
+# These tests cover the AppController glue between the QML approve/deny
+# buttons and the two downstream consumers (the SessionHost write path
+# and the SessionModel row-mutation slot). They use the same hermetic
+# `_FakeSessionHost` swap as the awaiting-state tests above and exercise
+# `respond_to_permission` with both the real `SessionModel` (no thread
+# dependency, safe to call directly) and the fake host.
+
+
+def _seed_pending_permission(ctrl: AppController, request_id: str, tool: str) -> None:
+    """Inject a pending permission_request row into the controller's model.
+
+    Calls `apply` directly because we're already on the GUI thread —
+    same shortcut `submit_prompt` uses for the optimistic user-row
+    injection.
+    """
+    ctrl._session_model.apply(
+        {
+            "type": "permission_request",
+            "request_id": request_id,
+            "tool_name": tool,
+            "title": f"Allow {tool}?",
+        }
+    )
+
+
+def test_respond_to_permission_allow_dispatches_host_and_model(controller):
+    """Allow click — host receives ("req-1","allow"); model row flips approved."""
+    _seed_pending_permission(controller, "req-1", "Bash")
+
+    controller.respond_to_permission("req-1", "allow")
+
+    assert controller._session_host.permission_calls == [("req-1", "allow")]
+    # Walk the model rows and find the resolved one. There's only one
+    # row at this point so this is concise.
+    rows = controller._session_model._rows
+    assert len(rows) == 1
+    assert rows[0].permission_state == "approved"
+    assert rows[0].request_id == "req-1"
+
+
+def test_respond_to_permission_deny_dispatches_host_and_model(controller):
+    """Deny click — host receives ("req-2","deny"); model row flips denied."""
+    _seed_pending_permission(controller, "req-2", "Edit")
+
+    controller.respond_to_permission("req-2", "deny")
+
+    assert controller._session_host.permission_calls == [("req-2", "deny")]
+    rows = controller._session_model._rows
+    assert rows[0].permission_state == "denied"
+
+
+def test_respond_to_permission_invalid_decision_is_a_noop(controller):
+    """Garbage `decision` strings must NOT reach the host or the model."""
+    _seed_pending_permission(controller, "req-3", "Read")
+
+    controller.respond_to_permission("req-3", "maybe")
+
+    assert controller._session_host.permission_calls == []
+    rows = controller._session_model._rows
+    # Row stays pending — invalid input must not corrupt model state.
+    assert rows[0].permission_state == "pending"
+
+
+def test_permission_request_event_does_not_clear_spinner(controller):
+    """Pending permission keeps the spinner ON.
+
+    The turn is still in flight from the user's perspective — the
+    sidecar's canUseTool callback is awaiting our reply, no `result`
+    envelope has fired yet. Clearing the spinner here would lie to
+    the user about whether work is happening.
+    """
+    controller._set_awaiting_response(True)
+    emissions = _capture_emissions(controller)
+
+    controller._on_session_event(
+        {
+            "type": "permission_request",
+            "request_id": "req-4",
+            "tool_name": "Bash",
+        }
+    )
+
+    assert controller.awaitingResponse is True
+    assert emissions == []
+
+
+def test_respond_to_permission_ordering_host_before_model(controller):
+    """Host-first ordering is the contract — sidecar promise resolves
+    before the UI feedback fires, so a fast-following SDK event lands
+    on a row we've already marked resolved.
+
+    This test pins the ordering by stubbing the model's
+    `resolve_permission` to record the host call count it observes;
+    if the model ran first, that count would be 0 instead of 1.
+    """
+    _seed_pending_permission(controller, "req-5", "Glob")
+
+    observed: list[int] = []
+    original_resolve = controller._session_model.resolve_permission
+
+    def spy(request_id: str, behavior: str) -> None:
+        observed.append(len(controller._session_host.permission_calls))
+        original_resolve(request_id, behavior)
+
+    controller._session_model.resolve_permission = spy  # type: ignore[method-assign]
+    controller.respond_to_permission("req-5", "allow")
+
+    assert observed == [1], (
+        "model.resolve_permission must run AFTER host.send_permission_response"
+    )

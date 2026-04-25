@@ -133,6 +133,29 @@ QtObject {
         readonly property QtObject agent: QtObject {
             readonly property color user: "#c8a37a"        // warm amber, shares tone with accent.primary
             readonly property color assistant: "#3DB6B0"   // wine_theme.term_cyan — dim sibling of mode.terminal
+
+            // Permission card tokens. The card fires when claude's SDK
+            // canUseTool callback awaits a decision; the user must
+            // approve or deny before the tool runs. We deliberately
+            // alias the same hex values used by mode.normal/insert/replace
+            // so the card's semantic palette reads continuous with the
+            // editor's existing "awaiting" / "go" / "stop" cues. Aliasing
+            // (not duplicating) means a future palette nudge to those
+            // mode colors would update both surfaces together — a
+            // single decision touches both editor and agent pane.
+            //
+            //   permissionBorder — wine_theme.keyword (== mode.normal):
+            //                      warm amber says "your turn to decide",
+            //                      paired with the user-amber tone above.
+            //   permissionApprove — wine_theme.string (== mode.insert):
+            //                       editor-grade "go" green for the
+            //                       allow affordance.
+            //   permissionDeny    — wine_theme.error_red (== mode.replace):
+            //                       editor-grade "stop" red for the
+            //                       deny affordance.
+            readonly property color permissionBorder: "#C28B12"
+            readonly property color permissionApprove: "#62BA46"
+            readonly property color permissionDeny: "#D2602D"
         }
     }
 

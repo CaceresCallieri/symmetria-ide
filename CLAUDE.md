@@ -23,8 +23,9 @@ A custom IDE wrapper built on NeoVim, in the Symmetria ecosystem.
 - `src/symmetria_ide/nvim_view.py` — `QQuickPaintedItem` rendering the grid; coalesces runs of same-highlight cells into single `fillRect` + `drawText` calls.
 - `src/symmetria_ide/keys.py` — Qt key event → NeoVim keycode translator (unit-tested).
 - `src/symmetria_ide/app.py` — `QGuiApplication`, `StatusBarState` (well-known capsules with per-field notify signals), `CapsuleModel` (generic extension slot), `AppController`. Owns `SessionHost` + `SessionModel` alongside the nvim backend; spawns `claude -p` when `SYMMETRIA_IDE_AGENT_PROMPT` is set.
-- `src/symmetria_ide/session_host.py` — `claude -p --output-format stream-json` subprocess + daemon stdout/stderr worker threads; GC-suspends around signal emission per gotcha #10; mirrors `NvimBackend` post-refactor shape (`_stop_event`, `daemon=True` workers).
-- `src/symmetria_ide/session_models.py` — `SessionModel(QAbstractListModel)` ingests stream-json events as a flat row list with partial-text coalescing for streaming assistant content; `AgentRow` is `@dataclass(slots=True, frozen=True)`.
+- `src/symmetria_ide/session_host.py` — Node SDK sidecar subprocess (`node sidecar/dist/index.js`) + daemon stdout/stderr worker threads; GC-suspends around signal emission per gotcha #10; mirrors `NvimBackend` post-refactor shape (`_stop_event`, `daemon=True` workers). Owns `send_user_message` and `send_permission_response` write paths.
+- `src/symmetria_ide/session_models.py` — `SessionModel(QAbstractListModel)` ingests sidecar events as a flat row list with partial-text coalescing for streaming assistant content; `AgentRow` is `@dataclass(slots=True, frozen=True)` and carries `permission_state` + `request_id` fields for in-pane approve/deny rows.
+- `sidecar/` — TypeScript Node sidecar driving `@anthropic-ai/claude-agent-sdk`. `src/protocol.ts` is the wire-protocol reference (the Python side mirrors it in `session_host.py`). `src/index.ts` runs the SDK's `query()` async iterable and translates SDK messages back to the JSONL shapes `SessionModel` consumes; the SDK's `canUseTool` callback synthesizes `permission_request` envelopes that the QML pane resolves via `permission_response` commands on stdin.
 - `qml/Main.qml`, `qml/StatusBar.qml`, `qml/CommandLine.qml`, `qml/WhichKeyOverlay.qml`, `qml/AgentPane.qml` — UI.
 - `qml/design/Theme.qml` + `qml/design/qmldir` — design tokens singleton (palette, typography, spacing, sizing). Every chrome component binds against `Theme.*`; local literals forbidden.
 - `runtime/init.lua` — status-line replacement + capsule emitter + cmdline completion pipeline. Loads the orchestrator modules below.
@@ -61,34 +62,59 @@ We also force-disable `nvim-cmp`'s cmdline source from our `VimEnter` handler (`
 
 To add a new well-known capsule, add the field + notify signal to `StatusBarState` and bind it in `StatusBar.qml`. To add a plugin-defined one, just emit it from Lua — it falls through to `CapsuleModel` and a future delegate can render it.
 
-## The stream-json protocol
+## The agent backend (Node SDK sidecar)
 
-Distinct from the capsule / completion / which-key pipelines above — this one connects our Python backend to a live `claude` subprocess, not to nvim.
+Distinct from the capsule / completion / which-key pipelines above — this one connects our Python backend to the official `@anthropic-ai/claude-agent-sdk` running in a Node sidecar process. We pivoted away from `claude -p --output-format stream-json` CLI scraping because that mode self-resolves permissions server-side and exposes no in-band approve/deny surface. The SDK's `canUseTool` callback gives us a structured permission request as a typed async function — the same path Zed's `claude-code-acp`, opencode, and the official VS Code extension take.
 
-`SessionHost.start(prompt)` spawns `claude -p --input-format stream-json --output-format stream-json --include-partial-messages --verbose` with stdin kept open, then writes `prompt` as the first JSONL user envelope via `send_user_message`. The subprocess stays alive across turns — `AppController.submit_prompt` branches on `SessionHost.is_running`: cold → `start(text)` (spawn + first envelope), hot → `send_user_message(text)` (another envelope on the existing stdin stream). Session state accumulates server-side, so turn 2 can reference turn 1 without any session-id plumbing. Before either branch, `submit_prompt` feeds a synthetic `user` event directly into `SessionModel` so the message renders the instant the composer submits — `claude` does NOT echo user envelopes back on stdout, so without this injection every turn would look like Claude is responding to nothing. Do NOT remove the synthetic-event call when refactoring `submit_prompt`. A daemon worker thread iterates `proc.stdout.readline()`, parses each JSONL line via `parse_stream_json_line`, and emits `event_received(dict)` onto the GUI thread (Qt auto-queued cross-thread delivery). A second daemon reads stderr and emits `stderr_line(str)`; `AppController._log_session_stderr` forwards those to the app log.
+**Topology.** `SessionHost.start(prompt)` spawns `node sidecar/dist/index.js` with stdin/stdout/stderr piped. The sidecar (`sidecar/src/index.ts`) runs `query({ prompt: <async iterable>, options: { canUseTool, includePartialMessages: true, permissionMode: "default" } })` and translates SDK messages to JSONL events on stdout. Python's daemon stdout worker iterates `proc.stdout.readline()`, parses each line via `parse_stream_json_line`, and emits `event_received(dict)` onto the GUI thread via `Qt.QueuedConnection`. A second daemon reads stderr and emits `stderr_line(str)`; `AppController._log_session_stderr` forwards those to the app log.
 
-The user-envelope shape (empirically verified) is `{"type":"user","message":{"role":"user","content":"<text>"}}`. The inner `"role":"user"` is NOT optional — omitting it causes `claude` to silently discard the turn. `SessionHost.send_user_message` is the single source of truth for this envelope; don't hand-roll the JSON anywhere else.
+**Build artifact.** The sidecar's `dist/index.js` is gitignored — `npm run build` in `sidecar/` regenerates it via esbuild (SDK marked `external` so its native binary opt-deps resolve from `node_modules` at runtime, not bundled). Requires Node `>=20`. `SessionHost.start` checks `_sidecar_dist_path()` exists before spawning and surfaces a clear log error pointing at `cd sidecar && npm install && npm run build` if missing.
 
-Top-level `type` discriminators observed in the protocol:
+**Wire protocol.** Defined in `sidecar/src/protocol.ts`; mirrored in `session_host.py`'s module docstring. Inbound (Python → sidecar):
+
+```
+{"type": "user_message", "content": "..."}
+{"type": "permission_response", "request_id": "<uuid>",
+ "behavior": "allow" | "deny", "message"?: "..."}
+```
+
+Outbound (sidecar → Python): SDK messages translated to JSONL events. The sidecar **drops `SDKUserMessage` echoes entirely** — Python's optimistic-render in `submit_prompt` (the synthetic user-row injection) is the single source of truth for user-row rendering; re-emitting the SDK echo would duplicate every user turn. Do NOT remove the synthetic injection when refactoring `submit_prompt`. The new `permission_request` envelope is sidecar-synthesized when `canUseTool` fires:
+
+```
+{"type": "permission_request",
+ "request_id": "<uuid>",
+ "tool_name": "Bash" | "Read" | ...,
+ "tool_use_id": "<uuid>",
+ "input": {...},
+ "title"?, "description"?, "display_name"?, "blocked_path"?, "decision_reason"?,
+ "note": "sidecar-synthesized"}
+```
+
+The matching Python-side reply must echo the same `request_id`. The sidecar holds a `Map<request_id, resolver>` and resolves the awaited `Promise<PermissionResult>` when the response arrives. SDK aborts (session shutdown, query cancellation) auto-resolve pending entries with `{behavior:"deny", interrupt:true}`.
+
+Top-level outbound `type` discriminators that `SessionModel.apply` routes (other types fall through to an empty-role visible row so new envelopes surface during exploration):
 
 | type                | payload shape                             | `SessionModel` row treatment                                  |
 |---------------------|-------------------------------------------|---------------------------------------------------------------|
-| `system`            | `subtype` ∈ {init, hook_*, …}             | role=`system`, text summarises subtype                        |
+| `system`            | `subtype` ∈ {init, hook_*, compact_boundary, …} | role=`system`, text summarises subtype                  |
 | `stream_event`      | nested `event.type` (SSE frame)           | only `content_block_delta.text_delta` extends the streaming row |
 | `assistant`         | `message.content[]` (text + tool_use)     | role=`assistant`, tool_use blocks render as `[tool: <name>]`  |
-| `user`              | `message.content` (str or blocks)         | role=`user`, flattened text                                    |
+| `user`              | (passthrough — sidecar drops these)        | not emitted; Python's optimistic-render handles user rows    |
 | `result`            | `duration_ms`, `total_cost_usd`, …        | role=`system`, "done · Nms · $X"                               |
 | `rate_limit_event`  | `rate_limit_info.{status,rateLimitType}`  | role=`system`, dim info row                                    |
-| anything else       | —                                         | empty-role row with kind as prefix so new envelopes surface visibly |
+| `permission_request`| sidecar-synthesized (see shape above)      | `kind="permission_request"`, `permission_state="pending"`, drives the QML approve/deny card |
+| anything else       | —                                         | empty-role row with kind as prefix                            |
 
 Partial coalescing: when a `stream_event.content_block_delta` with `delta.type == "text_delta"` arrives, `SessionModel` extends the most recent streaming row's text via `dataclasses.replace` + list swap, and emits `dataChanged` with an explicit role list scoped to `TextRole` (gotcha #3 — empty role lists force full re-bind; scoped lists let QML re-evaluate only the changed binding). Any non-stream-event event resets the coalesce index so the next `text_delta` opens a fresh row.
 
+Permission flow: a `permission_request` event lands in `SessionModel` as a row with `permission_state="pending"` + `request_id`. `AgentPane.qml`'s delegate variant renders an inline approve/deny card whose buttons call `controller.respond_to_permission(entry.requestId, "allow"|"deny")`. `AppController.respond_to_permission` writes the `permission_response` to the sidecar (host first — its promise resolves before our UI feedback fires) then mutates the model row to `"approved"`/`"denied"` via `resolve_permission`, which emits a scoped `dataChanged([PermissionStateRole])`. The `awaitingResponse` spinner stays ON during a pending permission — the turn is still in flight from the user's perspective; only the SDK's `result` envelope flips it OFF.
+
 Thread safety:
 - `SessionHost._run_stdout_loop` suspends GC around the emit (gotcha #10 — Python 3.14 cyclic GC racing `QSGRenderThread` is the same class of SEGV the nvim side solved; we apply the same mitigation here).
-- The cross-thread `event_received → SessionModel.apply` connect uses explicit `Qt.QueuedConnection` per project-standards §4 P2, with a one-line grep-able comment at the connect site.
+- The cross-thread `event_received → SessionModel.apply` and `event_received → _on_session_event` connects use explicit `Qt.QueuedConnection` per project-standards §4 P2, with a one-line grep-able comment at the connect site.
 - `_stop_event` + daemon workers satisfy project-standards §1 P0 ("every long-running thread is daemon=True OR owns an explicit shutdown Event"). We satisfy both, matching `NvimBackend`.
 
-The placeholder renders events flat, one row each. Turn grouping + tool-call drill-in are deferred — designing them against guessed vocabulary is the waste the spike exists to avoid; real event cadence informs the eventual UI.
+SDK version pin: `@anthropic-ai/claude-agent-sdk@0.2.119`. The pin is exact (no caret) so behaviour is reproducible — security patches require a manual bump. Authentication uses the same `~/.claude` credentials as the CLI; the SDK reads them at `query()` time. Turn grouping + tool-call drill-in are still deferred — the SDK exposes far richer event vocabulary than `-p` did, but the placeholder discipline (`.claude/memory/ui_surface_discipline.md`) means we ship the structural surface first and iterate the visual treatment once real cadence is observable.
 
 ## The which-key protocol
 
@@ -160,20 +186,24 @@ PYTHONPATH=src python -m pytest tests/ -v
 
 ## Phase 2 starting points
 
-The placeholder spike has landed. See `docs/phases.md` for the full sequencing; below is the fast-onboarding summary for picking up the follow-up work.
+The Node SDK sidecar pivot has landed. See `docs/phases.md` for the full sequencing; below is the fast-onboarding summary for picking up the follow-up work.
 
 **What's wired today:**
-- `SessionHost` spawns `claude -p --output-format stream-json --include-partial-messages --verbose <prompt>` when `SYMMETRIA_IDE_AGENT_PROMPT` is set. Editor-first when unset.
-- `SessionModel` renders events flat, one row per event, with partial-text coalescing for streaming assistant turns.
-- `AgentPane.qml` is a sibling of `NvimView` inside `Main.qml`'s `RowLayout` (60/40). Theme-tokens only; no literals.
-- Tests cover model routing, partial coalescing, role-scoped `dataChanged`, and the JSONL line parser's malformed-input tolerance.
+- `SessionHost` spawns the Node sidecar (`node sidecar/dist/index.js`) when `SYMMETRIA_IDE_AGENT_PROMPT` is set. Editor-first when unset. Sidecar drives `@anthropic-ai/claude-agent-sdk@0.2.119` programmatically and translates SDK messages to JSONL events on stdout.
+- `send_user_message` writes `{type:"user_message",content}` envelopes; `send_permission_response` writes `{type:"permission_response",request_id,behavior}` envelopes — both on the same stdin stream under `_stdin_lock`.
+- `SessionModel` renders events flat with partial-text coalescing for streaming assistant turns. New `permission_request` rows carry `permission_state` + `request_id`; `resolve_permission(id, behavior)` mutates them to `"approved"`/`"denied"`.
+- `AgentPane.qml` is a sibling of `NvimView` inside `Main.qml`'s `RowLayout` (60/40). Theme-tokens only; the new permission card uses `Theme.color.agent.{permissionBorder,permissionApprove,permissionDeny}` (aliased to mode.normal/insert/replace).
+- `AppController.respond_to_permission` is the QML-facing slot wired from the card buttons; it dispatches host-first then model-resolves.
+- Tests cover model permission routing, scoped `dataChanged([PermissionStateRole])`, AppController dispatch ordering, and the new envelope shapes on the write path.
 
 **What's deliberately deferred (each a natural next chunk):**
-- **Composer.** Native Qt text input; wire into the existing `SessionHost.send_user_message` stub. Flip `start()` to also pass `--input-format stream-json` so the subprocess stays alive between turns.
-- **Permission UI.** `claude` emits permission-request events on tool use; render inline approve/deny cards rather than stalling on a terminal y/n prompt.
-- **Turn grouping + tool-call drill-in.** Flat list is intentional for the placeholder; real event cadence now informs what the grouped view should look like.
+- **Permission persistence.** "Always allow X for project Y" — the SDK exposes `PermissionUpdate.addRules` via `PermissionResult.updatedPermissions`, but we don't surface that in the card yet. Add a third button (Allow once / Allow always / Deny) once the placeholder UX is exercised.
+- **Stop control.** The SDK's `Query.interrupt()` exists but isn't wired. Useful for mistyped prompts and runaway tool loops. Sidecar would expose it as a new inbound command (`{type:"interrupt"}`) that calls `AbortController.abort()` on the active query.
+- **Turn grouping + tool-call drill-in.** Flat list is intentional for the placeholder; the SDK now gives us a much richer typed event surface to iterate against.
 - **Media rendering.** User-passed images, assistant-generated diagrams (inline `QtWebEngineView`), URL chips, code-fence copy actions.
-- **Focus switching.** No mouse; add a keyboard binding to hop between editor and agent pane (and back).
+- **Focus switching.** No mouse; keyboard binding to hop between editor and agent pane (and back).
+- **Session resume UI.** SDK exposes `resume`/`sessionId` options on `query()` — surface them in the agent pane chrome.
+- **MCP / hooks / slash commands via SDK options.** All available, none wired.
 
 **Design rules that hold across every follow-up:**
 - Cross-thread signals use explicit `Qt.QueuedConnection` with a grep-able comment at the connect site (§4 P2).

@@ -1,4 +1,4 @@
-"""Agent-pane event model: SessionModel for stream-json events.
+"""Agent-pane event model: SessionModel for SDK sidecar events.
 
 Extracted here (rather than living in `app.py`) to mirror the
 convention started by `cmdline_models.py` and `whichkey_models.py`:
@@ -9,16 +9,20 @@ side effect. That side-effect import (with `noqa: F401`) is kept in
 `_register_qml_types` so linters cannot silently drop it (the same
 second-layer protection the existing QML-registered modules use).
 
-These models render the `claude -p --output-format stream-json`
-event stream driven by `session_host.py`. See `docs/phases.md`
-(Phase 2 placeholder spike) and the upcoming CLAUDE.md
-`## The stream-json protocol` section for the routing detail.
+These models render the JSONL event stream emitted by the Node
+sidecar (`sidecar/src/index.ts`). The sidecar drives
+`@anthropic-ai/claude-agent-sdk` programmatically and translates
+typed SDK messages back to dict shapes that `_row_from_*` here
+already consumes (assistant, system, stream_event, result,
+rate_limit_event), plus a sidecar-synthesized `permission_request`
+envelope when the SDK's `canUseTool` callback fires. See CLAUDE.md
+`## The agent backend (Node SDK sidecar)` for the wire-protocol
+contract and `sidecar/src/protocol.ts` for the TypeScript types.
 
-Shape for the placeholder spike: one ListView row per event, with
-partial coalescing for streaming assistant text. Turn grouping and
-tool-call drill-in land after the spike — designing them against
-guessed protocol vocabulary is exactly the waste the spike exists
-to avoid.
+Shape: one ListView row per event, with partial coalescing for
+streaming assistant text. Turn grouping and tool-call drill-in land
+later — designing them against guessed event cadence is exactly the
+waste the placeholder discipline exists to avoid.
 """
 
 from __future__ import annotations
@@ -90,16 +94,26 @@ class StreamJsonEvent(TypedDict, total=False):
 
 @dataclass(slots=True, frozen=True)
 class AgentRow:
-    """One stream-json event rendered as a flat ListView row.
+    """One sidecar event rendered as a flat ListView row.
 
-    `kind` carries the raw stream-json event `type` (grep-able back
-    to the protocol). `role` is an inferred attribution that QML
-    delegates colour-map against `Theme.color.agent.*`. `text` is the
-    human-readable body, possibly grown by partial-text coalescing
-    while `partial=True`. `subtype` adds discriminator detail for
-    system/result/tool events. `raw` keeps the original event dict so
-    future richer delegates (tool drill-in, image rendering, etc.)
-    have the full payload without requiring a model rewrite.
+    `kind` carries the raw event `type` (grep-able back to the
+    sidecar's wire protocol — see `sidecar/src/protocol.ts`). `role`
+    is an inferred attribution that QML delegates colour-map against
+    `Theme.color.agent.*`. `text` is the human-readable body,
+    possibly grown by partial-text coalescing while `partial=True`.
+    `subtype` adds discriminator detail for system/result/tool events.
+    `raw` keeps the original event dict so future richer delegates
+    (tool drill-in, image rendering, etc.) have the full payload
+    without requiring a model rewrite.
+
+    `permission_state` and `request_id` are populated only on
+    `kind == "permission_request"` rows. They drive the in-pane
+    approve/deny card in `AgentPane.qml` and the lookup that
+    `resolve_permission()` uses to flip a row from "pending" to
+    "approved"/"denied" once the user decides. Empty strings on
+    every other row — the QML delegate gates the card on
+    `permission_state === "pending"` so non-permission rows are
+    unaffected.
     """
 
     kind: str
@@ -108,6 +122,8 @@ class AgentRow:
     partial: bool
     subtype: str
     raw: dict
+    permission_state: str = ""
+    request_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +174,8 @@ class SessionModel(QAbstractListModel):
     PartialRole = Qt.ItemDataRole.UserRole + 4
     SubtypeRole = Qt.ItemDataRole.UserRole + 5
     RawRole = Qt.ItemDataRole.UserRole + 6
+    PermissionStateRole = Qt.ItemDataRole.UserRole + 7
+    RequestIdRole = Qt.ItemDataRole.UserRole + 8
 
     # Emitted once after the host subprocess has fully closed. Scalar
     # state so delegates don't reshape when it fires — UI can bind
@@ -185,6 +203,8 @@ class SessionModel(QAbstractListModel):
             self.PartialRole: b"partial",
             self.SubtypeRole: b"subtype",
             self.RawRole: b"raw",
+            self.PermissionStateRole: b"permissionState",
+            self.RequestIdRole: b"requestId",
         }
 
     def rowCount(  # noqa: B008
@@ -209,6 +229,10 @@ class SessionModel(QAbstractListModel):
             return row.subtype
         if role == self.RawRole:
             return row.raw
+        if role == self.PermissionStateRole:
+            return row.permission_state
+        if role == self.RequestIdRole:
+            return row.request_id
         return None
 
     # --- Application API (GUI thread only) ------------------------------
@@ -251,6 +275,9 @@ class SessionModel(QAbstractListModel):
         if kind == "rate_limit_event":
             self._append(_row_from_rate_limit(event))
             return
+        if kind == "permission_request":
+            self._append(_row_from_permission_request(event))
+            return
         self._append(
             AgentRow(
                 kind=kind,
@@ -277,6 +304,35 @@ class SessionModel(QAbstractListModel):
         """Mark the host closed and emit `hostClosed` for UI wiring."""
         self._streaming_row_index = None
         self.hostClosed.emit()
+
+    @Slot(str, str)
+    def resolve_permission(self, request_id: str, behavior: str) -> None:
+        """Mark the matching permission row as approved or denied.
+
+        Locates the most recent row whose `request_id` matches and
+        whose `permission_state == "pending"`, replaces it via
+        `dataclasses.replace`, and emits `dataChanged` with a role
+        list scoped to `PermissionStateRole` (gotcha #3 — empty role
+        lists force full re-bind; scoped lists let QML re-evaluate
+        only the binding that actually changed). No-op if no matching
+        pending row exists — keeps the QML invocation surface
+        tolerant of races where the host already closed before the
+        user's click landed.
+        """
+        new_state = "approved" if behavior == "allow" else "denied"
+        # Walk in reverse — pending permission requests are
+        # short-lived and the relevant row is almost always near the
+        # tail. Bail on the first match.
+        for idx in range(len(self._rows) - 1, -1, -1):
+            row = self._rows[idx]
+            if row.request_id == request_id and row.permission_state == "pending":
+                self._rows[idx] = replace(row, permission_state=new_state)
+                model_index = self.index(idx)
+                self.dataChanged.emit(
+                    model_index, model_index, [self.PermissionStateRole]
+                )
+                return
+        log.debug("resolve_permission: no pending row for request_id=%s", request_id)
 
     # --- Internal helpers -----------------------------------------------
 
@@ -454,6 +510,47 @@ def _row_from_result(event: dict) -> AgentRow:
         partial=False,
         subtype=str(event.get("subtype") or ""),
         raw=event,
+    )
+
+
+def _row_from_permission_request(event: dict) -> AgentRow:
+    """Build a pending-permission row from a `permission_request` envelope.
+
+    Envelope shape (sidecar-synthesized — see `sidecar/src/protocol.ts`
+    `PermissionRequestEvent`):
+
+        {"type": "permission_request",
+         "request_id": "<uuid>",
+         "tool_name": "<name>",
+         "tool_use_id": "<uuid>",
+         "input": {...},
+         "title"?: "...", "description"?: "...", ...,
+         "note": "sidecar-synthesized"}
+
+    The `text` field prefers the SDK's bridge-rendered `title` when
+    present (matches what the canUseTool docstring recommends as the
+    primary prompt) and falls back to a tool-name + summary
+    reconstruction. `subtype` carries the tool name so the QML
+    delegate can label the approve button without re-deriving it.
+    """
+    request_id = str(event.get("request_id") or "")
+    tool_name = str(event.get("tool_name") or "")
+    title = str(event.get("title") or "")
+    if title:
+        text = title
+    elif tool_name:
+        text = f"Allow {tool_name}?"
+    else:
+        text = "Allow tool call?"
+    return AgentRow(
+        kind="permission_request",
+        role="system",
+        text=text,
+        partial=False,
+        subtype=tool_name,
+        raw=event,
+        permission_state="pending",
+        request_id=request_id,
     )
 
 

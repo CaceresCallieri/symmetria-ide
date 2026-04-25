@@ -294,13 +294,13 @@ class AppController(QObject):
 
     @Slot(str)
     def _log_session_stderr(self, line: str) -> None:
-        """Forward `claude`'s stderr into the app log.
+        """Forward the sidecar's stderr into the app log.
 
         The agent pane doesn't render stderr for the placeholder —
-        it's diagnostic only (auth failures, CLI warnings). Logging at
-        WARNING surfaces it without the pane having to grow another
-        row type, and keeps the signal trivially greppable during
-        exploration.
+        it's diagnostic only (sidecar lifecycle, SDK auth failures,
+        sidecar-internal logging). Logging at WARNING surfaces it
+        without the pane having to grow another row type, and keeps
+        the signal trivially greppable during exploration.
         """
         if line:
             log.warning("session stderr: %s", line)
@@ -353,13 +353,19 @@ class AppController(QObject):
     def _on_session_event(self, event: dict) -> None:
         """OFF edge for the spinner — drop on `result` envelope.
 
-        `result` is `claude`'s canonical turn-complete signal (carries
+        `result` is the SDK's canonical turn-complete signal (carries
         `duration_ms` + `total_cost_usd`). Watching for it here keeps
         the spinner state coupled to the protocol rather than to UI
         heuristics like "stop spinning when streaming text appears" —
         protocol coupling means tool-using turns (which produce text
         AND continue working) keep the spinner on through the whole
         round-trip.
+
+        Pending permission requests do NOT clear the spinner: the
+        sidecar's canUseTool callback is awaiting our reply, and the
+        turn is still in flight from the user's perspective. The
+        `result` envelope only fires once the user's decision lands
+        and any subsequent tool work completes.
         """
         if str(event.get("type") or "") == "result":
             self._set_awaiting_response(False)
@@ -424,22 +430,23 @@ class AppController(QObject):
 
         Two branches:
 
-        - **Cold** (no running subprocess): `start(prompt)` spawns
-          `claude` in stream-json mode and delivers `prompt` as the
-          first JSONL envelope on stdin.
-        - **Hot** (subprocess alive from a previous turn):
-          `send_user_message(prompt)` writes another JSONL envelope on
-          the same stdin stream. `claude` retains full session context
-          — this is what makes the pane feel like a conversation
-          rather than independent one-shots.
+        - **Cold** (no running sidecar): `start(prompt)` spawns the
+          Node sidecar and delivers `prompt` as the first JSONL
+          `user_message` command on stdin, which the sidecar wraps in
+          an `SDKUserMessage` for the SDK's prompt iterable.
+        - **Hot** (sidecar alive from a previous turn):
+          `send_user_message(prompt)` writes another `user_message`
+          command on the same stdin stream. The SDK's session state
+          (model context, tool authorization, etc.) is retained
+          inside the sidecar — this is what makes the pane feel like
+          a conversation rather than independent one-shots.
 
         Before either branch, we feed a synthetic `user` event into
         `SessionModel` so the message appears in the pane the instant
-        the composer submits. `claude` does NOT echo user envelopes
-        on stdout (would require `--replay-user-messages`, and even
-        then it's a server roundtrip), so without this the user has
-        no visual confirmation of what they typed — every turn would
-        look like Claude is responding to nothing.
+        the composer submits. The sidecar deliberately drops
+        SDKUserMessage echoes (Python's optimistic-render is the
+        single source of truth) so without this synthetic injection
+        the user would have no visual confirmation of what they typed.
 
         `<leader>aN` (`action="new"` on the agent-event) stops the
         host and clears the model before this slot runs, so "new
@@ -466,6 +473,29 @@ class AppController(QObject):
         else:
             log.info("submit_prompt (new session): %s", text[:100])
             self._session_host.start(text)
+
+    @Slot(str, str)
+    def respond_to_permission(self, request_id: str, decision: str) -> None:
+        """Send the user's permission decision back through the sidecar.
+
+        Wired from `AgentPane.qml`'s permission card buttons:
+        `controller.respond_to_permission(entry.requestId, "allow"|"deny")`.
+
+        Order matters: the sidecar gets the response first so its
+        canUseTool promise resolves and the SDK can proceed (or
+        deliver the deny tool_result). Then we mark the model row as
+        approved/denied so the UI gives immediate feedback even if
+        the sidecar's next event takes a moment to arrive. Validates
+        `decision` and silently drops invalid values — keeps the QML
+        invocation surface tolerant of typos or accidental coercion.
+        """
+        if decision not in ("allow", "deny"):
+            log.warning(
+                "respond_to_permission: invalid decision %r — dropped", decision
+            )
+            return
+        self._session_host.send_permission_response(request_id, decision)
+        self._session_model.resolve_permission(request_id, decision)
 
     def start(self) -> None:
         self._backend.start()

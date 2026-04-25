@@ -434,3 +434,127 @@ def test_on_host_closed_emits_host_closed_signal_once():
     m.hostClosed.connect(lambda: received.append(1))
     m.on_host_closed()
     assert received == [1]
+
+
+# ---------------------------------------------------------------------------
+# Permission row routing — sidecar canUseTool integration
+# ---------------------------------------------------------------------------
+#
+# `permission_request` envelopes are sidecar-synthesized — they don't
+# exist in raw stream-json. SessionModel routes them into a pending
+# row carrying request_id + permission_state="pending"; the
+# `resolve_permission` slot mutates that state to "approved"/"denied"
+# when the user clicks the inline card. These tests pin the dispatch
+# routing AND the scoped-role-list discipline (gotcha #3 — empty role
+# lists force a full re-bind; we want exactly one role).
+
+
+def _permission_request_event(request_id: str, tool: str, title: str = "") -> dict:
+    return {
+        "type": "permission_request",
+        "request_id": request_id,
+        "tool_name": tool,
+        "tool_use_id": "tu-" + request_id,
+        "input": {},
+        "title": title,
+        "note": "sidecar-synthesized",
+    }
+
+
+def test_permission_request_event_appends_pending_row():
+    m = SessionModel()
+    m.apply(_permission_request_event("abc", "Bash", "Allow Bash?"))
+    assert m.rowCount() == 1
+    idx = m.index(0)
+    assert m.data(idx, SessionModel.KindRole) == "permission_request"
+    assert m.data(idx, SessionModel.RoleRole) == "system"
+    assert m.data(idx, SessionModel.PermissionStateRole) == "pending"
+    assert m.data(idx, SessionModel.RequestIdRole) == "abc"
+    # When `title` is present, body text uses it verbatim — matches the
+    # SDK's CanUseTool docstring guidance.
+    assert m.data(idx, SessionModel.TextRole) == "Allow Bash?"
+    # subtype carries the tool name so the QML card can label without
+    # re-deriving from the body text.
+    assert m.data(idx, SessionModel.SubtypeRole) == "Bash"
+
+
+def test_permission_request_falls_back_to_tool_name_when_no_title():
+    m = SessionModel()
+    m.apply(_permission_request_event("abc", "Read"))
+    idx = m.index(0)
+    assert m.data(idx, SessionModel.TextRole) == "Allow Read?"
+
+
+def test_resolve_permission_allow_flips_to_approved_with_scoped_dataChanged():
+    m = SessionModel()
+    m.apply(_permission_request_event("abc", "Edit"))
+
+    # Capture (top-left, bottom-right, role list) for every dataChanged.
+    received: list[tuple[int, int, list[int]]] = []
+    m.dataChanged.connect(
+        lambda tl, br, roles: received.append((tl.row(), br.row(), list(roles)))
+    )
+
+    m.resolve_permission("abc", "allow")
+
+    assert m.data(m.index(0), SessionModel.PermissionStateRole) == "approved"
+    # Exactly one emission, scoped to the single role that changed.
+    # Empty role list would force every binding on every visible
+    # delegate to re-evaluate — gotcha #3 invariant.
+    assert received == [(0, 0, [SessionModel.PermissionStateRole])]
+
+
+def test_resolve_permission_deny_flips_to_denied():
+    m = SessionModel()
+    m.apply(_permission_request_event("abc", "Edit"))
+    m.resolve_permission("abc", "deny")
+    assert m.data(m.index(0), SessionModel.PermissionStateRole) == "denied"
+
+
+def test_resolve_permission_unknown_id_is_a_noop():
+    """Race: user clicks deny just as host crashes → resolve fires with
+    an id that no longer matches a pending row. Must NOT mutate state
+    or emit dataChanged."""
+    m = SessionModel()
+    m.apply(_permission_request_event("abc", "Edit"))
+
+    received: list[int] = []
+    m.dataChanged.connect(lambda tl, br, roles: received.append(1))
+
+    m.resolve_permission("never-existed", "allow")
+
+    assert m.data(m.index(0), SessionModel.PermissionStateRole) == "pending"
+    assert received == []
+
+
+def test_resolve_permission_skips_already_resolved_rows():
+    """Two consecutive resolves must NOT re-flip an already-resolved row.
+
+    Otherwise repeated clicks during a stuck UI cycle could spuriously
+    re-emit dataChanged, forcing pointless re-binds across every
+    visible delegate. The scan walks only `permission_state == "pending"`
+    rows by design.
+    """
+    m = SessionModel()
+    m.apply(_permission_request_event("abc", "Edit"))
+    m.resolve_permission("abc", "allow")
+
+    received: list[int] = []
+    m.dataChanged.connect(lambda tl, br, roles: received.append(1))
+
+    m.resolve_permission("abc", "deny")
+
+    # Still approved (first resolve wins). No second emission.
+    assert m.data(m.index(0), SessionModel.PermissionStateRole) == "approved"
+    assert received == []
+
+
+def test_role_names_includes_permission_state_and_request_id():
+    """Regression guard — QML delegates bind to byte-string role names.
+
+    A rename here breaks the typed-property delegate's
+    `required property string permissionState` / `requestId` bindings.
+    """
+    names = SessionModel().roleNames()
+    assert names[SessionModel.PermissionStateRole] == b"permissionState"
+    assert names[SessionModel.RequestIdRole] == b"requestId"

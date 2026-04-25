@@ -27,18 +27,30 @@ Key-notation examples: `i`, `<Esc>`, `<CR>`, `:e file.txt<CR>`, `100G`, `<C-w>v`
 
 Use this pattern when you need to verify a UI change without opening a window the user can see. Screenshots land cleanly even if workspace 6 isn't active.
 
-## Phase 2 placeholder spike
+## Sidecar setup *(one-time)*
 
-The agent pane is editor-first by design: `SYMMETRIA_IDE_AGENT_PROMPT` unset means no `claude` subprocess spawns and the pane renders its empty-state affordance ("agent pane — set SYMMETRIA_IDE_AGENT_PROMPT to populate"). Set the env var to opt in.
+Phase 2's agent pane is driven by a Node sidecar that runs `@anthropic-ai/claude-agent-sdk` programmatically. The sidecar lives in `sidecar/` and ships built artifacts gitignored — install + build once after cloning, and again whenever `sidecar/src/**` or its dependencies change.
+
+```
+cd sidecar
+npm install
+npm run build
+```
+
+Requires Node `>=20` (Arch ships >=22 in the `nodejs` package). `npm install` fetches `@anthropic-ai/claude-agent-sdk` (pinned to `0.2.119`) plus dev tooling (esbuild, typescript, @types/node). `npm run build` produces `sidecar/dist/index.js`, which the Python `SessionHost` spawns at runtime. If the bundle is missing, `SessionHost.start` logs a clear error pointing right back at this section.
+
+## Phase 2 agent pane
+
+The agent pane is editor-first by design: `SYMMETRIA_IDE_AGENT_PROMPT` unset means no sidecar spawns and the pane renders its empty-state affordance ("agent pane — set SYMMETRIA_IDE_AGENT_PROMPT to populate"). Set the env var to opt in.
 
 ```
 SYMMETRIA_IDE_AGENT_PROMPT="explain the capsule protocol" \
   PYTHONPATH=src python -m symmetria_ide
 ```
 
-Runs the real `claude -p --output-format stream-json --include-partial-messages --verbose <prompt>` subprocess. Every JSONL event lands in `SessionModel` and renders as a flat `ListView` row. One-shot per launch — multi-turn arrives with the composer.
+Runs the Node sidecar; every SDK message translates to a JSONL event that lands in `SessionModel` and renders as a flat `ListView` row. Tool-using turns now surface an inline approve/deny card (the `permission_request` envelope, synthesized by the SDK's `canUseTool` callback) — clicking Allow or Deny writes a `permission_response` back through `SessionHost.send_permission_response` and the SDK proceeds.
 
-Prerequisite: `claude auth status` must return `loggedIn: true`. If not, run `claude auth` first; the pane surfaces auth failures via the `stderr_line` signal (logged at WARNING by `AppController._log_session_stderr`).
+Prerequisite: `claude auth status` must return `loggedIn: true` (the SDK reads the same `~/.claude` credentials as the CLI). If not, run `claude auth` first; the sidecar surfaces auth failures via the `stderr_line` signal (logged at WARNING by `AppController._log_session_stderr`).
 
 Combined with `SYMMETRIA_IDE_SCREENSHOT` + a longer warmup, this doubles as a headless verification of the agent pane wiring (allow 5–8 s warmup so the first streamed event arrives before the screenshot fires).
 
