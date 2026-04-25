@@ -87,3 +87,7 @@ def test_send_user_message_tolerates_broken_pipe():
 
     # Should log the exception via `log.exception` but NOT propagate.
     host.send_user_message("after the crash")
+
+    # flush must NOT be called when write already raised — the exception
+    # exits the try-block before reaching the flush line.
+    assert fake.stdin.flush_count == 0, "flush must not be called after a failed write"

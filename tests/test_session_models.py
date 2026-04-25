@@ -227,8 +227,13 @@ def test_assistant_event_finalises_streaming_row_in_place():
     we don't just keep the partial-buffered text and flip the flag.
     """
     m = SessionModel()
+    # Capture dataChanged emissions during finalization (gotcha #3 guard:
+    # scoped role lists let QML skip re-evaluating unchanged bindings).
+    finalize_roles: list[list[int]] = []
+    m.dataChanged.connect(lambda _tl, _br, roles: finalize_roles.append(list(roles)))
     m.apply(_text_delta_event("partial"))
-    assert m.rowCount() == 1  # streaming row is open
+    # The first delta opens a new row — that's beginInsertRows, not dataChanged.
+    assert finalize_roles == [], "opening a new streaming row must not emit dataChanged"
     m.apply(
         {
             "type": "assistant",
@@ -251,6 +256,19 @@ def test_assistant_event_finalises_streaming_row_in_place():
     # Text comes from re-extraction of the canonical content blocks,
     # so tool_use is included even though it never streamed.
     assert m.data(row, SessionModel.TextRole) == "Let me check. [tool: Read] Answer: 4."
+    # Finalization must emit exactly one scoped dataChanged (gotcha #3).
+    # RoleRole is intentionally absent — role stays "assistant" so QML
+    # doesn't re-evaluate the colour-map binding unnecessarily.
+    assert len(finalize_roles) == 1, "finalization must emit exactly one dataChanged"
+    emitted = set(finalize_roles[0])
+    assert SessionModel.KindRole in emitted
+    assert SessionModel.TextRole in emitted
+    assert SessionModel.PartialRole in emitted
+    assert SessionModel.SubtypeRole in emitted
+    assert SessionModel.RawRole in emitted
+    assert SessionModel.RoleRole not in emitted, (
+        "RoleRole must NOT be in dataChanged — role does not change during finalization"
+    )
 
 
 def test_assistant_event_without_prior_streaming_appends_canonical_row():

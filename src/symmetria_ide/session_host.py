@@ -189,6 +189,11 @@ class SessionHost(QObject):
         if not prompt:
             log.warning("SessionHost.start with empty prompt — not spawning")
             return
+        # Reset the stop signal so `is_running` and `_run_stdout_loop`
+        # see a clean slate — a prior `stop()` call sets this and it must
+        # be cleared before starting workers or they will exit immediately
+        # after the first event (the event-loop break at line ~352).
+        self._stop_event.clear()
         argv = list(_CLAUDE_BASE_ARGV)
         log.info("spawning claude: %s", " ".join(shlex.quote(a) for a in argv))
         try:
@@ -213,7 +218,7 @@ class SessionHost(QObject):
             log.exception("failed to spawn claude")
             self._stop_event.set()
             self.closed.emit()
-            raise
+            return
         self._stdout_worker = threading.Thread(
             target=self._run_stdout_loop,
             name="session-host-stdout",
@@ -304,7 +309,7 @@ class SessionHost(QObject):
         should not need to branch on `is_running`.
         """
         proc = self._proc
-        if proc is None or proc.stdin is None:
+        if proc is None:
             log.debug("send_user_message with no running subprocess — dropped")
             return
         payload = json.dumps(
