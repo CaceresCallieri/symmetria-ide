@@ -186,26 +186,9 @@ PYTHONPATH=src python -m pytest tests/ -v
 
 ## Phase 2 starting points
 
-The Node SDK sidecar pivot has landed. See `docs/phases.md` for the full sequencing; below is the fast-onboarding summary for picking up the follow-up work.
+Phase 2 status (what's wired, what's deferred, key invariants) lives in `.claude/memory/project/active/phase2_current_state.md` — refreshed each session as state changes. `docs/phases.md` carries the full phase sequencing.
 
-**What's wired today:**
-- `SessionHost` spawns the Node sidecar (`node sidecar/dist/index.js`) when `SYMMETRIA_IDE_AGENT_PROMPT` is set. Editor-first when unset. Sidecar drives `@anthropic-ai/claude-agent-sdk@0.2.119` programmatically and translates SDK messages to JSONL events on stdout.
-- `send_user_message` writes `{type:"user_message",content}` envelopes; `send_permission_response` writes `{type:"permission_response",request_id,behavior}` envelopes — both on the same stdin stream under `_stdin_lock`.
-- `SessionModel` renders events flat with partial-text coalescing for streaming assistant turns. New `permission_request` rows carry `permission_state` + `request_id`; `resolve_permission(id, behavior)` mutates them to `"approved"`/`"denied"`.
-- `AgentPane.qml` is a sibling of `NvimView` inside `Main.qml`'s `RowLayout` (60/40). Theme-tokens only; the new permission card uses `Theme.color.agent.{permissionBorder,permissionApprove,permissionDeny}` (aliased to mode.normal/insert/replace).
-- `AppController.respond_to_permission` is the QML-facing slot wired from the card buttons; it dispatches host-first then model-resolves.
-- Tests cover model permission routing, scoped `dataChanged([PermissionStateRole])`, AppController dispatch ordering, and the new envelope shapes on the write path.
-
-**What's deliberately deferred (each a natural next chunk):**
-- **Permission persistence.** "Always allow X for project Y" — the SDK exposes `PermissionUpdate.addRules` via `PermissionResult.updatedPermissions`, but we don't surface that in the card yet. Add a third button (Allow once / Allow always / Deny) once the placeholder UX is exercised.
-- **Stop control.** The SDK's `Query.interrupt()` exists but isn't wired. Useful for mistyped prompts and runaway tool loops. Sidecar would expose it as a new inbound command (`{type:"interrupt"}`) that calls `AbortController.abort()` on the active query.
-- **Turn grouping + tool-call drill-in.** Flat list is intentional for the placeholder; the SDK now gives us a much richer typed event surface to iterate against.
-- **Media rendering.** User-passed images, assistant-generated diagrams (inline `QtWebEngineView`), URL chips, code-fence copy actions.
-- **Focus switching.** No mouse; keyboard binding to hop between editor and agent pane (and back).
-- **Session resume UI.** SDK exposes `resume`/`sessionId` options on `query()` — surface them in the agent pane chrome.
-- **MCP / hooks / slash commands via SDK options.** All available, none wired.
-
-**Design rules that hold across every follow-up:**
+Cross-cutting design rules that hold across every Phase 2 follow-up:
 - Cross-thread signals use explicit `Qt.QueuedConnection` with a grep-able comment at the connect site (§4 P2).
 - Every worker thread is `daemon=True` AND owns a `threading.Event` (§1 P0).
 - GC is suspended around worker-thread signal emission (gotcha #10) whenever the payload construction allocates.

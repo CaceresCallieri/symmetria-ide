@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/jc/projects/symmetria-ide/.claude/hooks/memory-sweep-precompact.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/jc/projects/symmetria-ide/.claude/hooks/memory-sweep-postcommit.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
