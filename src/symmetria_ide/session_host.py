@@ -8,14 +8,14 @@ cross-thread delivery. A second daemon reads stderr and emits
 `stderr_line(str)` for diagnostic surfaces (authentication failures,
 CLI warnings, etc.).
 
-**Shape for the placeholder spike.** `start(prompt, cwd)` passes the
-prompt via argv — the simplest path that we already validated in
-Step 1 of Phase 2. `claude -p` responds to one prompt and exits, so
-the host is effectively one-shot in this iteration. The
-`send_user_message` API is a stub wired for the composer work that
-lands in a later iteration — at that point `start()` will add
-`--input-format stream-json` and send the initial prompt as the first
-stdin JSONL message, keeping the subprocess alive for multi-turn.
+**Shape.** `start(prompt, cwd)` spawns `claude -p --input-format
+stream-json --output-format stream-json` with stdin kept open, then
+writes the initial prompt as the first JSONL user envelope via
+`send_user_message`. The subprocess stays alive across turns —
+every subsequent composer submit is another `send_user_message` call
+writing a new JSONL line. stdin is closed only on `stop()` (user
+pressed Escape + action="new", or app shutdown), which triggers a
+clean exit-0 and one final `result` event.
 
 **Thread discipline (project-standards §1 P0 + §4 P0).**
 
@@ -52,15 +52,19 @@ log = logging.getLogger(__name__)
 
 # Argv tail used on every `start()` call. `-p` is required to enable
 # non-interactive streaming output; `--output-format stream-json`
-# produces one JSON event per stdout line; `--include-partial-messages`
-# emits content_block_delta frames as Claude generates them (gives
-# the UI a streaming feel). `--verbose` surfaces hook output and
-# session-init detail in the event stream — useful during the
-# placeholder spike, reconsidered once the pane has richer
-# diagnostics of its own.
+# produces one JSON event per stdout line; `--input-format stream-json`
+# reads JSONL user envelopes on stdin (one per turn) so the subprocess
+# stays alive across multiple user messages instead of exiting after
+# the first response; `--include-partial-messages` emits
+# content_block_delta frames as Claude generates them (gives the UI a
+# streaming feel); `--verbose` surfaces hook output and session-init
+# detail in the event stream — useful during exploration, revisit once
+# the pane has richer diagnostics of its own.
 _CLAUDE_BASE_ARGV: tuple[str, ...] = (
     "claude",
     "-p",
+    "--input-format",
+    "stream-json",
     "--output-format",
     "stream-json",
     "--include-partial-messages",
@@ -168,13 +172,14 @@ class SessionHost(QObject):
 
     @Slot(str)
     def start(self, prompt: str, cwd: Path | None = None) -> None:
-        """Spawn `claude -p` with `prompt` as argv input, start workers.
+        """Spawn `claude` in stream-json mode; deliver `prompt` as first turn.
 
-        The placeholder uses argv-prompt (single-turn). When the
-        composer lands, `start` will flip to `--input-format
-        stream-json` and write the prompt as the first stdin JSONL
-        message — keeping the subprocess alive for multi-turn. The
-        `send_user_message` stub is the seam for that future change.
+        The subprocess is configured with `--input-format stream-json`
+        so stdin stays open across turns — we write the initial prompt
+        as the first JSONL user envelope via `send_user_message`, then
+        subsequent composer submits become additional JSONL lines on
+        the same stdin stream. `claude` only exits when stdin closes
+        (via `stop()`) or on error.
 
         No-op if called while a subprocess is already spawned.
         """
@@ -184,7 +189,7 @@ class SessionHost(QObject):
         if not prompt:
             log.warning("SessionHost.start with empty prompt — not spawning")
             return
-        argv = [*_CLAUDE_BASE_ARGV, prompt]
+        argv = list(_CLAUDE_BASE_ARGV)
         log.info("spawning claude: %s", " ".join(shlex.quote(a) for a in argv))
         try:
             self._proc = subprocess.Popen(  # noqa: S603 — argv is list, not shell
@@ -221,6 +226,11 @@ class SessionHost(QObject):
         )
         self._stdout_worker.start()
         self._stderr_worker.start()
+        # Deliver the initial user turn on the now-alive stdin stream.
+        # Factoring the write through `send_user_message` means there's
+        # one JSON envelope shape + one `_stdin_lock`-serialised write
+        # path — this function doesn't duplicate them.
+        self.send_user_message(prompt)
 
     @Slot()
     def stop(self) -> None:
@@ -274,19 +284,21 @@ class SessionHost(QObject):
     def send_user_message(self, text: str) -> None:
         """Write a JSONL user message to the subprocess's stdin.
 
-        **Placeholder-era stub.** The current `start()` passes the
-        prompt via argv and `claude -p` exits after responding, so
-        stdin is effectively unused. This method is here so the
-        composer wire-up (a later iteration) can call it without
-        needing to rearchitect the class — at that point `start()`
-        will add `--input-format stream-json` and the JSONL shape
-        emitted below becomes the real channel for follow-up turns.
+        Envelope shape (empirically verified against the real `claude`
+        CLI — see docs/phases.md's Step 1 protocol discovery):
+
+            {"type": "user", "message": {"role": "user", "content": "<text>"}}
+
+        The inner `"role": "user"` is NOT optional — a prior iteration
+        omitted it and the subprocess silently discarded the turn.
+        Every field in this envelope is load-bearing; do not trim it
+        down without re-running the protocol check.
 
         Serialisation: write + flush is wrapped in `_stdin_lock` so
         interleaved writes from concurrent callers can't corrupt the
         line framing. GIL already serialises same-handle writes in
         practice; the lock is explicit documentation and future-
-        proofing.
+        proofing for free-threaded builds.
 
         Silently returns if there's no running subprocess — callers
         should not need to branch on `is_running`.
@@ -295,7 +307,9 @@ class SessionHost(QObject):
         if proc is None or proc.stdin is None:
             log.debug("send_user_message with no running subprocess — dropped")
             return
-        payload = json.dumps({"type": "user", "message": {"content": text}})
+        payload = json.dumps(
+            {"type": "user", "message": {"role": "user", "content": text}}
+        )
         line = payload + "\n"
         with self._stdin_lock:
             try:

@@ -138,10 +138,13 @@ class SessionModel(QAbstractListModel):
     scoped to `TextRole` (gotcha #3: empty role lists force full
     re-bind; scoped lists let QML only re-evaluate the one binding
     that actually changed). The finalised `assistant` event then
-    appends a canonical row and clears the streaming coalesce — the
-    streaming row stays in place with `partial=True` so a future
-    delegate can visually distinguish the in-flight view from the
-    final canonical text.
+    **replaces the streaming row in place** — text is re-extracted
+    from the canonical content blocks (so `[tool: name]` markers
+    interleaved with text are preserved, even though tool blocks were
+    never part of the streamed text), `partial` flips to `False`, and
+    `raw` is swapped to the assistant event. If no streaming row was
+    open (very short non-streaming responses), a fresh canonical row
+    is appended.
 
     **Thread affinity.** `apply()` runs on the GUI thread only. It is
     the `@Slot(dict)` wired to `SessionHost.event_received` via a
@@ -225,10 +228,16 @@ class SessionModel(QAbstractListModel):
             self._handle_stream_event(event)
             return
         # Any non-stream-event event closes the current streaming
-        # coalesce so the next text_delta opens a fresh row.
+        # coalesce so the next text_delta opens a fresh row. Snapshot
+        # first so the `assistant` branch can finalise the row in
+        # place rather than appending a duplicate.
+        streaming_idx = self._streaming_row_index
         self._streaming_row_index = None
         if kind == "assistant":
-            self._append(_row_from_assistant(event))
+            if streaming_idx is not None and streaming_idx < len(self._rows):
+                self._finalize_streaming_assistant(streaming_idx, event)
+            else:
+                self._append(_row_from_assistant(event))
             return
         if kind == "user":
             self._append(_row_from_user(event))
@@ -299,6 +308,45 @@ class SessionModel(QAbstractListModel):
         if not text:
             return
         self._extend_streaming_text(text, event)
+
+    def _finalize_streaming_assistant(self, idx: int, event: dict) -> None:
+        """Replace the in-flight streaming row with the canonical assistant row.
+
+        The text-delta-built body is text-only — tool_use blocks were
+        ignored during streaming because their `input_json_delta`
+        frames carry tool input fragments, not visible content. The
+        finalised `assistant` event ships the complete, ordered list
+        of content blocks; re-extracting via `_extract_assistant_text`
+        gives us text + `[tool: name]` markers correctly interleaved.
+
+        Mutating in place (rather than appending a new row) keeps the
+        UI from showing a duplicate "Claude" entry every turn — the
+        bug a user submitted while testing multi-turn. The `dataChanged`
+        signal carries an explicit role list so QML only re-evaluates
+        the bindings that actually changed (gotcha #3).
+        """
+        old = self._rows[idx]
+        text = _extract_assistant_text(event.get("message") or {})
+        self._rows[idx] = replace(
+            old,
+            kind="assistant",
+            text=text,
+            partial=False,
+            subtype="",
+            raw=event,
+        )
+        model_index = self.index(idx)
+        self.dataChanged.emit(
+            model_index,
+            model_index,
+            [
+                self.KindRole,
+                self.TextRole,
+                self.PartialRole,
+                self.SubtypeRole,
+                self.RawRole,
+            ],
+        )
 
     def _extend_streaming_text(self, delta_text: str, event: dict) -> None:
         """Append to the streaming row, or open a fresh one if none open."""

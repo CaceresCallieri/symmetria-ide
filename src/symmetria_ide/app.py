@@ -350,29 +350,47 @@ class AppController(QObject):
 
     @Slot(str)
     def submit_prompt(self, prompt: str) -> None:
-        """Kick off a `claude -p` run with `prompt`.
+        """Route the user's composer submit to the session host.
 
-        Placeholder-era behaviour: each submit stops any in-flight
-        subprocess and spawns a fresh one with the new prompt via
-        argv (so `claude` exits after responding and the one-shot
-        flow we already validated in Step 1 holds). The event log
-        accumulates across submissions so the pane reads as a
-        running history — a terminal `result` row separates each run.
+        Two branches:
 
-        Multi-turn routing through `send_user_message` + stdin-based
-        stream-json input lands with the richer composer iteration;
-        this slot is the minimum to make the placeholder testable
-        without relaunching the app.
+        - **Cold** (no running subprocess): `start(prompt)` spawns
+          `claude` in stream-json mode and delivers `prompt` as the
+          first JSONL envelope on stdin.
+        - **Hot** (subprocess alive from a previous turn):
+          `send_user_message(prompt)` writes another JSONL envelope on
+          the same stdin stream. `claude` retains full session context
+          — this is what makes the pane feel like a conversation
+          rather than independent one-shots.
+
+        Before either branch, we feed a synthetic `user` event into
+        `SessionModel` so the message appears in the pane the instant
+        the composer submits. `claude` does NOT echo user envelopes
+        on stdout (would require `--replay-user-messages`, and even
+        then it's a server roundtrip), so without this the user has
+        no visual confirmation of what they typed — every turn would
+        look like Claude is responding to nothing.
+
+        `<leader>aN` (`action="new"` on the agent-event) stops the
+        host and clears the model before this slot runs, so "new
+        Claude" semantics still re-spawn from scratch.
         """
         text = prompt.strip()
         if not text:
             return
+        # Optimistic local rendering. `apply` is the same slot wired
+        # to `event_received` via QueuedConnection, but we're already
+        # on the GUI thread here so a direct call is safe and cheaper
+        # than detouring through the queue.
+        self._session_model.apply(
+            {"type": "user", "message": {"role": "user", "content": text}}
+        )
         if self._session_host.is_running:
-            # Stop the current subprocess cleanly first — each submit
-            # is a fresh `claude -p` invocation in the placeholder.
-            self._session_host.stop()
-        log.info("submit_prompt: %s", text[:100])
-        self._session_host.start(text)
+            log.info("submit_prompt (continue): %s", text[:100])
+            self._session_host.send_user_message(text)
+        else:
+            log.info("submit_prompt (new session): %s", text[:100])
+            self._session_host.start(text)
 
     def start(self) -> None:
         self._backend.start()
@@ -388,8 +406,12 @@ class AppController(QObject):
         prompt = os.environ.get("SYMMETRIA_IDE_AGENT_PROMPT") or ""
         want_view = bool(prompt) or os.environ.get("SYMMETRIA_IDE_AGENT_VIEW") == "1"
         if prompt:
-            log.info("SYMMETRIA_IDE_AGENT_PROMPT set — spawning session host")
-            self._session_host.start(prompt)
+            log.info("SYMMETRIA_IDE_AGENT_PROMPT set — submitting initial prompt")
+            # Route through submit_prompt so the env-var path picks up
+            # the same synthetic-user-row injection that the composer
+            # uses. Without this the cold-start UX shows Claude's reply
+            # but no record of what the user asked.
+            self.submit_prompt(prompt)
         if want_view:
             self.show_agent()
         self.backendReady.emit()

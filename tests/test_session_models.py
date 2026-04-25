@@ -213,24 +213,59 @@ def test_empty_text_delta_is_skipped():
     assert m.rowCount() == 0
 
 
-def test_assistant_event_closes_coalesce_and_appends_final_row():
+def test_assistant_event_finalises_streaming_row_in_place():
+    """Multi-turn duplicate-row regression guard.
+
+    The streaming row built up from `text_delta` frames must be
+    REPLACED in place when the canonical `assistant` event arrives —
+    NOT left dangling alongside a fresh appended row. Showing both
+    looked like Claude was responding twice (a real user-reported bug
+    during multi-turn testing).
+
+    Re-extracting from the canonical content blocks also fills in
+    `[tool: name]` markers that never streamed as deltas; that's why
+    we don't just keep the partial-buffered text and flip the flag.
+    """
     m = SessionModel()
     m.apply(_text_delta_event("partial"))
     assert m.rowCount() == 1  # streaming row is open
     m.apply(
         {
             "type": "assistant",
-            "message": {"content": [{"type": "text", "text": "partial plus final"}]},
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Let me check. "},
+                    {"type": "tool_use", "name": "Read", "input": {"path": "x"}},
+                    {"type": "text", "text": " Answer: 4."},
+                ]
+            },
         }
     )
-    # Streaming row stays (partial=True) + finalised row appends
-    # (partial=False). Two visible rows is informative for the
-    # placeholder; a future delegate can hide / fold the streaming
-    # one once the finalised arrives.
-    assert m.rowCount() == 2
-    final = m.index(1)
-    assert m.data(final, SessionModel.PartialRole) is False
-    assert m.data(final, SessionModel.TextRole) == "partial plus final"
+    # ONE row, finalised in place. The streaming row is now the
+    # canonical assistant row.
+    assert m.rowCount() == 1
+    row = m.index(0)
+    assert m.data(row, SessionModel.PartialRole) is False
+    assert m.data(row, SessionModel.KindRole) == "assistant"
+    assert m.data(row, SessionModel.RoleRole) == "assistant"
+    # Text comes from re-extraction of the canonical content blocks,
+    # so tool_use is included even though it never streamed.
+    assert m.data(row, SessionModel.TextRole) == "Let me check. [tool: Read] Answer: 4."
+
+
+def test_assistant_event_without_prior_streaming_appends_canonical_row():
+    """Fallback path: a non-streamed assistant event still produces a row."""
+    m = SessionModel()
+    m.apply(
+        {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "hi"}]},
+        }
+    )
+    assert m.rowCount() == 1
+    row = m.index(0)
+    assert m.data(row, SessionModel.PartialRole) is False
+    assert m.data(row, SessionModel.TextRole) == "hi"
 
 
 def test_next_stream_after_boundary_starts_fresh_row():
@@ -359,7 +394,9 @@ def test_clear_resets_rows_and_streaming_state():
             "message": {"content": [{"type": "text", "text": "done"}]},
         }
     )
-    assert m.rowCount() == 2
+    # One row — the streaming row was finalised in place by the
+    # assistant event (not duplicated as a second row).
+    assert m.rowCount() == 1
     m.clear()
     assert m.rowCount() == 0
     # After clear, the next stream delta opens a fresh streaming row.
