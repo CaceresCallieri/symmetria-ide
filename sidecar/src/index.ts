@@ -263,9 +263,8 @@ const handleCommand = (cmd: InboundCommand): void => {
     // so Python's pill stays in sync with whatever the SDK actually
     // accepted (the cycle slot does NOT optimistically mutate per the
     // protocol contract in protocol.ts:PermissionModeChangedEvent).
-    const requested: PermissionMode = cmd.mode;
     queryInstance
-      .setPermissionMode(requested)
+      .setPermissionMode(cmd.mode)
       .then(() => {
         currentMode = cmd.mode;
         writeEvent({

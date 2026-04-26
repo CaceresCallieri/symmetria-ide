@@ -426,6 +426,10 @@ class AppController(QObject):
 
     @Slot()
     def toggle_agent(self) -> None:
+        # No idempotency guard here — by definition toggle always changes
+        # state, so checking for "already in the desired state" makes no
+        # sense. show_agent / hide_agent have guards because they have a
+        # target direction; toggle does not.
         self._agent_visible = not self._agent_visible
         self.agentVisibleChanged.emit()
 

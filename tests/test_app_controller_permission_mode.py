@@ -247,3 +247,31 @@ def test_session_closed_resets_to_default(controller):
 
     assert controller.permissionMode == "default"
     assert emissions == ["default"]
+
+
+# ---------------------------------------------------------------------------
+# Cycle when no session is running
+# ---------------------------------------------------------------------------
+
+
+def test_cycle_when_no_session_running_still_dispatches_to_host(controller):
+    """cycle_permission_mode does NOT guard on is_running — it always dispatches.
+
+    The split of responsibility: the controller dispatches unconditionally;
+    SessionHost._write_command silently drops the command when _proc is None.
+    This test documents that contract so future refactors don't accidentally
+    add a guard here (which would prevent modes from cycling correctly even
+    when the sidecar starts a moment later).
+
+    The host-level drop is covered separately in
+    test_send_set_permission_mode_without_subprocess_is_a_noop.
+    """
+    # Default fake has is_running = False
+    assert controller._session_host.is_running is False
+
+    controller.cycle_permission_mode()
+
+    # Controller dispatches regardless — host decides whether to drop.
+    assert controller._session_host.set_permission_mode_calls == ["acceptEdits"]
+    # Property must not mutate without an echo.
+    assert controller.permissionMode == "default"

@@ -74,6 +74,15 @@ Rectangle {
         return Theme.color.permissionMode.default_
     }
 
+    // Returns true for Shift+Tab regardless of how Qt represents it —
+    // Qt.Key_Backtab is the canonical representation on most platforms,
+    // but some input methods send Key_Tab + ShiftModifier instead. Both
+    // are accepted so neither path silently misses the handler.
+    function _isShiftTab(event) {
+        return event.key === Qt.Key_Backtab
+            || (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))
+    }
+
     // Capture Shift+Tab when focus sits on the pane chrome (between
     // compositions, after escaping the composer, etc.). The composer's
     // own Keys.onPressed below carries the same handler so cycling
@@ -84,14 +93,10 @@ Rectangle {
     // outdent) cannot collide with this handler. Per non-negotiable #3
     // ("NeoVim motions preserved"), the editor's keybinds are sacred.
     Keys.onShortcutOverride: (event) => {
-        if (event.key === Qt.Key_Backtab
-            || (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))) {
-            event.accepted = true
-        }
+        if (root._isShiftTab(event)) event.accepted = true
     }
     Keys.onPressed: (event) => {
-        if (event.key === Qt.Key_Backtab
-            || (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))) {
+        if (root._isShiftTab(event)) {
             root._cyclePermissionMode()
             event.accepted = true
         }
@@ -662,14 +667,10 @@ Rectangle {
                 // Shortcut+Override pair keeps Qt's accelerator system
                 // from intercepting first.
                 Keys.onShortcutOverride: (event) => {
-                    if (event.key === Qt.Key_Backtab
-                        || (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))) {
-                        event.accepted = true
-                    }
+                    if (root._isShiftTab(event)) event.accepted = true
                 }
                 Keys.onPressed: (event) => {
-                    if (event.key === Qt.Key_Backtab
-                        || (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))) {
+                    if (root._isShiftTab(event)) {
                         root._cyclePermissionMode()
                         event.accepted = true
                     }

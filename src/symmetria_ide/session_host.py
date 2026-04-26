@@ -402,6 +402,10 @@ class SessionHost(QObject):
         invalid values rather than raising — same tolerance pattern as
         `send_permission_response`. Same `_stdin_lock` discipline.
         """
+        # Keep in sync with AppController._PERMISSION_MODES — that tuple is the
+        # canonical source of truth for cycle order and validation. The two strings
+        # must match or a mode emitted by cycle_permission_mode will be silently
+        # dropped here before reaching the sidecar.
         if mode not in ("default", "acceptEdits", "bypassPermissions", "plan"):
             log.warning("send_set_permission_mode: invalid mode %r — dropped", mode)
             return

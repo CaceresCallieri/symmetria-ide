@@ -351,7 +351,8 @@ A grep audit at the time of this document:
 | Python functions without return-type annotation | 4 | `QAbstractItemModel.data()` overrides — intentionally un-annotated due to pyright stub conflict; see gotcha #7. Do not "fix" by adding return types — that breaks Qt's metaobject system. Locations after Issue #5 extraction: `app.py:166`, `cmdline_models.py:188`, `cmdline_models.py:279`, `whichkey_models.py:134`. |
 | `# type: ignore` | check before each release | Keep ≤2 per 1k LOC. |
 | `nvim_view.py` module length | 1453 lines | Exceeds "Bad" threshold (>800). **Known hotspot** — `QQuickPaintedItem`, animation classes, and rendering helpers are co-located for paint-thread safety (see Section 5). Splitting across modules would require sharing mutable animation state across thread boundaries. Acceptable until a clean seam is identified. |
-| `app.py` module length | 379 lines | Within "Good" threshold (≤400). Issue #5 extracted `CmdlineState`, `PopupmenuModel`, `CompletionModel` → `cmdline_models.py` and `WhichKeyState`, `WhichKeyModel` → `whichkey_models.py`. |
+| `app.py` module length | 806 lines | **Above "Bad" threshold (>800).** Phase 2 added `AppController` permission-mode state machine, session lifecycle, and agent-pane slots. Next extraction candidate: move `AppController` into its own `app_controller.py` (same split pattern as `cmdline_models.py` / `whichkey_models.py`). |
+| `qml/AgentPane.qml` file length | 680 lines | **Above "Bad" threshold (>400).** Pre-Phase-2 baseline was 555 lines. Diff rendering and permission card are the main contributors — splitting into sub-components is the future path once the delegate aesthetic stabilizes. |
 
 When working near any non-zero row, consider addressing the instance. Do not regress the zero rows.
 
