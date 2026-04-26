@@ -566,6 +566,59 @@ def test_clear_is_noop_when_already_empty():
     assert m.rowCount() == 0
 
 
+def test_clear_resets_tool_use_cache():
+    """Cache survives clear() only if clear() resets it — regression guard for the
+    fix that added `self._tool_use_cache = {}` to `clear()`.
+
+    If clear() does NOT reset the cache, the tool_use_id from the previous
+    session lingers; a new session's user tool_result could then match it and
+    produce a spurious diff row from a prior session's data.
+    """
+    m = SessionModel()
+    # Populate the cache via an assistant event.
+    m.apply(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_session1",
+                        "name": "Edit",
+                        "input": {
+                            "file_path": "/tmp/x.py",
+                            "old_string": "old",
+                            "new_string": "new",
+                        },
+                    }
+                ]
+            },
+        }
+    )
+    # Reset the model (simulates starting a fresh session in-place).
+    m.clear()
+    assert m.rowCount() == 0
+
+    # If the cache was correctly cleared, a tool_result referencing the
+    # same tool_use_id should fall back to kind="tool_result", not "tool_diff".
+    m.apply(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_session1",
+                        "content": "File has been updated",
+                    }
+                ]
+            },
+        }
+    )
+    assert m.rowCount() == 1
+    assert m.data(m.index(0), SessionModel.KindRole) == "tool_result"
+
+
 def test_on_host_closed_emits_host_closed_signal_once():
     m = SessionModel()
     received: list[int] = []

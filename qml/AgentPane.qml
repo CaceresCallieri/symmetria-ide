@@ -176,7 +176,7 @@ Rectangle {
                         id: diffView
 
                         readonly property bool isDiff: entry.kind === "tool_diff" && entry.text !== ""
-                        readonly property var lines: diffView.isDiff ? entry.text.split("\n") : []
+                        readonly property list<string> lines: diffView.isDiff ? entry.text.split("\n") : []
 
                         visible: diffView.isDiff
                         width: entry.width

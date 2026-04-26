@@ -283,6 +283,7 @@ class SessionModel(QAbstractListModel):
         self.beginResetModel()
         self._rows = []
         self._streaming_row_index = None
+        self._tool_use_cache = {}
         self.endResetModel()
 
     @Slot()
@@ -759,7 +760,7 @@ def _maybe_diff_for_tool_result(
 
 
 def _compute_tool_diff(tool_name: str, tool_input: dict) -> str | None:
-    """Build a unified diff string for an editing tool invocation.
+    """Dispatch to the per-tool diff helper and return the result.
 
     Returns `None` when the input shape doesn't match the tool's known
     schema (defensive — protocol drift shouldn't crash the agent pane,
@@ -769,49 +770,66 @@ def _compute_tool_diff(tool_name: str, tool_input: dict) -> str | None:
     file_path = str(
         tool_input.get("file_path") or tool_input.get("notebook_path") or "file"
     )
-    if tool_name == "Edit":
-        old = tool_input.get("old_string")
-        new = tool_input.get("new_string")
-        if not isinstance(old, str) or not isinstance(new, str):
-            return None
-        return _unified_diff(old, new, file_path)
-    if tool_name == "Write":
-        new = tool_input.get("content")
-        if not isinstance(new, str):
-            return None
-        # Pass "" as the "before" state — Write replaces the entire
-        # file contents, so the visual is "every line is added".
-        return _unified_diff("", new, file_path)
-    if tool_name == "MultiEdit":
-        edits = tool_input.get("edits")
-        if not isinstance(edits, list) or not edits:
-            return None
-        # Concatenate per-edit diffs. We do NOT compose the edits into
-        # a single before/after pair because each edit's `old_string`
-        # is matched against the *post-previous-edit* state, which we
-        # don't have without re-reading the file. Per-edit diffs read
-        # like a sequence of localized changes — which is what
-        # MultiEdit actually does anyway.
-        chunks: list[str] = []
-        for edit in edits:
-            if not isinstance(edit, dict):
-                continue
-            old = edit.get("old_string")
-            new = edit.get("new_string")
-            if isinstance(old, str) and isinstance(new, str):
-                d = _unified_diff(old, new, file_path)
-                if d:
-                    chunks.append(d)
-        return "\n".join(chunks) if chunks else None
-    if tool_name == "NotebookEdit":
-        new = tool_input.get("new_source")
-        old = tool_input.get("old_source")
-        if not isinstance(new, str):
-            return None
-        if not isinstance(old, str):
-            old = ""
-        return _unified_diff(old, new, file_path)
-    return None
+    _handlers = {
+        "Edit": _diff_for_edit,
+        "Write": _diff_for_write,
+        "MultiEdit": _diff_for_multiedit,
+        "NotebookEdit": _diff_for_notebookedit,
+    }
+    handler = _handlers.get(tool_name)
+    if handler is None:
+        return None
+    return handler(tool_input, file_path)
+
+
+def _diff_for_edit(tool_input: dict, file_path: str) -> str | None:
+    old = tool_input.get("old_string")
+    new = tool_input.get("new_string")
+    if not isinstance(old, str) or not isinstance(new, str):
+        return None
+    return _unified_diff(old, new, file_path)
+
+
+def _diff_for_write(tool_input: dict, file_path: str) -> str | None:
+    new = tool_input.get("content")
+    if not isinstance(new, str):
+        return None
+    # Pass "" as the "before" state — Write replaces the entire
+    # file contents, so the visual is "every line is added".
+    return _unified_diff("", new, file_path)
+
+
+def _diff_for_multiedit(tool_input: dict, file_path: str) -> str | None:
+    edits = tool_input.get("edits")
+    if not isinstance(edits, list) or not edits:
+        return None
+    # Concatenate per-edit diffs. We do NOT compose the edits into
+    # a single before/after pair because each edit's `old_string`
+    # is matched against the *post-previous-edit* state, which we
+    # don't have without re-reading the file. Per-edit diffs read
+    # like a sequence of localized changes — which is what
+    # MultiEdit actually does anyway.
+    chunks: list[str] = []
+    for edit in edits:
+        if not isinstance(edit, dict):
+            continue
+        old = edit.get("old_string")
+        new = edit.get("new_string")
+        if isinstance(old, str) and isinstance(new, str):
+            d = _unified_diff(old, new, file_path)
+            if d:
+                chunks.append(d)
+    return "\n".join(chunks) if chunks else None
+
+
+def _diff_for_notebookedit(tool_input: dict, file_path: str) -> str | None:
+    new = tool_input.get("new_source")
+    old = tool_input.get("old_source")
+    if not isinstance(new, str):
+        return None
+    if not isinstance(old, str):
+        old = ""
+    return _unified_diff(old, new, file_path)
 
 
 def _unified_diff(old: str, new: str, path: str) -> str:
