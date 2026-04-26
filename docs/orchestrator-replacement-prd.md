@@ -63,7 +63,7 @@ These rules apply to every phase. Future-you: read this section even if you skip
 
 - Every pixel of new QML chrome binds to `Theme.*` tokens from `qml/design/Theme.qml`.
 - New tokens land in `Theme.qml` first, with a provenance comment citing the wine theme source, then are referenced from delegates. No inline color/spacing/radius/typography literals.
-- The 8-color agent palette must match `~/projects/orchestrator.nvim/lua/orchestrator/highlights.lua:16-27` exactly (same colors, same order, modulo-8 wrapping). Identical color indices in the dashboard and the IDE preserves cross-feed consistency.
+- **The IDE does NOT render per-instance colors.** Instance differentiation in the IDE chrome is by slot **number** only (no color palette, no chips). User decision (2026-04-26) — orchestrator.nvim's per-instance color rotation is not load-bearing for any IDE workflow. The Symmetria Shell agent dashboard continues to render colored bubbles using its own M3 palette (`~/.config/quickshell/symmetria/services/AgentService.qml:83-92`); the SDK→bridge emitter still sends a `color_idx` field (= slot number) so the dashboard's existing color-by-index logic keeps working without IDE-side color allocation.
 
 ### 3.3 Testing
 
@@ -188,8 +188,7 @@ Extend the dispatch table:
 
 **`qml/design/Theme.qml`:**
 
-- Add `Theme.color.agent.palette: list<color>` — the 8 colors from `orchestrator.nvim/lua/orchestrator/highlights.lua:16-27`. Provenance comment cites that file.
-- Add `Theme.color.agent.colorForIndex(idx: int): color` (a `function` in the singleton) returning `palette[(idx - 1) % palette.length]`. Used by future chip rendering and by the in-pane instance indicator.
+- No new tokens for instance colors (per §3.2). Instance differentiation is text-only — the slot number IS the differentiator.
 
 ### 5.2 User-facing behavior
 
@@ -326,7 +325,7 @@ This phase realizes the "dual-feed" architecture from `docs/agent-dashboard-inte
 ### 7.2 User-facing behavior
 
 - When the IDE spawns instance 1, the agent dashboard's bar shows a new chip for it within ~100ms.
-- The chip's color matches the IDE's pane chrome color for that instance (palette match per §3.2).
+- The chip's color is assigned by the dashboard (its own M3 palette, indexed by `color_idx = slot_number`); the IDE pane itself shows the slot number, not a color.
 - When Claude does work in instance 1, the chip's `activityTool` updates ("Bash", "Edit", etc.) — same as a terminal-`claude` chip.
 - When the IDE closes instance 1, the chip disappears.
 - Killing the IDE causes all its chips to disappear within 1s (graceful) or 15s (`ACTIVITY_STALENESS_TIMEOUT` in the bridge — fallback for hard-kill).
@@ -334,7 +333,7 @@ This phase realizes the "dual-feed" architecture from `docs/agent-dashboard-inte
 ### 7.3 Acceptance criteria
 
 - IDE-spawned sidecar appears in `symmetria shell agentbar status` JSON output.
-- Chip color matches `Theme.color.agent.colorForIndex(N)` for instance N.
+- Chip color is whatever the dashboard's M3 palette gives for `color_idx = slot_number` (no IDE-side palette involvement).
 - Tool-use events update the chip's tool annotation.
 - Bridge logs (`~/.local/state/symmetria/debug.log`) show `recv | agents=N` increments when the IDE spawns.
 - Closing the IDE during a session leaves the bridge log clean (no orphaned activity entries past the staleness window).
@@ -607,23 +606,23 @@ Edit tracker keys (`<leader>ae`, `<leader>aj`) land in Phase G with their final 
 
 ### 12.4 Open questions index
 
-| ID | Phase | Question |
-|----|-------|----------|
-| A1 | A | `_session_hosts: dict[int, SessionHost]` vs `list[SessionHost \| None]`? |
-| A2 | A | Instance indicator visible always or only when ≥ 2? |
-| B1 | B | Composer text per-instance or shared? |
-| B2 | B | Focus into non-existent slot: no-op or auto-spawn? |
-| B3 | B | Instance indicator: chip strip or text? |
-| B4 | B | Per-instance color: creation-order or slot-reuse? |
-| C1 | C | `resume` keybind: auto-pick latest or open picker? |
-| C2 | C | Skip-perms reflected in instance indicator color? |
-| D1 | D | Emit `permission_mode` per-event or only on change? |
-| D2 | D | Socket reconnect: retry-on-event or once-at-startup? |
-| E1 | E | Spawn menu unrecognized key: dismiss or hold? |
-| E2 | E | Spawn menu project switcher? (Answer: NO — out of scope.) |
-| F1 | F | Delete orchestrator.nvim from disk on retirement? (Answer: NO.) |
-| G1 | G | Edit tracker: session-scoped or persistent? |
-| G2 | G | Edit tracker: per-entry "ack" affordance? |
+| ID | Phase | Status | Question / Decision |
+|----|-------|--------|---------------------|
+| A1 | A | ✅ Resolved (2026-04-26) | Pool shape → **`dict[int, SessionHost]`** |
+| A2 | A | Open | Instance indicator visible always or only when ≥ 2? |
+| B1 | B | ✅ Resolved (2026-04-26) | Composer text → **per-instance drafts** |
+| B2 | B | ✅ Resolved (2026-04-26) | Focus into empty slot → **no-op + log warning** |
+| B3 | B | Open | Instance indicator: chip strip or text? (Now constrained to text-only since colors are out per §3.2 — likely just `<focused> / <total>`) |
+| B4 | B | ✅ Resolved (2026-04-26) | Per-instance color → **NONE — slot number is the differentiator**; dashboard uses its own palette indexed by slot |
+| C1 | C | Open | `resume` keybind: auto-pick latest or open picker? |
+| C2 | C | Resolved by B4 | Skip-perms reflected in indicator color → N/A (no colors). Use a small Theme-tokened glyph or text marker instead. |
+| D1 | D | Open | Emit `permission_mode` per-event or only on change? |
+| D2 | D | Open | Socket reconnect: retry-on-event or once-at-startup? |
+| E1 | E | Open | Spawn menu unrecognized key: dismiss or hold? |
+| E2 | E | ✅ Resolved | Spawn menu project switcher → **NO** (out of scope) |
+| F1 | F | ✅ Resolved | Delete orchestrator.nvim from disk on retirement → **NO** |
+| G1 | G | Open | Edit tracker: session-scoped or persistent? |
+| G2 | G | Open | Edit tracker: per-entry "ack" affordance? |
 
 Resolve each with the user before landing the corresponding phase. Recommendations are noted under each phase's Open Questions section but are not commitments.
 
