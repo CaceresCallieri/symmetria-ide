@@ -27,6 +27,7 @@ waste the placeholder discipline exists to avoid.
 
 from __future__ import annotations
 
+import difflib
 import logging
 from dataclasses import dataclass, replace
 
@@ -160,6 +161,15 @@ class SessionModel(QAbstractListModel):
         # the row boundary resets this to `None` so the next
         # text_delta starts a fresh streaming row.
         self._streaming_row_index: int | None = None
+        # tool_use_id → {"name": str, "input": dict}. Populated when
+        # an assistant message lands carrying tool_use blocks; consumed
+        # by `_row_from_user` to look up the original tool name + input
+        # so Edit/Write/MultiEdit/NotebookEdit results render as a
+        # unified diff instead of the SDK's "File has been updated"
+        # text. Cache grows unboundedly across a session — typical
+        # sessions have tens of tool calls, not thousands. Add LRU
+        # eviction if this becomes a real memory concern.
+        self._tool_use_cache: dict[str, dict] = {}
 
     # --- Qt model overrides ---------------------------------------------
 
@@ -226,13 +236,21 @@ class SessionModel(QAbstractListModel):
         streaming_idx = self._streaming_row_index
         self._streaming_row_index = None
         if kind == "assistant":
+            # Harvest tool_use blocks before rendering — the matching
+            # tool_result envelope (a `user` event) lands a few events
+            # later and needs the original input cached for diff
+            # rendering. Order doesn't matter for harvesting (no
+            # interaction with row insertion), but keeping it before
+            # the row-mutation branch makes the read/write distinction
+            # obvious.
+            _harvest_tool_uses(event.get("message") or {}, self._tool_use_cache)
             if streaming_idx is not None and streaming_idx < len(self._rows):
                 self._finalize_streaming_assistant(streaming_idx, event)
             else:
                 self._append(_row_from_assistant(event))
             return
         if kind == "user":
-            self._append(_row_from_user(event))
+            self._append(_row_from_user(event, self._tool_use_cache))
             return
         if kind == "system":
             self._append(_row_from_system(event))
@@ -418,7 +436,10 @@ def _row_from_assistant(event: dict) -> AgentRow:
     )
 
 
-def _row_from_user(event: dict) -> AgentRow:
+def _row_from_user(
+    event: dict,
+    tool_use_cache: dict[str, dict] | None = None,
+) -> AgentRow:
     """Translate a `user` envelope into a row.
 
     Anthropic's protocol overloads the `user` role: a fresh user turn
@@ -430,11 +451,32 @@ def _row_from_user(event: dict) -> AgentRow:
     overwhelmingly a tool result. We still tolerate text-only envelopes
     defensively — if a future SDK change leaks one through, it should
     render as a user echo, not crash or silently disappear.
+
+    `tool_use_cache` is the model's lookup table from `tool_use_id` to
+    the original tool name + input. When present and the result block
+    matches a cached Edit/Write/MultiEdit/NotebookEdit invocation, we
+    emit a `tool_diff` row carrying a unified diff string instead of
+    the SDK's "File has been updated" text. Optional so existing tests
+    that pass only the event still work — diffs are a presentation
+    enhancement, not a correctness requirement.
     """
     message = event.get("message") or {}
     content = message.get("content")
     tool_blocks = _extract_tool_result_blocks(content)
     if tool_blocks:
+        if tool_use_cache is not None:
+            diff_text, diff_tool = _maybe_diff_for_tool_result(
+                tool_blocks, tool_use_cache
+            )
+            if diff_text is not None:
+                return AgentRow(
+                    kind="tool_diff",
+                    role="tool",
+                    text=diff_text,
+                    partial=False,
+                    subtype=diff_tool,
+                    raw=event,
+                )
         text, is_error = _flatten_tool_results(tool_blocks)
         return AgentRow(
             kind="tool_result",
@@ -632,3 +674,163 @@ def _flatten_content_blocks(content: list) -> str:
         elif btype == "tool_result":
             parts.append("[tool result]")
     return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Tool-use cache + diff rendering for Edit/Write/MultiEdit/NotebookEdit
+# ---------------------------------------------------------------------------
+#
+# When the assistant calls an editing tool, the SDK echoes back a
+# `user`-role envelope with a `tool_result` block whose body is a short
+# confirmation string (e.g. "The file ... has been updated"). That body
+# is useless for a developer trying to see what changed. The original
+# Edit's `old_string` / `new_string` (or Write's `content`) was in the
+# preceding `assistant` event's `tool_use` block — we cache those on
+# arrival and look them up via `tool_use_id` when the result lands, then
+# compute a unified diff with stdlib `difflib`.
+
+# Tools whose inputs we know how to diff. Anything outside this set
+# falls through to the plain `tool_result` row (no behaviour change).
+_DIFF_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+
+def _harvest_tool_uses(message: dict, cache: dict[str, dict]) -> None:
+    """Extract tool_use blocks from an assistant message into the cache.
+
+    Idempotent — re-harvesting the same message overwrites entries with
+    the same `id`, which is fine because a `tool_use_id` is unique per
+    invocation.
+    """
+    content = message.get("content")
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if str(block.get("type") or "") != "tool_use":
+            continue
+        tool_id = str(block.get("id") or "")
+        if not tool_id:
+            continue
+        tool_input = block.get("input")
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        cache[tool_id] = {
+            "name": str(block.get("name") or ""),
+            "input": tool_input,
+        }
+
+
+def _maybe_diff_for_tool_result(
+    blocks: list[dict],
+    cache: dict[str, dict],
+) -> tuple[str | None, str]:
+    """Return (diff_text, tool_name) when blocks describe a diff-able result.
+
+    Returns `(None, "")` whenever any condition for diff rendering
+    fails — multi-block envelopes (rare; defensively rendered as plain
+    text to avoid mislabelling), missing `tool_use_id`, cache miss
+    (assistant message arrived before us or was filtered), errored
+    results (the body is the error message, not a diff), or tools
+    outside `_DIFF_TOOLS`. The plain `tool_result` path stays identical
+    in all those cases so this is purely additive.
+    """
+    if len(blocks) != 1:
+        return (None, "")
+    block = blocks[0]
+    if block.get("is_error"):
+        return (None, "")
+    tool_use_id = str(block.get("tool_use_id") or "")
+    if not tool_use_id:
+        return (None, "")
+    cached = cache.get(tool_use_id)
+    if cached is None:
+        return (None, "")
+    tool_name = str(cached.get("name") or "")
+    if tool_name not in _DIFF_TOOLS:
+        return (None, "")
+    tool_input = cached.get("input")
+    if not isinstance(tool_input, dict):
+        return (None, "")
+    diff = _compute_tool_diff(tool_name, tool_input)
+    if not diff:
+        return (None, "")
+    return (diff, tool_name)
+
+
+def _compute_tool_diff(tool_name: str, tool_input: dict) -> str | None:
+    """Build a unified diff string for an editing tool invocation.
+
+    Returns `None` when the input shape doesn't match the tool's known
+    schema (defensive — protocol drift shouldn't crash the agent pane,
+    just fall back to the SDK's text confirmation). Path metadata uses
+    `file_path` for code tools and `notebook_path` for `NotebookEdit`.
+    """
+    file_path = str(
+        tool_input.get("file_path") or tool_input.get("notebook_path") or "file"
+    )
+    if tool_name == "Edit":
+        old = tool_input.get("old_string")
+        new = tool_input.get("new_string")
+        if not isinstance(old, str) or not isinstance(new, str):
+            return None
+        return _unified_diff(old, new, file_path)
+    if tool_name == "Write":
+        new = tool_input.get("content")
+        if not isinstance(new, str):
+            return None
+        # Pass "" as the "before" state — Write replaces the entire
+        # file contents, so the visual is "every line is added".
+        return _unified_diff("", new, file_path)
+    if tool_name == "MultiEdit":
+        edits = tool_input.get("edits")
+        if not isinstance(edits, list) or not edits:
+            return None
+        # Concatenate per-edit diffs. We do NOT compose the edits into
+        # a single before/after pair because each edit's `old_string`
+        # is matched against the *post-previous-edit* state, which we
+        # don't have without re-reading the file. Per-edit diffs read
+        # like a sequence of localized changes — which is what
+        # MultiEdit actually does anyway.
+        chunks: list[str] = []
+        for edit in edits:
+            if not isinstance(edit, dict):
+                continue
+            old = edit.get("old_string")
+            new = edit.get("new_string")
+            if isinstance(old, str) and isinstance(new, str):
+                d = _unified_diff(old, new, file_path)
+                if d:
+                    chunks.append(d)
+        return "\n".join(chunks) if chunks else None
+    if tool_name == "NotebookEdit":
+        new = tool_input.get("new_source")
+        old = tool_input.get("old_source")
+        if not isinstance(new, str):
+            return None
+        if not isinstance(old, str):
+            old = ""
+        return _unified_diff(old, new, file_path)
+    return None
+
+
+def _unified_diff(old: str, new: str, path: str) -> str:
+    """Wrap difflib.unified_diff with the metadata + lineterm we render.
+
+    `lineterm=""` strips the trailing `\\n` difflib appends to hunk
+    markers — keeping it would leave dangling whitespace lines that
+    QML's per-line tinting would have to special-case. `n=3` is the
+    standard context-line count, matching `git diff` output.
+    """
+    old_lines = old.splitlines(keepends=False)
+    new_lines = new.splitlines(keepends=False)
+    return "\n".join(
+        difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=path,
+            tofile=path,
+            lineterm="",
+            n=3,
+        )
+    )

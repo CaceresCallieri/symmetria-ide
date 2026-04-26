@@ -14,13 +14,17 @@ import pytest
 from symmetria_ide.session_models import (
     AgentRow,
     SessionModel,
+    _compute_tool_diff,
     _extract_assistant_text,
     _extract_tool_result_blocks,
     _flatten_content_blocks,
     _flatten_tool_results,
+    _harvest_tool_uses,
+    _maybe_diff_for_tool_result,
     _row_from_result,
     _row_from_system,
     _row_from_user,
+    _unified_diff,
 )
 
 
@@ -879,3 +883,353 @@ def test_row_from_user_with_mixed_text_and_tool_result_blocks():
     assert "tool output" in row.text
     # Text block content is discarded — only tool_result content surfaces.
     assert "user comment" not in row.text
+
+
+# ---------------------------------------------------------------------------
+# Tool-use cache + diff rendering — Stage 1 of Edit/Write diff visualization
+# ---------------------------------------------------------------------------
+#
+# These tests cover the new pipeline that turns Edit/Write/MultiEdit/
+# NotebookEdit tool_results into rich `tool_diff` rows: harvesting tool_use
+# blocks from assistant messages, looking them up by `tool_use_id` when the
+# matching `user`-role tool_result lands, and computing unified diffs via
+# stdlib `difflib`.
+
+
+def test_harvest_tool_uses_extracts_id_and_input_from_assistant_blocks():
+    cache: dict[str, dict] = {}
+    _harvest_tool_uses(
+        {
+            "content": [
+                {"type": "text", "text": "Editing the file"},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_abc",
+                    "name": "Edit",
+                    "input": {
+                        "file_path": "/tmp/foo.py",
+                        "old_string": "x = 1",
+                        "new_string": "x = 2",
+                    },
+                },
+            ]
+        },
+        cache,
+    )
+    assert "toolu_abc" in cache
+    assert cache["toolu_abc"]["name"] == "Edit"
+    assert cache["toolu_abc"]["input"]["old_string"] == "x = 1"
+
+
+def test_harvest_tool_uses_skips_blocks_missing_id():
+    """Defensive: block without an id is unusable for pairing — just skip."""
+    cache: dict[str, dict] = {}
+    _harvest_tool_uses(
+        {"content": [{"type": "tool_use", "name": "Edit", "input": {}}]},
+        cache,
+    )
+    assert cache == {}
+
+
+def test_harvest_tool_uses_handles_non_list_content_gracefully():
+    cache: dict[str, dict] = {}
+    _harvest_tool_uses({"content": None}, cache)
+    _harvest_tool_uses({"content": "string"}, cache)
+    _harvest_tool_uses({}, cache)
+    assert cache == {}
+
+
+def test_harvest_tool_uses_normalizes_missing_input_to_empty_dict():
+    """Missing/non-dict input becomes {} so downstream lookups don't crash."""
+    cache: dict[str, dict] = {}
+    _harvest_tool_uses(
+        {"content": [{"type": "tool_use", "id": "t1", "name": "Bash"}]},
+        cache,
+    )
+    assert cache["t1"]["input"] == {}
+
+
+# --- _unified_diff ----------------------------------------------------
+
+
+def test_unified_diff_basic_replace():
+    diff = _unified_diff("hello\nworld\n", "hello\nplanet\n", "/tmp/x.txt")
+    assert "--- /tmp/x.txt" in diff
+    assert "+++ /tmp/x.txt" in diff
+    assert "-world" in diff
+    assert "+planet" in diff
+
+
+def test_unified_diff_returns_empty_for_identical_inputs():
+    """No changes → no diff. We use this in _maybe_diff_for_tool_result to fall back."""
+    assert _unified_diff("same\n", "same\n", "/tmp/x.txt") == ""
+
+
+def test_unified_diff_lineterm_strips_trailing_newlines():
+    """`lineterm=""` keeps lines clean for QML's per-line tinting."""
+    diff = _unified_diff("a\nb\n", "a\nc\n", "/tmp/x")
+    # No line in the diff should end with extra whitespace.
+    for line in diff.split("\n"):
+        assert line == line.rstrip()
+
+
+# --- _compute_tool_diff ----------------------------------------------
+
+
+def test_compute_tool_diff_edit_renders_old_to_new():
+    diff = _compute_tool_diff(
+        "Edit",
+        {
+            "file_path": "/tmp/a.py",
+            "old_string": "x = 1",
+            "new_string": "x = 2",
+        },
+    )
+    assert diff is not None
+    assert "-x = 1" in diff
+    assert "+x = 2" in diff
+
+
+def test_compute_tool_diff_write_uses_empty_string_as_before():
+    """Write replaces the entire file — visual is 'every line added'."""
+    diff = _compute_tool_diff(
+        "Write",
+        {"file_path": "/tmp/new.txt", "content": "first\nsecond\n"},
+    )
+    assert diff is not None
+    assert "+first" in diff
+    assert "+second" in diff
+    # Nothing was removed.
+    assert "-first" not in diff
+
+
+def test_compute_tool_diff_multiedit_concatenates_per_edit_diffs():
+    diff = _compute_tool_diff(
+        "MultiEdit",
+        {
+            "file_path": "/tmp/x.py",
+            "edits": [
+                {"old_string": "a", "new_string": "A"},
+                {"old_string": "b", "new_string": "B"},
+            ],
+        },
+    )
+    assert diff is not None
+    assert "-a" in diff
+    assert "+A" in diff
+    assert "-b" in diff
+    assert "+B" in diff
+
+
+def test_compute_tool_diff_multiedit_skips_malformed_entries():
+    """Per-edit malformed dicts get dropped, not crash the whole MultiEdit."""
+    diff = _compute_tool_diff(
+        "MultiEdit",
+        {
+            "file_path": "/tmp/x",
+            "edits": [
+                {"old_string": "a", "new_string": "A"},
+                {"old_string": 42, "new_string": "B"},  # malformed
+                {"old_string": "c", "new_string": "C"},
+            ],
+        },
+    )
+    assert diff is not None
+    assert "+A" in diff
+    assert "+C" in diff
+    assert "+B" not in diff
+
+
+def test_compute_tool_diff_notebookedit_falls_back_to_empty_old_source():
+    """NotebookEdit may omit old_source on cell creation — treat as empty."""
+    diff = _compute_tool_diff(
+        "NotebookEdit",
+        {"notebook_path": "/tmp/n.ipynb", "new_source": "import numpy"},
+    )
+    assert diff is not None
+    assert "+import numpy" in diff
+
+
+def test_compute_tool_diff_returns_none_for_unknown_tool():
+    assert _compute_tool_diff("Bash", {"command": "ls"}) is None
+
+
+def test_compute_tool_diff_returns_none_for_malformed_edit_input():
+    """Type-mismatched input → None, lets caller fall back to plain text."""
+    assert _compute_tool_diff("Edit", {"old_string": 42, "new_string": "x"}) is None
+    assert _compute_tool_diff("Edit", {"file_path": "/tmp/x"}) is None
+
+
+# --- _maybe_diff_for_tool_result -------------------------------------
+
+
+def test_maybe_diff_for_tool_result_succeeds_for_cached_edit():
+    cache = {
+        "toolu_1": {
+            "name": "Edit",
+            "input": {"file_path": "/tmp/x", "old_string": "a", "new_string": "b"},
+        }
+    }
+    blocks = [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]
+    diff_text, tool_name = _maybe_diff_for_tool_result(blocks, cache)
+    assert diff_text is not None
+    assert "-a" in diff_text
+    assert "+b" in diff_text
+    assert tool_name == "Edit"
+
+
+def test_maybe_diff_for_tool_result_returns_none_when_cache_misses():
+    """Cache miss (e.g. assistant message arrived before sidecar started) → no diff."""
+    blocks = [{"type": "tool_result", "tool_use_id": "unknown", "content": "ok"}]
+    diff_text, tool_name = _maybe_diff_for_tool_result(blocks, {})
+    assert diff_text is None
+    assert tool_name == ""
+
+
+def test_maybe_diff_for_tool_result_returns_none_for_error_block():
+    """Errored results carry the error message in `content`, not a diff."""
+    cache = {
+        "toolu_1": {
+            "name": "Edit",
+            "input": {"file_path": "/tmp/x", "old_string": "a", "new_string": "b"},
+        }
+    }
+    blocks = [
+        {
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "content": "no match found",
+            "is_error": True,
+        }
+    ]
+    assert _maybe_diff_for_tool_result(blocks, cache) == (None, "")
+
+
+def test_maybe_diff_for_tool_result_returns_none_for_non_diff_tool():
+    """Bash / Read / Grep results are not diff-able — fall through."""
+    cache = {"toolu_1": {"name": "Bash", "input": {"command": "ls"}}}
+    blocks = [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]
+    assert _maybe_diff_for_tool_result(blocks, cache) == (None, "")
+
+
+def test_maybe_diff_for_tool_result_returns_none_for_multiple_blocks():
+    """Multi-block envelopes are rare — render plainly to avoid mislabelling."""
+    cache = {
+        "toolu_1": {
+            "name": "Edit",
+            "input": {"file_path": "/tmp/x", "old_string": "a", "new_string": "b"},
+        }
+    }
+    blocks = [
+        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+        {"type": "tool_result", "tool_use_id": "toolu_2", "content": "also ok"},
+    ]
+    assert _maybe_diff_for_tool_result(blocks, cache) == (None, "")
+
+
+# --- _row_from_user with cache → tool_diff row -----------------------
+
+
+def test_row_from_user_with_cached_edit_emits_tool_diff_row():
+    cache = {
+        "toolu_1": {
+            "name": "Edit",
+            "input": {
+                "file_path": "/tmp/x.py",
+                "old_string": "x = 1",
+                "new_string": "x = 2",
+            },
+        }
+    }
+    row = _row_from_user(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": "File has been updated",
+                    }
+                ]
+            },
+        },
+        tool_use_cache=cache,
+    )
+    assert row.kind == "tool_diff"
+    assert row.role == "tool"
+    assert row.subtype == "Edit"  # tool name carried for the QML role label
+    assert "-x = 1" in row.text
+    assert "+x = 2" in row.text
+
+
+def test_row_from_user_falls_back_to_tool_result_when_cache_miss():
+    """Without a matching cache entry, the existing plain `tool_result` path runs."""
+    row = _row_from_user(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "missing",
+                        "content": "File has been updated",
+                    }
+                ]
+            },
+        },
+        tool_use_cache={},
+    )
+    assert row.kind == "tool_result"
+    assert row.text == "File has been updated"
+
+
+# --- End-to-end via apply() with the model's own cache ---------------
+
+
+def test_apply_assistant_then_user_emits_tool_diff_row():
+    """Full pipeline: assistant tool_use lands → cache populated → user tool_result
+    arrives → SessionModel emits a `tool_diff` row instead of plain `tool_result`.
+    This is the user-visible promise of Stage 1."""
+    m = SessionModel()
+    m.apply(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Editing now"},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_xyz",
+                        "name": "Edit",
+                        "input": {
+                            "file_path": "/tmp/foo.py",
+                            "old_string": "old",
+                            "new_string": "new",
+                        },
+                    },
+                ]
+            },
+        }
+    )
+    m.apply(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_xyz",
+                        "content": "File has been updated",
+                    }
+                ]
+            },
+        }
+    )
+    # row 0 = assistant; row 1 = tool_diff (not tool_result)
+    assert m.rowCount() == 2
+    assert m.data(m.index(1), SessionModel.KindRole) == "tool_diff"
+    assert m.data(m.index(1), SessionModel.SubtypeRole) == "Edit"
+    text = m.data(m.index(1), SessionModel.TextRole)
+    assert "-old" in text
+    assert "+new" in text

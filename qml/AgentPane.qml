@@ -141,7 +141,10 @@ Rectangle {
                     Text {
                         id: bodyText
 
-                        visible: entry.text !== ""
+                        // Diff rows render below in `diffView` instead —
+                        // this Text would be a duplicate (and unwrapped)
+                        // copy of the unified-diff string.
+                        visible: entry.text !== "" && entry.kind !== "tool_diff"
                         width: entry.width
                         text: _formatBody(entry.role, entry.kind, entry.text)
                         color: entry.partial
@@ -152,6 +155,71 @@ Rectangle {
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.sm
                         renderType: Text.NativeRendering
+                    }
+
+                    // --- Diff variant ---------------------------------
+                    //
+                    // Only populated for `kind === "tool_diff"` rows.
+                    // SessionModel emits these for Edit/Write/MultiEdit/
+                    // NotebookEdit results, with `text` containing a
+                    // `difflib.unified_diff` string. We split on \n and
+                    // give each line its own tinted Rectangle so adds /
+                    // removes / hunk markers read at a glance — the
+                    // Claude Code terminal display the user pointed at
+                    // for reference uses the same per-line tint pattern.
+                    //
+                    // No syntax highlighting yet (deferred Stage 3).
+                    // Tokens live in `Theme.color.diff.*` with provenance
+                    // comments — adding new diff colors lands there, not
+                    // inline here.
+                    Column {
+                        id: diffView
+
+                        readonly property bool isDiff: entry.kind === "tool_diff" && entry.text !== ""
+                        readonly property var lines: diffView.isDiff ? entry.text.split("\n") : []
+
+                        visible: diffView.isDiff
+                        width: entry.width
+                        spacing: 0  // tight stacking — reads as a contiguous patch block
+
+                        Repeater {
+                            model: diffView.lines
+
+                            delegate: Rectangle {
+                                id: diffLine
+
+                                required property string modelData
+
+                                width: diffView.width
+                                // Same vertical rhythm as the body text but tighter
+                                // top/bottom padding so a 20-line diff doesn't double
+                                // the row height.
+                                implicitHeight: diffLineText.implicitHeight + Theme.spacing.xs
+                                color: entry._diffBg(diffLine.modelData)
+
+                                Text {
+                                    id: diffLineText
+
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.leftMargin: Theme.spacing.sm
+                                    anchors.rightMargin: Theme.spacing.sm
+                                    anchors.verticalCenter: parent.verticalCenter
+
+                                    text: diffLine.modelData
+                                    color: entry._diffFg(diffLine.modelData)
+                                    font.family: Theme.font.family
+                                    font.pixelSize: Theme.font.size.sm
+                                    // Diffs are inherently column-positional —
+                                    // wrapping breaks alignment between adds
+                                    // and removes. Long lines elide instead.
+                                    wrapMode: Text.NoWrap
+                                    elide: Text.ElideRight
+                                    textFormat: Text.PlainText
+                                    renderType: Text.NativeRendering
+                                }
+                            }
+                        }
                     }
 
                     // --- Permission card variant ----------------------
@@ -310,6 +378,11 @@ Rectangle {
 
                 function _formatRoleLabel(r, s, k) {
                     if (k === "permission_request") return "Permission"
+                    // Diff rows carry the tool name in subtype (e.g.
+                    // "Edit", "Write") — show that directly rather than
+                    // the generic "Tool result" label so the user sees
+                    // *which* operation produced the patch.
+                    if (k === "tool_diff") return s !== "" ? s : "Edit"
                     if (r === "user") return "You"
                     if (r === "assistant") return "Claude"
                     if (r === "tool") return s === "error" ? "Tool · error" : "Tool result"
@@ -326,6 +399,35 @@ Rectangle {
                         return "[" + k + "]" + (t !== "" ? " " + t : "")
                     }
                     return t
+                }
+
+                // --- Diff line tinting ----------------------------------
+                //
+                // Both helpers gate on `+++` / `---` prefixes (the unified-
+                // diff file headers difflib emits) BEFORE the single-char
+                // `+` / `-` checks — the headers visually land at the top of
+                // the patch and shouldn't be tinted as add/remove lines.
+                // They borrow `text.dim` foreground so they read as
+                // metadata rather than content.
+
+                function _diffBg(line) {
+                    if (line.length === 0) return "transparent"
+                    if (line.indexOf("+++") === 0) return "transparent"
+                    if (line.indexOf("---") === 0) return "transparent"
+                    if (line.charAt(0) === "+") return Theme.color.diff.addedBg
+                    if (line.charAt(0) === "-") return Theme.color.diff.removedBg
+                    if (line.indexOf("@@") === 0) return Theme.color.diff.hunkBg
+                    return "transparent"
+                }
+
+                function _diffFg(line) {
+                    if (line.length === 0) return Theme.color.diff.contextFg
+                    if (line.indexOf("+++") === 0) return Theme.color.text.dim
+                    if (line.indexOf("---") === 0) return Theme.color.text.dim
+                    if (line.charAt(0) === "+") return Theme.color.diff.addedFg
+                    if (line.charAt(0) === "-") return Theme.color.diff.removedFg
+                    if (line.indexOf("@@") === 0) return Theme.color.diff.hunkFg
+                    return Theme.color.diff.contextFg
                 }
             }
 

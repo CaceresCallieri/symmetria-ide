@@ -157,6 +157,41 @@ QtObject {
             readonly property color permissionApprove: "#62BA46"
             readonly property color permissionDeny: "#D2602D"
         }
+
+        // Diff visualization. Tints `tool_diff` rows in the agent pane —
+        // assistant edits land as a `user`-role tool_result envelope,
+        // which `SessionModel._row_from_user` re-routes into a `tool_diff`
+        // row carrying a stdlib `difflib.unified_diff` string. The
+        // delegate splits on \n and tints each line by leading char.
+        //
+        // Background colors are low-alpha overlays of the same wine_theme
+        // greens/reds that drive `mode.insert` / `mode.replace`. Aliasing
+        // the same hue family means a future palette nudge to those mode
+        // colors would visually carry through here without touching this
+        // rung — the editor's "go" / "stop" semantic stays continuous
+        // with the agent pane's "added" / "removed" semantic.
+        //
+        // Foreground colors are softer siblings tuned for legibility on
+        // the tinted background — the saturated mode colors would be
+        // hard to read at the body-text size used here.
+        //
+        //   addedBg / addedFg     — green family (wine_theme.string).
+        //   removedBg / removedFg — red family (wine_theme.error_red).
+        //   hunkBg / hunkFg       — amber accent for `@@ ... @@` markers,
+        //                           derived from accent.primary so the
+        //                           hunk header reads as a section
+        //                           heading rather than a change line.
+        //   contextFg             — neutral text.normal for unchanged
+        //                           context lines (` ` prefix).
+        readonly property QtObject diff: QtObject {
+            readonly property color addedBg: "#3362BA46"     // mode.insert @ ~20% alpha
+            readonly property color removedBg: "#33D2602D"   // mode.replace @ ~20% alpha
+            readonly property color hunkBg: "#22c8a37a"      // accent.primary @ ~13% alpha
+            readonly property color addedFg: "#a8e088"
+            readonly property color removedFg: "#f0a285"
+            readonly property color hunkFg: "#c8a37a"        // accent.primary
+            readonly property color contextFg: "#b0b0b0"     // text.normal
+        }
     }
 
     // ─── Spacing ─────────────────────────────────────────────────
