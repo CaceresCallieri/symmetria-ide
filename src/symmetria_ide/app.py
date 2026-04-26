@@ -603,9 +603,9 @@ class AppController(QObject):
         self._set_awaiting_response_for(slot, False)
         self._set_permission_mode_for(slot, "default")
         self._pending_permissions = {
-            req_id: idx
-            for req_id, idx in self._pending_permissions.items()
-            if idx != slot
+            req_id: issuing_slot
+            for req_id, issuing_slot in self._pending_permissions.items()
+            if issuing_slot != slot
         }
 
     @Slot(dict)
@@ -779,12 +779,10 @@ class AppController(QObject):
         between request and response). The lookup is authoritative;
         falling back to `_focused_instance` would silently route the
         decision to the wrong sidecar.
+
+        Decision validation is delegated to `respond_to_permission_for` —
+        no duplicate check here to keep the wrapper a thin routing layer.
         """
-        if decision not in ("allow", "deny"):
-            log.warning(
-                "respond_to_permission: invalid decision %r — dropped", decision
-            )
-            return
         slot = self._pending_permissions.get(request_id)
         if slot is None:
             log.warning(

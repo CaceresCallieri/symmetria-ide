@@ -27,6 +27,7 @@ from __future__ import annotations
 import pytest
 
 from symmetria_ide.app import AppController
+from symmetria_ide.session_models import SessionModel
 
 
 class _FakeSessionHost:
@@ -91,9 +92,7 @@ def _add_slot(ctrl: AppController, slot: int) -> _FakeSessionHost:
     """
     fake = _FakeSessionHost(instance_index=slot)
     ctrl._session_hosts[slot] = fake  # type: ignore[assignment]
-    ctrl._session_models[slot] = ctrl._session_models[1].__class__(  # noqa: SLF001
-        ctrl, instance_index=slot
-    )
+    ctrl._session_models[slot] = SessionModel(ctrl, instance_index=slot)
     ctrl._awaiting_response[slot] = False
     ctrl._permission_mode[slot] = "default"
     return fake
@@ -154,8 +153,7 @@ def test_focus_instance_real_switch_emits_three_signals(controller):
     the spinner and pill to the newly-focused slot's per-instance
     state without QML knowing the pool exists.
     """
-    fake_2 = _add_slot(controller, 2)
-    assert fake_2 is not None  # silence vulture-style "unused"
+    _add_slot(controller, 2)
     # Seed slot 2 with state distinct from slot 1's defaults so the
     # bound properties produce different values after the focus switch.
     controller._awaiting_response[2] = True
