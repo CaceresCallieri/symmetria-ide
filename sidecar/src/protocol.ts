@@ -96,14 +96,13 @@ export interface SidecarErrorEvent {
 }
 
 /**
- * State echo: the sidecar's authoritative view of the current SDK
- * permissionMode. Emitted (a) once at session start so Python's initial
- * `_permission_mode` matches the sidecar's `default`, and (b) every time
- * `Query.setPermissionMode(mode)` resolves successfully after a
- * `set_permission_mode` inbound command. Python's AppController treats this
- * envelope as the single source of truth for `permissionMode` — the cycle
- * slot does NOT optimistically mutate, because the SDK can reject a
- * transition (e.g. `bypassPermissions` without `allowDangerouslySkipPermissions`).
+ * State echo: the sidecar's authoritative view of the current permission
+ * mode. Emitted (a) once at session start so Python's initial
+ * `_permission_mode` matches the sidecar's `default`, and (b) synchronously
+ * whenever a `set_permission_mode` inbound command arrives — `currentMode`
+ * is updated and the echo fires immediately, then `Query.setPermissionMode()`
+ * is called best-effort to keep the SDK in sync. Python's AppController
+ * treats this envelope as the single source of truth for `permissionMode`.
  */
 export interface PermissionModeChangedEvent {
   type: "permission_mode_changed";

@@ -382,7 +382,7 @@ def test_respond_to_permission_ordering_host_before_model(controller):
 # for the fixture teardown) so no subprocess actually launches.
 
 
-def _stub_backend(ctrl: AppController) -> None:
+def _stub_backend(monkeypatch, ctrl: AppController) -> None:
     """Replace nvim spawn/teardown with no-ops so `controller.start()` is hermetic.
 
     The pre-warm tests below need to call `controller.start()` to exercise
@@ -391,8 +391,8 @@ def _stub_backend(ctrl: AppController) -> None:
     cost and keeps the test pure-Python — same hermetic discipline the
     awaiting-state tests above rely on.
     """
-    ctrl._backend.start = lambda: None  # type: ignore[method-assign]  # pyright: ignore[reportAttributeAccessIssue]
-    ctrl._backend.stop = lambda: None  # type: ignore[method-assign]  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setattr(ctrl._backend, "start", lambda: None)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(ctrl._backend, "stop", lambda: None)  # pyright: ignore[reportPrivateUsage]
 
 
 def test_app_controller_start_prewarms_sidecar(controller, monkeypatch):
@@ -405,7 +405,7 @@ def test_app_controller_start_prewarms_sidecar(controller, monkeypatch):
     """
     monkeypatch.delenv("SYMMETRIA_IDE_AGENT_PROMPT", raising=False)
     monkeypatch.delenv("SYMMETRIA_IDE_AGENT_VIEW", raising=False)
-    _stub_backend(controller)
+    _stub_backend(monkeypatch, controller)
 
     controller.start()
 
@@ -433,7 +433,7 @@ def test_app_controller_start_with_env_prompt_uses_hot_branch_after_prewarm(
     """
     monkeypatch.setenv("SYMMETRIA_IDE_AGENT_PROMPT", "hi from env")
     monkeypatch.delenv("SYMMETRIA_IDE_AGENT_VIEW", raising=False)
-    _stub_backend(controller)
+    _stub_backend(monkeypatch, controller)
 
     controller.start()
 
@@ -445,4 +445,46 @@ def test_app_controller_start_with_env_prompt_uses_hot_branch_after_prewarm(
     )
     assert controller.awaitingResponse is True, (
         "submit_prompt's ON edge must fire even on the hot branch"
+    )
+
+
+# ---------------------------------------------------------------------------
+# action="new" re-warm — `<leader>aN` stops the session then re-warms so
+# the permission-mode pill + Shift+Tab cycling stay live after the reset
+# ---------------------------------------------------------------------------
+#
+# This is the regression guard for the re-warm invariant: after action="new"
+# the sidecar must be re-warmed so `cycle_permission_mode` writes land on a
+# live stdin. Without the re-warm, `_write_command`'s `if self._proc is None`
+# guard silently drops Shift+Tab presses after a <leader>aN reset.
+
+
+def test_agent_event_action_new_rewarms_sidecar_after_stop(controller, monkeypatch):
+    """action='new' re-warm contract — sidecar is alive after <leader>aN reset.
+
+    Simulates the <leader>aN path: host is running, action='new' arrives,
+    host is stopped, model is cleared, and the sidecar is re-warmed so the
+    permission-mode pill stays live. Without the re-warm, Shift+Tab after
+    a <leader>aN reset would silently drop writes on a non-existent stdin.
+    """
+    # Simulate a running session first
+    controller._session_host.is_running = True
+
+    initial_start_calls = list(controller._session_host.start_calls)
+
+    controller._on_agent_event({"op": "show", "action": "new"})
+
+    # stop() was called for the running host
+    assert controller._session_host.stop_calls == 1, (
+        "action='new' must stop the running host"
+    )
+    # Re-warm: start("") must be called once after the stop
+    new_calls = controller._session_host.start_calls[len(initial_start_calls) :]
+    assert new_calls == [""], (
+        "action='new' must re-warm the sidecar with start('') so the "
+        "permission-mode pill stays live after reset"
+    )
+    # Spinner should be off
+    assert controller.awaitingResponse is False, (
+        "action='new' must clear the awaiting-response spinner"
     )

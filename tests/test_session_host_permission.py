@@ -384,3 +384,55 @@ def test_send_set_permission_mode_after_prewarm_writes_envelope(monkeypatch):
         }
     finally:
         host.stop()
+
+
+def test_start_stop_start_rewarm_cycle_works(monkeypatch):
+    """Re-warm cycle — start("") → stop() → start("") behaves correctly.
+
+    Guards the <leader>aN code path: `action='new'` calls stop() then
+    re-warms with start(""). The second start() must succeed without
+    sending a user_message — the `_stop_event.clear()` in `start()` is
+    what makes re-warm after stop safe, and `if prompt:` is what prevents
+    an empty envelope from reaching the SDK.
+
+    Without the `_stop_event.clear()` guard, re-warm would spawn workers
+    that exit immediately (stop_event already set), leaving `_proc` set
+    but workers dead — the host appears alive but never reads stdout.
+    """
+    host = SessionHost()
+    fake1 = _FakeProcWithStreams()
+    fake2 = _FakeProcWithStreams()
+    popen_calls: list[_FakeProcWithStreams] = []
+
+    import symmetria_ide.session_host as session_host_module
+
+    def fake_popen(*_args, **_kwargs):
+        # Return each fake in sequence
+        result = [fake1, fake2][len(popen_calls)]
+        popen_calls.append(result)
+        return result
+
+    monkeypatch.setattr(session_host_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        session_host_module,
+        "_sidecar_dist_path",
+        lambda: __import__("pathlib").Path(__file__),
+    )
+
+    try:
+        # Initial pre-warm
+        host.start("")
+        assert host._proc is not None  # pyright: ignore[reportPrivateUsage]
+        assert fake1.stdin.chunks == [], "pre-warm must not write anything"
+
+        # Simulate <leader>aN stop
+        host.stop()
+        assert host._proc is None  # pyright: ignore[reportPrivateUsage]
+
+        # Re-warm (the <leader>aN re-warm path)
+        host.start("")
+        assert host._proc is not None, "re-warm must spawn a new subprocess"  # pyright: ignore[reportPrivateUsage]
+        assert fake2.stdin.chunks == [], "re-warm must not send a user_message"
+        assert len(popen_calls) == 2, "two Popen calls expected (initial + re-warm)"
+    finally:
+        host.stop()

@@ -512,6 +512,14 @@ class AppController(QObject):
                 # here keeps the spinner from briefly lingering when
                 # the user mashes <leader>aN.
                 self._set_awaiting_response(False)
+                # Re-warm the sidecar so the permission-mode pill +
+                # Shift+Tab cycling remain live after the reset. The
+                # pre-warm invariant (sidecar always running when pane
+                # is reachable) is established in `start()` — we must
+                # restore it here after stopping. Empty prompt spawns
+                # without sending a user_message, same as the initial
+                # pre-warm; next composer submit takes the hot branch.
+                self._session_host.start("")
             self.show_agent()
         elif op == "hide":
             self.hide_agent()
@@ -529,16 +537,17 @@ class AppController(QObject):
 
         Two branches:
 
-        - **Cold** (no running sidecar): `start(prompt)` spawns the
-          Node sidecar and delivers `prompt` as the first JSONL
-          `user_message` command on stdin, which the sidecar wraps in
-          an `SDKUserMessage` for the SDK's prompt iterable.
-        - **Hot** (sidecar alive from a previous turn):
-          `send_user_message(prompt)` writes another `user_message`
-          command on the same stdin stream. The SDK's session state
+        - **Hot** (sidecar alive — the normal path after pre-warm):
+          `send_user_message(prompt)` writes a `user_message` command
+          on the already-open stdin stream. The SDK's session state
           (model context, tool authorization, etc.) is retained
           inside the sidecar — this is what makes the pane feel like
           a conversation rather than independent one-shots.
+        - **Cold** (sidecar not running — defensive fallback): `start(prompt)`
+          spawns the Node sidecar and delivers `prompt` as the first
+          JSONL `user_message` command on stdin. Reached only if
+          `AppController.start()` was not called or a previous `stop()`
+          was not followed by a re-warm.
 
         Before either branch, we feed a synthetic `user` event into
         `SessionModel` so the message appears in the pane the instant
@@ -548,8 +557,9 @@ class AppController(QObject):
         the user would have no visual confirmation of what they typed.
 
         `<leader>aN` (`action="new"` on the agent-event) stops the
-        host and clears the model before this slot runs, so "new
-        Claude" semantics still re-spawn from scratch.
+        host, clears the model, and re-warms the sidecar before this
+        slot runs, so "new Claude" semantics re-spawn from scratch
+        while keeping the permission-mode pill live.
         """
         text = prompt.strip()
         if not text:

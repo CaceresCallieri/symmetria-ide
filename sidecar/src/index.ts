@@ -36,17 +36,17 @@ const log = (msg: string): void => {
 
 // --- Permission mode state ------------------------------------------------
 //
-// `currentMode` is the sidecar's authoritative view of the SDK's permissionMode.
-// It drives two paths: (a) the canUseTool short-circuit (Step 4) and (b) the
+// `currentMode` is the sidecar's authoritative view of the active permission
+// mode. It drives two paths: (a) the canUseTool short-circuit and (b) the
 // permission_mode_changed echo emitted to Python so the AppController can
-// render the mode pill. We track it locally rather than reading from the SDK
-// because the SDK exposes no synchronous getter — once the user calls
-// `Query.setPermissionMode(mode)` we update `currentMode` only on success.
+// render the mode pill. Updated synchronously when a set_permission_mode
+// command arrives — `Query.setPermissionMode()` is a best-effort SDK push
+// that runs after the echo, not the other way around (see handleCommand).
 //
-// `queryInstance` is captured after the query() call below so handleCommand
-// can dispatch setPermissionMode requests onto it. The variable is `null`
-// until the IIFE at the bottom assigns it; set_permission_mode commands
-// arriving before the SDK is ready are ignored with a log line.
+// `queryInstance` is captured after warm.query() assigns it below so
+// handleCommand can forward setPermissionMode to the SDK once it's alive.
+// Null before that assignment — the best-effort SDK push is skipped when
+// null, which is safe because `currentMode` is already authoritative.
 type AgentPermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "plan";
 const VALID_MODES: ReadonlyArray<AgentPermissionMode> = [
   "default",
@@ -392,7 +392,7 @@ const translateMessage = (msg: SDKMessage): OutboundEvent | null => {
   // first prompt is sent. WarmQuery.query() returns a Query whose CLI
   // is already alive, so setPermissionMode and the system:init event
   // both fire immediately. Matches what Claude Code TUI does (sdk.d.ts:5142).
-  let warm;
+  let warm: Awaited<ReturnType<typeof startup>>;
   try {
     warm = await startup({ options });
   } catch (err) {

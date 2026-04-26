@@ -9,8 +9,11 @@ cross-thread delivery. A second daemon reads stderr and emits
 SDK errors, sidecar-internal logging, etc.).
 
 **Shape.** `start(prompt, cwd)` spawns `node sidecar/dist/index.js`
-with stdin kept open, then writes the initial prompt as the first
-JSONL `user_message` command via `send_user_message`. The sidecar
+with stdin kept open. When `prompt` is non-empty, it writes the
+initial prompt as the first JSONL `user_message` command via
+`send_user_message`; when `prompt` is empty (the pre-warm path used
+by `AppController.start()`), it spawns without sending a message so
+the SDK's async iterable blocks until the user submits. The sidecar
 runs `@anthropic-ai/claude-agent-sdk`'s `query()` programmatically
 and translates SDK messages back to JSONL events on stdout that
 `SessionModel._row_from_*` already consumes. stdin is closed only on
@@ -37,12 +40,11 @@ synthesized envelopes:
     does NOT auto-resolve (full round-trip via the in-pane card).
   - `permission_mode_changed` — emitted (a) once at session start
     so the AppController's `_permission_mode` matches the sidecar's
-    authoritative `currentMode`, and (b) every time
-    `Query.setPermissionMode(mode)` resolves successfully after a
-    `set_permission_mode` inbound command. AppController treats
-    this envelope as the single source of truth for the QML pill —
-    the cycle slot does NOT optimistically mutate, because the SDK
-    can reject a transition.
+    authoritative `currentMode`, and (b) synchronously whenever a
+    `set_permission_mode` inbound command arrives — `currentMode` is
+    updated immediately and the echo fires before the best-effort
+    `Query.setPermissionMode()` SDK call. AppController treats this
+    envelope as the single source of truth for the QML pill.
 
 **Thread discipline (project-standards §1 P0 + §4 P0).**
 
