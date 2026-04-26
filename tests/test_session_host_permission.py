@@ -171,3 +171,65 @@ def test_send_permission_response_without_subprocess_is_a_noop():
     """Same defensive contract as send_user_message."""
     host = SessionHost()
     host.send_permission_response("orphan-id", "allow")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# set_permission_mode envelope — Shift+Tab cycle dispatch
+# ---------------------------------------------------------------------------
+#
+# These tests cover the third inbound envelope the sidecar accepts: the
+# `set_permission_mode` command emitted by AppController.cycle_permission_mode
+# in response to Shift+Tab. The shape is deliberately small (just `mode`)
+# because the sidecar replies with a `permission_mode_changed` echo on
+# success, so there's no need for the inbound envelope to carry an ACK token.
+
+
+def test_send_set_permission_mode_writes_envelope_for_each_valid_mode():
+    """All four valid modes must serialise to the canonical envelope shape.
+
+    Iterating in cycle order (default → acceptEdits → bypassPermissions →
+    plan) doubles as a regression guard against accidental case-mangling
+    or string drift between the controller and the host (the controller's
+    `_PERMISSION_MODES` tuple is the source of truth; the host's validation
+    set must stay in sync).
+    """
+    for mode in ("default", "acceptEdits", "bypassPermissions", "plan"):
+        host = SessionHost()
+        fake = _FakeProc()
+        host._proc = fake  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+
+        host.send_set_permission_mode(mode)
+
+        assert fake.stdin.flush_count == 1, f"flush missing for mode={mode}"
+        assert _decode_one(fake) == {
+            "type": "set_permission_mode",
+            "mode": mode,
+        }
+
+
+def test_send_set_permission_mode_rejects_invalid_mode():
+    """Anything outside the four-mode union is silently dropped.
+
+    Defensive guard — even though the controller's cycle slot only ever
+    emits valid modes, a future caller (or a malformed direct invocation
+    from QML) shouldn't crash the host or write garbage to the sidecar.
+    Mirrors the `send_permission_response` invalid-behavior pattern.
+    """
+    host = SessionHost()
+    fake = _FakeProc()
+    host._proc = fake  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+
+    host.send_set_permission_mode("ACCEPT_EDITS")  # case-sensitive
+    host.send_set_permission_mode("auto")  # SDK mode we deliberately omit
+    host.send_set_permission_mode("dontAsk")  # SDK mode we deliberately omit
+    host.send_set_permission_mode("")
+    host.send_set_permission_mode("garbage")
+
+    assert fake.stdin.chunks == []
+    assert fake.stdin.flush_count == 0
+
+
+def test_send_set_permission_mode_without_subprocess_is_a_noop():
+    """Same defensive contract as the other two send_* methods."""
+    host = SessionHost()
+    host.send_set_permission_mode("plan")  # must not raise

@@ -14,6 +14,10 @@ export type InboundCommand =
       request_id: string;
       behavior: "allow" | "deny";
       message?: string;
+    }
+  | {
+      type: "set_permission_mode";
+      mode: "default" | "acceptEdits" | "bypassPermissions" | "plan";
     };
 
 /**
@@ -45,6 +49,7 @@ export type InboundCommand =
 export type OutboundEvent =
   | PassthroughEvent
   | PermissionRequestEvent
+  | PermissionModeChangedEvent
   | SidecarErrorEvent;
 
 /**
@@ -86,6 +91,23 @@ export interface PermissionRequestEvent {
 export interface SidecarErrorEvent {
   type: "sidecar_error";
   message: string;
+  /** sidecar-synthesized; no equivalent in raw stream-json */
+  note: "sidecar-synthesized";
+}
+
+/**
+ * State echo: the sidecar's authoritative view of the current SDK
+ * permissionMode. Emitted (a) once at session start so Python's initial
+ * `_permission_mode` matches the sidecar's `default`, and (b) every time
+ * `Query.setPermissionMode(mode)` resolves successfully after a
+ * `set_permission_mode` inbound command. Python's AppController treats this
+ * envelope as the single source of truth for `permissionMode` — the cycle
+ * slot does NOT optimistically mutate, because the SDK can reject a
+ * transition (e.g. `bypassPermissions` without `allowDangerouslySkipPermissions`).
+ */
+export interface PermissionModeChangedEvent {
+  type: "permission_mode_changed";
+  mode: "default" | "acceptEdits" | "bypassPermissions" | "plan";
   /** sidecar-synthesized; no equivalent in raw stream-json */
   note: "sidecar-synthesized";
 }

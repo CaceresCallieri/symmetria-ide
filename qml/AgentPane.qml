@@ -56,6 +56,47 @@ Rectangle {
     // directly. No intermediate mouse step, matches non-negotiable #1.
     onVisibleChanged: if (visible) composer.forceActiveFocus()
 
+    // Cycle the SDK permission mode. Wired to Shift+Tab on both `root`
+    // (when focus is on the events ListView or chrome) and `composer`
+    // (when the user is typing). Centralised here so the two key
+    // handlers don't drift out of sync.
+    function _cyclePermissionMode() {
+        controller.cycle_permission_mode()
+    }
+
+    // Map the four SDK permission modes to the Theme.color.permissionMode
+    // rung. Default falls through for unknown / future modes so a
+    // stray sidecar event can't paint the pill into a TypeError.
+    function _pillColor(mode) {
+        if (mode === "acceptEdits") return Theme.color.permissionMode.acceptEdits
+        if (mode === "bypassPermissions") return Theme.color.permissionMode.bypassPermissions
+        if (mode === "plan") return Theme.color.permissionMode.plan
+        return Theme.color.permissionMode.default_
+    }
+
+    // Capture Shift+Tab when focus sits on the pane chrome (between
+    // compositions, after escaping the composer, etc.). The composer's
+    // own Keys.onPressed below carries the same handler so cycling
+    // works while typing too. CRITICAL invariant: this handler ONLY
+    // fires while the agent pane is `visible: true` — Main.qml's
+    // editor/agent swap puts the pane in a `visible: false` Item when
+    // the editor is active, so Shift+Tab in the editor (NeoVim's
+    // outdent) cannot collide with this handler. Per non-negotiable #3
+    // ("NeoVim motions preserved"), the editor's keybinds are sacred.
+    Keys.onShortcutOverride: (event) => {
+        if (event.key === Qt.Key_Backtab
+            || (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))) {
+            event.accepted = true
+        }
+    }
+    Keys.onPressed: (event) => {
+        if (event.key === Qt.Key_Backtab
+            || (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))) {
+            root._cyclePermissionMode()
+            event.accepted = true
+        }
+    }
+
     ColumnLayout {
         anchors.fill: root
         anchors.leftMargin: root.horizontalPadding
@@ -63,6 +104,68 @@ Rectangle {
         anchors.topMargin: root.verticalPadding
         anchors.bottomMargin: root.verticalPadding
         spacing: Theme.spacing.md
+
+        // --- Permission mode pill -----------------------------------
+        //
+        // Surfaces the sidecar's authoritative `permissionMode` so the
+        // user always knows whether bypassPermissions is actually
+        // active (versus assumed). Bound to controller.permissionMode
+        // — the cycle slot does NOT optimistically mutate, so the pill
+        // only flips after the SDK accepts the transition.
+        //
+        // Visual construction mimics StatusBar.qml's mode badge for
+        // visual continuity with the editor pane: pill radius is
+        // `height / 2`, label color is `Theme.color.mode.badgeLabel`,
+        // background derives from the Theme.color.permissionMode rung
+        // (which itself aliases mode.* hexes — see Theme.qml comment).
+        RowLayout {
+            id: chromeRow
+            Layout.fillWidth: true
+            Layout.preferredHeight: Theme.size.modeBadgeHeight
+            spacing: Theme.spacing.md
+
+            Rectangle {
+                id: permissionPill
+                Layout.preferredHeight: Theme.size.modeBadgeHeight
+                Layout.preferredWidth: pillLabel.implicitWidth + Theme.spacing.md * 2
+                radius: height / 2
+                color: root._pillColor(controller.permissionMode)
+
+                Text {
+                    id: pillLabel
+                    anchors.centerIn: parent
+                    text: controller.permissionMode.toUpperCase()
+                    color: Theme.color.mode.badgeLabel
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                    font.weight: Theme.font.weight.medium
+                    font.letterSpacing: 0.6
+                    renderType: Text.NativeRendering
+                }
+
+                // Click-to-cycle as a mouse-friendly affordance (the
+                // primary path is still Shift+Tab, per non-negotiable #1
+                // — keyboard-first, mouse never required). The cursor
+                // shape signals interactivity without a tooltip.
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root._cyclePermissionMode()
+                }
+            }
+
+            Text {
+                id: pillHint
+                Layout.fillWidth: true
+                text: "Shift+Tab to cycle"
+                color: Theme.color.text.dim
+                font.family: Theme.font.family
+                font.pixelSize: Theme.font.size.xs
+                font.weight: Theme.font.weight.normal
+                font.letterSpacing: 0.4
+                renderType: Text.NativeRendering
+            }
+        }
 
         // --- Event log ----------------------------------------------
         ListView {
@@ -549,6 +652,28 @@ Rectangle {
                 // `NvimView.onVisibleChanged` to restore focus on the
                 // far side, so no additional focus handling needed here.
                 Keys.onEscapePressed: controller.hide_agent()
+
+                // Shift+Tab while typing cycles permissionMode without
+                // surrendering composer focus. TextField's default Tab
+                // / Shift+Tab is focus navigation — we deliberately
+                // override here because the only other focusable item in
+                // the pane chrome is the pill's MouseArea, and the user
+                // doesn't want focus to leave the composer mid-thought.
+                // Shortcut+Override pair keeps Qt's accelerator system
+                // from intercepting first.
+                Keys.onShortcutOverride: (event) => {
+                    if (event.key === Qt.Key_Backtab
+                        || (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))) {
+                        event.accepted = true
+                    }
+                }
+                Keys.onPressed: (event) => {
+                    if (event.key === Qt.Key_Backtab
+                        || (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))) {
+                        root._cyclePermissionMode()
+                        event.accepted = true
+                    }
+                }
             }
         }
     }

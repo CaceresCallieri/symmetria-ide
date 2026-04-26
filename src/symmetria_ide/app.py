@@ -219,6 +219,23 @@ class AppController(QObject):
     backendReady = Signal()
     agentVisibleChanged = Signal()
     awaitingResponseChanged = Signal()
+    permissionModeChanged = Signal()
+
+    # Cycle order for Shift+Tab in the agent pane. Tuple is the source of
+    # truth for both validation (gate `_set_permission_mode` against this)
+    # and the next-mode computation in `cycle_permission_mode`. Order
+    # matches the user's mental model: default (ask) → acceptEdits (auto-go
+    # on edits) → bypassPermissions (all gates open) → plan (suppress
+    # execution) → wraps. The sidecar's `setPermissionMode` accepts the same
+    # four values; the SDK supports two more (`dontAsk`, `auto`) which we
+    # deliberately omit per the user's spec — adding them later is just
+    # extending this tuple.
+    _PERMISSION_MODES: tuple[str, str, str, str] = (
+        "default",
+        "acceptEdits",
+        "bypassPermissions",
+        "plan",
+    )
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -290,6 +307,14 @@ class AppController(QObject):
         # the entire infrastructure (delegate aesthetic is intentionally
         # cheap so the placeholder can iterate later).
         self._awaiting_response = False
+        # Permission mode — mirrors the sidecar's authoritative
+        # `currentMode`. Sidecar emits a `permission_mode_changed` echo
+        # at session start AND after every successful `setPermissionMode`
+        # call, so this field is updated reactively rather than
+        # optimistically (the SDK can reject a transition into
+        # `bypassPermissions` if `allowDangerouslySkipPermissions` is
+        # not set; we set the flag in the sidecar but trust the echo).
+        self._permission_mode: str = "default"
 
     @Slot(dict)
     def _route_capsule(self, payload: dict) -> None:
@@ -333,6 +358,56 @@ class AppController(QObject):
         self._awaiting_response = value
         self.awaitingResponseChanged.emit()
 
+    @Property(str, notify=permissionModeChanged)
+    def permissionMode(self) -> str:
+        return self._permission_mode
+
+    def _set_permission_mode(self, value: str) -> None:
+        """Single mutation point for the permission-mode property.
+
+        Same idempotent guard as `_set_awaiting_response` — repeated
+        echoes (sidecar emits one on start AND one after every
+        `setPermissionMode` resolution, so a no-op transition from
+        `default` to `default` lands twice) don't re-emit the signal.
+
+        Validates against `_PERMISSION_MODES` and silently drops invalid
+        values; tolerance lets the sidecar add modes later without
+        hard-crashing the controller (forward compatibility), and
+        protects against malformed `permission_mode_changed` envelopes.
+        """
+        if value not in self._PERMISSION_MODES:
+            log.warning("_set_permission_mode: invalid mode %r — ignored", value)
+            return
+        if self._permission_mode == value:
+            return
+        self._permission_mode = value
+        self.permissionModeChanged.emit()
+
+    @Slot()
+    def cycle_permission_mode(self) -> None:
+        """Advance the permission mode one step through `_PERMISSION_MODES`.
+
+        Called from QML's `Keys.onPressed` handler when the agent pane
+        captures Shift+Tab / Backtab. Computes the next mode in cycle
+        order from the CURRENT `_permission_mode` and writes a
+        `set_permission_mode` command to the sidecar. Does NOT mutate
+        `_permission_mode` here — the sidecar's `permission_mode_changed`
+        echo is the single source of truth, because the SDK can reject
+        a transition (e.g. into `bypassPermissions` without
+        `allowDangerouslySkipPermissions`). Optimistic mutation would
+        flicker the pill into a state the SDK didn't accept.
+        """
+        try:
+            idx = self._PERMISSION_MODES.index(self._permission_mode)
+        except ValueError:
+            # Defensive: shouldn't happen because `_set_permission_mode`
+            # validates. If it does, fall back to advancing from the
+            # canonical default rather than wedging the cycle.
+            idx = -1
+        next_mode = self._PERMISSION_MODES[(idx + 1) % len(self._PERMISSION_MODES)]
+        log.debug("cycle_permission_mode: %s -> %s", self._permission_mode, next_mode)
+        self._session_host.send_set_permission_mode(next_mode)
+
     @Slot()
     def show_agent(self) -> None:
         """Open full-window agent view. Focus routing is QML's job."""
@@ -371,9 +446,17 @@ class AppController(QObject):
         turn is still in flight from the user's perspective. The
         `result` envelope only fires once the user's decision lands
         and any subsequent tool work completes.
+
+        Also routes the sidecar's `permission_mode_changed` echo into
+        `_set_permission_mode` so the pill renders the SDK's actual
+        accepted state (the cycle slot deliberately doesn't optimistically
+        mutate — see `cycle_permission_mode` for rationale).
         """
-        if str(event.get("type") or "") == "result":
+        kind = str(event.get("type") or "")
+        if kind == "result":
             self._set_awaiting_response(False)
+        elif kind == "permission_mode_changed":
+            self._set_permission_mode(str(event.get("mode") or ""))
 
     @Slot()
     def _on_session_closed(self) -> None:
@@ -382,8 +465,15 @@ class AppController(QObject):
         Crashes, SIGTERM from `<leader>aN`, or auth failures all reach
         the GUI through `closed` rather than a `result` envelope. Without
         this slot the spinner would stay lit indefinitely after a crash.
+
+        Also resets the permission mode to `default` so the next session
+        (e.g. after `<leader>aN`) starts with the canonical pill rather
+        than briefly inheriting the stale mode from the dead subprocess.
+        The new sidecar's start-time echo would override this anyway,
+        but resetting synchronously closes the visible window.
         """
         self._set_awaiting_response(False)
+        self._set_permission_mode("default")
 
     @Slot(dict)
     def _on_agent_event(self, payload: dict) -> None:

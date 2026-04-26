@@ -23,13 +23,26 @@ both in sync. Inbound (Python → sidecar): one JSON object per line:
     {"type": "user_message", "content": "..."}
     {"type": "permission_response", "request_id": "<uuid>",
      "behavior": "allow" | "deny", "message"?: "..."}
+    {"type": "set_permission_mode",
+     "mode": "default" | "acceptEdits" | "bypassPermissions" | "plan"}
 
 Outbound (sidecar → Python): SDK messages translated to JSONL
 events whose top-level `type` and inner fields match what
 `SessionModel.apply` already routes (`assistant`, `system`,
-`stream_event`, `result`, `rate_limit_event`), plus a sidecar-
-synthesized `permission_request` envelope when the SDK's
-`canUseTool` callback fires.
+`stream_event`, `result`, `rate_limit_event`), plus two sidecar-
+synthesized envelopes:
+
+  - `permission_request` — emitted when the SDK's `canUseTool`
+    callback fires for a tool that the current `permissionMode`
+    does NOT auto-resolve (full round-trip via the in-pane card).
+  - `permission_mode_changed` — emitted (a) once at session start
+    so the AppController's `_permission_mode` matches the sidecar's
+    authoritative `currentMode`, and (b) every time
+    `Query.setPermissionMode(mode)` resolves successfully after a
+    `set_permission_mode` inbound command. AppController treats
+    this envelope as the single source of truth for the QML pill —
+    the cycle slot does NOT optimistically mutate, because the SDK
+    can reject a transition.
 
 **Thread discipline (project-standards §1 P0 + §4 P0).**
 
@@ -365,6 +378,34 @@ class SessionHost(QObject):
                 "behavior": behavior,
             }
         )
+
+    @Slot(str)
+    def send_set_permission_mode(self, mode: str) -> None:
+        """Write a JSONL `set_permission_mode` command to the sidecar.
+
+        Envelope shape (mirrors `InboundCommand` in
+        `sidecar/src/protocol.ts`):
+
+            {"type": "set_permission_mode", "mode": "<mode>"}
+
+        Where `<mode>` is one of `default | acceptEdits |
+        bypassPermissions | plan`. The sidecar awaits
+        `Query.setPermissionMode(mode)`; on success it emits a
+        `permission_mode_changed` event so AppController's `_permission_mode`
+        re-syncs to the SDK's authoritative state. The cycle slot in
+        AppController does NOT optimistically mutate the property — the
+        sidecar's echo is the source of truth, because the SDK can reject
+        a transition (e.g. into `bypassPermissions` if the
+        `allowDangerouslySkipPermissions` flag wasn't set).
+
+        Validates `mode` against the four-mode union and silently drops
+        invalid values rather than raising — same tolerance pattern as
+        `send_permission_response`. Same `_stdin_lock` discipline.
+        """
+        if mode not in ("default", "acceptEdits", "bypassPermissions", "plan"):
+            log.warning("send_set_permission_mode: invalid mode %r — dropped", mode)
+            return
+        self._write_command({"type": "set_permission_mode", "mode": mode})
 
     def _write_command(self, payload: dict) -> None:
         """Serialise + flush a JSONL command on stdin under the lock.

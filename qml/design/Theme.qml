@@ -110,6 +110,50 @@ QtObject {
             readonly property color badgeLabel: "#131313"
         }
 
+        // Permission mode pill palette — agent pane chrome. Surfaces the
+        // sidecar's authoritative `permissionMode` (default | acceptEdits |
+        // bypassPermissions | plan) as a pill the user cycles with
+        // Shift+Tab. The colors deliberately ALIAS the editor's `mode.*`
+        // hex values so the agent pane's "permission state" semantic
+        // reads continuous with the editor's "vim mode" semantic — both
+        // are wine_theme-derived state badges, both use the same
+        // "your turn / go / stop / command" colour grammar:
+        //
+        //   default_         — mode.normal (amber): standard prompt path,
+        //                       canUseTool round-trips through the in-pane
+        //                       card. Reads "your turn to decide per tool".
+        //                       Trailing underscore because `default` is a
+        //                       JS reserved word in QML property identifiers.
+        //   acceptEdits      — mode.insert (green): editor-grade "go" green
+        //                       for "auto-allow file-edit tools". Continuous
+        //                       with diff.addedBg / permissionApprove which
+        //                       both alias the same green for the same
+        //                       "approved change" semantic.
+        //   bypassPermissions — mode.replace (red): editor-grade "stop" red
+        //                       repurposed as "warning — all gates open".
+        //                       Red here is intentional: the user is opting
+        //                       OUT of safety, the pill should feel loud
+        //                       so they cannot forget which mode they're in.
+        //   plan             — mode.command (blue): cmdline blue, fitting
+        //                       for "planning only, no execution" — same
+        //                       palette family as the cmdline firstchar
+        //                       which is also a "thinking before doing" cue.
+        //
+        // Aliasing (not duplicating) means a future palette nudge to the
+        // mode colors propagates here automatically — the editor pane and
+        // the agent pane stay in lockstep for free. Per the Step 1 protocol
+        // discovery for the permission-mode feature: the SDK's gating logic
+        // is opaque (native binary), so the sidecar applies a defensive
+        // canUseTool short-circuit per mode; this palette must read
+        // honestly because it's the user's only feedback for which mode
+        // is actually active.
+        readonly property QtObject permissionMode: QtObject {
+            readonly property color default_: theme.color.mode.normal
+            readonly property color acceptEdits: theme.color.mode.insert
+            readonly property color bypassPermissions: theme.color.mode.replace
+            readonly property color plan: theme.color.mode.command
+        }
+
         // Agent pane role accents. Distinct rung so the agent surface
         // reads as its own context — neither editor chrome nor a mode
         // badge — while staying inside the wine_theme family.

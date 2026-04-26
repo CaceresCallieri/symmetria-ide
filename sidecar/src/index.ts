@@ -18,7 +18,9 @@ import {
   query,
   type CanUseTool,
   type Options,
+  type PermissionMode,
   type PermissionResult,
+  type Query,
   type SDKMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -32,6 +34,35 @@ const writeEvent = (event: OutboundEvent): void => {
 const log = (msg: string): void => {
   process.stderr.write(`[sidecar] ${msg}\n`);
 };
+
+// --- Permission mode state ------------------------------------------------
+//
+// `currentMode` is the sidecar's authoritative view of the SDK's permissionMode.
+// It drives two paths: (a) the canUseTool short-circuit (Step 4) and (b) the
+// permission_mode_changed echo emitted to Python so the AppController can
+// render the mode pill. We track it locally rather than reading from the SDK
+// because the SDK exposes no synchronous getter — once the user calls
+// `Query.setPermissionMode(mode)` we update `currentMode` only on success.
+//
+// `queryInstance` is captured after the query() call below so handleCommand
+// can dispatch setPermissionMode requests onto it. The variable is `null`
+// until the IIFE at the bottom assigns it; set_permission_mode commands
+// arriving before the SDK is ready are ignored with a log line.
+type AgentPermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "plan";
+const VALID_MODES: ReadonlyArray<AgentPermissionMode> = [
+  "default",
+  "acceptEdits",
+  "bypassPermissions",
+  "plan",
+];
+let currentMode: AgentPermissionMode = "default";
+let queryInstance: Query | null = null;
+const EDIT_TOOLS: ReadonlySet<string> = new Set([
+  "Edit",
+  "Write",
+  "MultiEdit",
+  "NotebookEdit",
+]);
 
 // --- User-message queue (async iterable bridging stdin → SDK) -------------
 //
@@ -108,6 +139,38 @@ type PendingPermission = {
 const pendingPermissions = new Map<string, PendingPermission>();
 
 const canUseTool: CanUseTool = (toolName, input, opts) => {
+  // Mode-driven short-circuit. Per the Step 1 protocol-discovery finding:
+  // the SDK's permissionMode gating logic lives in a native binary and
+  // cannot be inspected by source-grep, so we apply our own conservative
+  // policy here regardless of whether the SDK also short-circuits — duplicate
+  // `allow` is idempotent and the SDK takes the first resolution. Branches
+  // matching `bypassPermissions` / `plan` / `acceptEdits` (for edit tools)
+  // resolve immediately and do NOT emit a permission_request envelope, so
+  // the in-pane card is correctly suppressed for the auto-resolved cases
+  // while remaining the single decision point under `default` and for the
+  // non-edit tools under `acceptEdits`.
+  if (currentMode === "bypassPermissions") {
+    // Echo input as updatedInput per gotcha #24 (CLAUDE.md): the SDK's
+    // PermissionResultAllow.updatedInput is declaratively optional but
+    // functionally required — Edit/Write Zod schemas reject undefined.
+    return Promise.resolve<PermissionResult>({
+      behavior: "allow",
+      updatedInput: input,
+    });
+  }
+  if (currentMode === "plan") {
+    return Promise.resolve<PermissionResult>({
+      behavior: "deny",
+      message: "plan mode — tool execution suppressed",
+    });
+  }
+  if (currentMode === "acceptEdits" && EDIT_TOOLS.has(toolName)) {
+    return Promise.resolve<PermissionResult>({
+      behavior: "allow",
+      updatedInput: input,
+    });
+  }
+  // `default` (and `acceptEdits` for non-edit tools) — full round-trip.
   return new Promise<PermissionResult>((resolve) => {
     const requestId = randomUUID();
 
@@ -184,6 +247,44 @@ const handleCommand = (cmd: InboundCommand): void => {
     }
     return;
   }
+  if (cmd.type === "set_permission_mode") {
+    if (!VALID_MODES.includes(cmd.mode)) {
+      log(`set_permission_mode: invalid mode ${cmd.mode} — ignored`);
+      return;
+    }
+    if (queryInstance === null) {
+      log(`set_permission_mode: query not yet ready — dropped`);
+      return;
+    }
+    // Fire-and-forget: setPermissionMode returns a Promise but we don't
+    // need to block the readline 'line' callback on its resolution. The
+    // success path emits the authoritative permission_mode_changed echo
+    // inside the .then(); the failure path logs + emits a sidecar_error
+    // so Python's pill stays in sync with whatever the SDK actually
+    // accepted (the cycle slot does NOT optimistically mutate per the
+    // protocol contract in protocol.ts:PermissionModeChangedEvent).
+    const requested: PermissionMode = cmd.mode;
+    queryInstance
+      .setPermissionMode(requested)
+      .then(() => {
+        currentMode = cmd.mode;
+        writeEvent({
+          type: "permission_mode_changed",
+          mode: cmd.mode,
+          note: "sidecar-synthesized",
+        });
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`setPermissionMode(${cmd.mode}) rejected: ${message}`);
+        writeEvent({
+          type: "sidecar_error",
+          message: `setPermissionMode(${cmd.mode}) failed: ${message}`,
+          note: "sidecar-synthesized",
+        });
+      });
+    return;
+  }
 };
 
 const rl = readline.createInterface({ input: process.stdin });
@@ -223,11 +324,17 @@ const options: Options = {
   abortController,
   canUseTool,
   includePartialMessages: true,
-  // `permissionMode: "default"` routes through canUseTool when present;
-  // bypassPermissions / acceptEdits would short-circuit the callback for
-  // some tools, defeating the whole point of the in-pane card. Stay on
-  // default and let canUseTool be the single decision point.
+  // Initial mode is `"default"` — every fresh sidecar starts in the
+  // standard prompt path. Mode transitions land via the `set_permission_mode`
+  // inbound command, which calls `queryInstance.setPermissionMode(mode)`
+  // (sdk.d.ts:1977). The flag below MUST be `true` because the SDK
+  // refuses to enter `bypassPermissions` without it (sdk.d.ts:3199–3202);
+  // we set it eagerly so the user-driven cycle into bypass succeeds.
+  // canUseTool short-circuits in our callback below based on `currentMode`,
+  // so even with the flag set we retain the in-pane card UX for `default`
+  // and the non-edit tools under `acceptEdits`.
   permissionMode: "default",
+  allowDangerouslySkipPermissions: true,
 };
 
 // Anthropic's message protocol overloads the `user` role for two semantically
@@ -265,6 +372,18 @@ const translateMessage = (msg: SDKMessage): OutboundEvent | null => {
   log("ready; starting SDK query");
   try {
     const q = query({ prompt: userMessages, options });
+    queryInstance = q;
+    // Emit the initial mode echo so AppController's _permission_mode
+    // matches the sidecar's authoritative `currentMode` from the start.
+    // Without this, the QML pill would render as `default` only because
+    // that's the Python field's default — there'd be no positive
+    // confirmation that the SDK actually started in default. The echo
+    // closes that gap and makes the wire protocol self-describing.
+    writeEvent({
+      type: "permission_mode_changed",
+      mode: currentMode,
+      note: "sidecar-synthesized",
+    });
     for await (const msg of q) {
       const event = translateMessage(msg);
       if (event !== null) writeEvent(event);

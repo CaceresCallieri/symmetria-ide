@@ -1,11 +1,11 @@
 ---
 name: Phase 2 agent pane — current state
-description: 2026-04-25 snapshot. Node SDK sidecar pivot landed; in-pane permission UI shipped. Multi-turn + permission cards verified. Open follow-ups listed.
+description: 2026-04-26 snapshot. Permission-mode pill + Shift+Tab cycling landed atop the in-pane permission card; sidecar honours mode via setPermissionMode + canUseTool short-circuit.
 type: project
 originSessionId: a094e8d9-4dcb-4507-bc47-56d8a4453394
 ---
 
-# Phase 2 — current state (2026-04-25)
+# Phase 2 — current state (2026-04-26)
 
 ## What's wired today
 
@@ -14,7 +14,8 @@ originSessionId: a094e8d9-4dcb-4507-bc47-56d8a4453394
 - `SessionModel` renders events flat with partial-text coalescing for streaming assistant turns. New `permission_request` rows carry `permission_state` + `request_id`; `resolve_permission(id, behavior)` mutates them to `"approved"`/`"denied"`.
 - `AgentPane.qml` is a sibling of `NvimView` inside `Main.qml`'s `RowLayout` (60/40). Theme-tokens only; the new permission card uses `Theme.color.agent.{permissionBorder,permissionApprove,permissionDeny}`.
 - `AppController.respond_to_permission` is the QML-facing slot wired from the card buttons; it dispatches host-first then model-resolves.
-- Tests cover model permission routing, scoped `dataChanged([PermissionStateRole])`, AppController dispatch ordering, and the new envelope shapes on the write path.
+- **Permission-mode pill + Shift+Tab cycle (2026-04-26).** `AgentPane.qml` chrome carries a Theme-tokened pill bound to `controller.permissionMode`. Shift+Tab on the pane (root + composer) cycles `default → acceptEdits → bypassPermissions → plan → default`. The cycle slot dispatches `set_permission_mode` to the sidecar; `Query.setPermissionMode(mode)` resolves and the sidecar emits a `permission_mode_changed` echo that AppController treats as the source of truth (no optimistic mutation). The sidecar's `canUseTool` short-circuits per mode: `bypassPermissions` auto-allows everything, `plan` auto-denies everything, `acceptEdits` auto-allows the four edit tools, `default` (and `acceptEdits` for non-edit tools) round-trips through the in-pane card. `allowDangerouslySkipPermissions: true` is set in `Options` so transitions into `bypassPermissions` succeed.
+- Tests cover model permission routing, scoped `dataChanged([PermissionStateRole])`, AppController dispatch ordering, the new envelope shapes on the write path, AND the permission-mode state machine (initial, cycle order + wraparound, event-driven update, invalid mode ignored, idempotency, subprocess-closed reset).
 
 **How to use today:** `PYTHONPATH=src python -m symmetria_ide`. `<leader>aN` / `<leader>an` opens the agent pane. `SYMMETRIA_IDE_AGENT_VIEW=1` opens it on startup. `SYMMETRIA_IDE_AGENT_PROMPT="..."` opens + pre-runs a prompt. Multi-turn is on; permission cards render inline approve/deny on tool use.
 
