@@ -170,6 +170,29 @@ Rectangle {
                 font.letterSpacing: 0.4
                 renderType: Text.NativeRendering
             }
+
+            // --- Instance indicator (Phase A — multi-instance plumbing) ---
+            //
+            // Surfaces `<focused_instance> / <total_instances>` so the user
+            // sees the new pool state from frame 1, even when total is 1.
+            // Phase A always renders "1 / 1" — Phase B's `<C-1>..<C-5>`
+            // focus + `<leader>aN` spawn make this read meaningfully. Per
+            // PRD §3.2 the IDE renders no per-instance colours; the slot
+            // NUMBER is the differentiator. Theme.color.text.dim borrows
+            // the pillHint palette so the chrome reads as one continuous
+            // diagnostic strip rather than two competing badges. Decision
+            // (A2): visible always, even at 1/1, to normalize the
+            // multi-instance mental model from day one.
+            Text {
+                id: instanceIndicator
+                text: controller.focusedInstance + " / " + controller.instanceCount
+                color: Theme.color.text.dim
+                font.family: Theme.font.family
+                font.pixelSize: Theme.font.size.xs
+                font.weight: Theme.font.weight.medium
+                font.letterSpacing: 0.6
+                renderType: Text.NativeRendering
+            }
         }
 
         // --- Event log ----------------------------------------------

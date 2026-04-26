@@ -156,8 +156,17 @@ class SessionHost(QObject):
     # as a dim info row (future) or via the app log (placeholder).
     stderr_line = Signal(str)
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(
+        self, parent: QObject | None = None, *, instance_index: int = 0
+    ) -> None:
         super().__init__(parent)
+        # `instance_index` is a slot identifier used by AppController's
+        # pool (Phase A — multi-instance plumbing). The host doesn't act
+        # on it directly; it's surfaced in log messages so a future
+        # operator looking at multi-instance traces can attribute each
+        # log line to its sidecar. Default 0 keeps single-instance
+        # construction (and existing tests) source-compatible.
+        self._instance_index = instance_index
         self._proc: subprocess.Popen[str] | None = None
         self._stdout_worker: threading.Thread | None = None
         self._stderr_worker: threading.Thread | None = None

@@ -152,8 +152,16 @@ class SessionModel(QAbstractListModel):
     # boundary games.
     hostClosed = Signal()
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(
+        self, parent: QObject | None = None, *, instance_index: int = 0
+    ) -> None:
         super().__init__(parent)
+        # Slot identifier from AppController's instance pool (Phase A
+        # multi-instance plumbing). Used only for log prefixing; the
+        # model itself is 1:1 with one sidecar's event stream and is
+        # otherwise unaware of the pool. Default 0 keeps existing tests
+        # constructing without naming the kwarg.
+        self._instance_index = instance_index
         self._rows: list[AgentRow] = []
         # Index of the in-progress assistant row (extended by
         # content_block_delta / text_delta events). `None` when no

@@ -31,7 +31,13 @@ class _FakeSessionHost:
     record the call so the test can assert on which branch ran.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, instance_index: int = 0) -> None:
+        # Mirror the real `SessionHost.__init__(..., instance_index=...)` shape so
+        # Phase B fixtures can construct N fakes with distinct slot ids
+        # without touching this stub. Default 0 keeps zero-arg construction
+        # source-compatible for tests that don't care which slot the fake
+        # represents.
+        self.instance_index = instance_index
         self.is_running = False
         self.start_calls: list[str] = []
         self.send_calls: list[str] = []
@@ -79,7 +85,13 @@ def controller():
     construction; they read it dynamically each call.
     """
     ctrl = AppController()
-    ctrl._session_host = _FakeSessionHost()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+    # Phase A pool refactor: replace slot 1's real host with a fake.
+    # The real host never spawned a subprocess (no `start()` was
+    # called), so swapping the dict entry is safe — we just leak the
+    # original host's QObject reference, which gets garbage-collected
+    # after the fixture tear-down. Tests reach into `_session_hosts[1]`
+    # directly to assert against the fake.
+    ctrl._session_hosts[1] = _FakeSessionHost(instance_index=1)  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
     yield ctrl
     # Stop the real backend that __init__ created, even though we
     # never started it — defensive in case future __init__ changes
@@ -116,19 +128,19 @@ def test_submit_prompt_flips_awaiting_to_true(controller):
     assert controller.awaitingResponse is True
     assert emissions == [True]
     # Cold path was taken since `_FakeSessionHost.is_running` is False.
-    assert controller._session_host.start_calls == ["hello"]
-    assert controller._session_host.send_calls == []
+    assert controller._session_hosts[1].start_calls == ["hello"]
+    assert controller._session_hosts[1].send_calls == []
 
 
 def test_submit_prompt_hot_branch_also_flips(controller):
     """ON edge holds whether the host is cold or hot."""
-    controller._session_host.is_running = True
+    controller._session_hosts[1].is_running = True
 
     controller.submit_prompt("turn 2")
 
     assert controller.awaitingResponse is True
-    assert controller._session_host.send_calls == ["turn 2"]
-    assert controller._session_host.start_calls == []
+    assert controller._session_hosts[1].send_calls == ["turn 2"]
+    assert controller._session_hosts[1].start_calls == []
 
 
 def test_submit_prompt_empty_string_is_a_noop(controller):
@@ -140,15 +152,15 @@ def test_submit_prompt_empty_string_is_a_noop(controller):
 
     assert controller.awaitingResponse is False
     assert emissions == []
-    assert controller._session_host.start_calls == []
+    assert controller._session_hosts[1].start_calls == []
 
 
 def test_on_session_event_result_flips_off(controller):
     """OFF edge — `result` envelope is the canonical turn-complete signal."""
-    controller._set_awaiting_response(True)
+    controller._set_awaiting_response_for(1, True)
     emissions = _capture_emissions(controller)
 
-    controller._on_session_event({"type": "result", "duration_ms": 1234})
+    controller._on_session_event_for(1, {"type": "result", "duration_ms": 1234})
 
     assert controller.awaitingResponse is False
     assert emissions == [False]
@@ -163,7 +175,7 @@ def test_on_session_event_non_result_does_not_flip(controller):
     thinking" disappear and then sit through silent tool work with
     nothing to indicate progress.
     """
-    controller._set_awaiting_response(True)
+    controller._set_awaiting_response_for(1, True)
     emissions = _capture_emissions(controller)
 
     for event in (
@@ -173,7 +185,7 @@ def test_on_session_event_non_result_does_not_flip(controller):
         {"type": "system", "subtype": "init"},
         {},  # missing type
     ):
-        controller._on_session_event(event)
+        controller._on_session_event_for(1, event)
 
     assert controller.awaitingResponse is True
     assert emissions == []
@@ -181,10 +193,10 @@ def test_on_session_event_non_result_does_not_flip(controller):
 
 def test_on_session_closed_flips_off(controller):
     """OFF edge — subprocess EOF / crash / SIGTERM."""
-    controller._set_awaiting_response(True)
+    controller._set_awaiting_response_for(1, True)
     emissions = _capture_emissions(controller)
 
-    controller._on_session_closed()
+    controller._on_session_closed_for(1)
 
     assert controller.awaitingResponse is False
     assert emissions == [False]
@@ -197,7 +209,7 @@ def test_agent_event_action_new_resets_awaiting(controller):
     but the synchronous reset in `_on_agent_event` keeps the spinner
     from briefly lingering when the user mashes `<leader>aN`.
     """
-    controller._set_awaiting_response(True)
+    controller._set_awaiting_response_for(1, True)
     emissions = _capture_emissions(controller)
 
     controller._on_agent_event({"op": "show", "action": "new"})
@@ -212,7 +224,7 @@ def test_agent_event_show_without_action_new_does_not_reset(controller):
     Re-opening the pane with an in-flight turn shouldn't hide the
     "thinking" indicator — the conversation is still alive.
     """
-    controller._set_awaiting_response(True)
+    controller._set_awaiting_response_for(1, True)
     emissions = _capture_emissions(controller)
 
     controller._on_agent_event({"op": "show"})
@@ -233,19 +245,19 @@ def test_set_awaiting_response_is_idempotent(controller):
     emissions = _capture_emissions(controller)
 
     # Already False on construction — calling False again is a no-op.
-    controller._set_awaiting_response(False)
+    controller._set_awaiting_response_for(1, False)
     assert emissions == []
 
     # Real transition False -> True emits once.
-    controller._set_awaiting_response(True)
+    controller._set_awaiting_response_for(1, True)
     assert emissions == [True]
 
     # Re-asserting True is a no-op.
-    controller._set_awaiting_response(True)
+    controller._set_awaiting_response_for(1, True)
     assert emissions == [True]
 
     # Real transition True -> False emits once.
-    controller._set_awaiting_response(False)
+    controller._set_awaiting_response_for(1, False)
     assert emissions == [True, False]
 
 
@@ -262,20 +274,33 @@ def test_set_awaiting_response_is_idempotent(controller):
 
 
 def _seed_pending_permission(ctrl: AppController, request_id: str, tool: str) -> None:
-    """Inject a pending permission_request row into the controller's model.
+    """Inject a pending permission_request into model + the routing map.
 
-    Calls `apply` directly because we're already on the GUI thread —
-    same shortcut `submit_prompt` uses for the optimistic user-row
-    injection.
+    Two seeding steps mirror what happens in production:
+
+    1. `_session_models[1].apply` — populates the row that the QML
+       approve/deny card binds against (production path: queued
+       connection from `SessionHost.event_received`).
+    2. `_on_session_event_for(1, ...)` — populates
+       `_pending_permissions[request_id] = 1` so the Phase A
+       routing lookup in `respond_to_permission` finds the
+       issuing slot. Without this seed, the controller would
+       drop the response with "request_id not in pending map"
+       because no `permission_request` event ever populated
+       the routing dict.
+
+    Both calls are GUI-thread direct (same shortcut `submit_prompt`
+    uses for the optimistic user-row injection); no QueuedConnection
+    detour needed in tests.
     """
-    ctrl._session_model.apply(
-        {
-            "type": "permission_request",
-            "request_id": request_id,
-            "tool_name": tool,
-            "title": f"Allow {tool}?",
-        }
-    )
+    payload = {
+        "type": "permission_request",
+        "request_id": request_id,
+        "tool_name": tool,
+        "title": f"Allow {tool}?",
+    }
+    ctrl._session_models[1].apply(payload)
+    ctrl._on_session_event_for(1, payload)
 
 
 def test_respond_to_permission_allow_dispatches_host_and_model(controller):
@@ -284,10 +309,10 @@ def test_respond_to_permission_allow_dispatches_host_and_model(controller):
 
     controller.respond_to_permission("req-1", "allow")
 
-    assert controller._session_host.permission_calls == [("req-1", "allow")]
+    assert controller._session_hosts[1].permission_calls == [("req-1", "allow")]
     # Walk the model rows and find the resolved one. There's only one
     # row at this point so this is concise.
-    rows = controller._session_model._rows
+    rows = controller._session_models[1]._rows
     assert len(rows) == 1
     assert rows[0].permission_state == "approved"
     assert rows[0].request_id == "req-1"
@@ -299,8 +324,8 @@ def test_respond_to_permission_deny_dispatches_host_and_model(controller):
 
     controller.respond_to_permission("req-2", "deny")
 
-    assert controller._session_host.permission_calls == [("req-2", "deny")]
-    rows = controller._session_model._rows
+    assert controller._session_hosts[1].permission_calls == [("req-2", "deny")]
+    rows = controller._session_models[1]._rows
     assert rows[0].permission_state == "denied"
 
 
@@ -310,8 +335,8 @@ def test_respond_to_permission_invalid_decision_is_a_noop(controller):
 
     controller.respond_to_permission("req-3", "maybe")
 
-    assert controller._session_host.permission_calls == []
-    rows = controller._session_model._rows
+    assert controller._session_hosts[1].permission_calls == []
+    rows = controller._session_models[1]._rows
     # Row stays pending — invalid input must not corrupt model state.
     assert rows[0].permission_state == "pending"
 
@@ -324,15 +349,16 @@ def test_permission_request_event_does_not_clear_spinner(controller):
     envelope has fired yet. Clearing the spinner here would lie to
     the user about whether work is happening.
     """
-    controller._set_awaiting_response(True)
+    controller._set_awaiting_response_for(1, True)
     emissions = _capture_emissions(controller)
 
-    controller._on_session_event(
+    controller._on_session_event_for(
+        1,
         {
             "type": "permission_request",
             "request_id": "req-4",
             "tool_name": "Bash",
-        }
+        },
     )
 
     assert controller.awaitingResponse is True
@@ -351,13 +377,13 @@ def test_respond_to_permission_ordering_host_before_model(controller):
     _seed_pending_permission(controller, "req-5", "Glob")
 
     observed: list[int] = []
-    original_resolve = controller._session_model.resolve_permission
+    original_resolve = controller._session_models[1].resolve_permission
 
     def spy(request_id: str, behavior: str) -> None:
-        observed.append(len(controller._session_host.permission_calls))
+        observed.append(len(controller._session_hosts[1].permission_calls))
         original_resolve(request_id, behavior)
 
-    controller._session_model.resolve_permission = spy  # type: ignore[method-assign]
+    controller._session_models[1].resolve_permission = spy  # type: ignore[method-assign]
     controller.respond_to_permission("req-5", "allow")
 
     assert observed == [1], (
@@ -409,10 +435,10 @@ def test_app_controller_start_prewarms_sidecar(controller, monkeypatch):
 
     controller.start()
 
-    assert controller._session_host.start_calls == [""], (
+    assert controller._session_hosts[1].start_calls == [""], (
         "pre-warm must call host.start('') so the sidecar is alive at launch"
     )
-    assert controller._session_host.send_calls == [], (
+    assert controller._session_hosts[1].send_calls == [], (
         "no env-prompt means no initial user_message write"
     )
 
@@ -437,10 +463,10 @@ def test_app_controller_start_with_env_prompt_uses_hot_branch_after_prewarm(
 
     controller.start()
 
-    assert controller._session_host.start_calls == [""], (
+    assert controller._session_hosts[1].start_calls == [""], (
         "only the pre-warm should call start; submit_prompt must take the hot branch"
     )
-    assert controller._session_host.send_calls == ["hi from env"], (
+    assert controller._session_hosts[1].send_calls == ["hi from env"], (
         "env-prompt must route through send_user_message via submit_prompt's hot branch"
     )
     assert controller.awaitingResponse is True, (
@@ -468,18 +494,18 @@ def test_agent_event_action_new_rewarms_sidecar_after_stop(controller, monkeypat
     a <leader>aN reset would silently drop writes on a non-existent stdin.
     """
     # Simulate a running session first
-    controller._session_host.is_running = True
+    controller._session_hosts[1].is_running = True
 
-    initial_start_calls = list(controller._session_host.start_calls)
+    initial_start_calls = list(controller._session_hosts[1].start_calls)
 
     controller._on_agent_event({"op": "show", "action": "new"})
 
     # stop() was called for the running host
-    assert controller._session_host.stop_calls == 1, (
+    assert controller._session_hosts[1].stop_calls == 1, (
         "action='new' must stop the running host"
     )
     # Re-warm: start("") must be called once after the stop
-    new_calls = controller._session_host.start_calls[len(initial_start_calls) :]
+    new_calls = controller._session_hosts[1].start_calls[len(initial_start_calls) :]
     assert new_calls == [""], (
         "action='new' must re-warm the sidecar with start('') so the "
         "permission-mode pill stays live after reset"

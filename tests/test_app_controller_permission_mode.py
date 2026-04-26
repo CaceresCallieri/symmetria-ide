@@ -29,7 +29,10 @@ class _FakeSessionHost:
     `set_permission_mode_calls` ledger so we can assert the controller
     dispatched the right mode in the right order."""
 
-    def __init__(self) -> None:
+    def __init__(self, instance_index: int = 0) -> None:
+        # Mirror the real `SessionHost.__init__(..., instance_index=...)` shape so
+        # Phase B fixtures can construct N fakes with distinct slot ids.
+        self.instance_index = instance_index
         self.is_running = False
         self.start_calls: list[str] = []
         self.send_calls: list[str] = []
@@ -65,7 +68,8 @@ def controller():
     threads never spawn).
     """
     ctrl = AppController()
-    ctrl._session_host = _FakeSessionHost()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+    # Phase A pool refactor: replace slot 1's real host with the fake.
+    ctrl._session_hosts[1] = _FakeSessionHost(instance_index=1)  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
     yield ctrl
     ctrl.shutdown()
 
@@ -98,7 +102,7 @@ def test_cycle_permission_mode_dispatches_next_mode(controller):
 
     controller.cycle_permission_mode()
 
-    assert controller._session_host.set_permission_mode_calls == ["acceptEdits"]
+    assert controller._session_hosts[1].set_permission_mode_calls == ["acceptEdits"]
     # Property MUST NOT mutate — the sidecar echo is the source of truth.
     assert controller.permissionMode == "default"
     assert emissions == []
@@ -111,23 +115,25 @@ def test_cycle_permission_mode_full_cycle_order(controller):
     time, not from a private counter — we feed echoes between calls
     to simulate the sidecar's confirmation arriving.
     """
-    fake = controller._session_host
+    fake = controller._session_hosts[1]
 
     controller.cycle_permission_mode()
     assert fake.set_permission_mode_calls[-1] == "acceptEdits"
-    controller._on_session_event(
-        {"type": "permission_mode_changed", "mode": "acceptEdits"}
+    controller._on_session_event_for(
+        1, {"type": "permission_mode_changed", "mode": "acceptEdits"}
     )
 
     controller.cycle_permission_mode()
     assert fake.set_permission_mode_calls[-1] == "bypassPermissions"
-    controller._on_session_event(
-        {"type": "permission_mode_changed", "mode": "bypassPermissions"}
+    controller._on_session_event_for(
+        1, {"type": "permission_mode_changed", "mode": "bypassPermissions"}
     )
 
     controller.cycle_permission_mode()
     assert fake.set_permission_mode_calls[-1] == "plan"
-    controller._on_session_event({"type": "permission_mode_changed", "mode": "plan"})
+    controller._on_session_event_for(
+        1, {"type": "permission_mode_changed", "mode": "plan"}
+    )
 
     # Wraparound: from `plan` the next mode is `default` again.
     controller.cycle_permission_mode()
@@ -156,7 +162,7 @@ def test_cycle_after_event_resyncs_from_actual_mode(controller):
     controller.cycle_permission_mode()
     # Without optimistic mutation, this still computes "next after default"
     # which is acceptEdits — not "next after acceptEdits".
-    assert controller._session_host.set_permission_mode_calls == [
+    assert controller._session_hosts[1].set_permission_mode_calls == [
         "acceptEdits",
         "acceptEdits",
     ]
@@ -171,8 +177,8 @@ def test_permission_mode_changed_event_updates_property(controller):
     """A well-formed echo flips the property and emits exactly one signal."""
     emissions = _capture_mode_emissions(controller)
 
-    controller._on_session_event(
-        {"type": "permission_mode_changed", "mode": "acceptEdits"}
+    controller._on_session_event_for(
+        1, {"type": "permission_mode_changed", "mode": "acceptEdits"}
     )
 
     assert controller.permissionMode == "acceptEdits"
@@ -184,7 +190,9 @@ def test_permission_mode_changed_event_invalid_mode_is_ignored(controller):
     emissions = _capture_mode_emissions(controller)
 
     for bad in ("garbage", "ACCEPT_EDITS", "", "auto", "dontAsk"):
-        controller._on_session_event({"type": "permission_mode_changed", "mode": bad})
+        controller._on_session_event_for(
+            1, {"type": "permission_mode_changed", "mode": bad}
+        )
 
     assert controller.permissionMode == "default"
     assert emissions == []
@@ -194,7 +202,7 @@ def test_permission_mode_changed_event_missing_mode_is_ignored(controller):
     """Missing `mode` field — defensive guard against malformed envelopes."""
     emissions = _capture_mode_emissions(controller)
 
-    controller._on_session_event({"type": "permission_mode_changed"})
+    controller._on_session_event_for(1, {"type": "permission_mode_changed"})
 
     assert controller.permissionMode == "default"
     assert emissions == []
@@ -216,15 +224,15 @@ def test_set_permission_mode_idempotent(controller):
     emissions = _capture_mode_emissions(controller)
 
     # Start-time echo: default -> default, no-op.
-    controller._set_permission_mode("default")
+    controller._set_permission_mode_for(1, "default")
     assert emissions == []
 
     # Real transition: emits once.
-    controller._set_permission_mode("plan")
+    controller._set_permission_mode_for(1, "plan")
     assert emissions == ["plan"]
 
     # Re-asserting plan: still no re-emit.
-    controller._set_permission_mode("plan")
+    controller._set_permission_mode_for(1, "plan")
     assert emissions == ["plan"]
 
 
@@ -240,10 +248,10 @@ def test_session_closed_resets_to_default(controller):
     the synchronous reset prevents the visible window where the pill
     shows the dead subprocess's last mode.
     """
-    controller._set_permission_mode("bypassPermissions")
+    controller._set_permission_mode_for(1, "bypassPermissions")
     emissions = _capture_mode_emissions(controller)
 
-    controller._on_session_closed()
+    controller._on_session_closed_for(1)
 
     assert controller.permissionMode == "default"
     assert emissions == ["default"]
@@ -267,11 +275,11 @@ def test_cycle_when_no_session_running_still_dispatches_to_host(controller):
     test_send_set_permission_mode_without_subprocess_is_a_noop.
     """
     # Default fake has is_running = False
-    assert controller._session_host.is_running is False
+    assert controller._session_hosts[1].is_running is False
 
     controller.cycle_permission_mode()
 
     # Controller dispatches regardless — host decides whether to drop.
-    assert controller._session_host.set_permission_mode_calls == ["acceptEdits"]
+    assert controller._session_hosts[1].set_permission_mode_calls == ["acceptEdits"]
     # Property must not mutate without an echo.
     assert controller.permissionMode == "default"
