@@ -10,6 +10,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 ## Project — meta — `project/meta/` (identity, governance, key decisions)
 
 - [Project governance layer](project/meta/project_governance.md) — read .claude/project-standards.md, CONTRIBUTING.md, and Theme.qml before planning non-trivial work
+- [Agent dashboard dual-feed commitment](project/meta/agent_dashboard_commitment.md) — IDE keeps hooks AND adds SDK feed; orchestrator.nvim retires once IDE meets gates
 
 ## Project — active — `project/active/` (operational state being maintained)
 

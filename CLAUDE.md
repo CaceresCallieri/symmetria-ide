@@ -219,6 +219,7 @@ Cross-cutting design rules that hold across every Phase 2 follow-up:
 - `docs/phases.md` — the phased build plan
 - `docs/references.md` — Zed, Warp, cmux, Neovide
 - `docs/future.md` — long-horizon direction (own WM, gpui rewrite)
+- `docs/agent-dashboard-integration.md` — dual-feed (hooks + SDK) bridge plan, multi-instance commitment, `orchestrator.nvim` deprecation gates
 
 ## Non-negotiables
 
@@ -232,4 +233,4 @@ Cross-cutting design rules that hold across every Phase 2 follow-up:
 - Symmetria Shell (QuickShell-based desktop shell)
 - Symmetria File Manager (QML, to be integrated in Phase 1)
 - Symmetria WhatsApp (standalone, not integrated)
-- `orchestrator.nvim` (NeoVim plugin driving the Claude Code workflow)
+- `orchestrator.nvim` (NeoVim plugin driving the Claude Code workflow — slated for deprecation once the IDE meets the gates in `docs/agent-dashboard-integration.md`)
