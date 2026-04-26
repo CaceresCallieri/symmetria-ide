@@ -40,15 +40,27 @@ class _FakeSessionHost:
         # `respond_to_permission` tests so we can assert the host
         # received a (request_id, behavior) tuple in the right order.
         self.permission_calls: list[tuple[str, str]] = []
+        # Mode-cycle capture — mirrors the analogous field in the
+        # permission-mode test fake so a future shared-fake refactor
+        # doesn't have to choose between the two ledgers.
+        self.set_permission_mode_calls: list[str] = []
 
-    def start(self, prompt: str) -> None:
+    def start(self, prompt: str = "") -> None:
+        # Pre-warm path passes "" — accepting a default keeps the fake
+        # API symmetric with the real `SessionHost.start` post-pre-warm.
+        # Flip `is_running` AFTER appending so a test reading both fields
+        # in the same expression sees the post-spawn state.
         self.start_calls.append(prompt)
+        self.is_running = True
 
     def send_user_message(self, text: str) -> None:
         self.send_calls.append(text)
 
     def send_permission_response(self, request_id: str, behavior: str) -> None:
         self.permission_calls.append((request_id, behavior))
+
+    def send_set_permission_mode(self, mode: str) -> None:
+        self.set_permission_mode_calls.append(mode)
 
     def stop(self) -> None:
         self.stop_calls += 1
@@ -350,4 +362,87 @@ def test_respond_to_permission_ordering_host_before_model(controller):
 
     assert observed == [1], (
         "model.resolve_permission must run AFTER host.send_permission_response"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sidecar pre-warm — `AppController.start()` spawns the SDK subprocess
+# unconditionally so the permission-mode pill + Shift+Tab cycling are live
+# the moment the agent pane is reachable
+# ---------------------------------------------------------------------------
+#
+# These tests guard the behaviour change from "spawn-on-first-message" to
+# "pre-warm-at-launch". A regression where `AppController.start()` stops
+# pre-warming reintroduces the user-visible Shift+Tab silent-drop bug:
+# `cycle_permission_mode` writes a `set_permission_mode` envelope to a
+# non-existent stdin until the user sends their first message.
+#
+# `controller.start()` also calls `self._backend.start()` which spawns
+# nvim. To keep these tests hermetic we stub `_backend.start` (and `stop`
+# for the fixture teardown) so no subprocess actually launches.
+
+
+def _stub_backend(ctrl: AppController) -> None:
+    """Replace nvim spawn/teardown with no-ops so `controller.start()` is hermetic.
+
+    The pre-warm tests below need to call `controller.start()` to exercise
+    the new pre-warm path, but `start()` also spawns nvim via
+    `self._backend.start()`. Stubbing both methods avoids the subprocess
+    cost and keeps the test pure-Python — same hermetic discipline the
+    awaiting-state tests above rely on.
+    """
+    ctrl._backend.start = lambda: None  # type: ignore[method-assign]  # pyright: ignore[reportAttributeAccessIssue]
+    ctrl._backend.stop = lambda: None  # type: ignore[method-assign]  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_app_controller_start_prewarms_sidecar(controller, monkeypatch):
+    """Pre-warm contract — `controller.start()` calls `host.start("")` unconditionally.
+
+    With no `SYMMETRIA_IDE_AGENT_PROMPT` env var set, the pre-warm should
+    still spawn the sidecar with an empty prompt so `set_permission_mode`
+    writes work the moment the agent pane is reachable. This is the
+    regression guard for the user-visible Shift+Tab silent-drop bug.
+    """
+    monkeypatch.delenv("SYMMETRIA_IDE_AGENT_PROMPT", raising=False)
+    monkeypatch.delenv("SYMMETRIA_IDE_AGENT_VIEW", raising=False)
+    _stub_backend(controller)
+
+    controller.start()
+
+    assert controller._session_host.start_calls == [""], (
+        "pre-warm must call host.start('') so the sidecar is alive at launch"
+    )
+    assert controller._session_host.send_calls == [], (
+        "no env-prompt means no initial user_message write"
+    )
+
+
+def test_app_controller_start_with_env_prompt_uses_hot_branch_after_prewarm(
+    controller, monkeypatch
+):
+    """`SYMMETRIA_IDE_AGENT_PROMPT` path takes the hot branch post-pre-warm.
+
+    Before the pre-warm change, `submit_prompt` saw `is_running == False`
+    and called `start(prompt)` itself (cold branch). Now that
+    `controller.start()` pre-warms first, the env-prompt branch runs
+    AFTER `is_running` is True, so `submit_prompt` takes the hot branch
+    and routes through `send_user_message`. The synthetic-user-row
+    optimistic injection still fires, so the headless-smoke UX is
+    unchanged from the user's perspective — but the dispatch path
+    differs and tests should lock that in.
+    """
+    monkeypatch.setenv("SYMMETRIA_IDE_AGENT_PROMPT", "hi from env")
+    monkeypatch.delenv("SYMMETRIA_IDE_AGENT_VIEW", raising=False)
+    _stub_backend(controller)
+
+    controller.start()
+
+    assert controller._session_host.start_calls == [""], (
+        "only the pre-warm should call start; submit_prompt must take the hot branch"
+    )
+    assert controller._session_host.send_calls == ["hi from env"], (
+        "env-prompt must route through send_user_message via submit_prompt's hot branch"
+    )
+    assert controller.awaitingResponse is True, (
+        "submit_prompt's ON edge must fire even on the hot branch"
     )

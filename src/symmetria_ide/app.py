@@ -598,6 +598,21 @@ class AppController(QObject):
 
     def start(self) -> None:
         self._backend.start()
+        # Pre-warm the SDK sidecar at app launch so the permission-mode
+        # pill + Shift+Tab cycling are live the moment the agent pane is
+        # reachable. Without this, `cycle_permission_mode` writes a
+        # `set_permission_mode` envelope to a non-existent stdin (the
+        # `if self._proc is None` guard in `SessionHost._write_command`
+        # silently drops the write) until the user sends their first
+        # message — user-visible symptom: open IDE → press Shift+Tab on
+        # the agent pane → pill never moves → user assumes the binding
+        # is broken. Empty prompt to `start("")` spawns the subprocess
+        # but skips the initial `send_user_message`; the SDK's prompt
+        # async iterable blocks on its first await until `submit_prompt`
+        # later pushes onto it. The sidecar's start-time
+        # `permission_mode_changed("default")` echo proves the pre-warm
+        # succeeded and seeds the QML pill via `_on_session_event`.
+        self._session_host.start("")
         # Agent view is editor-first by default. Two opt-in vectors on
         # startup:
         #   SYMMETRIA_IDE_AGENT_PROMPT="..." — spawn one claude run
@@ -613,8 +628,11 @@ class AppController(QObject):
             log.info("SYMMETRIA_IDE_AGENT_PROMPT set — submitting initial prompt")
             # Route through submit_prompt so the env-var path picks up
             # the same synthetic-user-row injection that the composer
-            # uses. Without this the cold-start UX shows Claude's reply
-            # but no record of what the user asked.
+            # uses. Now that the sidecar is pre-warmed above, this hits
+            # `submit_prompt`'s hot branch (`is_running` is True), which
+            # calls `send_user_message` instead of spawning a second
+            # subprocess. The synthetic user-row injection inside
+            # `submit_prompt` still renders the prompt optimistically.
             self.submit_prompt(prompt)
         if want_view:
             self.show_agent()

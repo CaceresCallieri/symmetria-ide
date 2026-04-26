@@ -15,10 +15,9 @@
 import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 import {
-  query,
+  startup,
   type CanUseTool,
   type Options,
-  type PermissionMode,
   type PermissionResult,
   type Query,
   type SDKMessage,
@@ -252,36 +251,37 @@ const handleCommand = (cmd: InboundCommand): void => {
       log(`set_permission_mode: invalid mode ${cmd.mode} — ignored`);
       return;
     }
-    if (queryInstance === null) {
-      log(`set_permission_mode: query not yet ready — dropped`);
-      return;
-    }
-    // Fire-and-forget: setPermissionMode returns a Promise but we don't
-    // need to block the readline 'line' callback on its resolution. The
-    // success path emits the authoritative permission_mode_changed echo
-    // inside the .then(); the failure path logs + emits a sidecar_error
-    // so Python's pill stays in sync with whatever the SDK actually
-    // accepted (the cycle slot does NOT optimistically mutate per the
-    // protocol contract in protocol.ts:PermissionModeChangedEvent).
-    queryInstance
-      .setPermissionMode(cmd.mode)
-      .then(() => {
-        currentMode = cmd.mode;
-        writeEvent({
-          type: "permission_mode_changed",
-          mode: cmd.mode,
-          note: "sidecar-synthesized",
-        });
-      })
-      .catch((err: unknown) => {
+    // Sidecar's `currentMode` is the authoritative source of truth for
+    // permission gating because (a) `canUseTool` short-circuits on it
+    // directly — that's the actual decision point for tool calls, and
+    // (b) `Query.setPermissionMode()` is a control-protocol call that
+    // requires an active iteration loop to be processed. Pre-first-
+    // message the iteration is blocked on the empty user-message queue,
+    // so setPermissionMode promises queue forever and never resolve.
+    // We update `currentMode` + emit the echo synchronously here so
+    // the QML pill is responsive immediately (matching what Claude
+    // Code TUI does — it manages mode locally and sends it with the
+    // next turn rather than asking the API for permission to change
+    // modes pre-turn).
+    currentMode = cmd.mode;
+    writeEvent({
+      type: "permission_mode_changed",
+      mode: cmd.mode,
+      note: "sidecar-synthesized",
+    });
+    // Best-effort SDK push so server-side mode awareness tracks our
+    // local state once the session is live. If queryInstance is null
+    // (race window before startup() returns) or the call rejects (SDK
+    // refuses the transition — extremely unlikely with
+    // allowDangerouslySkipPermissions=true), we log and continue. The
+    // local currentMode + canUseTool short-circuit are already
+    // authoritative, so a failed SDK push does NOT affect tool gating.
+    if (queryInstance !== null) {
+      queryInstance.setPermissionMode(cmd.mode).catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         log(`setPermissionMode(${cmd.mode}) rejected: ${message}`);
-        writeEvent({
-          type: "sidecar_error",
-          message: `setPermissionMode(${cmd.mode}) failed: ${message}`,
-          note: "sidecar-synthesized",
-        });
       });
+    }
     return;
   }
 };
@@ -356,8 +356,21 @@ const containsToolResult = (msg: SDKMessage): boolean => {
   );
 };
 
+// SDK heartbeat / keepalive messages arrive as `{type: "system", subtype:
+// "status"}` and have no UI value — they're internal liveness signals. The
+// Python-side `_row_from_system` falls back to `text = subtype` for any
+// unknown subtype, so without filtering they render as a continuous stream
+// of "status / status" rows that drown out real session events. Drop them
+// at the sidecar boundary so the wire never carries them. New `system`
+// subtypes still pass through (per the placeholder discipline of letting
+// unknown envelopes surface) — only the known-noise "status" is filtered.
+const isSystemStatusKeepalive = (msg: SDKMessage): boolean =>
+  msg.type === "system" &&
+  (msg as unknown as { subtype?: unknown }).subtype === "status";
+
 const translateMessage = (msg: SDKMessage): OutboundEvent | null => {
   if (msg.type === "user" && !containsToolResult(msg)) return null;
+  if (isSystemStatusKeepalive(msg)) return null;
 
   // Everything else is a passthrough — SessionModel._row_from_* routes by
   // top-level `type` and the inner fields match what those helpers already
@@ -368,9 +381,32 @@ const translateMessage = (msg: SDKMessage): OutboundEvent | null => {
 };
 
 (async () => {
-  log("ready; starting SDK query");
+  log("ready; warming up SDK");
+  // Use startup() instead of calling query() directly so the SDK's
+  // internal CLI subprocess is spawned + initialize-handshaked BEFORE
+  // any user message flows. With direct query() the CLI is lazily
+  // spawned only when the prompt iterable yields its first value, so
+  // setPermissionMode calls land on a non-existent control channel
+  // until the first user_message arrives — user-visible symptom: the
+  // permission-mode pill in the agent pane refuses to cycle until the
+  // first prompt is sent. WarmQuery.query() returns a Query whose CLI
+  // is already alive, so setPermissionMode and the system:init event
+  // both fire immediately. Matches what Claude Code TUI does (sdk.d.ts:5142).
+  let warm;
   try {
-    const q = query({ prompt: userMessages, options });
+    warm = await startup({ options });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`startup error: ${message}`);
+    writeEvent({
+      type: "sidecar_error",
+      message: `startup failed: ${message}`,
+      note: "sidecar-synthesized",
+    });
+    process.exit(1);
+  }
+  try {
+    const q = warm.query(userMessages);
     queryInstance = q;
     // Emit the initial mode echo so AppController's _permission_mode
     // matches the sidecar's authoritative `currentMode` from the start.

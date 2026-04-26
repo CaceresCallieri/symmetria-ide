@@ -190,22 +190,28 @@ class SessionHost(QObject):
 
     @Slot(str)
     def start(self, prompt: str, cwd: Path | None = None) -> None:
-        """Spawn the Node sidecar; deliver `prompt` as first user message.
+        """Spawn the Node sidecar; optionally deliver `prompt` as first user message.
 
-        The sidecar keeps stdin open across turns — we write the
-        initial prompt as the first `user_message` command via
+        The sidecar keeps stdin open across turns — when `prompt` is
+        non-empty, we write it as the first `user_message` command via
         `send_user_message`, then subsequent composer submits become
         additional JSONL lines on the same stdin stream. The sidecar
         exits cleanly only when stdin closes (via `stop()`) or on
         SDK error.
 
+        Empty `prompt` spawns the subprocess without sending an initial
+        user message — the SDK's `query()` async iterable blocks on its
+        first await until `send_user_message` is later called. This is
+        the agent-pane pre-warm path used by `AppController.start()`
+        so the permission-mode pill + Shift+Tab cycling are live the
+        moment the pane is reachable, instead of silently dropping
+        `set_permission_mode` writes on a non-existent stdin until the
+        user sends their first message.
+
         No-op if called while a subprocess is already spawned.
         """
         if self._proc is not None:
             log.warning("SessionHost.start called while already running — ignored")
-            return
-        if not prompt:
-            log.warning("SessionHost.start with empty prompt — not spawning")
             return
         # Build artifact must exist before we attempt to spawn. The
         # sidecar's `dist/index.js` is gitignored — `npm run build`
@@ -267,11 +273,16 @@ class SessionHost(QObject):
         )
         self._stdout_worker.start()
         self._stderr_worker.start()
-        # Deliver the initial user turn on the now-alive stdin stream.
+        # Deliver the initial user turn on the now-alive stdin stream — only
+        # when a non-empty prompt was supplied. Pre-warm callers
+        # (`AppController.start` at IDE launch) pass `""` to spawn-only and
+        # let the SDK's prompt async iterable block on its first awaited
+        # next() until a `send_user_message` write later pushes onto it.
         # Factoring the write through `send_user_message` means there's
         # one JSON envelope shape + one `_stdin_lock`-serialised write
         # path — this function doesn't duplicate them.
-        self.send_user_message(prompt)
+        if prompt:
+            self.send_user_message(prompt)
 
     @Slot()
     def stop(self) -> None:

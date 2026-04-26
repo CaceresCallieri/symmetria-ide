@@ -233,3 +233,154 @@ def test_send_set_permission_mode_without_subprocess_is_a_noop():
     """Same defensive contract as the other two send_* methods."""
     host = SessionHost()
     host.send_set_permission_mode("plan")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Pre-warm path — `start("")` spawns the subprocess without sending an
+# initial user message
+# ---------------------------------------------------------------------------
+#
+# The pre-warm contract is what makes the permission-mode pill +
+# Shift+Tab cycling work the moment the agent pane is reachable, instead
+# of silently dropping `set_permission_mode` writes on a non-existent
+# stdin until the user sends their first message. AppController.start()
+# calls `session_host.start("")` unconditionally; if a future refactor
+# changes `start("")` to either error out or send an empty user_message
+# envelope, the user-visible Shift+Tab silent-drop bug returns.
+
+
+class _EmptyStream:
+    """`readline()` returns "" immediately so worker threads exit at EOF."""
+
+    def readline(self) -> str:
+        return ""
+
+    def __iter__(self):
+        # `_run_stderr_loop` iterates the stream directly (`for line in proc.stderr`)
+        # — yielding nothing closes the iterator and the loop falls through.
+        return iter(())
+
+
+class _FakeProcWithStreams:
+    """Subprocess stand-in shaped for the pre-warm + stop lifecycle.
+
+    Exposes the surface `start()` and `stop()` touch:
+      stdin   — `_FakeStdin` (captures any write attempts)
+      stdout  — `_EmptyStream` (worker reads "" → loop exits cleanly)
+      stderr  — `_EmptyStream` (stderr worker iterates → empty → exits)
+      terminate / wait / kill — no-ops so `host.stop()` doesn't blow up
+    """
+
+    def __init__(self) -> None:
+        self.stdin = _FakeStdin()
+        self.stdout = _EmptyStream()
+        self.stderr = _EmptyStream()
+        self.terminate_calls = 0
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+
+    def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+        return 0
+
+    def kill(self) -> None:
+        pass
+
+
+def _install_pre_warm_fakes(monkeypatch, fake_proc: _FakeProcWithStreams) -> None:
+    """Wire `Popen` + `_sidecar_dist_path` so `start()` runs without a real subprocess.
+
+    Module-level monkeypatch on `symmetria_ide.session_host.subprocess.Popen`
+    intercepts the spawn; `_sidecar_dist_path` returns a path that exists
+    so the dist-check guard at the top of `start()` doesn't bail early.
+    """
+    import symmetria_ide.session_host as session_host_module
+
+    def fake_popen(*_args, **_kwargs):
+        return fake_proc
+
+    monkeypatch.setattr(session_host_module.subprocess, "Popen", fake_popen)
+    # Use `__file__` itself as the "exists" target — no temp-file plumbing.
+    monkeypatch.setattr(
+        session_host_module,
+        "_sidecar_dist_path",
+        lambda: __import__("pathlib").Path(__file__),
+    )
+
+
+def test_start_with_empty_prompt_does_not_send_user_message(monkeypatch):
+    """Pre-warm contract — `start("")` spawns but writes nothing to stdin.
+
+    This is the regression guard for the user-visible bug. If `start("")`
+    accidentally sends `{"type":"user_message","content":""}`, the SDK
+    receives an empty turn and may either (a) hallucinate context or
+    (b) error. Either way, the pane shows confusing output the moment
+    the IDE launches.
+    """
+    host = SessionHost()
+    fake = _FakeProcWithStreams()
+    _install_pre_warm_fakes(monkeypatch, fake)
+
+    try:
+        host.start("")
+        # `_proc is not None` is the spawn proof; `is_running` is not
+        # asserted here because the fake stdout/stderr streams EOF
+        # immediately, which causes the worker threads to set
+        # `_stop_event` in their finally blocks before the test reaches
+        # the assertion. In production the real stdout blocks on the
+        # SDK's first event, so `is_running` stays True — the artificial
+        # immediate EOF is a test-only artifact, not a contract change.
+        assert host._proc is not None  # pyright: ignore[reportPrivateUsage]
+        assert fake.stdin.chunks == [], (
+            "pre-warm must not write any inbound envelope to stdin"
+        )
+        assert fake.stdin.flush_count == 0
+    finally:
+        host.stop()
+
+
+def test_start_with_nonempty_prompt_still_sends_user_message(monkeypatch):
+    """Backward-compat — non-empty prompt path keeps the initial write.
+
+    Locks in that the empty-prompt change didn't accidentally regress
+    the `SYMMETRIA_IDE_AGENT_PROMPT` headless-smoke path or the future
+    cold-start composer flow.
+    """
+    host = SessionHost()
+    fake = _FakeProcWithStreams()
+    _install_pre_warm_fakes(monkeypatch, fake)
+
+    try:
+        host.start("hello sir")
+        assert host._proc is not None  # pyright: ignore[reportPrivateUsage]
+        assert fake.stdin.flush_count == 1
+        assert _decode_one(fake) == {  # type: ignore[arg-type]
+            "type": "user_message",
+            "content": "hello sir",
+        }
+    finally:
+        host.stop()
+
+
+def test_send_set_permission_mode_after_prewarm_writes_envelope(monkeypatch):
+    """Regression guard — the pre-warm makes mode-cycling work immediately.
+
+    This is the test that, had it existed before, would have caught the
+    Shift+Tab silent-drop bug. After pre-warm, `_proc is not None`, so
+    `_write_command` proceeds instead of taking the silent-drop branch.
+    """
+    host = SessionHost()
+    fake = _FakeProcWithStreams()
+    _install_pre_warm_fakes(monkeypatch, fake)
+
+    try:
+        host.start("")
+        host.send_set_permission_mode("acceptEdits")
+
+        assert fake.stdin.flush_count == 1
+        assert _decode_one(fake) == {  # type: ignore[arg-type]
+            "type": "set_permission_mode",
+            "mode": "acceptEdits",
+        }
+    finally:
+        host.stop()
