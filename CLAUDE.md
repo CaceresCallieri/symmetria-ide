@@ -220,6 +220,7 @@ Cross-cutting design rules that hold across every Phase 2 follow-up:
 - `docs/references.md` — Zed, Warp, cmux, Neovide
 - `docs/future.md` — long-horizon direction (own WM, gpui rewrite)
 - `docs/agent-dashboard-integration.md` — dual-feed (hooks + SDK) bridge plan, multi-instance commitment, `orchestrator.nvim` deprecation gates
+- `docs/orchestrator-replacement-prd.md` — phased PRD (Phases A–G) for absorbing orchestrator.nvim's workflow into the IDE. Read this before starting any agent-pane multi-instance work.
 
 ## Non-negotiables
 
