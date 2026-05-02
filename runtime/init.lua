@@ -700,4 +700,42 @@ vim.api.nvim_create_autocmd("User", {
   end,
 })
 
+-- ============================================================================
+-- File manager toggle-overlay keybind
+-- ============================================================================
+--
+-- <leader>e (mnemonic: "explorer") toggles the embedded Symmetria File
+-- Manager overlay. The overlay floats above NvimView with a dim scrim
+-- behind it and dismisses on Escape. AppController owns the visibility
+-- state; this keybind only emits the rpcnotify event.
+--
+-- Initial path is the current buffer's directory if it exists on disk,
+-- otherwise nvim's cwd. Sending the path explicitly lets the overlay
+-- boot into the right directory without an extra RPC roundtrip.
+
+local function open_file_manager()
+  local buf_path = vim.api.nvim_buf_get_name(0)
+  local initial_path = ""
+  if buf_path ~= "" then
+    -- Prefer the buffer's parent directory so users navigating from
+    -- a file see siblings, not the project root.
+    local parent = vim.fn.fnamemodify(buf_path, ":p:h")
+    if parent ~= "" and vim.fn.isdirectory(parent) == 1 then
+      initial_path = parent
+    end
+  end
+  if initial_path == "" then
+    initial_path = vim.fn.getcwd()
+  end
+  pcall(vim.rpcnotify, 0, "fm", {
+    op = "toggle",
+    initialPath = initial_path,
+  })
+end
+
+vim.keymap.set("n", "<leader>e", open_file_manager, {
+  silent = true,
+  desc = "Toggle Symmetria File Manager overlay",
+})
+
 return M

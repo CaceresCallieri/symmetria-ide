@@ -43,13 +43,15 @@ repos:
         types_or: [lua]
         pass_filenames: true
 
-      # QML lint — uses system `qmllint`. If you have pyside6-qmllint
-      # installed (PySide6 devtools), swap the entry to that wrapper for
-      # type-aware warnings against Python-registered QML types.
+      # QML lint — must use Qt6's qmllint, not the bare `qmllint` on PATH
+      # (which resolves to Qt5's binary on Arch and chokes on Qt6 syntax
+      # like inline component `Component { Window { ... } }` or aliased
+      # imports `import Foo.Bar as Baz`). See CLAUDE.md: the Qt6 binary
+      # lives at /usr/lib/qt6/bin/qmllint.
       - id: qmllint
         name: qmllint (QML)
         language: system
-        entry: qmllint
+        entry: /usr/lib/qt6/bin/qmllint
         files: \.qml$
         pass_filenames: true
 

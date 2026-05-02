@@ -378,4 +378,10 @@ def _dispatch_notification(self: NvimBackend, name: str, args: list[Any]) -> Non
             return
         self.agent_event.emit(args[0])
         return
+    if name == "fm":
+        if not args or not isinstance(args[0], dict):
+            log.warning("fm notification with unexpected payload: %r", args)
+            return
+        self.fm_event.emit(args[0])
+        return
     log.debug("unhandled notification: %s (args=%r)", name, args)

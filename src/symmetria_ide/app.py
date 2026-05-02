@@ -218,10 +218,12 @@ class AppController(QObject):
 
     backendReady = Signal()
     agentVisibleChanged = Signal()
+    fmVisibleChanged = Signal()
     awaitingResponseChanged = Signal()
     permissionModeChanged = Signal()
     focusedInstanceChanged = Signal()
     instanceCountChanged = Signal()
+    instanceTitlesChanged = Signal()
 
     # Cycle order for Shift+Tab in the agent pane. Tuple is the source of
     # truth for both validation (gate `_set_permission_mode` against this)
@@ -279,6 +281,13 @@ class AppController(QObject):
         self._session_models: dict[int, SessionModel] = {}
         self._awaiting_response: dict[int, bool] = {}
         self._permission_mode: dict[int, str] = {}
+        # Per-slot session title — captured from the user's first prompt
+        # via `submit_prompt_for` and never overwritten thereafter (matches
+        # orchestrator.nvim's "title source is set-once" semantic, where
+        # OSC 2 typically fires once at session-start). An empty/missing
+        # entry means "no title yet" and the AgentTopBar chip renders
+        # only the slot number. `_close_instance` removes the entry.
+        self._instance_titles: dict[int, str] = {}
         # Slot whose transcript / state the QML pane currently mirrors.
         # Phase A locks this at 1 (only one instance exists). Phase B
         # introduces `<C-1>..<C-5>` to reassign it.
@@ -292,10 +301,15 @@ class AppController(QObject):
         # PRD §4.3 — adding it now keeps Phase B from re-touching
         # `respond_to_permission`.
         self._pending_permissions: dict[str, int] = {}
-        # Initialize slot 1 — the single-instance pre-warm target. Done
-        # via the same helper Phase B will call on `<leader>aN` so the
-        # construction path is exercised from frame 1.
-        self._create_instance(1)
+        # NB: pool starts EMPTY. Previously `__init__` auto-allocated
+        # slot 1 (so the bubble strip read as "1 active" before the
+        # user had asked for any agent), and `start()` pre-warmed its
+        # subprocess. Both violated the user's mental model — "no
+        # agents until I press <leader>aN". The first `<leader>aN`
+        # now calls `_spawn_instance(1)` lazily, matching what the
+        # subsequent `<leader>aN` invocations do for slots 2..5. The
+        # env-var startup paths (`SYMMETRIA_IDE_AGENT_PROMPT` /
+        # `_VIEW`) handle the spawn themselves in `start()`.
         # ----- Backend signal wiring (unchanged) -------------------------
         self._backend.capsule_updated.connect(self._route_capsule)
         self._backend.cmdline_updated.connect(self._cmdline.apply)
@@ -312,6 +326,13 @@ class AppController(QObject):
         # path before emitting `agent_event`.
         self._backend.agent_event.connect(self._on_agent_event)
         self._agent_visible = False
+        # File manager toggle-overlay lifecycle. Same routing pattern as
+        # agent_event — Lua emits via rpcnotify, NvimBackend re-emits as
+        # fm_event, this controller owns the state. The panel itself is a
+        # QML overlay over NvimView (not a separate window).
+        self._backend.fm_event.connect(self._on_fm_event)
+        self._fm_visible = False
+        self._fm_initial_path = ""
 
     def _create_instance(self, slot: int) -> None:
         """Allocate one pool entry: host + model + per-instance scalar state.
@@ -382,6 +403,22 @@ class AppController(QObject):
                 return slot
         return None
 
+    @staticmethod
+    def _derive_title(text: str) -> str:
+        """Turn a raw user prompt into a chip-sized session title.
+
+        Strips whitespace, takes only the first line (multi-line prompts
+        usually have a clear "topic sentence" first), and truncates to
+        an orchestrator-matching 32 chars with a U+2026 ellipsis. The
+        AgentTopBar chip applies a tighter visual cap on top of this
+        via `elide: Text.ElideRight` — this method only ensures the
+        Python-side cap so the wire/state stays compact.
+        """
+        first_line = text.strip().splitlines()[0] if text.strip() else ""
+        if len(first_line) <= 32:
+            return first_line
+        return first_line[:32] + "…"
+
     def _spawn_instance(self, slot: int, prompt: str = "") -> None:
         """Allocate the slot and pre-warm its sidecar.
 
@@ -420,6 +457,9 @@ class AppController(QObject):
         self._session_models.pop(slot, None)
         self._awaiting_response.pop(slot, None)
         self._permission_mode.pop(slot, None)
+        had_title = self._instance_titles.pop(slot, None) is not None
+        if had_title:
+            self.instanceTitlesChanged.emit()
         self._pending_permissions = {
             req_id: issuing_slot
             for req_id, issuing_slot in self._pending_permissions.items()
@@ -476,6 +516,21 @@ class AppController(QObject):
     @Property(bool, notify=agentVisibleChanged)
     def agentVisible(self) -> bool:
         return self._agent_visible
+
+    @Property(bool, notify=fmVisibleChanged)
+    def fmVisible(self) -> bool:
+        return self._fm_visible
+
+    @Property(str, notify=fmVisibleChanged)
+    def fmInitialPath(self) -> str:
+        """Initial directory for the FM overlay — set just before show_fm.
+
+        QML reads this when the overlay's Loader becomes active so the
+        FileManager panel boots into the right directory. Reset to ""
+        when the overlay closes so the next open re-pulls the current
+        nvim cwd rather than reusing a stale value.
+        """
+        return self._fm_initial_path
 
     @Property(bool, notify=awaitingResponseChanged)
     def awaitingResponse(self) -> bool:
@@ -552,6 +607,47 @@ class AppController(QObject):
         as new sidecars spawn; `<C-S-q>` decrements it on close.
         """
         return len(self._session_hosts)
+
+    @Property(list, notify=instanceCountChanged)
+    def activeInstanceSlots(self) -> list[int]:
+        """Sorted list of occupied pool slot indices.
+
+        Reuses `instanceCountChanged` as the notify signal because count
+        and key-set always change together (a spawn adds one slot AND
+        increments count; a close removes one AND decrements). The QML
+        bubble strip in `AgentPane.qml` uses this to render filled vs.
+        empty bubbles without a second notify hop.
+        """
+        return sorted(self._session_hosts.keys())
+
+    @Property(list, notify=instanceTitlesChanged)
+    def instanceTitles(self) -> list[str]:
+        """Per-slot titles, indexed 0..maxInstances-1 (slot N at index N-1).
+
+        QML's AgentTopBar chip Repeater iterates over `activeInstanceSlots`
+        but each delegate needs its slot's title text. A list aligned to
+        slot indices means the delegate just reads `controller.instanceTitles[bubble.slot - 1]`
+        — no per-slot Slot call, no map lookup, no notify-per-slot churn.
+
+        Empty string at any index = "no title yet" and the chip renders
+        the slot number alone (orchestrator.nvim's same fallback).
+        """
+        return [
+            self._instance_titles.get(slot, "")
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
+    @Property(int, constant=True)
+    def maxInstances(self) -> int:
+        """Pool capacity (the `_MAX_INSTANCES` constant).
+
+        Surfaced as a `constant=True` property — it never changes at
+        runtime, so QML can render exactly N bubbles without binding
+        against a notify signal. The QML side uses this as the Repeater
+        model length so the bubble strip stays aligned with the spawn
+        cap if `_MAX_INSTANCES` ever shifts.
+        """
+        return self._MAX_INSTANCES
 
     # `QObject` here (not `SessionModel`) so the property tolerates a
     # transient None during pool transitions (close-empty → spawn) and
@@ -662,6 +758,85 @@ class AppController(QObject):
         # target direction; toggle does not.
         self._agent_visible = not self._agent_visible
         self.agentVisibleChanged.emit()
+
+    # --- File manager overlay --------------------------------------------
+
+    @Slot(str)
+    def show_fm(self, initial_path: str = "") -> None:
+        """Open the file-manager overlay at `initial_path` (or nvim cwd)."""
+        if self._fm_visible:
+            return
+        self._fm_initial_path = initial_path or self._nvim_cwd_or_home()
+        self._fm_visible = True
+        self.fmVisibleChanged.emit()
+
+    @Slot()
+    def hide_fm(self) -> None:
+        """Dismiss the file-manager overlay; focus returns to the editor."""
+        if not self._fm_visible:
+            return
+        self._fm_visible = False
+        self._fm_initial_path = ""
+        self.fmVisibleChanged.emit()
+
+    @Slot()
+    def toggle_fm(self) -> None:
+        if self._fm_visible:
+            self.hide_fm()
+        else:
+            self.show_fm("")
+
+    @Slot(str)
+    def open_in_nvim(self, path: str) -> None:
+        """Open a file in NeoVim and dismiss the overlay.
+
+        Called by the file-manager panel's open action. The path is
+        passed to nvim via `:edit <path>` — fnameescape protects against
+        spaces / special chars. The overlay closes after dispatch so
+        focus returns to the editor for the freshly-opened buffer.
+        """
+        if not path:
+            return
+        # `fnameescape` is the safe quoting routine for nvim ex-command
+        # arguments — handles spaces, percent, hash, etc. Wrapping the
+        # whole call in a single `:execute` keeps the input() one shot.
+        cmd = f":execute 'edit ' . fnameescape({path!r})\n"
+        self._backend.input(cmd)
+        self.hide_fm()
+
+    def _nvim_cwd_or_home(self) -> str:
+        """Best-effort current directory for the FM overlay's initial path.
+
+        Reading nvim's cwd requires an RPC call from the worker thread;
+        rather than block the GUI we fall back to $HOME if a cached cwd
+        is unavailable. Future: subscribe to nvim's DirChanged autocmd
+        and cache the path on AppController for an instant lookup.
+        """
+        # Placeholder: $HOME is the safe default. Lua keybind can pass a
+        # specific path via show_fm(path) when needed.
+        import os
+
+        return os.path.expanduser("~")
+
+    def _on_fm_event(self, payload: dict) -> None:
+        """Route Lua-emitted fm rpcnotify events.
+
+        Payload shape:
+          { op: "show"|"hide"|"toggle", initialPath?: string }
+        """
+        op = str(payload.get("op") or "").lower()
+        initial_path = str(payload.get("initialPath") or "")
+        if op == "show":
+            self.show_fm(initial_path)
+        elif op == "hide":
+            self.hide_fm()
+        elif op == "toggle":
+            if self._fm_visible:
+                self.hide_fm()
+            else:
+                self.show_fm(initial_path)
+        else:
+            log.warning("fm event with unknown op: %r", payload)
 
     def _on_session_event_for(self, slot: int, event: dict) -> None:
         """Indexed event router — handles OFF edges + permission tracking.
@@ -839,6 +1014,23 @@ class AppController(QObject):
         # no-ops with their own logs — keep this dispatcher thin.
         self.focus_instance(index)
 
+    @Slot()
+    def close_focused_instance(self) -> None:
+        """QML-facing close — used by the agent pane's Ctrl+Shift+Q binding.
+
+        Mirrors the editor-side `<C-S-q>` keymap installed in
+        `runtime/init.lua`, which dispatches via `agent_event` →
+        `_handle_agent_close`. The QML composer / pane chrome can't reach
+        nvim's keymap system (focus sits on a TextField), so a parallel
+        QML→Python bridge is required.
+
+        Routes through `_handle_agent_close({})` rather than calling
+        `_close_instance` directly — `_handle_agent_close` carries the
+        refocus + empty-pool + signal-emit semantics that QML's chrome
+        relies on (chip strip empties, spinner clears, pill resets).
+        """
+        self._handle_agent_close({})
+
     def _handle_agent_close(self, payload: dict) -> None:
         """`op=close` dispatch — `<C-S-q>` (or future explicit-index variants).
 
@@ -919,6 +1111,14 @@ class AppController(QObject):
         if index not in self._session_hosts:
             log.warning("submit_prompt_for: slot %d not in pool — dropped", index)
             return
+        # Capture the first prompt as this slot's title, never overwriting.
+        # Mirrors orchestrator.nvim's set-once semantic for OSC-2-driven
+        # titles. The AgentTopBar chip reads `controller.instanceTitles`
+        # to render `<slot> │ <title>` once a title exists; before this
+        # the chip shows only the slot number.
+        if index not in self._instance_titles:
+            self._instance_titles[index] = self._derive_title(text)
+            self.instanceTitlesChanged.emit()
         host = self._session_hosts[index]
         model = self._session_models[index]
         # Optimistic local rendering. `apply` is the same slot wired
@@ -1003,45 +1203,41 @@ class AppController(QObject):
 
     def start(self) -> None:
         self._backend.start()
-        # Pre-warm slot 1's SDK sidecar at app launch so the permission-
-        # mode pill + Shift+Tab cycling are live the moment the agent
-        # pane is reachable. Without this, `cycle_permission_mode`
-        # writes a `set_permission_mode` envelope to a non-existent
-        # stdin (the `if self._proc is None` guard in
-        # `SessionHost._write_command` silently drops the write) until
-        # the user sends their first message — user-visible symptom:
-        # open IDE → press Shift+Tab on the agent pane → pill never
-        # moves → user assumes the binding is broken. Empty prompt to
-        # `start("")` spawns the subprocess but skips the initial
-        # `send_user_message`; the SDK's prompt async iterable blocks
-        # on its first await until `submit_prompt` later pushes onto
-        # it. The sidecar's start-time `permission_mode_changed("default")`
-        # echo proves the pre-warm succeeded and seeds the QML pill via
-        # `_on_session_event_for`. Phase A pre-warms ONE slot — Phase B
-        # spawns additional slots lazily on `<leader>aN`.
-        self._session_hosts[1].start("")
-        # Agent view is editor-first by default. Two opt-in vectors on
-        # startup:
-        #   SYMMETRIA_IDE_AGENT_PROMPT="..." — spawn one claude run
-        #     with the given prompt AND open the agent view so the
-        #     events are immediately visible. Used by headless smoke.
-        #   SYMMETRIA_IDE_AGENT_VIEW=1      — open the agent view
-        #     with an empty composer ready for interactive typing.
-        # Neither set = classic editor-only workflow. User can still
-        # open the agent view at any time via `<leader>A`.
+        # Pool stays empty unless an env-var path explicitly opts in.
+        # The first interactive `<leader>aN` lazily spawns slot 1 via
+        # `_handle_agent_show("new")` → `_next_free_slot()` returns 1
+        # → `_spawn_instance(1)`. Permission-mode cycling pre-first-
+        # message no longer needs a pre-warm: the sidecar's local
+        # `currentMode` is authoritative (CLAUDE.md gotcha #25), so
+        # Shift+Tab works the moment the user opens the pane (which
+        # cannot happen without spawning a slot first).
+        #
+        # Two env-var startup paths still need a slot to land on:
+        #   SYMMETRIA_IDE_AGENT_PROMPT="..." — spawn slot 1 with the
+        #     given prompt AND open the agent view. Used by headless
+        #     smoke tests; equivalent to the user pressing <leader>aN
+        #     and immediately typing the prompt.
+        #   SYMMETRIA_IDE_AGENT_VIEW=1      — spawn slot 1 (empty)
+        #     and open the agent view ready for interactive typing.
+        # Neither set = classic editor-only workflow with empty pool.
         prompt = os.environ.get("SYMMETRIA_IDE_AGENT_PROMPT") or ""
         want_view = bool(prompt) or os.environ.get("SYMMETRIA_IDE_AGENT_VIEW") == "1"
-        if prompt:
-            log.info("SYMMETRIA_IDE_AGENT_PROMPT set — submitting initial prompt")
-            # Route through submit_prompt so the env-var path picks up
-            # the same synthetic-user-row injection that the composer
-            # uses. Now that the sidecar is pre-warmed above, this hits
-            # `submit_prompt`'s hot branch (`is_running` is True), which
-            # calls `send_user_message` instead of spawning a second
-            # subprocess. The synthetic user-row injection inside
-            # `submit_prompt` still renders the prompt optimistically.
-            self.submit_prompt(prompt)
         if want_view:
+            # `_create_instance(1)` allocates host + model + per-instance
+            # state without spawning a subprocess. `submit_prompt`'s cold
+            # branch (`is_running == False`) then drives `host.start(prompt)`
+            # so the first user_message and the subprocess spawn are a
+            # single SDK exchange — no separate empty pre-warm write.
+            # For the empty-prompt VIEW path, `_spawn_instance` does the
+            # subprocess warm-up directly so the pane has something to
+            # focus on when shown.
+            if prompt:
+                log.info("SYMMETRIA_IDE_AGENT_PROMPT set — spawning slot 1 cold")
+                self._create_instance(1)
+                self.submit_prompt(prompt)
+            else:
+                log.info("SYMMETRIA_IDE_AGENT_VIEW set — pre-warming slot 1")
+                self._spawn_instance(1)
             self.show_agent()
         self.backendReady.emit()
 
@@ -1086,28 +1282,6 @@ class AppController(QObject):
     @property
     def whichkey_model(self) -> WhichKeyModel:
         return self._whichkey_model
-
-    @property
-    def session_host(self) -> SessionHost:
-        """The focused instance's session host.
-
-        Read by `_build_engine` to expose `sessionHost` as a QML
-        context property. Phase A always returns slot 1's host (the
-        only entry). Phase B will rebind this on focus switch via the
-        re-emit-on-focus-switch contract in `focus_instance`.
-        """
-        return self._session_hosts[self._focused_instance]
-
-    @property
-    def session_model(self) -> SessionModel:
-        """The focused instance's session model.
-
-        Same focused-slot contract as `session_host`. Phase B will
-        likely add a focus-aware QML accessor (`sessionModelForFocused`)
-        per PRD §5.1; Phase A keeps the existing single context
-        property pointing at the focused slot.
-        """
-        return self._session_models[self._focused_instance]
 
 
 def _register_qml_types() -> None:
@@ -1163,8 +1337,18 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     ctx.setContextProperty("completionModel", controller.completion)
     ctx.setContextProperty("whichKeyState", controller.whichkey_state)
     ctx.setContextProperty("whichKeyModel", controller.whichkey_model)
-    ctx.setContextProperty("sessionHost", controller.session_host)
-    ctx.setContextProperty("sessionModel", controller.session_model)
+    # NB: previously this block also exposed `sessionHost` and
+    # `sessionModel` as context properties pointing at the focused
+    # slot. Those have been removed for two reasons:
+    #   1. The agent pane now binds against `controller.sessionModelForFocused`
+    #      (a QObject @Property with notify=focusedInstanceChanged) so it
+    #      re-binds on focus switch — context properties are evaluated
+    #      ONCE at engine load and would keep pointing at stale slot 1.
+    #   2. The pool is empty at IDE launch (lazy spawn on first
+    #      `<leader>aN`). Dereferencing `_session_hosts[_focused_instance]`
+    #      here would KeyError before the user has spawned anything.
+    # Nothing in QML still binds against the old names — they were
+    # carry-over from Phase A's single-instance topology.
 
     # Resolve the editor font ONCE in Python so every QML overlay binds
     # to the same family the grid (`NvimView._default_font`) chose.

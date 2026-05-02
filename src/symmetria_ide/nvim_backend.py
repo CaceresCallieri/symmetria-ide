@@ -93,6 +93,12 @@ class NvimBackend(QObject):
     # `toggle` flips based on current state. AppController owns the
     # state — this signal is advisory, routing only.
     agent_event = Signal(dict)
+    # File manager toggle-overlay lifecycle. Same shape as agent_event:
+    #   { op: "show"|"hide"|"toggle", initialPath?: string }
+    # The overlay floats above NvimView; the user's compositor is not
+    # involved (unlike the standalone Symmetria File Manager which spawns
+    # a separate window). Source of truth is AppController.fmVisible.
+    fm_event = Signal(dict)
     closed = Signal()
 
     # --- Dispatch bindings --------------------------------------------
