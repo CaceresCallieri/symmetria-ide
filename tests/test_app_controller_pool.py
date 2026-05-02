@@ -28,43 +28,9 @@ import pytest
 
 from symmetria_ide.app import AppController
 from symmetria_ide.session_models import SessionModel
-
-
-class _FakeSessionHost:
-    """Stand-in for SessionHost — same shape as the awaiting-state fake.
-
-    Carries `instance_index` so tests can construct one fake per slot
-    and assert dispatch routes to the right one. `is_running` is
-    flipped True after `start()` to mimic the real host's spawn
-    semantics — the cold-vs-hot branch of `submit_prompt_for` reads
-    `is_running` to decide between `start(prompt)` and
-    `send_user_message(prompt)`.
-    """
-
-    def __init__(self, instance_index: int = 0) -> None:
-        self.instance_index = instance_index
-        self.is_running = False
-        self.start_calls: list[str] = []
-        self.send_calls: list[str] = []
-        self.stop_calls = 0
-        self.permission_calls: list[tuple[str, str]] = []
-        self.set_permission_mode_calls: list[str] = []
-
-    def start(self, prompt: str = "") -> None:
-        self.start_calls.append(prompt)
-        self.is_running = True
-
-    def send_user_message(self, text: str) -> None:
-        self.send_calls.append(text)
-
-    def send_permission_response(self, request_id: str, behavior: str) -> None:
-        self.permission_calls.append((request_id, behavior))
-
-    def send_set_permission_mode(self, mode: str) -> None:
-        self.set_permission_mode_calls.append(mode)
-
-    def stop(self) -> None:
-        self.stop_calls += 1
+from tests.conftest import (
+    FakeSessionHost as _FakeSessionHost,
+)  # canonical fake — see conftest.py
 
 
 @pytest.fixture
@@ -746,6 +712,52 @@ def test_agent_event_close_emptying_pool_hides_pane_and_resets_focus(controller)
     # Focused instance snaps back to 1 so the next spawn lands at slot 1
     # (matches cold-start behavior).
     assert controller.focusedInstance == 1
+
+
+def test_agent_event_close_emptying_pool_emits_all_signals_even_when_focused_was_1(
+    controller,
+):
+    """Empty-pool close always emits awaitingResponse + permissionMode signals.
+
+    Regression guard for the Phase B bug where the empty-pool branch
+    only emitted focus-tracking signals when `_focused_instance != 1`.
+    In the normal case — closing the only instance, which starts at
+    slot 1 — the guard suppressed the emissions, leaving QML with a
+    stale spinner / permission-pill state from the now-dead slot 1
+    sidecar. The fix: always emit unconditionally.
+    """
+    # Seed slot 1 with non-default state to make stale-state observable.
+    controller._set_awaiting_response_for(1, True)  # type: ignore[attr-defined]
+    controller._permission_mode[1] = "plan"
+    controller.show_agent()
+
+    awaiting_emissions: list[bool] = []
+    mode_emissions: list[str] = []
+    focused_emissions: list[int] = []
+    controller.awaitingResponseChanged.connect(
+        lambda: awaiting_emissions.append(controller.awaitingResponse)
+    )
+    controller.permissionModeChanged.connect(
+        lambda: mode_emissions.append(controller.permissionMode)
+    )
+    controller.focusedInstanceChanged.connect(
+        lambda: focused_emissions.append(controller.focusedInstance)
+    )
+
+    controller._on_agent_event({"op": "close"})
+
+    # Pool is empty — the property getters fall back to defaults.
+    assert controller.awaitingResponse is False
+    assert controller.permissionMode == "default"
+    assert controller.focusedInstance == 1
+    # Signals must have fired so QML re-evaluates the bindings and
+    # stops showing the stale spinner / mode pill.
+    assert len(awaiting_emissions) >= 1, (
+        "awaitingResponseChanged must fire on empty-pool close"
+    )
+    assert len(mode_emissions) >= 1, (
+        "permissionModeChanged must fire on empty-pool close"
+    )
 
 
 def test_agent_event_close_unknown_slot_is_a_noop(controller):

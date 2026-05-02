@@ -21,55 +21,9 @@ from __future__ import annotations
 import pytest
 
 from symmetria_ide.app import AppController
-
-
-class _FakeSessionHost:
-    """Stand-in for SessionHost.
-
-    `submit_prompt` reaches into `is_running`, `start`, and
-    `send_user_message`. None of those start threads here — they just
-    record the call so the test can assert on which branch ran.
-    """
-
-    def __init__(self, instance_index: int = 0) -> None:
-        # Mirror the real `SessionHost.__init__(..., instance_index=...)` shape so
-        # Phase B fixtures can construct N fakes with distinct slot ids
-        # without touching this stub. Default 0 keeps zero-arg construction
-        # source-compatible for tests that don't care which slot the fake
-        # represents.
-        self.instance_index = instance_index
-        self.is_running = False
-        self.start_calls: list[str] = []
-        self.send_calls: list[str] = []
-        self.stop_calls = 0
-        # Permission-response capture — populated by
-        # `respond_to_permission` tests so we can assert the host
-        # received a (request_id, behavior) tuple in the right order.
-        self.permission_calls: list[tuple[str, str]] = []
-        # Mode-cycle capture — mirrors the analogous field in the
-        # permission-mode test fake so a future shared-fake refactor
-        # doesn't have to choose between the two ledgers.
-        self.set_permission_mode_calls: list[str] = []
-
-    def start(self, prompt: str = "") -> None:
-        # Pre-warm path passes "" — accepting a default keeps the fake
-        # API symmetric with the real `SessionHost.start` post-pre-warm.
-        # Flip `is_running` AFTER appending so a test reading both fields
-        # in the same expression sees the post-spawn state.
-        self.start_calls.append(prompt)
-        self.is_running = True
-
-    def send_user_message(self, text: str) -> None:
-        self.send_calls.append(text)
-
-    def send_permission_response(self, request_id: str, behavior: str) -> None:
-        self.permission_calls.append((request_id, behavior))
-
-    def send_set_permission_mode(self, mode: str) -> None:
-        self.set_permission_mode_calls.append(mode)
-
-    def stop(self) -> None:
-        self.stop_calls += 1
+from tests.conftest import (
+    FakeSessionHost as _FakeSessionHost,
+)  # canonical fake — see conftest.py
 
 
 @pytest.fixture

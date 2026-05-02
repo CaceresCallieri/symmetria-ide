@@ -865,15 +865,19 @@ class AppController(QObject):
             # reset `_focused_instance` to 1 so the next spawn lands
             # at slot 1 (matching cold-start behavior).
             self.hide_agent()
-            if self._focused_instance != 1:
-                self._focused_instance = 1
-                # Re-emit the focus-tracking signals so any QML still
-                # bound (e.g. an instance indicator persisting through
-                # the hide animation) reads `1 / 0` rather than the
-                # stale focused slot.
-                self.focusedInstanceChanged.emit()
-                self.awaitingResponseChanged.emit()
-                self.permissionModeChanged.emit()
+            self._focused_instance = (
+                1  # idempotent; assignment is harmless when already 1
+            )
+            # Always re-emit the focus-tracking signals: the pool is
+            # gone so the QML indicator, spinner, and permission pill
+            # must all reflect the empty-pool defaults (1 / 0, False,
+            # "default"), even when _focused_instance was already 1
+            # before the close. Skipping the emit when already at 1
+            # would leave QML with stale spinner/pill state from the
+            # now-dead slot 1 sidecar.
+            self.focusedInstanceChanged.emit()
+            self.awaitingResponseChanged.emit()
+            self.permissionModeChanged.emit()
             return
         if was_focused:
             new_focus = self._next_focus_after_close(target)
