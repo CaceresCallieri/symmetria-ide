@@ -203,8 +203,27 @@ Rectangle {
             Layout.fillHeight: true
             clip: true
 
-            model: sessionModel
+            // Phase B: bind to `controller.sessionModelForFocused` so
+            // that focus-switching keybinds (`<C-1>..<C-5>`) re-bind the
+            // ListView to the new slot's transcript. The original
+            // `sessionModel` context property is set ONCE at engine load
+            // and would keep pointing at slot 1's model regardless of
+            // focus — a property with `notify=focusedInstanceChanged`
+            // is the QML-native way to make this re-evaluate. The
+            // Connections block below is belt-and-suspenders: if
+            // PySide6's binding evaluator ever fails to pick up the
+            // notify (older Qt-for-Python builds had occasional
+            // QObject-typed property re-bind quirks), an imperative
+            // re-assignment guarantees the swap.
+            model: controller.sessionModelForFocused
             spacing: Theme.spacing.md
+
+            Connections {
+                target: controller
+                function onFocusedInstanceChanged() {
+                    events.model = controller.sessionModelForFocused
+                }
+            }
 
             // Reusable delegates keep long streams smooth (§3 P1:
             // Repeater would pre-instantiate every event).

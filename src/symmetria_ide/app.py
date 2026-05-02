@@ -239,6 +239,12 @@ class AppController(QObject):
         "plan",
     )
 
+    # Phase B caps the pool at 5 instances to match the `<C-1>..<C-5>`
+    # focus keybind surface. The cap is policy, not a structural limit
+    # — `_session_hosts` is a sparse dict, so widening to N is just
+    # bumping this constant + adding `<C-N>` keybinds in init.lua.
+    _MAX_INSTANCES: int = 5
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         # These initial dimensions are a seed that gets immediately overridden
@@ -362,6 +368,90 @@ class AppController(QObject):
         )
         self.instanceCountChanged.emit()
 
+    def _next_free_slot(self) -> int | None:
+        """Lowest unoccupied slot in `1.._MAX_INSTANCES`, or None if full.
+
+        Returns 1 for an empty pool (start-of-day, or after closing the
+        last instance). The PRD's "lowest free" semantics means the
+        natural way to think about the pool is "fill from the bottom" —
+        which also matches the `<C-1>..<C-5>` keybind ordering so the
+        first spawn is `<C-1>`-reachable, the second is `<C-2>`, etc.
+        """
+        for slot in range(1, self._MAX_INSTANCES + 1):
+            if slot not in self._session_hosts:
+                return slot
+        return None
+
+    def _spawn_instance(self, slot: int, prompt: str = "") -> None:
+        """Allocate the slot and pre-warm its sidecar.
+
+        Wraps `_create_instance` (allocation only) + `host.start(prompt)`
+        (subprocess spawn). Empty prompt = pre-warm only — the SDK's
+        prompt async iterable blocks waiting for the first user message
+        but the subprocess is alive and `set_permission_mode` writes
+        will be honored. This is the same pre-warm contract slot 1
+        uses at app start (see `start()`).
+        """
+        self._create_instance(slot)
+        self._session_hosts[slot].start(prompt)
+
+    def _close_instance(self, slot: int) -> None:
+        """Tear down the slot's host + model + per-instance state.
+
+        Stops the sidecar (joins workers via the existing `stop()`),
+        drops the slot from every pool dict, and removes any
+        `_pending_permissions` entries the dead sidecar issued — those
+        request_ids will never be answered now that the SDK has
+        auto-rejected canUseTool's promise on abort.
+
+        Caller is responsible for refocus / hide-pane decisions —
+        `_close_instance` is allocation-symmetric to `_spawn_instance`
+        and stays focus-agnostic so the dispatch table can compose
+        close + refocus differently per `op`.
+
+        No-op + log on unknown slot.
+        """
+        host = self._session_hosts.get(slot)
+        if host is None:
+            log.warning("_close_instance: slot %d not in pool — no-op", slot)
+            return
+        host.stop()
+        del self._session_hosts[slot]
+        self._session_models.pop(slot, None)
+        self._awaiting_response.pop(slot, None)
+        self._permission_mode.pop(slot, None)
+        self._pending_permissions = {
+            req_id: issuing_slot
+            for req_id, issuing_slot in self._pending_permissions.items()
+            if issuing_slot != slot
+        }
+        self.instanceCountChanged.emit()
+
+    def _next_focus_after_close(self, closed_slot: int) -> int | None:
+        """Pick which slot to focus after closing `closed_slot`.
+
+        Per PRD §5.3: "the one BELOW the closed one if it exists,
+        otherwise the next ABOVE". Walks down from `closed_slot - 1`
+        toward 1 first, then up from `closed_slot + 1` toward
+        `_MAX_INSTANCES`. Returns None on empty pool.
+
+        This is NOT `min(self._session_hosts.keys())` — closing slot 3
+        of {1, 2, 3} should focus 2 (below), but `min` would pick 1.
+        The "below first" rule matches a stack-of-recent-work mental
+        model where the user opened higher slots more recently and
+        wants focus to fall back toward older work, not all the way
+        to the start.
+        """
+        if not self._session_hosts:
+            return None
+        for candidate in range(closed_slot - 1, 0, -1):
+            if candidate in self._session_hosts:
+                return candidate
+        for candidate in range(closed_slot + 1, self._MAX_INSTANCES + 1):
+            if candidate in self._session_hosts:
+                return candidate
+        return None
+
     @Slot(dict)
     def _route_capsule(self, payload: dict) -> None:
         if self._status.apply(payload):
@@ -462,6 +552,26 @@ class AppController(QObject):
         as new sidecars spawn; `<C-S-q>` decrements it on close.
         """
         return len(self._session_hosts)
+
+    # `QObject` here (not `SessionModel`) so the property tolerates a
+    # transient None during pool transitions (close-empty → spawn) and
+    # so PySide6's signature serializer doesn't choke on the
+    # `@QmlElement`-registered concrete type. QML accepts a QObject and
+    # the ListView treats None as "no model" (renders empty).
+    @Property(QObject, notify=focusedInstanceChanged)
+    def sessionModelForFocused(self) -> SessionModel | None:
+        """The focused slot's `SessionModel`, re-bindable on focus switch.
+
+        QML context properties are evaluated once at engine load — the
+        original `sessionModel` context property keeps pointing at slot
+        1's model regardless of focus. To make the agent pane's
+        `ListView.model` track the focused instance, QML binds against
+        THIS property instead, with `Connections { target: controller;
+        onFocusedInstanceChanged: ... }` re-evaluating the binding on
+        every focus switch (PRD §5.1's recommended fallback when
+        layoutChanged-style auto-rebinding is insufficient).
+        """
+        return self._session_models.get(self._focused_instance)
 
     @Slot(int)
     def focus_instance(self, index: int) -> None:
@@ -608,64 +718,66 @@ class AppController(QObject):
             if issuing_slot != slot
         }
 
+    def _coerce_slot_index(self, raw: object) -> int | None:
+        """Parse a payload's `index` field into a valid pool slot.
+
+        Returns None for missing / 0 / non-integer / out-of-range values
+        so callers can fall back to a default behavior (e.g. "focused
+        instance" semantics for `op=close`). Out-of-range logs at
+        WARNING because that means the Lua side dispatched a slot the
+        IDE can't honor — visible signal of a future-N keybind drift.
+        """
+        if raw is None:
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0:
+            return None
+        if value > self._MAX_INSTANCES:
+            log.warning(
+                "_coerce_slot_index: %d > _MAX_INSTANCES=%d — dropped",
+                value,
+                self._MAX_INSTANCES,
+            )
+            return None
+        return value
+
     @Slot(dict)
     def _on_agent_event(self, payload: dict) -> None:
         """Route a Lua-emitted agent lifecycle event.
 
-        Payload shape: `{op: "show"|"hide"|"toggle"|"debug", ...}`.
-        Unknown ops log at DEBUG and no-op — additive protocol
+        Payload shape: `{op: "show"|"hide"|"toggle"|"focus"|"close"|"debug",
+        ...}`. Unknown ops log at DEBUG and no-op — additive protocol
         evolution doesn't crash the controller.
 
-        `action="new"` on a `show` event resets the pane to a fresh
-        slate: stops any in-flight subprocess + clears the event log.
-        Used by the `<leader>aN` hijack so "New Claude" reads as
-        "start from scratch", not "append to whatever was there".
+        Phase B dispatch table (PRD §5.1):
 
-        `op="debug"` surfaces runtime diagnostics from the Lua side
-        (keymap-install attempts, orchestrator race observations,
-        etc.) at INFO so the operator can observe the hijack state
-        without needing `:messages` dives. Payload carries an `event`
-        string that discriminates the debug category.
+        - `op="show"`, `action="new"` → spawn into next free slot (1..5)
+          and focus it. Pool full = warn + focus the highest-numbered
+          existing slot (slot 5 in the saturated case).
+        - `op="show"` without `action` → just open the pane on the
+          currently-focused instance. No spawn.
+        - `op="focus"`, `index=N` → switch focus to slot N. No-op if
+          slot N is empty (per PRD B2 — focus does not spawn).
+        - `op="close"` → close the focused instance. With `index=N`,
+          close that specific slot. After close: refocus to the
+          next-lowest occupied slot (PRD §5.3 walk-down-then-up rule),
+          or hide the pane if the pool emptied.
+        - `op="hide"` / `op="toggle"` → pane visibility only, no
+          per-instance impact.
+        - `op="debug"` → diagnostic trail from the Lua side
+          (keymap-install attempts, orchestrator race observations).
+          Payload carries an `event` string discriminating category.
         """
         op = str(payload.get("op") or "").strip()
-        action = str(payload.get("action") or "").strip()
         if op == "show":
-            if action == "new":
-                # Phase A: <leader>aN resets the FOCUSED instance only —
-                # other slots are unaffected. Phase B will optionally
-                # spawn a new slot instead of resetting the focused one
-                # (see PRD §5.1 dispatch table); for now the user-
-                # visible behavior matches today (single-instance
-                # reset).
-                slot = self._focused_instance
-                host = self._session_hosts.get(slot)
-                model = self._session_models.get(slot)
-                if host is None or model is None:
-                    log.warning(
-                        "agent op=show action=new: focused slot %d missing "
-                        "from pool — dropping reset",
-                        slot,
-                    )
-                    return
-                if host.is_running:
-                    host.stop()
-                model.clear()
-                # Belt-and-suspenders: `_on_session_closed_for` will
-                # fire via the queued `closed` signal once the worker
-                # reaches EOF, but the QueuedConnection means it lands
-                # on a later event-loop tick. Resetting synchronously
-                # here keeps the spinner from briefly lingering when
-                # the user mashes <leader>aN.
-                self._set_awaiting_response_for(slot, False)
-                # Re-warm the sidecar so the permission-mode pill +
-                # Shift+Tab cycling remain live after the reset. The
-                # pre-warm invariant (sidecar always running when pane
-                # is reachable) is established in `start()` — we must
-                # restore it here after stopping. Empty prompt spawns
-                # without sending a user_message, same as the initial
-                # pre-warm; next composer submit takes the hot branch.
-                host.start("")
-            self.show_agent()
+            self._handle_agent_show(payload)
+        elif op == "focus":
+            self._handle_agent_focus(payload)
+        elif op == "close":
+            self._handle_agent_close(payload)
         elif op == "hide":
             self.hide_agent()
         elif op == "toggle":
@@ -675,6 +787,98 @@ class AppController(QObject):
             log.debug("agent debug: %s %r", event, payload)
         else:
             log.debug("unhandled agent op: %r", op)
+
+    def _handle_agent_show(self, payload: dict) -> None:
+        """`op=show` dispatch — Phase B's spawn-into-next-free path.
+
+        With `action="new"`, allocate a fresh slot from
+        `_next_free_slot()` and focus it. When the pool is saturated
+        (5/5), fall back to focusing the highest existing slot rather
+        than a hard error — the user's intent ("give me a new
+        Claude") can't be honored, but routing them to the most
+        recently spawned slot is the least surprising failure mode.
+
+        Without `action`, just call `show_agent` so the pane becomes
+        visible on whatever instance is already focused — used by the
+        env-var startup paths and by future `op=show` invocations
+        that want to surface the existing transcript.
+        """
+        action = str(payload.get("action") or "").strip()
+        if action == "new":
+            free_slot = self._next_free_slot()
+            if free_slot is not None:
+                log.info("agent op=show action=new: spawning slot %d", free_slot)
+                self._spawn_instance(free_slot)
+                self.focus_instance(free_slot)
+            else:
+                # Pool saturated. Highest-numbered slot is the most-
+                # recently-spawned (slots fill from the bottom), so
+                # focusing it routes the user to their newest session.
+                fallback = max(self._session_hosts.keys())
+                log.warning(
+                    "agent op=show action=new: pool full (1..%d occupied) "
+                    "— focusing slot %d",
+                    self._MAX_INSTANCES,
+                    fallback,
+                )
+                self.focus_instance(fallback)
+        self.show_agent()
+
+    def _handle_agent_focus(self, payload: dict) -> None:
+        """`op=focus` dispatch — `<C-1>..<C-5>`.
+
+        Per PRD B2, focusing a non-existent slot is a no-op-with-log
+        (decided NOT to auto-spawn — matches orchestrator.nvim and
+        avoids accidental spawn from a held keybind).
+        """
+        index = self._coerce_slot_index(payload.get("index"))
+        if index is None:
+            log.warning("agent op=focus: missing/invalid index — no-op")
+            return
+        # `focus_instance` handles the "already focused" + "slot empty"
+        # no-ops with their own logs — keep this dispatcher thin.
+        self.focus_instance(index)
+
+    def _handle_agent_close(self, payload: dict) -> None:
+        """`op=close` dispatch — `<C-S-q>` (or future explicit-index variants).
+
+        Missing index = focused instance. Refocus selection uses
+        `_next_focus_after_close` (walk down then up). Empty pool
+        after close hides the pane and snaps `_focused_instance` back
+        to 1 so the next `<leader>aN` press lands cleanly at slot 1.
+        """
+        raw_index = payload.get("index")
+        if raw_index is None:
+            target = self._focused_instance
+        else:
+            target = self._coerce_slot_index(raw_index)
+            if target is None:
+                log.warning("agent op=close: invalid index %r — no-op", raw_index)
+                return
+        if target not in self._session_hosts:
+            log.warning("agent op=close: slot %d not in pool — no-op", target)
+            return
+        was_focused = target == self._focused_instance
+        self._close_instance(target)
+        if not self._session_hosts:
+            # Pool empty — pane has nothing to display. Hide it and
+            # reset `_focused_instance` to 1 so the next spawn lands
+            # at slot 1 (matching cold-start behavior).
+            self.hide_agent()
+            if self._focused_instance != 1:
+                self._focused_instance = 1
+                # Re-emit the focus-tracking signals so any QML still
+                # bound (e.g. an instance indicator persisting through
+                # the hide animation) reads `1 / 0` rather than the
+                # stale focused slot.
+                self.focusedInstanceChanged.emit()
+                self.awaitingResponseChanged.emit()
+                self.permissionModeChanged.emit()
+            return
+        if was_focused:
+            new_focus = self._next_focus_after_close(target)
+            if new_focus is not None:
+                self.focus_instance(new_focus)
 
     @Slot(str, int)
     def submit_prompt_for(self, prompt: str, index: int) -> None:

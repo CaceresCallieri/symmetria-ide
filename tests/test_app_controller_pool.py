@@ -421,3 +421,444 @@ def test_create_instance_emits_instance_count_changed(controller):
 
     assert emissions == [2]
     assert controller.instanceCount == 2
+
+
+# ===========================================================================
+# Phase B — multi-instance spawn + focus dispatch
+# ===========================================================================
+#
+# Phase B introduces `<C-1>..<C-5>` focus + `<C-S-q>` close + a redefined
+# `<leader>aN` (spawn-into-next-free instead of reset-focused). The tests
+# below exercise:
+#
+#   - The pool helpers `_next_free_slot`, `_close_instance`,
+#     `_next_focus_after_close`.
+#   - The `_on_agent_event` dispatch table for focus / close / spawn-new.
+#   - `sessionModelForFocused` re-binding on focus switch.
+#
+# Spawn-path tests use `monkeypatch` to swap `_create_instance` with a
+# fake-installing version — `_spawn_instance` calls
+# `_create_instance(slot)` THEN `host.start("")`, and the real
+# `_create_instance` would construct an actual `SessionHost` whose
+# `start()` would Popen a Node subprocess. Patching at the
+# `_create_instance` boundary keeps the composition intact while
+# preventing the side effect.
+
+
+@pytest.fixture
+def patched_controller(controller, monkeypatch):
+    """Controller whose `_create_instance` installs a fake, not a real host.
+
+    Used by tests that exercise spawn paths (`_spawn_instance`,
+    `_on_agent_event` op=show action=new). Mirrors the real allocator
+    closely (same dict mutations, same `instanceCountChanged` emit) so
+    `_spawn_instance` still composes meaningfully — only the
+    SessionHost/SessionModel construction is swapped for fakes.
+    """
+
+    def fake_create(slot: int) -> None:
+        if slot in controller._session_hosts:
+            return
+        fake = _FakeSessionHost(instance_index=slot)
+        controller._session_hosts[slot] = fake  # type: ignore[assignment]
+        controller._session_models[slot] = SessionModel(controller, instance_index=slot)
+        controller._awaiting_response[slot] = False
+        controller._permission_mode[slot] = "default"
+        controller.instanceCountChanged.emit()
+
+    monkeypatch.setattr(controller, "_create_instance", fake_create)
+    return controller
+
+
+# ---------------------------------------------------------------------------
+# _next_free_slot
+# ---------------------------------------------------------------------------
+
+
+def test_next_free_slot_returns_2_when_only_slot_1_occupied(controller):
+    """Slot 1 is pre-allocated; the first free slot is 2."""
+    assert controller._next_free_slot() == 2
+
+
+def test_next_free_slot_walks_to_next_gap(controller):
+    """Lowest-free, not lowest-numbered: {1, 2, 4} → 3."""
+    _add_slot(controller, 2)
+    _add_slot(controller, 4)
+    assert controller._next_free_slot() == 3
+
+
+def test_next_free_slot_returns_none_when_pool_full(controller):
+    """{1..5} occupied → None — caller is responsible for the fallback."""
+    for slot in range(2, 6):
+        _add_slot(controller, slot)
+    assert controller._next_free_slot() is None
+
+
+def test_next_free_slot_returns_1_when_pool_empty(controller):
+    """Empty pool → slot 1 (matches cold-start behavior)."""
+    del controller._session_hosts[1]
+    del controller._session_models[1]
+    del controller._awaiting_response[1]
+    del controller._permission_mode[1]
+    assert controller._next_free_slot() == 1
+
+
+# ---------------------------------------------------------------------------
+# _spawn_instance — composition of _create_instance + host.start("")
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_instance_allocates_and_pre_warms(patched_controller):
+    """`_spawn_instance(2)` populates the pool slot AND starts the host."""
+    patched_controller._spawn_instance(2)
+
+    assert 2 in patched_controller._session_hosts
+    fake = patched_controller._session_hosts[2]
+    # Empty-prompt pre-warm — same contract slot 1 uses at app start.
+    assert fake.start_calls == [""]
+    assert fake.is_running is True
+
+
+def test_spawn_instance_passes_prompt_through(patched_controller):
+    """Non-empty prompt threads through to `host.start(prompt)`.
+
+    Phase A's pre-warm passes "" (no first message). Phase C / future
+    keybinds may pass an initial prompt; this test pins that the
+    composition routes the argument as-is.
+    """
+    patched_controller._spawn_instance(3, prompt="hello world")
+
+    fake = patched_controller._session_hosts[3]
+    assert fake.start_calls == ["hello world"]
+
+
+# ---------------------------------------------------------------------------
+# _close_instance — tear-down + state cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_close_instance_removes_slot_from_every_dict(controller):
+    """Close drops the slot from hosts/models/awaiting/permission_mode dicts."""
+    _add_slot(controller, 2)
+    controller._awaiting_response[2] = True
+    controller._permission_mode[2] = "plan"
+
+    controller._close_instance(2)
+
+    assert 2 not in controller._session_hosts
+    assert 2 not in controller._session_models
+    assert 2 not in controller._awaiting_response
+    assert 2 not in controller._permission_mode
+
+
+def test_close_instance_calls_stop_on_host(controller):
+    """The slot's sidecar gets `stop()` called so its workers join cleanly."""
+    fake = _add_slot(controller, 2)
+
+    controller._close_instance(2)
+
+    assert fake.stop_calls == 1
+
+
+def test_close_instance_drops_pending_permissions_for_that_slot(controller):
+    """`_pending_permissions` entries for the dead slot are pruned.
+
+    The SDK auto-rejects canUseTool's promise on subprocess abort, so
+    the request_id will never be answered. Leaving it in the dict
+    means a future `respond_to_permission` round-trip would
+    misroute. Critically: only entries for the closed slot are
+    dropped — entries from other slots survive.
+    """
+    _add_slot(controller, 2)
+    _add_slot(controller, 3)
+    controller._pending_permissions = {
+        "req-from-2": 2,
+        "req-from-3": 3,
+        "another-from-2": 2,
+    }
+
+    controller._close_instance(2)
+
+    assert controller._pending_permissions == {"req-from-3": 3}
+
+
+def test_close_instance_emits_instance_count_changed(controller):
+    """Closing decrements the instanceCount and emits."""
+    _add_slot(controller, 2)
+    emissions: list[int] = []
+    controller.instanceCountChanged.connect(
+        lambda: emissions.append(controller.instanceCount)
+    )
+
+    controller._close_instance(2)
+
+    assert emissions == [1]
+    assert controller.instanceCount == 1
+
+
+def test_close_instance_unknown_slot_is_a_noop(controller):
+    """Closing a slot not in the pool logs and returns — no crash."""
+    instance_count_before = controller.instanceCount
+
+    controller._close_instance(7)
+
+    assert controller.instanceCount == instance_count_before
+
+
+# ---------------------------------------------------------------------------
+# _next_focus_after_close — PRD §5.3 walk-down-then-up rule
+# ---------------------------------------------------------------------------
+
+
+def test_next_focus_after_close_walks_below_first(controller):
+    """Closing slot 3 of {1,2,3} → focus 2 (below the closed one)."""
+    _add_slot(controller, 2)
+    _add_slot(controller, 3)
+    # Simulate the close having already happened — the helper reads
+    # the post-close pool state.
+    del controller._session_hosts[3]
+    del controller._session_models[3]
+    del controller._awaiting_response[3]
+    del controller._permission_mode[3]
+
+    assert controller._next_focus_after_close(3) == 2
+
+
+def test_next_focus_after_close_walks_up_when_no_below(controller):
+    """Closing slot 1 of {1,2,3} → focus 2 (no below; first above)."""
+    _add_slot(controller, 2)
+    _add_slot(controller, 3)
+    del controller._session_hosts[1]
+    del controller._session_models[1]
+    del controller._awaiting_response[1]
+    del controller._permission_mode[1]
+
+    assert controller._next_focus_after_close(1) == 2
+
+
+def test_next_focus_after_close_skips_gaps(controller):
+    """Closing slot 4 of {1,2,4} → focus 2 (walks below past 3, finds 2)."""
+    _add_slot(controller, 2)
+    _add_slot(controller, 4)
+    del controller._session_hosts[4]
+    del controller._session_models[4]
+    del controller._awaiting_response[4]
+    del controller._permission_mode[4]
+
+    assert controller._next_focus_after_close(4) == 2
+
+
+def test_next_focus_after_close_empty_pool_returns_none(controller):
+    """Empty pool → None; dispatcher uses this to trigger hide_agent."""
+    del controller._session_hosts[1]
+    del controller._session_models[1]
+    del controller._awaiting_response[1]
+    del controller._permission_mode[1]
+
+    assert controller._next_focus_after_close(1) is None
+
+
+# ---------------------------------------------------------------------------
+# _on_agent_event — Phase B dispatch table
+# ---------------------------------------------------------------------------
+
+
+def test_agent_event_focus_dispatches_to_focus_instance(controller):
+    """`{op:focus, index:2}` switches focus when slot 2 is in the pool."""
+    _add_slot(controller, 2)
+
+    controller._on_agent_event({"op": "focus", "index": 2})
+
+    assert controller.focusedInstance == 2
+
+
+def test_agent_event_focus_unknown_slot_is_a_noop(controller):
+    """Per PRD B2: focusing an empty slot does NOT spawn — no-op + log."""
+    controller._on_agent_event({"op": "focus", "index": 4})
+
+    assert controller.focusedInstance == 1
+    assert 4 not in controller._session_hosts
+
+
+def test_agent_event_focus_out_of_range_is_dropped(controller):
+    """`<C-9>` would be caught at the Lua side, but defense in depth."""
+    _add_slot(controller, 2)
+
+    controller._on_agent_event({"op": "focus", "index": 9})
+
+    assert controller.focusedInstance == 1
+
+
+def test_agent_event_focus_missing_index_is_dropped(controller):
+    """No index field → log warning, no-op."""
+    controller._on_agent_event({"op": "focus"})
+
+    assert controller.focusedInstance == 1
+
+
+def test_agent_event_close_no_index_closes_focused(controller):
+    """`<C-S-q>` emits `{op:close}` (no index) → close focused, refocus."""
+    _add_slot(controller, 2)
+    controller.focus_instance(2)
+    fake_2 = controller._session_hosts[2]
+
+    controller._on_agent_event({"op": "close"})
+
+    assert 2 not in controller._session_hosts
+    assert fake_2.stop_calls == 1  # type: ignore[union-attr]
+    # Focused slot was 2 → after close, refocus to 1 (only one left).
+    assert controller.focusedInstance == 1
+
+
+def test_agent_event_close_explicit_index_closes_that_slot(controller):
+    """`{op:close, index:2}` closes slot 2 even when slot 3 is focused."""
+    _add_slot(controller, 2)
+    _add_slot(controller, 3)
+    controller.focus_instance(3)
+
+    controller._on_agent_event({"op": "close", "index": 2})
+
+    assert 2 not in controller._session_hosts
+    # Focus stays at 3 — we closed a non-focused slot.
+    assert controller.focusedInstance == 3
+
+
+def test_agent_event_close_focused_with_multiple_picks_below(controller):
+    """Closing slot 3 of {1,2,3} (focus on 3) → focus drops to 2."""
+    _add_slot(controller, 2)
+    _add_slot(controller, 3)
+    controller.focus_instance(3)
+
+    controller._on_agent_event({"op": "close"})
+
+    assert controller.focusedInstance == 2
+
+
+def test_agent_event_close_emptying_pool_hides_pane_and_resets_focus(controller):
+    """Closing the last instance hides the pane and resets focus to 1."""
+    controller.show_agent()
+    assert controller.agentVisible is True
+
+    controller._on_agent_event({"op": "close"})
+
+    assert controller.instanceCount == 0
+    assert controller.agentVisible is False
+    # Focused instance snaps back to 1 so the next spawn lands at slot 1
+    # (matches cold-start behavior).
+    assert controller.focusedInstance == 1
+
+
+def test_agent_event_close_unknown_slot_is_a_noop(controller):
+    """`{op:close, index:9}` logs and returns — no crash, no state change."""
+    instance_count_before = controller.instanceCount
+
+    controller._on_agent_event({"op": "close", "index": 9})
+
+    assert controller.instanceCount == instance_count_before
+    assert controller.focusedInstance == 1
+
+
+def test_agent_event_show_new_spawns_next_free_slot(patched_controller):
+    """`<leader>aN` with slot 1 occupied → spawn slot 2, focus it, show pane."""
+    patched_controller._on_agent_event({"op": "show", "action": "new"})
+
+    assert 2 in patched_controller._session_hosts
+    assert patched_controller._session_hosts[2].start_calls == [""]
+    assert patched_controller.focusedInstance == 2
+    assert patched_controller.agentVisible is True
+
+
+def test_agent_event_show_new_when_pool_full_focuses_highest(patched_controller):
+    """Pool full → no spawn; focus highest-numbered (most recent) slot."""
+    for slot in range(2, 6):
+        _add_slot(patched_controller, slot)
+    assert patched_controller.instanceCount == 5  # sanity
+
+    patched_controller._on_agent_event({"op": "show", "action": "new"})
+
+    # No new slot allocated.
+    assert patched_controller.instanceCount == 5
+    # Focus snapped to slot 5 (the last spawned).
+    assert patched_controller.focusedInstance == 5
+    assert patched_controller.agentVisible is True
+
+
+def test_agent_event_show_without_action_just_shows(patched_controller):
+    """`{op:show}` without `action` doesn't spawn — just opens the pane."""
+    initial_count = patched_controller.instanceCount
+
+    patched_controller._on_agent_event({"op": "show"})
+
+    assert patched_controller.instanceCount == initial_count
+    assert patched_controller.agentVisible is True
+
+
+# ---------------------------------------------------------------------------
+# Cross-instance request_id routing (Phase B's harder correctness gate)
+# ---------------------------------------------------------------------------
+
+
+def test_respond_to_permission_routes_across_focus_switch(controller):
+    """A request from slot 2 must resolve on slot 2 even after focus switches.
+
+    This is the PRD §4.3 risk #1 case manifesting in Phase B: user
+    focuses slot 2, slot 2 issues a permission_request, user
+    `<C-1>`s back to slot 1 to read something, then the permission
+    card from slot 2 is still visible (it's part of slot 2's model
+    history) — but the card lives in slot 2's transcript, so to see
+    it the user re-focuses 2. Either way, the ROUTING via
+    `_pending_permissions` must always pick slot 2's host, never the
+    focused one.
+    """
+    fake_2 = _add_slot(controller, 2)
+    # Slot 2 issues the request while focused.
+    controller.focus_instance(2)
+    controller._on_session_event_for(
+        2, {"type": "permission_request", "request_id": "req-cross-focus"}
+    )
+    # User switches focus back to slot 1 mid-request.
+    controller.focus_instance(1)
+
+    controller.respond_to_permission("req-cross-focus", "allow")
+
+    # Decision lands on slot 2's sidecar (the issuer), not slot 1's.
+    fake_1 = controller._session_hosts[1]
+    assert fake_2.permission_calls == [("req-cross-focus", "allow")]
+    assert fake_1.permission_calls == []  # type: ignore[union-attr]
+    # Pending map cleaned up regardless of focus.
+    assert "req-cross-focus" not in controller._pending_permissions
+
+
+# ---------------------------------------------------------------------------
+# sessionModelForFocused property — re-binds on focus switch
+# ---------------------------------------------------------------------------
+
+
+def test_session_model_for_focused_returns_focused_slot_model(controller):
+    """The property tracks `_focused_instance`'s model identity."""
+    _add_slot(controller, 2)
+    slot_1_model = controller._session_models[1]
+    slot_2_model = controller._session_models[2]
+
+    assert controller.sessionModelForFocused is slot_1_model
+    controller.focus_instance(2)
+    assert controller.sessionModelForFocused is slot_2_model
+
+
+def test_session_model_for_focused_emits_via_focused_instance_changed(controller):
+    """Focus switch emits `focusedInstanceChanged` — QML's binding trigger.
+
+    PySide6 fires the property's notify when its declared signal
+    emits; this test pins the contract by counting emissions of the
+    signal and confirming the property's value updates in lockstep.
+    """
+    _add_slot(controller, 2)
+    emissions: list[object] = []
+    controller.focusedInstanceChanged.connect(
+        lambda: emissions.append(controller.sessionModelForFocused)
+    )
+
+    controller.focus_instance(2)
+
+    assert len(emissions) == 1
+    assert emissions[0] is controller._session_models[2]

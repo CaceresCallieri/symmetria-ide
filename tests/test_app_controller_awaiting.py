@@ -202,20 +202,64 @@ def test_on_session_closed_flips_off(controller):
     assert emissions == [False]
 
 
-def test_agent_event_action_new_resets_awaiting(controller):
-    """OFF edge — `<leader>aN` "New Claude" must clear the spinner synchronously.
+def _patch_create_instance_with_fake(controller, monkeypatch):
+    """Swap `_create_instance` for a fake-installing version.
 
-    The QueuedConnection on `closed` would deliver the OFF eventually,
-    but the synchronous reset in `_on_agent_event` keeps the spinner
-    from briefly lingering when the user mashes `<leader>aN`.
+    Phase B's `<leader>aN` dispatches into `_spawn_instance(slot)` →
+    `_create_instance(slot)` + `host.start("")`. The real
+    `_create_instance` constructs an actual `SessionHost`; `start("")`
+    then spawns a Node subprocess from `sidecar/dist/index.js`.
+    Tests must avoid both side effects, so we replace the allocator
+    with a fake-host installer that mirrors the real dict mutations.
     """
+
+    def fake_create(slot: int) -> None:
+        if slot in controller._session_hosts:
+            return
+        fake = _FakeSessionHost(instance_index=slot)
+        controller._session_hosts[slot] = fake  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+        # Reuse the real SessionModel — no thread / subprocess
+        # dependencies in the model itself.
+        from symmetria_ide.session_models import SessionModel  # noqa: PLC0415
+
+        controller._session_models[slot] = SessionModel(controller, instance_index=slot)
+        controller._awaiting_response[slot] = False
+        controller._permission_mode[slot] = "default"
+        controller.instanceCountChanged.emit()
+
+    monkeypatch.setattr(controller, "_create_instance", fake_create)
+
+
+def test_agent_event_action_new_clears_focused_spinner(controller, monkeypatch):
+    """OFF edge — `<leader>aN` spawns a fresh slot and focuses it.
+
+    Phase B redefines `<leader>aN` as "spawn into next free slot,
+    focus it" — NOT "reset the focused instance" (the old Phase A
+    contract). The QML-facing `awaitingResponse` reads from
+    `_focused_instance`'s slot in the per-instance dict; after the
+    focus switch to the freshly-spawned slot 2, it reads slot 2's
+    default (False), so the spinner stops without the dispatcher
+    touching slot 1's state at all.
+
+    Slot 1's underlying spinner state is preserved (per-instance
+    isolation): the user can `<C-1>` back to find their prior turn
+    still in flight from slot 1's perspective.
+    """
+    _patch_create_instance_with_fake(controller, monkeypatch)
     controller._set_awaiting_response_for(1, True)
     emissions = _capture_emissions(controller)
 
     controller._on_agent_event({"op": "show", "action": "new"})
 
+    # QML-facing property reads False because focus moved to the new
+    # slot 2, whose default awaiting state is False.
     assert controller.awaitingResponse is False
+    # Single emission from the focus switch — the property's notify
+    # signal fires once when `focus_instance` retargets the binding.
     assert emissions == [False]
+    # Slot 1's underlying spinner state is UNTOUCHED — Phase B does
+    # not reset other slots when spawning a new one.
+    assert controller._awaiting_response[1] is True
 
 
 def test_agent_event_show_without_action_new_does_not_reset(controller):
@@ -475,42 +519,54 @@ def test_app_controller_start_with_env_prompt_uses_hot_branch_after_prewarm(
 
 
 # ---------------------------------------------------------------------------
-# action="new" re-warm — `<leader>aN` stops the session then re-warms so
-# the permission-mode pill + Shift+Tab cycling stay live after the reset
+# action="new" — Phase B redefines `<leader>aN` as spawn-into-next-free
+# rather than reset-focused. The fresh slot must be pre-warmed with
+# `start("")` so its permission-mode pill + Shift+Tab cycling are live
+# from the moment focus arrives, and the previously-focused slot must
+# survive untouched (Phase B's per-instance isolation contract).
 # ---------------------------------------------------------------------------
-#
-# This is the regression guard for the re-warm invariant: after action="new"
-# the sidecar must be re-warmed so `cycle_permission_mode` writes land on a
-# live stdin. Without the re-warm, `_write_command`'s `if self._proc is None`
-# guard silently drops Shift+Tab presses after a <leader>aN reset.
 
 
-def test_agent_event_action_new_rewarms_sidecar_after_stop(controller, monkeypatch):
-    """action='new' re-warm contract — sidecar is alive after <leader>aN reset.
+def test_agent_event_action_new_spawns_fresh_slot_and_preserves_focused(
+    controller, monkeypatch
+):
+    """`<leader>aN` Phase B contract — spawn a NEW slot, leave the focused alone.
 
-    Simulates the <leader>aN path: host is running, action='new' arrives,
-    host is stopped, model is cleared, and the sidecar is re-warmed so the
-    permission-mode pill stays live. Without the re-warm, Shift+Tab after
-    a <leader>aN reset would silently drop writes on a non-existent stdin.
+    Pre-Phase-B (Phase A), `<leader>aN` reset the focused slot:
+    `host.stop()` + `model.clear()` + `host.start("")` re-warm. Phase
+    B redefines the keybind as "spawn into next free slot, focus it"
+    so users can keep multiple parallel sessions alive — the focused
+    slot's transcript is preserved in case the user `<C-1>`s back.
+
+    This test pins the new contract: slot 2 gets allocated +
+    pre-warmed with `start("")`, slot 1 is NOT stopped, slot 1's
+    state survives unchanged, and focus moves to slot 2.
     """
-    # Simulate a running session first
+    _patch_create_instance_with_fake(controller, monkeypatch)
+    # Simulate slot 1 being mid-session (running + pending state).
     controller._session_hosts[1].is_running = True
-
-    initial_start_calls = list(controller._session_hosts[1].start_calls)
+    initial_slot_1_start_calls = list(controller._session_hosts[1].start_calls)
 
     controller._on_agent_event({"op": "show", "action": "new"})
 
-    # stop() was called for the running host
-    assert controller._session_hosts[1].stop_calls == 1, (
-        "action='new' must stop the running host"
+    # Slot 2 was spawned + pre-warmed.
+    assert 2 in controller._session_hosts, (
+        "action='new' must allocate slot 2 (next free after 1)"
     )
-    # Re-warm: start("") must be called once after the stop
-    new_calls = controller._session_hosts[1].start_calls[len(initial_start_calls) :]
-    assert new_calls == [""], (
-        "action='new' must re-warm the sidecar with start('') so the "
-        "permission-mode pill stays live after reset"
+    fake_2 = controller._session_hosts[2]
+    assert fake_2.start_calls == [""], (
+        "action='new' must pre-warm the new slot with start('') so the "
+        "permission-mode pill is live from frame 1"
     )
-    # Spinner should be off
-    assert controller.awaitingResponse is False, (
-        "action='new' must clear the awaiting-response spinner"
+    # Slot 1 is UNTOUCHED — no stop, no reset.
+    assert controller._session_hosts[1].stop_calls == 0, (
+        "action='new' must NOT stop the previously-focused slot — "
+        "Phase B preserves parallel sessions"
     )
+    assert controller._session_hosts[1].start_calls == initial_slot_1_start_calls, (
+        "action='new' must NOT re-call start on the previously-focused slot"
+    )
+    # Focus moved to the new slot.
+    assert controller.focusedInstance == 2
+    # Pane is shown.
+    assert controller.agentVisible is True

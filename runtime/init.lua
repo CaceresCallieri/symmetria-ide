@@ -560,9 +560,38 @@ local SYMMETRIA_AGENT_DESC = "New Claude (Symmetria agent pane)"
 -- Keeping the slot separate (with its own desc) so the eventual divergence
 -- is a code change, not a keymap-table surgery.
 local SYMMETRIA_AGENT_DESC_SKIP = "New Claude skip perms (Symmetria agent pane)"
+-- Phase B keybinds — focus an instance by slot, close the focused instance.
+-- Distinct desc strings so `slot_owned_by_us` can recognize ANY of our
+-- keymaps without the descriptor-table growing into a special-case forest.
+local SYMMETRIA_AGENT_DESC_FOCUS = "Focus Claude instance (Symmetria agent pane)"
+local SYMMETRIA_AGENT_DESC_CLOSE = "Close focused Claude instance (Symmetria agent pane)"
+
+-- Set keyed by descriptor string so a future divergence (e.g. focus
+-- handlers needing a different self-heal cadence) can branch on the
+-- desc without pattern-matching strings.
+local SYMMETRIA_AGENT_DESCS = {
+  [SYMMETRIA_AGENT_DESC] = true,
+  [SYMMETRIA_AGENT_DESC_SKIP] = true,
+  [SYMMETRIA_AGENT_DESC_FOCUS] = true,
+  [SYMMETRIA_AGENT_DESC_CLOSE] = true,
+}
 
 local function open_agent_new()
   pcall(vim.rpcnotify, 0, "agent", { op = "show", action = "new" })
+end
+
+-- Build a focus handler that emits `{op="focus", index=N}` for the
+-- given slot. Closure over `slot` keeps the install loop one-liner.
+local function make_focus_handler(slot)
+  return function()
+    pcall(vim.rpcnotify, 0, "agent", { op = "focus", index = slot })
+  end
+end
+
+local function close_focused_agent()
+  -- No `index` field — AppController interprets a missing index as
+  -- "the focused instance", per PRD §5.1's dispatch table.
+  pcall(vim.rpcnotify, 0, "agent", { op = "close" })
 end
 
 local function slot_owned_by_us(keys)
@@ -571,14 +600,33 @@ local function slot_owned_by_us(keys)
     return false
   end
   local desc = mapping.desc or ""
-  return desc == SYMMETRIA_AGENT_DESC or desc == SYMMETRIA_AGENT_DESC_SKIP
+  return SYMMETRIA_AGENT_DESCS[desc] == true
 end
 
 local function install_agent_keymaps(reason)
   local wanted = {
-    { keys = "<leader>aN", desc = SYMMETRIA_AGENT_DESC },
-    { keys = "<leader>an", desc = SYMMETRIA_AGENT_DESC_SKIP },
+    { keys = "<leader>aN", desc = SYMMETRIA_AGENT_DESC, handler = open_agent_new },
+    { keys = "<leader>an", desc = SYMMETRIA_AGENT_DESC_SKIP, handler = open_agent_new },
+    -- <C-S-q> closes the focused instance. Standalone CTRL+SHIFT chord —
+    -- no longer-prefix ambiguity, but we still install buffer-local +
+    -- nowait for parity with the rest of the agent keymaps. Kept as a
+    -- single binding to match orchestrator.nvim's mental model (one
+    -- close binding regardless of which instance is focused).
+    { keys = "<C-S-q>", desc = SYMMETRIA_AGENT_DESC_CLOSE, handler = close_focused_agent },
   }
+  -- <C-1>..<C-5> → focus the corresponding pool slot. CTRL+digit is
+  -- one of the few chord forms Qt reliably surfaces to embedded nvim
+  -- without terminal-layer ambiguity (terminals typically swallow it,
+  -- but we render via direct Qt key events through `keys.py`). Each
+  -- handler captures its slot via `make_focus_handler` so the install
+  -- loop stays uniform.
+  for slot = 1, 5 do
+    table.insert(wanted, {
+      keys = string.format("<C-%d>", slot),
+      desc = SYMMETRIA_AGENT_DESC_FOCUS,
+      handler = make_focus_handler(slot),
+    })
+  end
   for _, spec in ipairs(wanted) do
     if not slot_owned_by_us(spec.keys) then
       -- `buffer = 0` + `nowait = true` per gotcha #20: `nowait` is only
@@ -587,7 +635,7 @@ local function install_agent_keymaps(reason)
       -- <leader>a*). The BufEnter autocmd above re-installs on every
       -- buffer transition, which is the right lifecycle for buffer-local
       -- keymaps (they die with their buffer).
-      vim.keymap.set("n", spec.keys, open_agent_new, {
+      vim.keymap.set("n", spec.keys, spec.handler, {
         buffer = 0,
         silent = true,
         nowait = true,
