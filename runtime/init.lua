@@ -749,11 +749,11 @@ local function open_file_manager()
   })
 end
 
--- Slots we install. <leader>e is the user-facing binding; <C-u> is an
--- escape-hatch test binding while the <leader>e hijack fight against
--- yazi.nvim's lazy-loaded children is still being worked out. <C-u>
--- shadows nvim's built-in half-page scroll-up — accepted as a temporary
--- testing tradeoff. Remove from this list once <leader>e wins reliably.
+-- HACK: <C-u> is a temporary escape-hatch test binding while the <leader>e
+-- hijack fight against yazi.nvim's lazy-loaded children is still being worked
+-- out. <C-u> shadows nvim's built-in half-page scroll-up — accepted as a
+-- temporary testing tradeoff. Remove <C-u> from this list (and from the
+-- CLAUDE.md comment block above) once <leader>e wins reliably.
 local SYMMETRIA_FM_KEYS = { "<leader>e", "<C-u>" }
 
 local function fm_slot_owned_by_us(keys)
@@ -764,7 +764,8 @@ local function fm_slot_owned_by_us(keys)
   return (mapping.desc or "") == SYMMETRIA_FM_DESC
 end
 
-local function install_fm_keymap()
+local function install_fm_keymap(reason)
+  reason = reason or "unknown"
   for _, keys in ipairs(SYMMETRIA_FM_KEYS) do
     if not fm_slot_owned_by_us(keys) then
       vim.keymap.set("n", keys, open_file_manager, {
@@ -772,6 +773,16 @@ local function install_fm_keymap()
         silent = true,
         nowait = true,
         desc = SYMMETRIA_FM_DESC,
+      })
+      -- Diagnostic trail — mirrors install_agent_keymaps pattern so the
+      -- operator can confirm the FM hijack ran. Especially useful for
+      -- confirming <C-u> is active while the fight with yazi is unresolved.
+      -- pcall intentional: rpcnotify fails if Python client is disconnected.
+      pcall(vim.rpcnotify, 0, "fm", {
+        op = "debug",
+        event = "keymap_install",
+        keys = keys,
+        reason = reason,
       })
     end
   end
@@ -782,13 +793,42 @@ local fm_grp = vim.api.nvim_create_augroup("symmetria_fm_keys", { clear = true }
 vim.api.nvim_create_autocmd("VimEnter", {
   group = fm_grp,
   callback = function()
-    vim.schedule(install_fm_keymap)
+    vim.schedule(function()
+      install_fm_keymap("VimEnter")
+    end)
   end,
 })
 
 vim.api.nvim_create_autocmd("BufEnter", {
   group = fm_grp,
-  callback = install_fm_keymap,
+  callback = function()
+    install_fm_keymap("BufEnter")
+  end,
+})
+
+-- Self-heal when yazi.nvim (or any other FM plugin) lazy-loads via its
+-- `keys = {"<leader>ey", ...}` spec. lazy.nvim fires `User LazyLoad`
+-- synchronously inside its load path, BEFORE the triggering keypress is
+-- re-dispatched — so we win back the <leader>e slot for the trailing stroke.
+-- Narrowed to FM-plugin names so the install cost is zero for other lazy loads.
+-- BufEnter self-heal remains the fallback if a plugin uses a different name.
+vim.api.nvim_create_autocmd("User", {
+  group = fm_grp,
+  pattern = "LazyLoad",
+  callback = function(ev)
+    local name = ev.data or ""
+    if type(name) == "string" then
+      local lower = name:lower()
+      if
+        lower:find("yazi", 1, true)
+        or lower:find("neo-tree", 1, true)
+        or lower:find("nvim-tree", 1, true)
+        or lower:find("oil", 1, true)
+      then
+        install_fm_keymap("LazyLoad:" .. name)
+      end
+    end
+  end,
 })
 
 return M

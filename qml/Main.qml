@@ -175,6 +175,7 @@ Window {
                 // startPickerMode on show is handled by the Loader's
                 // onLoaded handler below — fires on every reconstruction.
 
+                // ----------------------------------------------------------------
                 // Focus return on dismiss. Without this, focus stays on
                 // the now-destroyed fmOverlay subtree's parent and
                 // keystrokes go nowhere — nvim/agent appears frozen
@@ -210,10 +211,11 @@ Window {
         sourceComponent: Item {
             id: fmOverlay
             anchors.fill: parent
-            visible: controller.fmVisible
-            focus: visible
+            // No visible/focus/onVisibleChanged bindings needed: this Item
+            // only exists while controller.fmVisible is true (Loader.active
+            // tears it down on hide). forceActiveFocus on construction is
+            // all that is required.
             Component.onCompleted: forceActiveFocus()
-            onVisibleChanged: if (visible) forceActiveFocus()
 
             Keys.onEscapePressed: event => {
                 controller.hide_fm()
@@ -270,6 +272,16 @@ Window {
     // Focus handoff when the window regains activation: whichever
     // view is currently visible grabs focus, so alt-tabbing back
     // never leaves the user typing into a dead surface.
+    //
+    // The `&& fmOverlayLoader.item` guard is still required under the
+    // per-show Loader.active reconstruction model — Qt does not
+    // guarantee that `Loader.active: controller.fmVisible` (a binding)
+    // and this `Window.onActiveChanged` (a signal handler) are
+    // delivered in the same frame. If activation fires while the
+    // Loader is mid-reconstruction, `.item` can momentarily be null
+    // even with `controller.fmVisible == true`. Falling through to the
+    // editor branch in that frame is benign — `onFmVisibleChanged`
+    // will reassert FM focus on the next tick when the Loader settles.
     onActiveChanged: {
         if (!active)
             return
