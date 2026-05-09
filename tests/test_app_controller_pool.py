@@ -42,6 +42,11 @@ def controller():
     `_create_instance(slot)` and then swap in additional fakes.
     """
     ctrl = AppController()
+    # `__init__` no longer auto-allocates slot 1 (production now waits
+    # for the user's first `<leader>aN`). Tests still expect slot 1
+    # to be present synchronously — call the same factory the agent_event
+    # path uses, then swap the real host for the fake.
+    ctrl._create_instance(1)
     ctrl._session_hosts[1] = _FakeSessionHost(instance_index=1)  # type: ignore[assignment]
     yield ctrl
     ctrl.shutdown()

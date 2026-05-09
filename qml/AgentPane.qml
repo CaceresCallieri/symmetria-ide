@@ -15,9 +15,24 @@
 // Focus routing:
 //   - Composer grabs focus whenever the pane becomes visible (no
 //     mouse required; the user lands in the input ready to type).
-//   - Escape in the composer calls `controller.hide_agent()` —
-//     Main.qml's `onVisibleChanged` handler then returns focus to
-//     the NvimView.
+//   - Escape OR Ctrl+X in the composer (or pane chrome) calls
+//     `controller.hide_agent()` — Main.qml's `onVisibleChanged`
+//     handler then returns focus to the NvimView, where
+//     `<leader>aN` can spawn a fresh agent slot in the pool.
+//     Both bindings exist because Escape is the cross-platform
+//     reflex while Ctrl+X is the user's preferred binding for the
+//     same intent — they coexist rather than compete.
+//   - Ctrl+1..Ctrl+5 (composer or pane chrome) → focus_instance(N).
+//     Mirrors the nvim-side `<C-1>..<C-5>` bindings installed in
+//     `runtime/init.lua` — those only fire when the editor has
+//     focus, so the pane needs its own QML-side handler when the
+//     user is mid-conversation. The bright bubble in AgentTopBar
+//     and the ListView's transcript both re-bind on the focus
+//     switch.
+//   - Ctrl+Shift+Q (composer or pane chrome) → close_focused_instance().
+//     Mirrors the nvim-side `<C-S-q>` keymap. Closing the last
+//     instance hides the pane and clears the AgentTopBar chip strip;
+//     refocus picks a neighbour via `_next_focus_after_close`.
 //   - Enter submits via `controller.submit_prompt(text)` and clears
 //     the field. `controller.submit_prompt` routes to the Node
 //     SDK sidecar; the event log accumulates across submissions so
@@ -83,6 +98,46 @@ Rectangle {
             || (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))
     }
 
+    // Returns true for Ctrl+X — the agent pane's "leave to editor"
+    // affordance. Mirrors Escape's existing semantics (calls hide_agent),
+    // but lives ALONGSIDE Escape rather than replacing it: Escape is the
+    // common-platform reflex, Ctrl+X is the user's preferred binding for
+    // the same intent. NB: inside a TextField, Ctrl+X is the system Cut
+    // shortcut — handlers below MUST claim it via Keys.onShortcutOverride
+    // first or Qt's accelerator routing intercepts and the composer just
+    // clears the selected text instead of leaving the pane.
+    function _isCtrlX(event) {
+        return event.key === Qt.Key_X
+            && (event.modifiers & Qt.ControlModifier)
+    }
+
+    // Returns the pool slot (1..5) when `event` is Ctrl+1..Ctrl+5, else 0.
+    // Mirrors the nvim-side `<C-1>..<C-5>` focus keymaps installed in
+    // `runtime/init.lua::install_agent_keymaps` — those only fire while
+    // NeoVim has focus, so the agent pane needs its own QML handler for
+    // when the user is typing in the composer or browsing the event log.
+    // Calls `controller.focus_instance(slot)` which is a no-op when the
+    // requested slot is empty (logs a warning), so pressing Ctrl+5 with
+    // only 3 active slots is harmless.
+    function _ctrlDigitSlot(event) {
+        if (!(event.modifiers & Qt.ControlModifier)) return 0
+        if (event.key < Qt.Key_1 || event.key > Qt.Key_5) return 0
+        return event.key - Qt.Key_1 + 1
+    }
+
+    // Returns true for Ctrl+Shift+Q — the agent pane's "close focused
+    // Cloud Code instance" affordance. Mirrors the nvim-side `<C-S-q>`
+    // keymap in `runtime/init.lua` so the close binding works regardless
+    // of whether the editor or the composer holds focus. The empty-pool
+    // case is handled by `_handle_agent_close` (hides pane, resets
+    // focused instance to 1, emits all chrome signals so the AgentTopBar
+    // chip strip clears).
+    function _isCtrlShiftQ(event) {
+        return event.key === Qt.Key_Q
+            && (event.modifiers & Qt.ControlModifier)
+            && (event.modifiers & Qt.ShiftModifier)
+    }
+
     // Capture Shift+Tab when focus sits on the pane chrome (between
     // compositions, after escaping the composer, etc.). The composer's
     // own Keys.onPressed below carries the same handler so cycling
@@ -93,12 +148,28 @@ Rectangle {
     // outdent) cannot collide with this handler. Per non-negotiable #3
     // ("NeoVim motions preserved"), the editor's keybinds are sacred.
     Keys.onShortcutOverride: (event) => {
-        if (root._isShiftTab(event)) event.accepted = true
+        if (root._isShiftTab(event)
+                || root._isCtrlX(event)
+                || root._isCtrlShiftQ(event)
+                || root._ctrlDigitSlot(event) > 0)
+            event.accepted = true
     }
     Keys.onPressed: (event) => {
         if (root._isShiftTab(event)) {
             root._cyclePermissionMode()
             event.accepted = true
+        } else if (root._isCtrlX(event)) {
+            controller.hide_agent()
+            event.accepted = true
+        } else if (root._isCtrlShiftQ(event)) {
+            controller.close_focused_instance()
+            event.accepted = true
+        } else {
+            const slot = root._ctrlDigitSlot(event)
+            if (slot > 0) {
+                controller.focus_instance(slot)
+                event.accepted = true
+            }
         }
     }
 
@@ -171,28 +242,10 @@ Rectangle {
                 renderType: Text.NativeRendering
             }
 
-            // --- Instance indicator (Phase A — multi-instance plumbing) ---
-            //
-            // Surfaces `<focused_instance> / <total_instances>` so the user
-            // sees the new pool state from frame 1, even when total is 1.
-            // Phase A always renders "1 / 1" — Phase B's `<C-1>..<C-5>`
-            // focus + `<leader>aN` spawn make this read meaningfully. Per
-            // PRD §3.2 the IDE renders no per-instance colours; the slot
-            // NUMBER is the differentiator. Theme.color.text.dim borrows
-            // the pillHint palette so the chrome reads as one continuous
-            // diagnostic strip rather than two competing badges. Decision
-            // (A2): visible always, even at 1/1, to normalize the
-            // multi-instance mental model from day one.
-            Text {
-                id: instanceIndicator
-                text: controller.focusedInstance + " / " + controller.instanceCount
-                color: Theme.color.text.dim
-                font.family: Theme.font.family
-                font.pixelSize: Theme.font.size.xs
-                font.weight: Theme.font.weight.medium
-                font.letterSpacing: 0.6
-                renderType: Text.NativeRendering
-            }
+            // Multi-instance bubble strip lives in `qml/AgentTopBar.qml`
+            // now (always-on top chrome). Keeping it out of this pane's
+            // chromeRow means the user can see the pool topology even
+            // when the editor is focused.
         }
 
         // --- Event log ----------------------------------------------
@@ -709,12 +762,28 @@ Rectangle {
                 // Shortcut+Override pair keeps Qt's accelerator system
                 // from intercepting first.
                 Keys.onShortcutOverride: (event) => {
-                    if (root._isShiftTab(event)) event.accepted = true
+                    if (root._isShiftTab(event)
+                            || root._isCtrlX(event)
+                            || root._isCtrlShiftQ(event)
+                            || root._ctrlDigitSlot(event) > 0)
+                        event.accepted = true
                 }
                 Keys.onPressed: (event) => {
                     if (root._isShiftTab(event)) {
                         root._cyclePermissionMode()
                         event.accepted = true
+                    } else if (root._isCtrlX(event)) {
+                        controller.hide_agent()
+                        event.accepted = true
+                    } else if (root._isCtrlShiftQ(event)) {
+                        controller.close_focused_instance()
+                        event.accepted = true
+                    } else {
+                        const slot = root._ctrlDigitSlot(event)
+                        if (slot > 0) {
+                            controller.focus_instance(slot)
+                            event.accepted = true
+                        }
                     }
                 }
             }

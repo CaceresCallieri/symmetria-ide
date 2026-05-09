@@ -805,17 +805,17 @@ class AppController(QObject):
         self.hide_fm()
 
     def _nvim_cwd_or_home(self) -> str:
-        """Best-effort current directory for the FM overlay's initial path.
+        """Default initial path for the FM overlay when none is provided.
 
-        Reading nvim's cwd requires an RPC call from the worker thread;
-        rather than block the GUI we fall back to $HOME if a cached cwd
-        is unavailable. Future: subscribe to nvim's DirChanged autocmd
-        and cache the path on AppController for an instant lookup.
+        The Lua keybind in runtime/init.lua already passes the buffer's
+        parent directory via `rpcnotify(0, "fm", { initialPath = … })`,
+        so this fallback is reached only when the keybind hasn't been
+        wired up or no buffer is loaded. $HOME is the safe default.
+
+        If we ever need nvim's actual cwd here, subscribe to nvim's
+        DirChanged autocmd and cache the path on AppController — don't
+        block the GUI thread on a synchronous RPC.
         """
-        # Placeholder: $HOME is the safe default. Lua keybind can pass a
-        # specific path via show_fm(path) when needed.
-        import os
-
         return os.path.expanduser("~")
 
     def _on_fm_event(self, payload: dict) -> None:

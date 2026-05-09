@@ -39,12 +39,16 @@ def controller():
     construction; they read it dynamically each call.
     """
     ctrl = AppController()
-    # Phase A pool refactor: replace slot 1's real host with a fake.
-    # The real host never spawned a subprocess (no `start()` was
-    # called), so swapping the dict entry is safe — we just leak the
-    # original host's QObject reference, which gets garbage-collected
-    # after the fixture tear-down. Tests reach into `_session_hosts[1]`
-    # directly to assert against the fake.
+    # `__init__` no longer auto-allocates slot 1 — production now waits
+    # for the user's first `<leader>aN` to spawn the first instance.
+    # Tests still need slot 1 populated synchronously so they can
+    # exercise per-instance dispatch without driving the agent_event
+    # path; `_create_instance(1)` allocates host + model + scalar state
+    # without spawning a subprocess. We then swap the real host for a
+    # fake — slot 1's other dict entries (`_session_models[1]`,
+    # `_awaiting_response[1]`, `_permission_mode[1]`) stay pointing at
+    # the real objects which suffices for the assertions in this file.
+    ctrl._create_instance(1)
     ctrl._session_hosts[1] = _FakeSessionHost(instance_index=1)  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
     yield ctrl
     # Stop the real backend that __init__ created, even though we
@@ -419,13 +423,19 @@ def _stub_backend(monkeypatch, ctrl: AppController) -> None:
     monkeypatch.setattr(ctrl._backend, "stop", lambda: None)  # pyright: ignore[reportPrivateUsage]
 
 
-def test_app_controller_start_prewarms_sidecar(controller, monkeypatch):
-    """Pre-warm contract — `controller.start()` calls `host.start("")` unconditionally.
+def test_app_controller_start_without_env_vars_does_not_spawn(controller, monkeypatch):
+    """No env vars → `start()` must NOT spawn slot 1's subprocess.
 
-    With no `SYMMETRIA_IDE_AGENT_PROMPT` env var set, the pre-warm should
-    still spawn the sidecar with an empty prompt so `set_permission_mode`
-    writes work the moment the agent pane is reachable. This is the
-    regression guard for the user-visible Shift+Tab silent-drop bug.
+    Regression guard for the user-visible "Claude is already running at
+    launch" bug. The previous pre-warm contract called `host.start("")`
+    unconditionally so the bubble strip lit slot 1 the moment the IDE
+    opened — violating the user's mental model ("no agents until I press
+    `<leader>aN`"). The new contract is lazy: the first `<leader>aN`
+    spawns slot 1, and this test asserts the inactive default.
+
+    The fixture's `_create_instance(1)` populates the pool dict so the
+    test can assert against the slot, but `host.start_calls` should stay
+    empty — the spawn is the user's call to make.
     """
     monkeypatch.delenv("SYMMETRIA_IDE_AGENT_PROMPT", raising=False)
     monkeypatch.delenv("SYMMETRIA_IDE_AGENT_VIEW", raising=False)
@@ -433,27 +443,25 @@ def test_app_controller_start_prewarms_sidecar(controller, monkeypatch):
 
     controller.start()
 
-    assert controller._session_hosts[1].start_calls == [""], (
-        "pre-warm must call host.start('') so the sidecar is alive at launch"
+    assert controller._session_hosts[1].start_calls == [], (
+        "no env vars should leave the sidecar dormant — user opts in via <leader>aN"
     )
     assert controller._session_hosts[1].send_calls == [], (
-        "no env-prompt means no initial user_message write"
+        "no env vars means no initial user_message write either"
     )
 
 
-def test_app_controller_start_with_env_prompt_uses_hot_branch_after_prewarm(
+def test_app_controller_start_with_env_prompt_cold_spawns_with_prompt(
     controller, monkeypatch
 ):
-    """`SYMMETRIA_IDE_AGENT_PROMPT` path takes the hot branch post-pre-warm.
+    """`SYMMETRIA_IDE_AGENT_PROMPT` drives a cold spawn carrying the prompt.
 
-    Before the pre-warm change, `submit_prompt` saw `is_running == False`
-    and called `start(prompt)` itself (cold branch). Now that
-    `controller.start()` pre-warms first, the env-prompt branch runs
-    AFTER `is_running` is True, so `submit_prompt` takes the hot branch
-    and routes through `send_user_message`. The synthetic-user-row
-    optimistic injection still fires, so the headless-smoke UX is
-    unchanged from the user's perspective — but the dispatch path
-    differs and tests should lock that in.
+    With no pre-warm, `submit_prompt` sees `is_running == False` and takes
+    the cold branch — `host.start(prompt)` spawns the sidecar AND delivers
+    `prompt` as the first user_message in a single SDK exchange. No
+    separate empty pre-warm write, no follow-up send_user_message call.
+    The synthetic-user-row injection inside `submit_prompt` still fires
+    so the headless-smoke UX is preserved.
     """
     monkeypatch.setenv("SYMMETRIA_IDE_AGENT_PROMPT", "hi from env")
     monkeypatch.delenv("SYMMETRIA_IDE_AGENT_VIEW", raising=False)
@@ -461,14 +469,42 @@ def test_app_controller_start_with_env_prompt_uses_hot_branch_after_prewarm(
 
     controller.start()
 
-    assert controller._session_hosts[1].start_calls == [""], (
-        "only the pre-warm should call start; submit_prompt must take the hot branch"
+    assert controller._session_hosts[1].start_calls == ["hi from env"], (
+        "env-prompt drives a single cold spawn carrying the prompt"
     )
-    assert controller._session_hosts[1].send_calls == ["hi from env"], (
-        "env-prompt must route through send_user_message via submit_prompt's hot branch"
+    assert controller._session_hosts[1].send_calls == [], (
+        "cold branch never reaches send_user_message — start handles the first turn"
     )
     assert controller.awaitingResponse is True, (
-        "submit_prompt's ON edge must fire even on the hot branch"
+        "submit_prompt's ON edge must still fire on the cold branch"
+    )
+
+
+def test_app_controller_start_with_env_view_only_pre_warms_slot_1(
+    controller, monkeypatch
+):
+    """`SYMMETRIA_IDE_AGENT_VIEW=1` (no prompt) → spawn slot 1 empty + show pane.
+
+    The VIEW-only env-var path is the analog of the user pressing
+    `<leader>aN` interactively: the sidecar warms up so the pane has a
+    session to focus on, but no message is sent. Without this, the pane
+    would render with an empty pool and `agentVisible == True` — an
+    incoherent state.
+    """
+    monkeypatch.delenv("SYMMETRIA_IDE_AGENT_PROMPT", raising=False)
+    monkeypatch.setenv("SYMMETRIA_IDE_AGENT_VIEW", "1")
+    _stub_backend(monkeypatch, controller)
+
+    controller.start()
+
+    assert controller._session_hosts[1].start_calls == [""], (
+        "VIEW-only env path warms up the sidecar with an empty prompt"
+    )
+    assert controller._session_hosts[1].send_calls == [], (
+        "no message yet — composer is ready for the user's first input"
+    )
+    assert controller.agentVisible is True, (
+        "VIEW-only env path must reveal the agent pane on startup"
     )
 
 

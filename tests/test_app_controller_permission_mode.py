@@ -68,7 +68,9 @@ def controller():
     threads never spawn).
     """
     ctrl = AppController()
-    # Phase A pool refactor: replace slot 1's real host with the fake.
+    # `__init__` no longer auto-allocates slot 1 — call the same factory
+    # the agent_event path uses, then swap the real host for the fake.
+    ctrl._create_instance(1)
     ctrl._session_hosts[1] = _FakeSessionHost(instance_index=1)  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
     yield ctrl
     ctrl.shutdown()
