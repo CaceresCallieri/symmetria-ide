@@ -394,16 +394,24 @@ def test_respond_to_permission_ordering_host_before_model(controller):
 
 
 # ---------------------------------------------------------------------------
-# Sidecar pre-warm — `AppController.start()` spawns the SDK subprocess
-# unconditionally so the permission-mode pill + Shift+Tab cycling are live
-# the moment the agent pane is reachable
+# Lazy-spawn contract — `AppController.start()` does NOT pre-warm a sidecar
+# unless an env-var path explicitly opts in
 # ---------------------------------------------------------------------------
 #
-# These tests guard the behaviour change from "spawn-on-first-message" to
-# "pre-warm-at-launch". A regression where `AppController.start()` stops
-# pre-warming reintroduces the user-visible Shift+Tab silent-drop bug:
-# `cycle_permission_mode` writes a `set_permission_mode` envelope to a
-# non-existent stdin until the user sends their first message.
+# The old pre-warm contract called `host.start("")` unconditionally at launch
+# so the permission-mode pill + Shift+Tab cycling were live before the user
+# touched the agent pane. This commit removes the unconditional pre-warm:
+# slot 1 now spawns lazily on the user's first `<leader>aN`. The three
+# tests below guard this new lazy contract:
+#
+#   - no env vars → pool stays empty, sidecar NOT spawned
+#   - SYMMETRIA_IDE_AGENT_PROMPT → cold spawn carrying the prompt (one shot)
+#   - SYMMETRIA_IDE_AGENT_VIEW   → spawn slot 1 empty + show pane
+#
+# Permission-mode cycling no longer needs a pre-warm because the sidecar's
+# local `currentMode` is authoritative (CLAUDE.md gotcha #25); Shift+Tab
+# dispatches correctly as long as a slot exists — which requires the user
+# to have opened the pane first via `<leader>aN`.
 #
 # `controller.start()` also calls `self._backend.start()` which spawns
 # nvim. To keep these tests hermetic we stub `_backend.start` (and `stop`

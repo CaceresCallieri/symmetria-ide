@@ -126,7 +126,7 @@ Rectangle {
     }
 
     // Returns true for Ctrl+Shift+Q — the agent pane's "close focused
-    // Cloud Code instance" affordance. Mirrors the nvim-side `<C-S-q>`
+    // Claude Code instance" affordance. Mirrors the nvim-side `<C-S-q>`
     // keymap in `runtime/init.lua` so the close binding works regardless
     // of whether the editor or the composer holds focus. The empty-pool
     // case is handled by `_handle_agent_close` (hides pane, resets
@@ -256,18 +256,17 @@ Rectangle {
             Layout.fillHeight: true
             clip: true
 
-            // Phase B: bind to `controller.sessionModelForFocused` so
-            // that focus-switching keybinds (`<C-1>..<C-5>`) re-bind the
-            // ListView to the new slot's transcript. The original
-            // `sessionModel` context property is set ONCE at engine load
-            // and would keep pointing at slot 1's model regardless of
-            // focus — a property with `notify=focusedInstanceChanged`
-            // is the QML-native way to make this re-evaluate. The
-            // Connections block below is belt-and-suspenders: if
-            // PySide6's binding evaluator ever fails to pick up the
-            // notify (older Qt-for-Python builds had occasional
-            // QObject-typed property re-bind quirks), an imperative
-            // re-assignment guarantees the swap.
+            // Bind to `controller.sessionModelForFocused` so that
+            // focus-switching keybinds (`<C-1>..<C-5>`) re-bind the
+            // ListView to the new slot's transcript when focus changes.
+            // A property with `notify=focusedInstanceChanged` is the
+            // QML-native way to make this re-evaluate automatically.
+            // The Connections block below is belt-and-suspenders:
+            // PySide6's property-change detection for QObject-typed
+            // return values (SessionModel* is a QObject subclass) can
+            // miss an identity swap if the notify signal fires but the
+            // engine skips the QObject* pointer comparison. The
+            // imperative re-assignment guarantees the swap regardless.
             model: controller.sessionModelForFocused
             spacing: Theme.spacing.md
 

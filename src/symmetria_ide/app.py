@@ -592,10 +592,9 @@ class AppController(QObject):
     def focusedInstance(self) -> int:
         """Slot whose transcript the agent pane currently mirrors.
 
-        Phase A always reads 1. Exposed now so AgentPane.qml can render
-        the `<focused> / <total>` indicator from frame 1, normalizing
-        the user's mental model before Phase B introduces real
-        focus-switching keybinds.
+        Read by AgentTopBar.qml to highlight the focused chip in the
+        always-on chip strip. Also used by AgentPane.qml when binding
+        `sessionModelForFocused` to the correct slot's transcript.
         """
         return self._focused_instance
 
@@ -615,7 +614,7 @@ class AppController(QObject):
         Reuses `instanceCountChanged` as the notify signal because count
         and key-set always change together (a spawn adds one slot AND
         increments count; a close removes one AND decrements). The QML
-        bubble strip in `AgentPane.qml` uses this to render filled vs.
+        bubble strip in `AgentTopBar.qml` uses this to render filled vs.
         empty bubbles without a second notify hop.
         """
         return sorted(self._session_hosts.keys())

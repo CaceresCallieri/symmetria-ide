@@ -9,8 +9,11 @@
 // Visibility:
 //   Always visible. Chrome height stays constant (`Theme.size.statusBarHeight`)
 //   so the editor viewport doesn't jump as instances spawn or close. The
-//   slot-1 pre-warm at IDE launch means there is always at least one
-//   filled bubble from frame 1 — the bar never reads as "empty".
+//   chip strip is empty at launch (lazy-spawn: no slot is pre-warmed until
+//   the user presses `<leader>aN` or an env-var startup path opts in).
+//   An empty strip is intentional — the bar is always present as chrome
+//   so layout doesn't shift, but chips only appear once the user asks for
+//   an agent.
 //
 // Future surface (deferred — placeholder structure here):
 //   - Per-agent working/idle state (animated when the SDK is awaiting a
