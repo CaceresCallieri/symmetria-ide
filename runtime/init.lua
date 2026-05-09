@@ -712,6 +712,22 @@ vim.api.nvim_create_autocmd("User", {
 -- Initial path is the current buffer's directory if it exists on disk,
 -- otherwise nvim's cwd. Sending the path explicitly lets the overlay
 -- boot into the right directory without an extra RPC roundtrip.
+--
+-- Hijack discipline (mirrors <leader>aN at line 533+):
+--   1. The user's nvim config commonly registers <leader>e as a
+--      which-key group declaration ("File explorers") in core/keymaps.lua,
+--      and lazy-loaded plugins like yazi.nvim add <leader>ey / <leader>eY
+--      via their `keys = {...}` spec. Both land AFTER our --cmd dofile of
+--      this file, so a plain file-scope `vim.keymap.set` is overwritten.
+--   2. Countermeasure: install on `VimEnter` (deferred via vim.schedule
+--      so we land last among non-lazy plugins) and self-heal on
+--      `BufEnter` (cheap reconciliation point + buffer-local keymaps die
+--      with their buffer, so we need to re-install per-buffer anyway).
+--   3. `buffer = 0` + `nowait = true` per gotcha #20: nowait only honors
+--      buffer-local maps, and yazi's <leader>ey/eY are longer global maps
+--      that would otherwise force a timeoutlen wait at <leader>e.
+
+local SYMMETRIA_FM_DESC = "Toggle Symmetria File Manager overlay"
 
 local function open_file_manager()
   local buf_path = vim.api.nvim_buf_get_name(0)
@@ -733,9 +749,46 @@ local function open_file_manager()
   })
 end
 
-vim.keymap.set("n", "<leader>e", open_file_manager, {
-  silent = true,
-  desc = "Toggle Symmetria File Manager overlay",
+-- Slots we install. <leader>e is the user-facing binding; <C-u> is an
+-- escape-hatch test binding while the <leader>e hijack fight against
+-- yazi.nvim's lazy-loaded children is still being worked out. <C-u>
+-- shadows nvim's built-in half-page scroll-up — accepted as a temporary
+-- testing tradeoff. Remove from this list once <leader>e wins reliably.
+local SYMMETRIA_FM_KEYS = { "<leader>e", "<C-u>" }
+
+local function fm_slot_owned_by_us(keys)
+  local mapping = vim.fn.maparg(keys, "n", false, true)
+  if type(mapping) ~= "table" or vim.tbl_isempty(mapping) then
+    return false
+  end
+  return (mapping.desc or "") == SYMMETRIA_FM_DESC
+end
+
+local function install_fm_keymap()
+  for _, keys in ipairs(SYMMETRIA_FM_KEYS) do
+    if not fm_slot_owned_by_us(keys) then
+      vim.keymap.set("n", keys, open_file_manager, {
+        buffer = 0,
+        silent = true,
+        nowait = true,
+        desc = SYMMETRIA_FM_DESC,
+      })
+    end
+  end
+end
+
+local fm_grp = vim.api.nvim_create_augroup("symmetria_fm_keys", { clear = true })
+
+vim.api.nvim_create_autocmd("VimEnter", {
+  group = fm_grp,
+  callback = function()
+    vim.schedule(install_fm_keymap)
+  end,
+})
+
+vim.api.nvim_create_autocmd("BufEnter", {
+  group = fm_grp,
+  callback = install_fm_keymap,
 })
 
 return M

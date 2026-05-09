@@ -121,17 +121,25 @@ Window {
     // FM's symbols in their own namespace so this file can mention
     // `Theme` (IDE) and `FmUi.FmTheme` (FM) without ambiguity.
     //
-    // Loader.active gates instantiation so the panel doesn't pay
-    // construction cost until the user first opens it. After that,
-    // toggling visibility just flips the Item's `visible` flag — fast.
+    // Loader.active toggles per visibility — the panel is reconstructed
+    // on each show. An earlier "keep loaded" approach (`active: visible
+    // || item !== null`) preserved tab/scroll/selection state across
+    // toggles, but it conflicted with the FM's focus-on-construction
+    // pattern: FileList.view grabs active focus inside its
+    // `Component.onCompleted` hook (FileList.qml:221), which only fires
+    // once per construction. After we hand focus back to the editor on
+    // dismiss, a subsequent show couldn't re-route focus into `view`
+    // (the FM panel's root is Item, not FocusScope, so focus
+    // restoration doesn't propagate from a parent forceActiveFocus).
+    // For picker-mode use (each <C-u> is a fresh "open file" flow),
+    // losing tab/scroll between toggles is acceptable; the
+    // ~50-100ms reconstruction cost is also acceptable for a binding
+    // that fires on user keypress, not in any hot path.
     Loader {
         id: fmOverlayLoader
         anchors.fill: parent
         z: 100
-        // Once activated, stay loaded — re-instantiating the FileManager
-        // tree each toggle would lose tab state, scroll position, and
-        // selection. Visibility flag handles hide/show.
-        active: controller.fmVisible || item !== null
+        active: controller.fmVisible
 
         // Start picker mode when the overlay first opens. The panel reuses
         // its existing picker infrastructure (built for the XDG portal) as
@@ -153,18 +161,31 @@ Window {
         Connections {
             target: controller
             function onFmVisibleChanged(): void {
-                if (!controller.fmVisible
-                        && fmOverlayLoader.item
-                        && FmUi.FileManagerService.pickerMode) {
+                // Cancel any in-flight picker mode when the overlay
+                // closes. FileManagerService is a singleton — its state
+                // outlives the Loader's reconstruction cycle, so without
+                // this the next show would skip startPickerMode and
+                // the panel would have no way to emit pickerCompleted.
+                // Note: no fmOverlayLoader.item guard — under per-show
+                // reconstruction, item is null exactly when we need to
+                // cancel.
+                if (!controller.fmVisible && FmUi.FileManagerService.pickerMode) {
                     FmUi.FileManagerService.cancelPickerMode()
                 }
-                if (controller.fmVisible
-                        && fmOverlayLoader.item
-                        && !FmUi.FileManagerService.pickerMode) {
-                    FmUi.FileManagerService.startPickerMode({
-                        title: "Open File",
-                        acceptLabel: "Open"
-                    })
+                // startPickerMode on show is handled by the Loader's
+                // onLoaded handler below — fires on every reconstruction.
+
+                // Focus return on dismiss. Without this, focus stays on
+                // the now-destroyed fmOverlay subtree's parent and
+                // keystrokes go nowhere — nvim/agent appears frozen
+                // until alt-tab. Mirrors the priority ordering in
+                // Window.onActiveChanged below: agent if visible,
+                // otherwise editor.
+                if (!controller.fmVisible) {
+                    if (controller.agentVisible)
+                        agentPane.forceActiveFocus()
+                    else
+                        editor.forceActiveFocus()
                 }
             }
         }
@@ -197,6 +218,21 @@ Window {
             Keys.onEscapePressed: event => {
                 controller.hide_fm()
                 event.accepted = true
+            }
+
+            // Bare `q` also dismisses — IDE-specific UX glue, not panel
+            // default. The FM panel's NormalModeHandler.js only handles
+            // Ctrl+Q (close-tab); bare `q` falls through unhandled and
+            // bubbles up to here. `Qt.NoModifier` guard means Ctrl+Q
+            // still routes to the panel's tab logic. Keys.onPressed
+            // fires AFTER child items, so any future FM mode that wants
+            // to consume `q` (e.g. inline rename) just sets
+            // event.accepted = true and our handler skips.
+            Keys.onPressed: event => {
+                if (event.key === Qt.Key_Q && event.modifiers === Qt.NoModifier) {
+                    controller.hide_fm()
+                    event.accepted = true
+                }
             }
 
             // Dim scrim — clicking dismisses.
