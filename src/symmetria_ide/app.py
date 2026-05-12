@@ -259,6 +259,11 @@ class AppController(QObject):
     # `fileTreeView.forceActiveFocus()`. Decoupled from the data-bearing
     # signals above because it carries no payload — it's a one-way ask.
     focusTreeRequested = Signal()
+    # Reverse direction of focusTreeRequested — fired from `_on_nav_event`
+    # (nvim spillover at leftmost split, dir="left") and from the QML
+    # tree's Ctrl+H handler. Both routes land on Main.qml's Connections
+    # block, which forwards to `editor.forceActiveFocus()`.
+    focusEditorRequested = Signal()
 
     # Cycle order for Shift+Tab in the agent pane. Tuple is the source of
     # truth for both validation (gate `_set_permission_mode` against this)
@@ -281,6 +286,21 @@ class AppController(QObject):
     # — `_session_hosts` is a sparse dict, so widening to N is just
     # bumping this constant + adding `<C-N>` keybinds in init.lua.
     _MAX_INSTANCES: int = 5
+
+    # Focus-chain spatial graph for the <C-h/j/k/l> spillover bridge.
+    # When nvim spills over from the editor at an edge, this table
+    # picks the destination outer pane. Today there's only one outer
+    # pane (tree) on the right; future panes (agent dock, terminal,
+    # etc.) extend the table without restructuring the dispatch path.
+    # Reverse direction (tree → editor) is handled directly from QML
+    # (the tree's Ctrl+H handler calls `controller.focus_editor()`
+    # without going through this table), so this dict only encodes
+    # editor-as-source edges.
+    _NAV_FROM_EDITOR: dict[str, str] = {
+        "right": "tree",
+        # left/up/down: no outer pane yet — adding agent dock at "down"
+        # is a one-line change.
+    }
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -374,6 +394,8 @@ class AppController(QObject):
         # `forceActiveFocus()` on the FileTreeView instance.
         # queued: NvimBackend worker → AppController GUI (same path as agent_event/fm_event)
         self._backend.tree_event.connect(self._on_tree_event)
+        # queued: NvimBackend worker → AppController GUI (same path as tree_event)
+        self._backend.nav_event.connect(self._on_nav_event)
         # Seed `cwd` with $HOME so QML's `rootPath: controller.cwd` has
         # a valid path during the brief window between QML construction
         # and the first capsule push from runtime/init.lua's VimEnter +
@@ -938,6 +960,52 @@ class AppController(QObject):
             log.debug("tree debug: %s %r", event, payload)
         else:
             log.warning("tree event with unknown op: %r", payload)
+
+    @Slot()
+    def focus_editor(self) -> None:
+        """Ask QML to move active focus into the NvimView.
+
+        Mirror of `focus_tree`. Called from two routes:
+        (a) `_on_nav_event` when nvim spillover targets the editor
+            (no current source path, but symmetric for future docks
+            that sit to the editor's left/up/down).
+        (b) Directly from QML when the tree-side Ctrl+H handler fires
+            — `controller.focus_editor()` from Main.qml.
+        Emits the signal rather than touching QML focus directly,
+        matching the project-standards §4 pattern for cross-layer
+        focus asks.
+        """
+        self.focusEditorRequested.emit()
+
+    @Slot(dict)
+    def _on_nav_event(self, payload: dict) -> None:
+        """Route Lua-emitted nav rpcnotify events.
+
+        Payload shapes (mirrors tree/fm event vocabulary):
+          { op: "move", dir: "left"|"right"|"up"|"down" }
+          { op: "debug", event: "keymap_install", reason: ... }
+
+        `move` events always source from the editor — Lua only emits
+        nav at the edge of an nvim split, and our only Lua-side
+        keymap surface is the editor. The destination is looked up
+        in `_NAV_FROM_EDITOR`; missing directions silently no-op
+        (matches vim-tmux-navigator's no-$TMUX behavior — better
+        than bell-ringing at a non-existent neighbor).
+        """
+        op = str(payload.get("op") or "").lower()
+        if op == "move":
+            direction = str(payload.get("dir") or "").lower()
+            target = self._NAV_FROM_EDITOR.get(direction)
+            if target == "tree":
+                self.focusTreeRequested.emit()
+            elif target == "editor":
+                self.focusEditorRequested.emit()
+            # else: no outer neighbor in this direction, silently ignore
+        elif op == "debug":
+            event = str(payload.get("event") or "")
+            log.debug("nav debug: %s %r", event, payload)
+        else:
+            log.warning("nav event with unknown op: %r", payload)
 
     def _nvim_cwd_or_home(self) -> str:
         """Default initial path for the FM overlay when none is provided.

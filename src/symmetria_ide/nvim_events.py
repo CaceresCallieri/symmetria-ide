@@ -390,4 +390,10 @@ def _dispatch_notification(self: NvimBackend, name: str, args: list[Any]) -> Non
             return
         self.tree_event.emit(args[0])
         return
+    if name == "nav":
+        if not args or not isinstance(args[0], dict):
+            log.warning("nav notification with unexpected payload: %r", args)
+            return
+        self.nav_event.emit(args[0])
+        return
     log.debug("unhandled notification: %s (args=%r)", name, args)

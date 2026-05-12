@@ -938,4 +938,80 @@ vim.api.nvim_create_autocmd("User", {
   end,
 })
 
+-- ---------------------------------------------------------------------------
+-- Window navigation bridge: <C-h/j/k/l> spillover to IDE outer panes
+-- ---------------------------------------------------------------------------
+-- vim-tmux-navigator (in the user's plugin set) installs <C-h/j/k/l>
+-- with edge detection that spills over to tmux when nvim has no window
+-- in the requested direction. Inside the IDE host we substitute the
+-- spillover destination: same edge-detection idiom
+-- (`winnr() == winnr(dir)`), same in-nvim fallback to `wincmd <dir>`,
+-- but the at-edge case fires `rpcnotify(0, "nav", ...)` to AppController
+-- instead of shelling out to `tmux select-pane`.
+--
+-- Outside the IDE (terminal nvim) the plugin's keymaps stay in place —
+-- runtime/init.lua is on the runtime path only when launched via the IDE
+-- (per `set rtp^=...` in the embed spawn), so this file does not load
+-- in a normal terminal-nvim session.
+--
+-- Edge detection (see :h winnr()): `winnr(dir)` returns the window
+-- number you'd land on by moving in `dir`, OR the current window when
+-- no neighbor exists in that direction. Equality means "I'm at the
+-- edge in this direction." This is the canonical idiom used by
+-- vim-tmux-navigator itself.
+local SYMMETRIA_NAV_DIRS = { h = "left", j = "down", k = "up", l = "right" }
+
+local function nav_handler(key)
+  if vim.fn.winnr() ~= vim.fn.winnr(key) then
+    vim.cmd("wincmd " .. key)
+    return
+  end
+  -- pcall intentional: rpcnotify fails if the Python client has
+  -- disconnected mid-session. The keystroke is still consumed cleanly
+  -- — no fallback to tmux from inside the IDE host.
+  pcall(vim.rpcnotify, 0, "nav", { op = "move", dir = SYMMETRIA_NAV_DIRS[key] })
+end
+
+local function install_nav_keymaps(reason)
+  for k, _ in pairs(SYMMETRIA_NAV_DIRS) do
+    vim.keymap.set("n", "<C-" .. k .. ">", function()
+      nav_handler(k)
+    end, { desc = "Symmetria pane nav " .. SYMMETRIA_NAV_DIRS[k], silent = true })
+  end
+  pcall(vim.rpcnotify, 0, "nav", {
+    op = "debug",
+    event = "keymap_install",
+    reason = reason,
+  })
+end
+
+-- VimEnter timing matches the fm + tree hijack pattern — installs AFTER
+-- lazy-loaded plugins (including vim-tmux-navigator) wire their own
+-- <C-h/j/k/l>. vim.schedule defers past the autocmd phase per gotcha #21
+-- (scheduled callbacks may stall during prefix-wait, but VimEnter isn't
+-- prefix-wait, so we're safe here).
+local nav_grp = vim.api.nvim_create_augroup("SymmetriaIdeNav", { clear = true })
+vim.api.nvim_create_autocmd("VimEnter", {
+  group = nav_grp,
+  callback = function()
+    vim.schedule(function()
+      install_nav_keymaps("VimEnter")
+    end)
+  end,
+})
+-- LazyLoad self-heal — if vim-tmux-navigator lazy-loads after VimEnter
+-- has fired (the plugin is eager-loaded in the current config, but a
+-- future `event = "VeryLazy"` would change that), its setup re-installs
+-- <C-h/j/k/l> and clobbers our maps. Re-install on the LazyLoad signal.
+vim.api.nvim_create_autocmd("User", {
+  group = nav_grp,
+  pattern = "LazyLoad",
+  callback = function(ev)
+    local name = ev.data or ""
+    if type(name) == "string" and name:lower():find("tmux-navigator", 1, true) then
+      install_nav_keymaps("LazyLoad:" .. name)
+    end
+  end,
+})
+
 return M

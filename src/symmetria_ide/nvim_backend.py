@@ -106,6 +106,12 @@ class NvimBackend(QObject):
     # <leader>tf keybind). Distinct from fm_event because the sidebar is
     # always-mounted whereas fm_event drives the toggle-overlay path.
     tree_event = Signal(dict)
+    # Window-navigation bridge. Lua emits via rpcnotify when <C-h/j/k/l>
+    # is pressed at the edge of nvim's window splits — payload is
+    # `{op:"move", dir:"left|right|up|down"}` for spillover, or
+    # `{op:"debug", event:"keymap_install", reason:...}` for diagnostic
+    # traces. Same routing pattern as tree_event / fm_event / agent_event.
+    nav_event = Signal(dict)
     closed = Signal()
 
     # --- Dispatch bindings --------------------------------------------

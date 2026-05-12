@@ -155,6 +155,40 @@ Window {
                 Layout.fillHeight: true
                 visible: controller.treeVisible
 
+                // Ctrl+H reverse-spillover: focus is in the tree, user
+                // wants to go back to the editor.
+                //
+                // Implemented as a window-scoped Shortcut rather than
+                // Keys.onPressed because FileTreeView's internal ListView
+                // captures the key event before it can bubble up to this
+                // FocusScope: the ListView's own `Keys.onPressed` matches
+                // `event.key === Qt.Key_H` without checking modifiers
+                // (the standard vim-style pattern), so it treats Ctrl+H
+                // as plain `h` (collapse node) and accepts the event,
+                // halting propagation. `Keys.priority: BeforeItem` on
+                // this FocusScope does NOT solve that — BeforeItem orders
+                // OUR own handlers relative to OUR own auto-handling, not
+                // relative to a descendant focusItem's handlers. Qt
+                // always delivers key events to the focused item first.
+                //
+                // Shortcut bypasses focus-chain delivery entirely. The
+                // `enabled: treeScope.activeFocus` gate scopes the
+                // binding to "focus is somewhere inside the tree's
+                // subtree" — for a FocusScope, `activeFocus` is true
+                // when ANY descendant has the active focus, which is
+                // exactly the scope we want.
+                //
+                // Other directions (Ctrl+J/K/L) currently no-op from
+                // the tree: nothing above, below, or right of it. Adding
+                // an agent dock down the road extends this with another
+                // Shortcut entry.
+                Shortcut {
+                    sequences: ["Ctrl+H"]
+                    enabled: treeScope.activeFocus
+                    context: Qt.WindowShortcut
+                    onActivated: controller.focus_editor()
+                }
+
                 FmUi.FileTreeView {
                     id: fileTreeView
                     anchors.fill: parent
@@ -199,6 +233,18 @@ Window {
                     listView.forceActiveFocus()
                 else
                     fileTreeView.forceActiveFocus()  // safety fallback
+            }
+
+            // Reverse direction of onFocusTreeRequested. Fired from
+            // AppController._on_nav_event (nvim spillover with dir
+            // matching the editor in the focus chain) and from the
+            // tree's Ctrl+H handler. NvimView itself IS a FocusScope
+            // (NvimView.qml manages its own focus), so a direct
+            // forceActiveFocus on `editor` lands the focus correctly
+            // without the descendant-walker workaround needed for the
+            // tree direction.
+            function onFocusEditorRequested(): void {
+                editor.forceActiveFocus()
             }
 
             // WORKAROUND: recursive descendant walker using toString() type detection.
