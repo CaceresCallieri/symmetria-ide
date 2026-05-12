@@ -966,10 +966,15 @@ local function nav_handler(key)
     vim.cmd("wincmd " .. key)
     return
   end
-  -- pcall intentional: rpcnotify fails if the Python client has
-  -- disconnected mid-session. The keystroke is still consumed cleanly
-  -- — no fallback to tmux from inside the IDE host.
-  pcall(vim.rpcnotify, 0, "nav", { op = "move", dir = SYMMETRIA_NAV_DIRS[key] })
+  -- WORKAROUND: pcall swallows the rpcnotify error when the Python client
+  -- has disconnected mid-session (e.g. IDE shutting down while nvim is still
+  -- alive). Clean fix would require a session-alive check API from pynvim,
+  -- which doesn't exist. Remove this guard once pynvim exposes a synchronous
+  -- `is_connected()` predicate or rpcnotify becomes a no-op on dead channels.
+  local ok, err = pcall(vim.rpcnotify, 0, "nav", { op = "move", dir = SYMMETRIA_NAV_DIRS[key] })
+  if not ok then
+    vim.notify("[symmetria] nav rpcnotify failed: " .. tostring(err), vim.log.levels.DEBUG)
+  end
 end
 
 local function install_nav_keymaps(reason)
@@ -978,11 +983,19 @@ local function install_nav_keymaps(reason)
       nav_handler(k)
     end, { desc = "Symmetria pane nav " .. SYMMETRIA_NAV_DIRS[k], silent = true })
   end
-  pcall(vim.rpcnotify, 0, "nav", {
+  -- WORKAROUND: pcall swallows the rpcnotify error when Python client is
+  -- disconnected; same root cause as the pcall in nav_handler above.
+  local dbg_ok, dbg_err = pcall(vim.rpcnotify, 0, "nav", {
     op = "debug",
     event = "keymap_install",
     reason = reason,
   })
+  if not dbg_ok then
+    vim.notify(
+      "[symmetria] nav debug rpcnotify failed: " .. tostring(dbg_err),
+      vim.log.levels.DEBUG
+    )
+  end
 end
 
 -- VimEnter timing matches the fm + tree hijack pattern — installs AFTER

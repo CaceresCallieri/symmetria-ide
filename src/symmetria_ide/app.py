@@ -12,6 +12,8 @@ by QML polling.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import gc
 import logging
 import os
@@ -259,10 +261,11 @@ class AppController(QObject):
     # `fileTreeView.forceActiveFocus()`. Decoupled from the data-bearing
     # signals above because it carries no payload — it's a one-way ask.
     focusTreeRequested = Signal()
-    # Reverse direction of focusTreeRequested — fired from `_on_nav_event`
-    # (nvim spillover at leftmost split, dir="left") and from the QML
-    # tree's Ctrl+H handler. Both routes land on Main.qml's Connections
-    # block, which forwards to `editor.forceActiveFocus()`.
+    # Reverse direction of focusTreeRequested — fired from the QML tree's
+    # Ctrl+H Shortcut handler (`controller.focus_editor()` in Main.qml).
+    # `_on_nav_event` would also emit this if a future `_NAV_FROM_EDITOR`
+    # entry targeted "editor", but no such entry exists today — only
+    # `focus_editor()` emits this signal currently.
     focusEditorRequested = Signal()
 
     # Cycle order for Shift+Tab in the agent pane. Tuple is the source of
@@ -296,7 +299,7 @@ class AppController(QObject):
     # (the tree's Ctrl+H handler calls `controller.focus_editor()`
     # without going through this table), so this dict only encodes
     # editor-as-source edges.
-    _NAV_FROM_EDITOR: dict[str, str] = {
+    _NAV_FROM_EDITOR: ClassVar[dict[str, str]] = {
         "right": "tree",
         # left/up/down: no outer pane yet — adding agent dock at "down"
         # is a one-line change.
@@ -998,9 +1001,10 @@ class AppController(QObject):
             target = self._NAV_FROM_EDITOR.get(direction)
             if target == "tree":
                 self.focusTreeRequested.emit()
-            elif target == "editor":
-                self.focusEditorRequested.emit()
             # else: no outer neighbor in this direction, silently ignore
+            # (target == "editor" is reserved for future docks that sit
+            # to the editor's left/up/down; no entry in _NAV_FROM_EDITOR
+            # maps to that value today, so the branch would be unreachable).
         elif op == "debug":
             event = str(payload.get("event") or "")
             log.debug("nav debug: %s %r", event, payload)

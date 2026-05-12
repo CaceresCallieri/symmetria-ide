@@ -482,6 +482,37 @@ class TestNotificationRouting:
 
         assert recorder.payloads == [payload]
 
+    def test_nav_move_routes_to_nav_event(self) -> None:
+        backend = NvimBackend()
+        recorder = _SignalRecorder()
+        backend.nav_event.connect(recorder)
+
+        payload = {"op": "move", "dir": "right"}
+        backend._dispatch_notification("nav", [payload])
+
+        assert recorder.payloads == [payload]
+
+    def test_nav_debug_routes_to_nav_event(self) -> None:
+        backend = NvimBackend()
+        recorder = _SignalRecorder()
+        backend.nav_event.connect(recorder)
+
+        payload = {"op": "debug", "event": "keymap_install", "reason": "VimEnter"}
+        backend._dispatch_notification("nav", [payload])
+
+        assert recorder.payloads == [payload]
+
+    def test_nav_drops_non_dict_payload(self) -> None:
+        backend = NvimBackend()
+        recorder = _SignalRecorder()
+        backend.nav_event.connect(recorder)
+
+        # Non-dict → must be logged and dropped, NOT emitted.
+        backend._dispatch_notification("nav", ["not-a-dict"])
+        backend._dispatch_notification("nav", [])
+
+        assert recorder.payloads == []
+
     def test_unknown_notification_is_silent(self) -> None:
         """Unrecognized channel names must not raise — just log & drop."""
         backend = NvimBackend()

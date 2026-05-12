@@ -183,7 +183,7 @@ Window {
                 // an agent dock down the road extends this with another
                 // Shortcut entry.
                 Shortcut {
-                    sequences: ["Ctrl+H"]
+                    sequence: "Ctrl+H"
                     enabled: treeScope.activeFocus
                     context: Qt.WindowShortcut
                     onActivated: controller.focus_editor()
