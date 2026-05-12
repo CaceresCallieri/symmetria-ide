@@ -24,9 +24,11 @@ from PySide6.QtCore import (
     QModelIndex,
     QObject,
     Qt,
+    QtMsgType,
     QUrl,
     Signal,
     Slot,
+    qInstallMessageHandler,
 )
 from PySide6.QtGui import QGuiApplication, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine, QmlElement
@@ -53,6 +55,32 @@ QML_IMPORT_MAJOR_VERSION = 1
 
 
 log = logging.getLogger(__name__)
+
+
+def _qt_message_handler(mode, ctx, msg: str) -> None:
+    """Route Qt/QML log output into Python's logging so console.log + qWarning
+    actually surface during development.
+
+    PySide6's default handler suppresses QML `console.log` and many qWarnings
+    unless we install our own. The result was that the FileTreeView sidebar
+    rendered as an empty column with no diagnostic clue — Qt's "QML component
+    failed to construct" warning was being swallowed by the default handler.
+    Routing through `log.warning` keeps the messages alive in the same stream
+    as Python's own log output.
+    """
+    qt_log = logging.getLogger("qt.qml")
+    file_loc = ""
+    if ctx is not None and getattr(ctx, "file", None):
+        file_loc = f" ({ctx.file}:{getattr(ctx, 'line', 0)})"
+    line = f"{msg}{file_loc}"
+    if mode in (QtMsgType.QtFatalMsg, QtMsgType.QtCriticalMsg):
+        qt_log.error(line)
+    elif mode == QtMsgType.QtWarningMsg:
+        qt_log.warning(line)
+    elif mode == QtMsgType.QtInfoMsg:
+        qt_log.info(line)
+    else:
+        qt_log.debug(line)
 
 
 @QmlElement
@@ -224,6 +252,13 @@ class AppController(QObject):
     focusedInstanceChanged = Signal()
     instanceCountChanged = Signal()
     instanceTitlesChanged = Signal()
+    cwdChanged = Signal()
+    treeVisibleChanged = Signal()
+    # QML-bound focus pull. The Lua `<leader>tf` keybind routes here via
+    # `_on_tree_event`; Main.qml's Connections block calls
+    # `fileTreeView.forceActiveFocus()`. Decoupled from the data-bearing
+    # signals above because it carries no payload — it's a one-way ask.
+    focusTreeRequested = Signal()
 
     # Cycle order for Shift+Tab in the agent pane. Tuple is the source of
     # truth for both validation (gate `_set_permission_mode` against this)
@@ -333,6 +368,24 @@ class AppController(QObject):
         self._backend.fm_event.connect(self._on_fm_event)
         self._fm_visible = False
         self._fm_initial_path = ""
+        # Always-on file-tree sidebar. Same Lua → rpcnotify → backend signal
+        # → controller routing as fm_event; the only op today is "focus",
+        # which the Main.qml Connections block translates into a
+        # `forceActiveFocus()` on the FileTreeView instance.
+        self._backend.tree_event.connect(self._on_tree_event)
+        # Seed `cwd` with $HOME so QML's `rootPath: controller.cwd` has
+        # a valid path during the brief window between QML construction
+        # and the first capsule push from runtime/init.lua's VimEnter +
+        # `symmetria_push_state` re-request (per CLAUDE.md gotcha #2).
+        # Empty string here would trip FileTreeView's `if (rootPath !==
+        # "")` guard and leave the sidebar showing "Empty" until the
+        # capsule lands.
+        self._cwd: str = os.path.expanduser("~")
+        # Always-on by default per the "visualization-first" decision —
+        # toggle keybind deferred (no `<leader>tt` in v1). Property
+        # exists so QML's `visible: controller.treeVisible` binding has
+        # something to read, and so a v2 toggle is a one-line addition.
+        self._tree_visible: bool = True
 
     def _create_instance(self, slot: int) -> None:
         """Allocate one pool entry: host + model + per-instance scalar state.
@@ -494,6 +547,18 @@ class AppController(QObject):
 
     @Slot(dict)
     def _route_capsule(self, payload: dict) -> None:
+        # `cwd` is intercepted BEFORE _status.apply so it never reaches
+        # the StatusBarState (not a statusbar field) and never falls
+        # through to CapsuleModel (would render as a stray status-bar
+        # pill). The sidebar's FileTreeView reads `controller.cwd`
+        # directly via the @Property binding.
+        cid = str(payload.get("id") or "")
+        if cid == "cwd":
+            new_cwd = str(payload.get("value") or "")
+            if new_cwd != self._cwd:
+                self._cwd = new_cwd
+                self.cwdChanged.emit()
+            return
         if self._status.apply(payload):
             return
         self._capsules.update(payload)
@@ -787,12 +852,13 @@ class AppController(QObject):
 
     @Slot(str)
     def open_in_nvim(self, path: str) -> None:
-        """Open a file in NeoVim and dismiss the overlay.
+        """Open a file in NeoVim without touching overlay/sidebar state.
 
-        Called by the file-manager panel's open action. The path is
-        passed to nvim via `:edit <path>` — fnameescape protects against
-        spaces / special chars. The overlay closes after dispatch so
-        focus returns to the editor for the freshly-opened buffer.
+        The "always-on sidebar" caller (FileTreeView's onFileActivated)
+        wants the file to land in nvim while the sidebar stays visible
+        and the editor regains focus. The overlay-picker caller has
+        different semantics — it dismisses the overlay after opening —
+        and lives in `pick_in_nvim`.
         """
         if not path:
             return
@@ -801,7 +867,75 @@ class AppController(QObject):
         # whole call in a single `:execute` keeps the input() one shot.
         cmd = f":execute 'edit ' . fnameescape({path!r})\n"
         self._backend.input(cmd)
+
+    @Slot(str)
+    def pick_in_nvim(self, path: str) -> None:
+        """Open a file in NeoVim AND dismiss the FM overlay.
+
+        Used by the file-manager picker (Main.qml's
+        `FileManagerService.onPickerCompleted` handler). Splits from
+        `open_in_nvim` because the sidebar caller wants to KEEP the
+        sidebar visible after activation; muxing both into one method
+        would force a flag parameter that's always one specific value
+        per caller — a smell that we keep as two thin wrappers instead.
+        """
+        if not path:
+            return
+        self.open_in_nvim(path)
         self.hide_fm()
+
+    # --- File-tree sidebar ----------------------------------------------
+
+    @Property(str, notify=cwdChanged)
+    def cwd(self) -> str:
+        """NeoVim's current working directory.
+
+        Populated by the `cwd` capsule emitted from `runtime/init.lua`
+        on VimEnter + DirChanged. Bound to `FileTreeView.rootPath` in
+        Main.qml so `:cd` in nvim retargets the sidebar.
+        """
+        return self._cwd
+
+    @Property(bool, notify=treeVisibleChanged)
+    def treeVisible(self) -> bool:
+        """Sidebar visibility — true by default.
+
+        Bound to the sidebar's QML `visible` property. No toggle
+        keybind exists in v1 (the "visualization-first" decision); the
+        property exists so a future `<leader>tt` is a one-line addition
+        without restructuring the binding shape.
+        """
+        return self._tree_visible
+
+    @Slot()
+    def focus_tree(self) -> None:
+        """Ask QML to move active focus into the FileTreeView.
+
+        Emits `focusTreeRequested` rather than reaching into QML
+        directly — keeps the Python side stateless about QML focus
+        ownership. Main.qml's Connections block calls
+        `fileTreeView.forceActiveFocus()` on receipt.
+        """
+        self.focusTreeRequested.emit()
+
+    def _on_tree_event(self, payload: dict) -> None:
+        """Route Lua-emitted tree rpcnotify events.
+
+        Payload shapes:
+          { op: "focus" }
+          { op: "debug", event: "keymap_install", keys, reason }
+        Only one user-facing op today (focus tree from `<leader>tf`);
+        shape mirrors `_on_fm_event` so a future `{op: "toggle"}` or
+        `{op: "reveal_current"}` is a single-line dispatch addition.
+        """
+        op = str(payload.get("op") or "").lower()
+        if op == "focus":
+            self.focus_tree()
+        elif op == "debug":
+            event = str(payload.get("event") or "")
+            log.debug("tree debug: %s %r", event, payload)
+        else:
+            log.warning("tree event with unknown op: %r", payload)
 
     def _nvim_cwd_or_home(self) -> str:
         """Default initial path for the FM overlay when none is provided.
@@ -820,8 +954,9 @@ class AppController(QObject):
     def _on_fm_event(self, payload: dict) -> None:
         """Route Lua-emitted fm rpcnotify events.
 
-        Payload shape:
+        Payload shapes:
           { op: "show"|"hide"|"toggle", initialPath?: string }
+          { op: "debug", event: "keymap_install", keys, reason }
         """
         op = str(payload.get("op") or "").lower()
         initial_path = str(payload.get("initialPath") or "")
@@ -834,6 +969,13 @@ class AppController(QObject):
                 self.hide_fm()
             else:
                 self.show_fm(initial_path)
+        elif op == "debug":
+            # Diagnostic trail from the Lua-side install_fm_keymap
+            # (keymap reinstall observability). Mirrors `_on_agent_event`'s
+            # debug branch — log at DEBUG, don't WARNING-spam the app log
+            # on every BufEnter.
+            event = str(payload.get("event") or "")
+            log.debug("fm debug: %s %r", event, payload)
         else:
             log.warning("fm event with unknown op: %r", payload)
 
@@ -1384,6 +1526,11 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
 
 def run() -> int:
     configure_logging()
+    # Install the Qt message handler BEFORE QGuiApplication so any QML
+    # warnings emitted during engine construction reach Python's logging.
+    # Without this, PySide6's default handler silently drops console.log
+    # and most qWarnings — turning silent QML failures into mystery bugs.
+    qInstallMessageHandler(_qt_message_handler)
     # Ctrl-C in the terminal should kill the app, not be caught by Qt.
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 

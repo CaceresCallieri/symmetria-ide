@@ -99,6 +99,13 @@ class NvimBackend(QObject):
     # involved (unlike the standalone Symmetria File Manager which spawns
     # a separate window). Source of truth is AppController.fmVisible.
     fm_event = Signal(dict)
+    # Always-on file-tree sidebar lifecycle. Same shape as fm_event:
+    #   { op: "focus" }
+    # Sidebar visibility itself is controlled by AppController.treeVisible
+    # — this signal only carries focus-management asks (the user's
+    # <leader>tf keybind). Distinct from fm_event because the sidebar is
+    # always-mounted whereas fm_event drives the toggle-overlay path.
+    tree_event = Signal(dict)
     closed = Signal()
 
     # --- Dispatch bindings --------------------------------------------

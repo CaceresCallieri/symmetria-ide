@@ -130,6 +130,13 @@ function M.push_state()
   emit_capsule("branch", "", git_branch())
   emit_capsule("file", "", file_display())
   emit_capsule("pos", "", cursor_position())
+  -- `cwd` is NOT a status-bar field — it's intercepted on the Python
+  -- side by AppController._route_capsule before reaching StatusBarState
+  -- and routed to controller.cwd, which the sidebar's FileTreeView
+  -- binds against as rootPath. Emitted alongside the rest of push_state
+  -- so the DirChanged/BufEnter/VimEnter triggers retarget the sidebar
+  -- without a second autocmd plumbing.
+  emit_capsule("cwd", "", vim.fn.getcwd())
 end
 
 function M.push_position()
@@ -826,6 +833,104 @@ vim.api.nvim_create_autocmd("User", {
         or lower:find("oil", 1, true)
       then
         install_fm_keymap("LazyLoad:" .. name)
+      end
+    end
+  end,
+})
+
+-- ============================================================================
+-- File-tree sidebar focus keybind
+-- ============================================================================
+--
+-- <leader>tf (mnemonic: "tree focus") moves active focus into the
+-- always-on file-tree sidebar. Sidebar visibility itself is managed by
+-- AppController.treeVisible (defaults to True, no v1 toggle keybind per
+-- the "visualization-first" scope decision).
+--
+-- This is a SEPARATE hijack surface from <leader>e / install_fm_keymap.
+-- The two are conceptually independent — sidebar focus vs FM overlay
+-- toggle compete with different plugin sets (nvim-tree / neo-tree
+-- contend for <leader>t* prefixes; yazi.nvim contends for <leader>e).
+-- Consolidating into one install function would couple lifecycle
+-- decisions that should evolve separately (see CLAUDE.md's
+-- `slot_owned_by_us` vs `fm_slot_owned_by_us` reasoning for the same
+-- pattern applied to agent and FM hijacks).
+
+local SYMMETRIA_TREE_DESC = "Focus Symmetria file-tree sidebar"
+
+local SYMMETRIA_TREE_KEYS = { "<leader>tf" }
+
+local function focus_file_tree()
+  pcall(vim.rpcnotify, 0, "tree", { op = "focus" })
+end
+
+local function tree_slot_owned_by_us(keys)
+  local mapping = vim.fn.maparg(keys, "n", false, true)
+  if type(mapping) ~= "table" or vim.tbl_isempty(mapping) then
+    return false
+  end
+  return (mapping.desc or "") == SYMMETRIA_TREE_DESC
+end
+
+local function install_tree_keymap(reason)
+  reason = reason or "unknown"
+  for _, keys in ipairs(SYMMETRIA_TREE_KEYS) do
+    if not tree_slot_owned_by_us(keys) then
+      vim.keymap.set("n", keys, focus_file_tree, {
+        buffer = 0,
+        silent = true,
+        nowait = true,
+        desc = SYMMETRIA_TREE_DESC,
+      })
+      -- Diagnostic trail — mirrors install_fm_keymap so the operator
+      -- can confirm the tree hijack ran via the app log.
+      -- pcall intentional: rpcnotify fails if Python client is disconnected.
+      pcall(vim.rpcnotify, 0, "tree", {
+        op = "debug",
+        event = "keymap_install",
+        keys = keys,
+        reason = reason,
+      })
+    end
+  end
+end
+
+local tree_grp = vim.api.nvim_create_augroup("symmetria_tree_keys", { clear = true })
+
+vim.api.nvim_create_autocmd("VimEnter", {
+  group = tree_grp,
+  callback = function()
+    vim.schedule(function()
+      install_tree_keymap("VimEnter")
+    end)
+  end,
+})
+
+vim.api.nvim_create_autocmd("BufEnter", {
+  group = tree_grp,
+  callback = function()
+    install_tree_keymap("BufEnter")
+  end,
+})
+
+-- Self-heal when nvim-tree / neo-tree / other <leader>t*-claiming plugins
+-- lazy-load. Same pattern as install_fm_keymap's LazyLoad self-heal —
+-- lazy.nvim's `User LazyLoad` fires synchronously inside its load path
+-- BEFORE the triggering keypress is re-dispatched, so we win the slot
+-- back for the trailing key in the chord.
+vim.api.nvim_create_autocmd("User", {
+  group = tree_grp,
+  pattern = "LazyLoad",
+  callback = function(ev)
+    local name = ev.data or ""
+    if type(name) == "string" then
+      local lower = name:lower()
+      if
+        lower:find("nvim-tree", 1, true)
+        or lower:find("neo-tree", 1, true)
+        or lower:find("oil", 1, true)
+      then
+        install_tree_keymap("LazyLoad:" .. name)
       end
     end
   end,

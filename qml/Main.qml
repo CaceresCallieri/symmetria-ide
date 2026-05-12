@@ -46,62 +46,189 @@ Window {
             Layout.preferredHeight: Theme.size.statusBarHeight
         }
 
-        // Editor / agent view swap. Full-window mode, not a side
-        // panel: when `controller.agentVisible` is True the editor
-        // hides entirely and the agent pane takes over the main
-        // content area; the chrome bars (AgentTopBar above and
-        // StatusBar below) stay visible across both modes for
-        // visual continuity. Only one of the two inner Items has
-        // `visible: true` at a time so Qt's scene graph skips the
-        // hidden subtree entirely.
-        Item {
-            id: mainContent
+        // Editor / agent view swap PLUS always-on file-tree sidebar.
+        //
+        // Outer RowLayout: `mainContent` (the NvimView | AgentPane
+        // visibility-swap) takes fillWidth; a 1px separator + a
+        // fixed-width FileTreeView pinned to the right give the user
+        // persistent observability into the project layout. The
+        // sidebar stays visible across BOTH editor mode and agent
+        // mode — per the "visualization-first" decision; users want
+        // the structural map at all times, not just while editing.
+        // Chrome bars (AgentTopBar above, StatusBar below) bracket
+        // the entire row, including the sidebar, for visual continuity.
+        RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            spacing: 0
 
-            NvimView {
-                id: editor
-                anchors.fill: parent
-                visible: !controller.agentVisible
-                backend: nvimBackend
-                focus: visible
+            Item {
+                id: mainContent
+                Layout.fillWidth: true
+                Layout.fillHeight: true
 
-                Component.onCompleted: forceActiveFocus()
-                onVisibleChanged: if (visible) forceActiveFocus()
-
-                // Floating cmdline + wildmenu overlay — parented to the
-                // editor so it clips within the viewport (not over the
-                // status bar) and so its anchors.fill tracks editor resizes.
-                // Focus stays on the NvimView; keys flow to NeoVim, which
-                // emits ext_cmdline/ext_popupmenu events that this overlay
-                // reads via cmdlineState / popupmenuModel.
-                CommandLine {
-                    id: cmdlineOverlay
+                NvimView {
+                    id: editor
                     anchors.fill: parent
+                    visible: !controller.agentVisible
+                    backend: nvimBackend
+                    focus: visible
+
+                    Component.onCompleted: forceActiveFocus()
+                    onVisibleChanged: if (visible) forceActiveFocus()
+
+                    // Floating cmdline + wildmenu overlay — parented to the
+                    // editor so it clips within the viewport (not over the
+                    // status bar) and so its anchors.fill tracks editor resizes.
+                    // Focus stays on the NvimView; keys flow to NeoVim, which
+                    // emits ext_cmdline/ext_popupmenu events that this overlay
+                    // reads via cmdlineState / popupmenuModel.
+                    CommandLine {
+                        id: cmdlineOverlay
+                        anchors.fill: parent
+                    }
+
+                    // Native which-key overlay. Bottom-anchored inside the
+                    // editor so it visually sits above the status bar and
+                    // animates alongside editor resizes. Driven entirely by
+                    // `whichKeyState` + `whichKeyModel`; Lua side controls
+                    // show/hide via rpcnotify (see runtime/lua/orchestrator/
+                    // whichkey/init.lua).
+                    WhichKeyOverlay {
+                        id: whichKeyOverlay
+                        anchors.left: editor.left
+                        anchors.right: editor.right
+                        anchors.bottom: editor.bottom
+                        // Clamp to half the viewport so huge menus never hog
+                        // the whole editor; scroll support is a v2 follow-up.
+                        height: Math.min(implicitHeight, editor.height * 0.5)
+                        z: 20
+                    }
                 }
 
-                // Native which-key overlay. Bottom-anchored inside the
-                // editor so it visually sits above the status bar and
-                // animates alongside editor resizes. Driven entirely by
-                // `whichKeyState` + `whichKeyModel`; Lua side controls
-                // show/hide via rpcnotify (see runtime/lua/orchestrator/
-                // whichkey/init.lua).
-                WhichKeyOverlay {
-                    id: whichKeyOverlay
-                    anchors.left: editor.left
-                    anchors.right: editor.right
-                    anchors.bottom: editor.bottom
-                    // Clamp to half the viewport so huge menus never hog
-                    // the whole editor; scroll support is a v2 follow-up.
-                    height: Math.min(implicitHeight, editor.height * 0.5)
-                    z: 20
+                AgentPane {
+                    id: agentPane
+                    anchors.fill: parent
+                    visible: controller.agentVisible
                 }
             }
 
-            AgentPane {
-                id: agentPane
-                anchors.fill: parent
-                visible: controller.agentVisible
+            // 1px vertical separator between editor and sidebar.
+            // Visibility tracks the sidebar so a future hide-tree
+            // toggle reclaims the pixel cleanly.
+            Rectangle {
+                Layout.fillHeight: true
+                implicitWidth: 1
+                visible: controller.treeVisible
+                color: FmUi.FmTheme.palette.outlineVariant
+            }
+
+            // File-tree sidebar.
+            //
+            // FocusScope wrapper carries focus into the internal
+            // ListView when the user presses <leader>tf. The
+            // ListView inside FileTreeView has `focus: true`
+            // (FileTreeView.qml:493), so once this FocusScope joins
+            // the active focus chain the ListView becomes its focus
+            // delegate and its Keys.onPressed block receives j/k/h/l.
+            //
+            // Earlier this FocusScope had `focus: false` to block the
+            // ListView's startup `view.forceActiveFocus()` from
+            // stealing focus from the editor. That wall worked for
+            // startup BUT also blocked our explicit <leader>tf focus
+            // grants — the FocusScope refused to ever enter the focus
+            // chain, so arrow keys went nowhere even after focus_tree
+            // fired. Replaced with a one-shot Window-level startup
+            // override below (`Component.onCompleted: editor.
+            // forceActiveFocus()`) that runs AFTER all child
+            // Component.onCompleted handlers, giving the editor the
+            // final word on initial focus without permanently
+            // disabling our FocusScope. See CLAUDE.md gotcha #N (TBD
+            // — file as a Phase 2 follow-up if this pattern recurs).
+            //
+            // Visibility defaults to true; no toggle keybind in v1
+            // per the "visualization-first" decision.
+            FocusScope {
+                id: treeScope
+                Layout.minimumWidth: 280
+                Layout.maximumWidth: 280
+                Layout.fillHeight: true
+                visible: controller.treeVisible
+
+                FmUi.FileTreeView {
+                    id: fileTreeView
+                    anchors.fill: parent
+                    rootPath: controller.cwd
+                    // Disable gitignore filtering — the FM's Gitignore
+                    // service spawns `sh -c "git check-ignore --stdin"`
+                    // via a C++ ShellRunner/QProcess, and that
+                    // subprocess fails to start (`ShellRunner::write()
+                    // called while not running`) when the plugin is
+                    // hosted inside our Python+PySide6 Qt event loop.
+                    // Without `finish(ignoredSet)` ever being invoked
+                    // by the filter callback, `_expand` never registers
+                    // the loaded FileSystemModel in `_models`, so the
+                    // tree renders zero rows AND never reaches the
+                    // "Empty" indicator either (`_loading` stays true
+                    // forever). Skipping the filter makes `_expand`
+                    // take its `finish({})` else-branch immediately
+                    // and the tree populates from FileSystemModel's
+                    // entries with no shell subprocess in the loop.
+                    // Re-enable once the underlying QProcess-from-
+                    // embedded-Qt issue is diagnosed upstream.
+                    respectGitignore: false
+                    onFileActivated: function(path) {
+                        controller.open_in_nvim(path)
+                        if (editor.visible)
+                            editor.forceActiveFocus()
+                    }
+                }
+            }
+        }
+
+        Connections {
+            target: controller
+            function onFocusTreeRequested(): void {
+                // FileTreeView's outer root is a plain Item (NOT a
+                // FocusScope), so calling forceActiveFocus() on it
+                // only makes the OUTER ITEM the activeFocusItem —
+                // the internal ListView (which owns Keys.onPressed
+                // for j/k/h/l navigation) never receives the focus,
+                // and arrow keys go nowhere even after <leader>tf.
+                //
+                // Walk fileTreeView's descendants to find the
+                // ListView and call forceActiveFocus() directly on
+                // it, which mirrors what FileTreeView does internally
+                // (FileTreeView.qml:493 — `view.forceActiveFocus()`
+                // in the ListView's Component.onCompleted).
+                //
+                // Slightly hacky — depends on FileTreeView keeping a
+                // single ListView descendant. The clean long-term
+                // fix is for the FM to expose a public
+                // `focusInternal()` method we can call. File as a
+                // Phase 2 follow-up.
+                var listView = _findListView(fileTreeView)
+                if (listView)
+                    listView.forceActiveFocus()
+                else
+                    fileTreeView.forceActiveFocus()  // safety fallback
+            }
+
+            // Recursive descendant walker. `toString()` on a QML
+            // object returns a class-name-prefixed string like
+            // "QQuickListView_QML_NN(0x...)" — checking the prefix
+            // is the most portable way to identify the type from
+            // QML without importing private Qt headers.
+            function _findListView(item: var): var {
+                if (!item || !item.children) return null
+                for (var i = 0; i < item.children.length; i++) {
+                    var c = item.children[i]
+                    if (c && c.toString && c.toString().indexOf("ListView") >= 0)
+                        return c
+                    var nested = _findListView(c)
+                    if (nested) return nested
+                }
+                return null
             }
         }
 
@@ -193,13 +320,15 @@ Window {
 
         // Bridge picker completion → nvim :edit. The signal fires whether
         // the user pressed Enter on a file or the panel auto-completed
-        // (e.g. Shift+Enter copy-then-confirm flow). controller.open_in_nvim
-        // handles the fnameescape and dismisses the overlay itself.
+        // (e.g. Shift+Enter copy-then-confirm flow). pick_in_nvim does
+        // the fnameescape + :edit AND dismisses the overlay — distinct
+        // from open_in_nvim (used by the sidebar's onFileActivated)
+        // which keeps the sidebar visible after activation.
         Connections {
             target: FmUi.FileManagerService
             function onPickerCompleted(fifoPath: string, paths: var): void {
                 if (paths && paths.length > 0)
-                    controller.open_in_nvim(paths[0])
+                    controller.pick_in_nvim(paths[0])
                 else
                     controller.hide_fm()
             }
@@ -292,4 +421,20 @@ Window {
         else
             editor.forceActiveFocus()
     }
+
+    // Startup focus override. Component.onCompleted fires
+    // bottom-up: child handlers run before parent handlers, so by
+    // the time THIS handler fires every child Component.onCompleted
+    // — including FileTreeView's internal ListView grab at
+    // FileTreeView.qml:493 — has already run. Asserting
+    // `editor.forceActiveFocus()` here is the final word on initial
+    // focus, replacing the previous `focus: false` wall on the
+    // tree's FocusScope (which permanently broke the tree's ability
+    // to receive focus via <leader>tf). See gotcha #16 in CLAUDE.md
+    // for the related "deferred callbacks don't fire during
+    // prefix-wait" rule on the Lua side — this is the QML-side
+    // analog: don't fight nested Component.onCompleted with
+    // declaratively-disabled FocusScopes, fight it with one
+    // post-construction explicit grant.
+    Component.onCompleted: editor.forceActiveFocus()
 }
