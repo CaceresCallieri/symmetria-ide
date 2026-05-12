@@ -198,6 +198,16 @@ Window {
                     // maxExpandDepth=8 (default) plus internal guardrails
                     // (.git skip, 200-children fanout, 10k row ceiling).
                     initialExpandDepth: -1
+                    // Git status badges. The FM's `statusProvider` is a
+                    // duck-typed seam (property var) — it calls our adapter's
+                    // `statusForPath(absolutePath)` per visible row and
+                    // re-binds on `statusChanged`. We use `gitProviderAdapter`
+                    // rather than `gitController` directly because the FM
+                    // expects `{char, color, tooltip}` (a resolved color),
+                    // while `GitController` returns `{char, state, tooltip}`
+                    // (a state name). The adapter maps state→FmTheme color so
+                    // the IDE never hardcodes hex values from the FM palette.
+                    statusProvider: gitProviderAdapter
                     onFileActivated: function(path) {
                         controller.open_in_nvim(path)
                         if (editor.visible)
@@ -431,6 +441,75 @@ Window {
                 initialPath: controller.fmInitialPath || ""
                 onCloseRequested: controller.hide_fm()
             }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Git-status adapter — translates GitController's payload to the
+    // FM's `statusProvider` contract.
+    // ----------------------------------------------------------------
+    //
+    // GitController (Python side) returns `{char, state, tooltip}` where
+    // `state` is a semantic name ("unstaged", "staged", "untracked", …).
+    // The FM's `FileTreeView.statusProvider` contract expects
+    // `{char, color, tooltip}` where `color` is a resolved colour value.
+    //
+    // This adapter is a thin QtObject that:
+    //   1. Forwards `statusForPath(absolute)` calls to `gitController`.
+    //   2. Maps the returned state name to the corresponding
+    //      `FmUi.FmTheme.gitStatus.*` palette value — so badge colours
+    //      stay consistent with whatever the FM ships, and we never
+    //      hardcode hex values on the IDE side.
+    //   3. Re-emits `statusChanged` (the signal FM listens for) so the
+    //      file tree invalidates its delegate bindings in one pass.
+    //
+    // The duck-typed FM seam (`property var statusProvider: null`) means
+    // we don't need to inherit from any interface — just match the shape.
+    QtObject {
+        id: gitProviderAdapter
+
+        signal statusChanged()
+
+        function statusForPath(absolutePath) {
+            var s = gitController.statusForPath(absolutePath)
+            // GitController returns {} for clean files / paths outside the
+            // repo. The FM treats null and empty objects identically (no
+            // badge); we return null for symmetry with the contract docs.
+            if (!s || !s.char)
+                return null
+            return {
+                char: s.char,
+                color: _colorForState(s.state),
+                tooltip: s.tooltip
+            }
+        }
+
+        function _colorForState(state) {
+            switch (state) {
+                case "unstaged":    return FmUi.FmTheme.gitStatus.unstagedRed
+                case "staged":      return FmUi.FmTheme.gitStatus.stagedGreen
+                case "untracked":   return FmUi.FmTheme.gitStatus.untrackedBlue
+                case "renamed":     return FmUi.FmTheme.gitStatus.renamedYellow
+                case "conflicted":  return FmUi.FmTheme.gitStatus.conflictedMagenta
+                case "ignored":     return FmUi.FmTheme.gitStatus.ignoredGray
+                default:            return FmUi.FmTheme.gitStatus.unstagedRed
+            }
+        }
+    }
+
+    // Forward the controller's emit so the FM's
+    // `Connections.ignoreUnknownSignals: true` block picks it up and
+    // invalidates badge bindings in one pass per scan.
+    //
+    // Lives as a sibling rather than a child of the adapter because
+    // QtObject has no default property (only Item, FocusScope, etc. do),
+    // so child objects can only be attached as named properties — which
+    // would obscure the signal-forwarding intent. A sibling Connections
+    // with an explicit `target: gitController` is the canonical pattern.
+    Connections {
+        target: gitController
+        function onStatusChanged(): void {
+            gitProviderAdapter.statusChanged()
         }
     }
 
