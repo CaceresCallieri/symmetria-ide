@@ -372,6 +372,7 @@ class AppController(QObject):
         # → controller routing as fm_event; the only op today is "focus",
         # which the Main.qml Connections block translates into a
         # `forceActiveFocus()` on the FileTreeView instance.
+        # queued: NvimBackend worker → AppController GUI (same path as agent_event/fm_event)
         self._backend.tree_event.connect(self._on_tree_event)
         # Seed `cwd` with $HOME so QML's `rootPath: controller.cwd` has
         # a valid path during the brief window between QML construction
@@ -918,6 +919,7 @@ class AppController(QObject):
         """
         self.focusTreeRequested.emit()
 
+    @Slot(dict)
     def _on_tree_event(self, payload: dict) -> None:
         """Route Lua-emitted tree rpcnotify events.
 
@@ -951,6 +953,7 @@ class AppController(QObject):
         """
         return os.path.expanduser("~")
 
+    @Slot(dict)
     def _on_fm_event(self, payload: dict) -> None:
         """Route Lua-emitted fm rpcnotify events.
 

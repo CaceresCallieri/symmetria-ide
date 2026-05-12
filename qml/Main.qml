@@ -143,8 +143,8 @@ Window {
             // forceActiveFocus()`) that runs AFTER all child
             // Component.onCompleted handlers, giving the editor the
             // final word on initial focus without permanently
-            // disabling our FocusScope. See CLAUDE.md gotcha #N (TBD
-            // — file as a Phase 2 follow-up if this pattern recurs).
+            // disabling our FocusScope. See the startup focus override
+            // comment at Window.Component.onCompleted below.
             //
             // Visibility defaults to true; no toggle keybind in v1
             // per the "visualization-first" decision.
@@ -176,6 +176,9 @@ Window {
                     // entries with no shell subprocess in the loop.
                     // Re-enable once the underlying QProcess-from-
                     // embedded-Qt issue is diagnosed upstream.
+                    // WORKAROUND: respectGitignore disabled — QProcess subprocess race
+                    // when hosted inside PySide6 Qt event loop (ShellRunner never calls
+                    // finish(), tree stays empty forever). Re-enable once diagnosed upstream.
                     respectGitignore: false
                     onFileActivated: function(path) {
                         controller.open_in_nvim(path)
@@ -214,8 +217,11 @@ Window {
                     fileTreeView.forceActiveFocus()  // safety fallback
             }
 
-            // Recursive descendant walker. `toString()` on a QML
-            // object returns a class-name-prefixed string like
+            // WORKAROUND: recursive descendant walker using toString() type detection.
+            // Root cause: FileTreeView's outer Item is not a FocusScope and exposes no
+            // public focusInternal() method, so we walk children to find the ListView.
+            // Remove once FM exposes FocusScope or a public focusView() slot.
+            // `toString()` on a QML object returns a class-name-prefixed string like
             // "QQuickListView_QML_NN(0x...)" — checking the prefix
             // is the most portable way to identify the type from
             // QML without importing private Qt headers.

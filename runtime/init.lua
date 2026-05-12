@@ -861,6 +861,7 @@ local SYMMETRIA_TREE_DESC = "Focus Symmetria file-tree sidebar"
 local SYMMETRIA_TREE_KEYS = { "<leader>tf" }
 
 local function focus_file_tree()
+  -- pcall intentional: rpcnotify fails if Python client is disconnected.
   pcall(vim.rpcnotify, 0, "tree", { op = "focus" })
 end
 
@@ -929,6 +930,7 @@ vim.api.nvim_create_autocmd("User", {
         lower:find("nvim-tree", 1, true)
         or lower:find("neo-tree", 1, true)
         or lower:find("oil", 1, true)
+        or lower:find("yazi", 1, true) -- yazi.nvim may also claim <leader>t* prefixes
       then
         install_tree_keymap("LazyLoad:" .. name)
       end
