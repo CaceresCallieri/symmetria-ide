@@ -159,27 +159,11 @@ Window {
                     id: fileTreeView
                     anchors.fill: parent
                     rootPath: controller.cwd
-                    // Disable gitignore filtering — the FM's Gitignore
-                    // service spawns `sh -c "git check-ignore --stdin"`
-                    // via a C++ ShellRunner/QProcess, and that
-                    // subprocess fails to start (`ShellRunner::write()
-                    // called while not running`) when the plugin is
-                    // hosted inside our Python+PySide6 Qt event loop.
-                    // Without `finish(ignoredSet)` ever being invoked
-                    // by the filter callback, `_expand` never registers
-                    // the loaded FileSystemModel in `_models`, so the
-                    // tree renders zero rows AND never reaches the
-                    // "Empty" indicator either (`_loading` stays true
-                    // forever). Skipping the filter makes `_expand`
-                    // take its `finish({})` else-branch immediately
-                    // and the tree populates from FileSystemModel's
-                    // entries with no shell subprocess in the loop.
-                    // Re-enable once the underlying QProcess-from-
-                    // embedded-Qt issue is diagnosed upstream.
-                    // WORKAROUND: respectGitignore disabled — QProcess subprocess race
-                    // when hosted inside PySide6 Qt event loop (ShellRunner never calls
-                    // finish(), tree stays empty forever). Re-enable once diagnosed upstream.
-                    respectGitignore: false
+                    respectGitignore: true
+                    // -1 = fully recursive expand at mount; FM caps at
+                    // maxExpandDepth=8 (default) plus internal guardrails
+                    // (.git skip, 200-children fanout, 10k row ceiling).
+                    initialExpandDepth: -1
                     onFileActivated: function(path) {
                         controller.open_in_nvim(path)
                         if (editor.visible)
