@@ -41,6 +41,7 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
     CompletionModel,
     PopupmenuModel,
 )
+from .git_controller import GitController
 from .nvim_backend import NvimBackend
 from .nvim_view import NvimView  # noqa: F401 — side-effect: @QmlElement registration
 from .session_host import SessionHost
@@ -412,6 +413,19 @@ class AppController(QObject):
         # exists so QML's `visible: controller.treeVisible` binding has
         # something to read, and so a v2 toggle is a one-line addition.
         self._tree_visible: bool = True
+        # ----- Git status provider (status badges + Active Changes panel) -
+        # The GitController watches `.git/index` + co. via QFileSystemWatcher
+        # and exposes `statusForPath(absolute_path)` to QML. It's the single
+        # source of truth shared between the file tree's per-row badges and
+        # the (forthcoming) Active Changes panel above the tree — one parse,
+        # two consumers. Bound to the nvim `project` capsule below.
+        self._git_controller = GitController(self)
+        # Drive `repoRoot` from the project capsule. `statusBar.project` is
+        # emitted on `BufEnter` / `DirChanged` from runtime/init.lua, so the
+        # provider rebuilds automatically when the user switches projects.
+        # Same-thread connection (capsule routing already happens on the GUI
+        # thread inside `_route_capsule`), so no QueuedConnection needed.
+        self._status.projectChanged.connect(self._sync_git_repo_root)
 
     def _create_instance(self, slot: int) -> None:
         """Allocate one pool entry: host + model + per-instance scalar state.
@@ -932,6 +946,29 @@ class AppController(QObject):
         without restructuring the binding shape.
         """
         return self._tree_visible
+
+    @Property(QObject, constant=True)
+    def gitController(self) -> QObject:
+        """The `GitController` exposed to QML.
+
+        QML binds the file tree's `statusProvider` to this object, and the
+        forthcoming `GitStatusPanel` will bind its model to it as well.
+        Marked `constant=True` because the object identity doesn't change
+        over the controller's lifetime — only its internal `repoRoot` does.
+        """
+        return self._git_controller
+
+    @Slot()
+    def _sync_git_repo_root(self) -> None:
+        """Push the current project capsule value into the git controller.
+
+        Connected to `StatusBarState.projectChanged`. Same-thread
+        connection (capsule routing runs on the GUI thread already), so
+        no QueuedConnection annotation is needed at the connect site.
+        Idempotent on equal values — `GitController.set_repo_root` returns
+        early when the new path matches the current one.
+        """
+        self._git_controller.set_repo_root(self._status.project)
 
     @Slot()
     def focus_tree(self) -> None:
@@ -1465,6 +1502,10 @@ class AppController(QObject):
         # (it shouldn't, but defensive iteration costs nothing).
         for host in list(self._session_hosts.values()):
             host.stop()
+        # Stop the git worker before nvim — its scan is fast (≤1s join) and
+        # we want it joined before the event loop tears down so its
+        # cross-thread emit can't fire into a half-destroyed receiver.
+        self._git_controller.stop()
         self._backend.stop()
 
     @property
@@ -1553,6 +1594,13 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     ctx.setContextProperty("completionModel", controller.completion)
     ctx.setContextProperty("whichKeyState", controller.whichkey_state)
     ctx.setContextProperty("whichKeyModel", controller.whichkey_model)
+    # Git status provider — exposed as its own context property so QML can
+    # bind both the file tree's `statusProvider` and the (forthcoming)
+    # Active Changes panel to the same object. Equivalent to
+    # `controller.gitController` (the @Property) but binding-friendly: a
+    # property-of-a-property doesn't re-evaluate when the outer object
+    # changes identity, whereas a context property is rebound implicitly.
+    ctx.setContextProperty("gitController", controller.gitController)
     # NB: previously this block also exposed `sessionHost` and
     # `sessionModel` as context properties pointing at the focused
     # slot. Those have been removed for two reasons:
