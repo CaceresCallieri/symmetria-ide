@@ -609,6 +609,18 @@ class GitController(QObject):
             self._resolved_root = resolved
 
         if old_map != new_map or old_root != resolved:
+            # Counting non-aggregate entries for the log line — directory
+            # aggregates are an implementation detail, the user cares about
+            # how many actual files have changes.
+            file_count = sum(1 for s in new_map.values() if s.char != "·")
+            if resolved:
+                log.info(
+                    "git scan: %d file(s) changed in %s",
+                    file_count,
+                    resolved,
+                )
+            else:
+                log.info("git scan: cleared (not in a repo)")
             gc.disable()
             try:
                 self.statusChanged.emit()

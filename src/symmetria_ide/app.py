@@ -425,12 +425,17 @@ class AppController(QObject):
         # the panel's ListView. Auto-refreshes on the controller's
         # statusChanged via a queued connection (handled internally).
         self._git_status_list = GitStatusListModel(self._git_controller, self)
-        # Drive `repoRoot` from the project capsule. `statusBar.project` is
-        # emitted on `BufEnter` / `DirChanged` from runtime/init.lua, so the
-        # provider rebuilds automatically when the user switches projects.
-        # Same-thread connection (capsule routing already happens on the GUI
-        # thread inside `_route_capsule`), so no QueuedConnection needed.
-        self._status.projectChanged.connect(self._sync_git_repo_root)
+        # Drive `repoRoot` from the `cwd` capsule (NOT `project`).
+        # runtime/init.lua's `project_name()` returns `fnamemodify(cwd, ":t")`
+        # — the basename only — for status-bar display. `git rev-parse
+        # --show-toplevel` needs the FULL path as its subprocess `cwd`,
+        # so we bind against `self._cwd` which receives the full path
+        # via the `cwd` capsule (init.lua line 139). The `cwdChanged`
+        # signal fires on every directory change (BufEnter/DirChanged
+        # in nvim), so the provider rebuilds when the user `:cd`s into
+        # a different repo. Same-thread connection (capsule routing
+        # runs on the GUI thread already), no QueuedConnection needed.
+        self.cwdChanged.connect(self._sync_git_repo_root)
 
     def _create_instance(self, slot: int) -> None:
         """Allocate one pool entry: host + model + per-instance scalar state.
@@ -975,15 +980,17 @@ class AppController(QObject):
 
     @Slot()
     def _sync_git_repo_root(self) -> None:
-        """Push the current project capsule value into the git controller.
+        """Push the current nvim cwd into the git controller.
 
-        Connected to `StatusBarState.projectChanged`. Same-thread
+        Connected to `cwdChanged` (NOT `projectChanged` — `_status.project`
+        is the BASENAME via `fnamemodify(cwd, ":t")` in runtime/init.lua,
+        which fails as a subprocess `cwd` for `git rev-parse`). Same-thread
         connection (capsule routing runs on the GUI thread already), so
         no QueuedConnection annotation is needed at the connect site.
         Idempotent on equal values — `GitController.set_repo_root` returns
         early when the new path matches the current one.
         """
-        self._git_controller.set_repo_root(self._status.project)
+        self._git_controller.set_repo_root(self._cwd)
 
     @Slot()
     def focus_tree(self) -> None:
