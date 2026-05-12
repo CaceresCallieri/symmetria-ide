@@ -599,7 +599,7 @@ def _inject(controller: GitController, resolved: str, *entries: GitStatus) -> No
 def test_file_entries_empty_when_no_repo() -> None:
     controller = GitController()
     try:
-        assert controller.file_entries() == []
+        assert controller._file_entries() == []
     finally:
         controller.stop()
 
@@ -614,7 +614,7 @@ def test_file_entries_returns_absolute_paths() -> None:
                 path="src/foo.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
             ),
         )
-        entries = controller.file_entries()
+        entries = controller._file_entries()
         assert len(entries) == 1
         abs_path, status = entries[0]
         assert abs_path == "/home/jc/repo/src/foo.py"
@@ -638,7 +638,7 @@ def test_file_entries_filters_directory_aggregates() -> None:
                 path="src", char="·", state=STATE_UNSTAGED, tooltip="1 file changed"
             ),
         )
-        entries = controller.file_entries()
+        entries = controller._file_entries()
         assert len(entries) == 1
         assert entries[0][1].path == "src/foo.py"
     finally:
@@ -661,7 +661,7 @@ def test_file_entries_sorted_by_repo_relative_path() -> None:
                 path="middle.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
             ),
         )
-        entries = controller.file_entries()
+        entries = controller._file_entries()
         assert [e[1].path for e in entries] == ["alpha.py", "middle.py", "zeta.py"]
     finally:
         controller.stop()
@@ -797,5 +797,76 @@ def test_list_model_role_names_use_kebab_qml_form() -> None:
         assert names[GitStatusListModel.CharRole] == b"statusChar"
         assert names[GitStatusListModel.StateRole] == b"statusState"
         assert names[GitStatusListModel.TooltipRole] == b"tooltip"
+    finally:
+        controller.stop()
+
+
+# ---------------------------------------------------------------------------
+# _publish — signal suppression on equal map
+# ---------------------------------------------------------------------------
+
+
+def test_publish_suppresses_signal_on_equal_map() -> None:
+    # When the newly-scanned map is identical to the previous one,
+    # _publish must NOT emit statusChanged — a spurious modelReset would
+    # invalidate every visible delegate binding for no real change.
+    # Common scenario: an unrelated .git/ file changes (fsmonitor cache
+    # touch) and git status produces the same output as before.
+    controller = GitController()
+    try:
+        status = GitStatus(
+            path="src/foo.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
+        )
+        with controller._lock:
+            controller._status_map = {"src/foo.py": status}
+            controller._resolved_root = "/repo"
+        received: list[None] = []
+        controller.statusChanged.connect(lambda: received.append(None))
+        # Publish the SAME map — should be a no-op.
+        controller._publish({"src/foo.py": status}, "/repo")
+        assert len(received) == 0, "statusChanged must not fire when map is unchanged"
+        # Publish a DIFFERENT map — should fire.
+        controller._publish({}, "")
+        assert len(received) == 1, "statusChanged must fire when map changes"
+    finally:
+        controller.stop()
+
+
+# ---------------------------------------------------------------------------
+# set_repo_root empty string — clears state and re-emits
+# ---------------------------------------------------------------------------
+
+
+def test_controller_set_repo_root_to_empty_clears_state() -> None:
+    # Setting repoRoot to "" after it was non-empty should synchronously
+    # clear the map and resolved root, emit statusChanged (so the panel
+    # hides), and emit repoRootChanged.
+    controller = GitController()
+    try:
+        with controller._lock:
+            controller._resolved_root = "/home/jc/repo"
+            controller._status_map = {
+                "foo.py": GitStatus(
+                    path="foo.py",
+                    char="M",
+                    state=STATE_UNSTAGED,
+                    tooltip="Modified",
+                ),
+            }
+        controller._repo_root = "/home/jc/repo"  # prime the guard for idempotency
+
+        root_changes: list[None] = []
+        status_changes: list[None] = []
+        controller.repoRootChanged.connect(lambda: root_changes.append(None))
+        controller.statusChanged.connect(lambda: status_changes.append(None))
+
+        controller.set_repo_root("")
+
+        assert controller.repoRoot == ""
+        with controller._lock:
+            assert controller._status_map == {}
+            assert controller._resolved_root == ""
+        assert len(root_changes) == 1, "repoRootChanged must fire on root change"
+        assert len(status_changes) == 1, "statusChanged must fire to clear the panel"
     finally:
         controller.stop()

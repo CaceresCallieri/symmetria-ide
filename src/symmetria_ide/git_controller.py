@@ -267,9 +267,10 @@ def _add_directory_aggregates(file_map: dict[str, GitStatus]) -> dict[str, GitSt
             ancestor = str(Path(*parts[:depth]))
             count, current_state = dir_info.get(ancestor, (0, STATE_IGNORED))
             count += 1
-            if _STATE_PRIORITY.get(status.state, -1) > _STATE_PRIORITY.get(
-                current_state, -1
-            ):
+            # All states are keys in _STATE_PRIORITY; direct access
+            # raises KeyError for unseen states, which is more useful
+            # than silently treating them as priority -1.
+            if _STATE_PRIORITY[status.state] > _STATE_PRIORITY[current_state]:
                 current_state = status.state
             dir_info[ancestor] = (count, current_state)
 
@@ -459,7 +460,7 @@ class GitController(QObject):
             result["origPath"] = status.orig_path
         return result
 
-    def file_entries(self) -> list[tuple[str, GitStatus]]:
+    def _file_entries(self) -> list[tuple[str, GitStatus]]:
         """Return all non-aggregate entries as ``(absolute_path, status)`` pairs.
 
         Directory aggregates (``char == '·'``) are filtered out — they belong
@@ -516,7 +517,8 @@ class GitController(QObject):
 
     def _do_scan(self) -> None:
         """One scan: resolve repo root, run git status, update map."""
-        repo_root = self._repo_root
+        with self._lock:
+            repo_root = self._repo_root
         if not repo_root:
             self._publish({}, "")
             return
@@ -706,12 +708,8 @@ class GitController(QObject):
         return os.path.join(git_dir, rel_ref)
 
     def _clear_watcher(self) -> None:
-        files = self._watcher.files()
-        if files:
-            self._watcher.removePaths(files)
-        dirs = self._watcher.directories()
-        if dirs:
-            self._watcher.removePaths(dirs)
+        self._watcher.removePaths(self._watcher.files())
+        self._watcher.removePaths(self._watcher.directories())
 
     @Slot(str)
     def _on_watched_changed(self, path: str) -> None:
@@ -795,7 +793,7 @@ class GitStatusListModel(QAbstractListModel):
             self.TooltipRole: b"tooltip",
         }
 
-    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: B008, ARG002
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: B008 — QModelIndex() default required by Qt; ARG002 — parent unused per QAbstractListModel contract
         return len(self._items)
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
@@ -834,7 +832,7 @@ class GitStatusListModel(QAbstractListModel):
         than computing a diff, and the panel re-binds in one pass.
         """
         new_items: list[dict[str, str]] = []
-        for abs_path, status in self._controller.file_entries():
+        for abs_path, status in self._controller._file_entries():
             new_items.append(
                 {
                     "path": abs_path,

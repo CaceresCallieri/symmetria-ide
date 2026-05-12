@@ -435,6 +435,7 @@ class AppController(QObject):
         # in nvim), so the provider rebuilds when the user `:cd`s into
         # a different repo. Same-thread connection (capsule routing
         # runs on the GUI thread already), no QueuedConnection needed.
+        # same-thread: cwdChanged fires on the GUI thread; GitController.set_repo_root is GUI-only
         self.cwdChanged.connect(self._sync_git_repo_root)
 
     def _create_instance(self, slot: int) -> None:

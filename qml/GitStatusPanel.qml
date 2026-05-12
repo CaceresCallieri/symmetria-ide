@@ -25,7 +25,7 @@ Item {
     // Model — driven by `gitStatusList` context property (a
     // GitStatusListModel projecting GitController's map). Set at use
     // site so this component stays portable / reusable.
-    property var model: null
+    property QtObject model: null
 
     // Emitted when the user clicks a row. Carries the ABSOLUTE filesystem
     // path of the activated file. Main.qml connects this to
