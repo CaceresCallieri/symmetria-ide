@@ -41,7 +41,7 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
     CompletionModel,
     PopupmenuModel,
 )
-from .git_controller import GitController
+from .git_controller import GitController, GitStatusListModel
 from .nvim_backend import NvimBackend
 from .nvim_view import NvimView  # noqa: F401 — side-effect: @QmlElement registration
 from .session_host import SessionHost
@@ -420,6 +420,11 @@ class AppController(QObject):
         # the (forthcoming) Active Changes panel above the tree — one parse,
         # two consumers. Bound to the nvim `project` capsule below.
         self._git_controller = GitController(self)
+        # Flat-list projection for the Active Changes panel — filters out
+        # directory aggregates, sorts by path, exposes Qt model roles for
+        # the panel's ListView. Auto-refreshes on the controller's
+        # statusChanged via a queued connection (handled internally).
+        self._git_status_list = GitStatusListModel(self._git_controller, self)
         # Drive `repoRoot` from the project capsule. `statusBar.project` is
         # emitted on `BufEnter` / `DirChanged` from runtime/init.lua, so the
         # provider rebuilds automatically when the user switches projects.
@@ -951,12 +956,22 @@ class AppController(QObject):
     def gitController(self) -> QObject:
         """The `GitController` exposed to QML.
 
-        QML binds the file tree's `statusProvider` to this object, and the
-        forthcoming `GitStatusPanel` will bind its model to it as well.
-        Marked `constant=True` because the object identity doesn't change
-        over the controller's lifetime — only its internal `repoRoot` does.
+        QML binds the file tree's `statusProvider` to this object via the
+        gitProviderAdapter wrapper. Marked `constant=True` because the
+        object identity doesn't change over the controller's lifetime —
+        only its internal `repoRoot` does.
         """
         return self._git_controller
+
+    @Property(QObject, constant=True)
+    def gitStatusList(self) -> QObject:
+        """Flat list model of changed files for the Active Changes panel.
+
+        Same identity-stable contract as `gitController` — the model
+        updates its contents via `modelReset` on every controller scan,
+        but the object itself is created once at startup.
+        """
+        return self._git_status_list
 
     @Slot()
     def _sync_git_repo_root(self) -> None:
@@ -1601,6 +1616,7 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # property-of-a-property doesn't re-evaluate when the outer object
     # changes identity, whereas a context property is rebound implicitly.
     ctx.setContextProperty("gitController", controller.gitController)
+    ctx.setContextProperty("gitStatusList", controller.gitStatusList)
     # NB: previously this block also exposed `sessionHost` and
     # `sessionModel` as context properties pointing at the focused
     # slot. Those have been removed for two reasons:

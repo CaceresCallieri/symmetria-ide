@@ -36,7 +36,9 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     Property,
+    QAbstractListModel,
     QFileSystemWatcher,
+    QModelIndex,
     QObject,
     Qt,
     QTimer,
@@ -457,6 +459,30 @@ class GitController(QObject):
             result["origPath"] = status.orig_path
         return result
 
+    def file_entries(self) -> list[tuple[str, GitStatus]]:
+        """Return all non-aggregate entries as ``(absolute_path, status)`` pairs.
+
+        Directory aggregates (``char == '·'``) are filtered out — they belong
+        in the file tree's badges, not in the changes panel which is meant to
+        be a flat list of *files* the user has touched. Sorted alphabetically
+        by repo-relative path so the panel has a stable display order across
+        scans (no jitter on bursty re-parses).
+
+        Returns an empty list when ``_resolved_root`` is unset.
+        """
+        with self._lock:
+            resolved = self._resolved_root
+            snapshot = list(self._status_map.items())
+        if not resolved:
+            return []
+        out: list[tuple[str, GitStatus]] = []
+        for rel, status in snapshot:
+            if status.char == "·":
+                continue
+            out.append((os.path.join(resolved, rel), status))
+        out.sort(key=lambda pair: pair[1].path)
+        return out
+
     # -- Lifecycle ---------------------------------------------------------
 
     def stop(self) -> None:
@@ -692,3 +718,129 @@ class GitController(QObject):
     def _wake_worker(self) -> None:
         """Set the wakeup event so the worker exits its wait and scans."""
         self._scan_wakeup.set()
+
+
+# ---------------------------------------------------------------------------
+# GitStatusListModel — flat projection of GitController for the panel.
+# ---------------------------------------------------------------------------
+
+
+class GitStatusListModel(QAbstractListModel):
+    """Flat list of changed files, projected from ``GitController``.
+
+    Filters directory aggregates (``char == '·'``) out — they live in the
+    file tree's per-row badges, not in the changes panel which is a flat
+    list of *files* the user has touched. Sorted alphabetically by
+    repo-relative path for stable ordering across scans.
+
+    Auto-refreshes on the controller's ``statusChanged`` signal. The panel
+    binds ``visible: gitStatusList.count > 0`` so the section disappears
+    when the tree is clean or we're not in a git repo.
+
+    Roles (kebab-case bytes for QML):
+
+      - ``path``         — absolute filesystem path (for click-to-jump)
+      - ``displayName``  — repo-relative path (the row's label)
+      - ``statusChar``   — single-character badge ("M", "?", "A", …)
+      - ``statusState``  — semantic state name (for color lookup in QML)
+      - ``tooltip``      — human-readable hover text
+    """
+
+    PathRole = Qt.ItemDataRole.UserRole + 1
+    DisplayNameRole = Qt.ItemDataRole.UserRole + 2
+    CharRole = Qt.ItemDataRole.UserRole + 3
+    StateRole = Qt.ItemDataRole.UserRole + 4
+    TooltipRole = Qt.ItemDataRole.UserRole + 5
+
+    countChanged = Signal()
+
+    def __init__(
+        self,
+        controller: GitController,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._controller = controller
+        self._items: list[dict[str, str]] = []
+        # The controller emits `statusChanged` on the worker thread when a
+        # scan completes (the cross-thread emit is wrapped in gc.disable
+        # per gotcha #10). Receivers MUST use QueuedConnection to hop onto
+        # the GUI thread before mutating the model — direct connection
+        # would call `beginResetModel` from the worker, which crashes Qt's
+        # model/view invariants.
+        # queued: GitController worker → GitStatusListModel GUI (§4 P2)
+        self._controller.statusChanged.connect(
+            self._refresh,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    def roleNames(self) -> dict[int, bytes]:
+        return {
+            self.PathRole: b"path",
+            self.DisplayNameRole: b"displayName",
+            self.CharRole: b"statusChar",
+            self.StateRole: b"statusState",
+            self.TooltipRole: b"tooltip",
+        }
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: B008, ARG002
+        return len(self._items)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or index.row() >= len(self._items):
+            return None
+        item = self._items[index.row()]
+        if role == self.PathRole:
+            return item["path"]
+        if role == self.DisplayNameRole:
+            return item["displayName"]
+        if role == self.CharRole:
+            return item["char"]
+        if role == self.StateRole:
+            return item["state"]
+        if role == self.TooltipRole:
+            return item["tooltip"]
+        return None
+
+    @Property(int, notify=countChanged)
+    def count(self) -> int:
+        """Row count exposed as a bindable property.
+
+        QML's `ListView.count` exists but isn't directly bindable in older
+        Qt versions; exposing our own `count` Property with `countChanged`
+        notify makes `visible: model.count > 0` work universally.
+        """
+        return len(self._items)
+
+    @Slot()
+    def _refresh(self) -> None:
+        """Rebuild items from the controller and emit modelReset.
+
+        Runs on the GUI thread (the controller's signal is queued). A full
+        reset is correct here because we don't know which entries moved;
+        for typical change-set sizes (tens of files) a reset is cheaper
+        than computing a diff, and the panel re-binds in one pass.
+        """
+        new_items: list[dict[str, str]] = []
+        for abs_path, status in self._controller.file_entries():
+            new_items.append(
+                {
+                    "path": abs_path,
+                    "displayName": status.path,
+                    "char": status.char,
+                    "state": status.state,
+                    "tooltip": status.tooltip,
+                }
+            )
+        if new_items == self._items:
+            # Identical map — common when an unrelated `.git/` file changes
+            # (e.g. fsmonitor cache touch). Skipping the emit avoids a
+            # spurious modelReset that would invalidate every visible
+            # delegate binding for no reason.
+            return
+        self.beginResetModel()
+        old_count = len(self._items)
+        self._items = new_items
+        self.endResetModel()
+        if old_count != len(self._items):
+            self.countChanged.emit()

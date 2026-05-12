@@ -189,29 +189,61 @@ Window {
                     onActivated: controller.focus_editor()
                 }
 
-                FmUi.FileTreeView {
-                    id: fileTreeView
+                // Two-section composition inside the side panel:
+                //   1. GitStatusPanel — auto-hidden when clean; collapses
+                //      to zero height so the tree below claims its space.
+                //   2. FileTreeView   — fills the remaining vertical space.
+                //
+                // No separator between them — the panel's chrome border
+                // already provides visual delineation, and a hairline
+                // separator would just add noise when the panel hides.
+                ColumnLayout {
                     anchors.fill: parent
-                    rootPath: controller.cwd
-                    respectGitignore: true
-                    // -1 = fully recursive expand at mount; FM caps at
-                    // maxExpandDepth=8 (default) plus internal guardrails
-                    // (.git skip, 200-children fanout, 10k row ceiling).
-                    initialExpandDepth: -1
-                    // Git status badges. The FM's `statusProvider` is a
-                    // duck-typed seam (property var) — it calls our adapter's
-                    // `statusForPath(absolutePath)` per visible row and
-                    // re-binds on `statusChanged`. We use `gitProviderAdapter`
-                    // rather than `gitController` directly because the FM
-                    // expects `{char, color, tooltip}` (a resolved color),
-                    // while `GitController` returns `{char, state, tooltip}`
-                    // (a state name). The adapter maps state→FmTheme color so
-                    // the IDE never hardcodes hex values from the FM palette.
-                    statusProvider: gitProviderAdapter
-                    onFileActivated: function(path) {
-                        controller.open_in_nvim(path)
-                        if (editor.visible)
-                            editor.forceActiveFocus()
+                    spacing: 0
+
+                    GitStatusPanel {
+                        id: gitStatusPanel
+                        Layout.fillWidth: true
+                        model: gitStatusList
+                        // Same activation contract as the FileTreeView: open
+                        // the path in nvim and re-focus the editor so the
+                        // user can immediately start editing. Routed through
+                        // `controller.open_in_nvim` — the same slot the FM
+                        // overlay and the tree's onFileActivated already use.
+                        onFileActivated: function(path) {
+                            controller.open_in_nvim(path)
+                            if (editor.visible)
+                                editor.forceActiveFocus()
+                        }
+                    }
+
+                    FmUi.FileTreeView {
+                        id: fileTreeView
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        rootPath: controller.cwd
+                        respectGitignore: true
+                        // -1 = fully recursive expand at mount; FM caps at
+                        // maxExpandDepth=8 (default) plus internal guardrails
+                        // (.git skip, 200-children fanout, 10k row ceiling).
+                        initialExpandDepth: -1
+                        // Git status badges. The FM's `statusProvider` is a
+                        // duck-typed seam (property var) — it calls our
+                        // adapter's `statusForPath(absolutePath)` per visible
+                        // row and re-binds on `statusChanged`. We use
+                        // `gitProviderAdapter` rather than `gitController`
+                        // directly because the FM expects
+                        // `{char, color, tooltip}` (a resolved color), while
+                        // `GitController` returns `{char, state, tooltip}`
+                        // (a state name). The adapter maps state→FmTheme
+                        // color so the IDE never hardcodes hex values from
+                        // the FM palette.
+                        statusProvider: gitProviderAdapter
+                        onFileActivated: function(path) {
+                            controller.open_in_nvim(path)
+                            if (editor.visible)
+                                editor.forceActiveFocus()
+                        }
                     }
                 }
             }

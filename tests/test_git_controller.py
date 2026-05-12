@@ -12,6 +12,8 @@ format spec is summarised in its module docstring.
 
 from __future__ import annotations
 
+from PySide6.QtCore import QModelIndex
+
 from symmetria_ide.git_controller import (
     STATE_CONFLICTED,
     STATE_IGNORED,
@@ -21,6 +23,7 @@ from symmetria_ide.git_controller import (
     STATE_UNTRACKED,
     GitController,
     GitStatus,
+    GitStatusListModel,
     _add_directory_aggregates,
     parse_porcelain_v2,
 )
@@ -577,5 +580,222 @@ def test_controller_repo_root_property_reflects_set_value() -> None:
     try:
         controller.set_repo_root("/foo/bar")
         assert controller.repoRoot == "/foo/bar"
+    finally:
+        controller.stop()
+
+
+# ---------------------------------------------------------------------------
+# file_entries — sorted absolute-path projection for the panel.
+# ---------------------------------------------------------------------------
+
+
+def _inject(controller: GitController, resolved: str, *entries: GitStatus) -> None:
+    """Direct-set the controller's internal state. Test-only intimacy."""
+    with controller._lock:
+        controller._resolved_root = resolved
+        controller._status_map = {e.path: e for e in entries}
+
+
+def test_file_entries_empty_when_no_repo() -> None:
+    controller = GitController()
+    try:
+        assert controller.file_entries() == []
+    finally:
+        controller.stop()
+
+
+def test_file_entries_returns_absolute_paths() -> None:
+    controller = GitController()
+    try:
+        _inject(
+            controller,
+            "/home/jc/repo",
+            GitStatus(
+                path="src/foo.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
+            ),
+        )
+        entries = controller.file_entries()
+        assert len(entries) == 1
+        abs_path, status = entries[0]
+        assert abs_path == "/home/jc/repo/src/foo.py"
+        assert status.path == "src/foo.py"
+    finally:
+        controller.stop()
+
+
+def test_file_entries_filters_directory_aggregates() -> None:
+    # `_add_directory_aggregates` populates entries with char='·' for every
+    # ancestor; the panel must not see them.
+    controller = GitController()
+    try:
+        _inject(
+            controller,
+            "/repo",
+            GitStatus(
+                path="src/foo.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
+            ),
+            GitStatus(
+                path="src", char="·", state=STATE_UNSTAGED, tooltip="1 file changed"
+            ),
+        )
+        entries = controller.file_entries()
+        assert len(entries) == 1
+        assert entries[0][1].path == "src/foo.py"
+    finally:
+        controller.stop()
+
+
+def test_file_entries_sorted_by_repo_relative_path() -> None:
+    controller = GitController()
+    try:
+        _inject(
+            controller,
+            "/repo",
+            GitStatus(
+                path="zeta.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
+            ),
+            GitStatus(
+                path="alpha.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
+            ),
+            GitStatus(
+                path="middle.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
+            ),
+        )
+        entries = controller.file_entries()
+        assert [e[1].path for e in entries] == ["alpha.py", "middle.py", "zeta.py"]
+    finally:
+        controller.stop()
+
+
+# ---------------------------------------------------------------------------
+# GitStatusListModel — flat projection consumed by the Active Changes panel.
+# ---------------------------------------------------------------------------
+
+
+def test_list_model_starts_empty() -> None:
+    controller = GitController()
+    try:
+        model = GitStatusListModel(controller)
+        assert model.rowCount(QModelIndex()) == 0
+        assert model.count == 0
+    finally:
+        controller.stop()
+
+
+def test_list_model_refresh_populates_from_controller() -> None:
+    controller = GitController()
+    try:
+        model = GitStatusListModel(controller)
+        _inject(
+            controller,
+            "/repo",
+            GitStatus(
+                path="src/foo.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
+            ),
+            GitStatus(
+                path="new.txt", char="?", state=STATE_UNTRACKED, tooltip="Untracked"
+            ),
+        )
+        # `_refresh` is the slot the queued connection would call —
+        # invoke directly to bypass the worker thread.
+        model._refresh()
+        assert model.rowCount(QModelIndex()) == 2
+        assert model.count == 2
+    finally:
+        controller.stop()
+
+
+def test_list_model_roles_expose_all_fields() -> None:
+    controller = GitController()
+    try:
+        model = GitStatusListModel(controller)
+        _inject(
+            controller,
+            "/repo",
+            GitStatus(
+                path="src/foo.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
+            ),
+        )
+        model._refresh()
+        idx = model.index(0, 0)
+        assert model.data(idx, GitStatusListModel.PathRole) == "/repo/src/foo.py"
+        assert model.data(idx, GitStatusListModel.DisplayNameRole) == "src/foo.py"
+        assert model.data(idx, GitStatusListModel.CharRole) == "M"
+        assert model.data(idx, GitStatusListModel.StateRole) == STATE_UNSTAGED
+        assert model.data(idx, GitStatusListModel.TooltipRole) == "Modified"
+    finally:
+        controller.stop()
+
+
+def test_list_model_filters_directory_aggregates() -> None:
+    # Directory aggregates (char='·') must NOT appear in the panel — they
+    # belong on the file tree only. file_entries() drops them, so the model
+    # should never see them.
+    controller = GitController()
+    try:
+        model = GitStatusListModel(controller)
+        _inject(
+            controller,
+            "/repo",
+            GitStatus(
+                path="src/foo.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
+            ),
+            GitStatus(
+                path="src", char="·", state=STATE_UNSTAGED, tooltip="1 file changed"
+            ),
+        )
+        model._refresh()
+        assert model.rowCount(QModelIndex()) == 1
+        assert (
+            model.data(model.index(0, 0), GitStatusListModel.DisplayNameRole)
+            == "src/foo.py"
+        )
+    finally:
+        controller.stop()
+
+
+def test_list_model_count_changed_emitted_on_size_change() -> None:
+    controller = GitController()
+    try:
+        model = GitStatusListModel(controller)
+        received: list[None] = []
+        model.countChanged.connect(lambda: received.append(None))
+        _inject(
+            controller,
+            "/repo",
+            GitStatus(path="a.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"),
+        )
+        model._refresh()
+        assert len(received) == 1
+        # Same data again — count unchanged, no emit.
+        model._refresh()
+        assert len(received) == 1
+        # Add a second file — count goes 1→2, emit fires once.
+        _inject(
+            controller,
+            "/repo",
+            GitStatus(path="a.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"),
+            GitStatus(
+                path="b.py", char="?", state=STATE_UNTRACKED, tooltip="Untracked"
+            ),
+        )
+        model._refresh()
+        assert len(received) == 2
+    finally:
+        controller.stop()
+
+
+def test_list_model_role_names_use_kebab_qml_form() -> None:
+    # Sanity-check role names land as bytes (Qt convention) and match the
+    # QML property names the delegate references.
+    controller = GitController()
+    try:
+        model = GitStatusListModel(controller)
+        names = model.roleNames()
+        assert names[GitStatusListModel.PathRole] == b"path"
+        assert names[GitStatusListModel.DisplayNameRole] == b"displayName"
+        assert names[GitStatusListModel.CharRole] == b"statusChar"
+        assert names[GitStatusListModel.StateRole] == b"statusState"
+        assert names[GitStatusListModel.TooltipRole] == b"tooltip"
     finally:
         controller.stop()
