@@ -199,7 +199,16 @@ Window {
                 // separator would just add noise when the panel hides.
                 ColumnLayout {
                     anchors.fill: parent
-                    spacing: 0
+                    // Spacing between the two sections (GitStatusPanel and
+                    // FileTreeView). When the panel is hidden (clean tree),
+                    // `spacing` only applies between VISIBLE Layout
+                    // children, so the tree expands to fill cleanly.
+                    // Using `Theme.spacing.lg` (14px) — md (10px) was
+                    // technically present but visually indistinguishable
+                    // because both the panel's chrome (`bg.chrome`) and
+                    // the tree's background are the same dark matte. The
+                    // larger value pushes past the eye's grouping threshold.
+                    spacing: Theme.spacing.lg
 
                     GitStatusPanel {
                         id: gitStatusPanel

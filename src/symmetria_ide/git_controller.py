@@ -708,8 +708,21 @@ class GitController(QObject):
         return os.path.join(git_dir, rel_ref)
 
     def _clear_watcher(self) -> None:
-        self._watcher.removePaths(self._watcher.files())
-        self._watcher.removePaths(self._watcher.directories())
+        # Guard against calling removePaths([]). Qt's docs say it's a no-op,
+        # but Qt 6 actually emits `QFileSystemWatcher::removePaths: list is
+        # empty` warnings at runtime — visible in the IDE's startup log
+        # every time this runs against an empty watcher (which is most
+        # invocations, since most repo switches happen before the watcher
+        # has armed any paths).
+        # Regression note: a previous "simplification" removed these guards
+        # trusting the docs; restore-with-comment after observing the log
+        # noise so the next reviewer doesn't re-collapse them.
+        files = self._watcher.files()
+        if files:
+            self._watcher.removePaths(files)
+        dirs = self._watcher.directories()
+        if dirs:
+            self._watcher.removePaths(dirs)
 
     @Slot(str)
     def _on_watched_changed(self, path: str) -> None:

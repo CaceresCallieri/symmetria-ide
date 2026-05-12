@@ -39,7 +39,14 @@ Item {
     // is the "same panel, two sections" composition behaviour: when
     // changes are 0, the section vanishes; the tree expands naturally.
     visible: model && model.count > 0
-    implicitHeight: visible ? content.implicitHeight : 0
+    // Include the asymmetric top+bottom margins so the chrome Rectangle
+    // matches the actual content layout. Without the `+ topMargin +
+    // bottomMargin`, ColumnLayout inside this Item gets anchors.fill with
+    // margins which leaves it `2*margin` less tall than its content wants,
+    // squeezing the last row.
+    implicitHeight: visible
+        ? content.implicitHeight + Theme.spacing.sm * 2
+        : 0
     Layout.preferredHeight: implicitHeight
     Layout.fillWidth: true
 
@@ -56,7 +63,15 @@ Item {
     ColumnLayout {
         id: content
         anchors.fill: parent
-        anchors.margins: Theme.spacing.xs
+        // Asymmetric margins: tighter on the sides (matches the file tree
+        // below for column-aligned reading) and looser top/bottom so the
+        // panel reads as a distinct card. The extra bottom space, combined
+        // with the outer `ColumnLayout.spacing: lg` in Main.qml, gives the
+        // panel visible "footer" breathing room before the tree starts.
+        anchors.topMargin: Theme.spacing.sm
+        anchors.bottomMargin: Theme.spacing.sm
+        anchors.leftMargin: Theme.spacing.xs
+        anchors.rightMargin: Theme.spacing.xs
         spacing: Theme.spacing.xs
 
         // Section header — quiet label so the panel reads as a labelled
