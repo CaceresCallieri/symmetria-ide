@@ -189,6 +189,18 @@ Window {
                     onActivated: controller.focus_editor()
                 }
 
+                // Panel-level chrome matte. Painted on the FocusScope itself
+                // (not each child) so the spacing gap between GitStatusPanel
+                // and FileTreeView — and any future sub-panels — inherits the
+                // background without the desktop wallpaper bleeding through.
+                // Uses `Theme.color.bg.chrome`, the same token GitStatusPanel
+                // uses for its own framed background, so the two panels read
+                // as one continuous dark column. (§3 P1: chrome → Theme.*)
+                Rectangle {
+                    anchors.fill: parent
+                    color: Theme.color.bg.chrome
+                }
+
                 // Two-section composition inside the side panel:
                 //   1. GitStatusPanel — auto-hidden when clean; collapses
                 //      to zero height so the tree below claims its space.
