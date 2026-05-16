@@ -75,7 +75,8 @@ Window {
                     focus: visible
 
                     Component.onCompleted: forceActiveFocus()
-                    onVisibleChanged: if (visible) forceActiveFocus()
+                    onVisibleChanged: if (visible)
+                        forceActiveFocus()
 
                     // Floating cmdline + wildmenu overlay — parented to the
                     // editor so it clips within the viewport (not over the
@@ -211,16 +212,23 @@ Window {
                 // separator would just add noise when the panel hides.
                 ColumnLayout {
                     anchors.fill: parent
-                    // Spacing between the two sections (GitStatusPanel and
-                    // FileTreeView). When the panel is hidden (clean tree),
-                    // `spacing` only applies between VISIBLE Layout
-                    // children, so the tree expands to fill cleanly.
-                    // Using `Theme.spacing.lg` (14px) — md (10px) was
-                    // technically present but visually indistinguishable
-                    // because both the panel's chrome (`bg.chrome`) and
-                    // the tree's background are the same dark matte. The
-                    // larger value pushes past the eye's grouping threshold.
-                    spacing: Theme.spacing.lg
+                    // No explicit spacing between GitStatusPanel and
+                    // FileTreeView. Both already contribute ~10px of
+                    // intra-component padding (GitStatusPanel's
+                    // `anchors.bottomMargin: Theme.spacing.sm` + the FM
+                    // ListView's `anchors.margins: FmTheme.padding.sm`),
+                    // which is enough visual breath to distinguish the
+                    // two surfaces. Adding `spacing.lg` on top of that
+                    // (previous setup, commit 59d602a) produced a
+                    // ~26px band that read as "blank wallpaper" rather
+                    // than panel separation. When GitStatusPanel is
+                    // hidden (clean tree) the layout naturally collapses
+                    // — `spacing` only applies between visible siblings,
+                    // so 0 is the cleanest no-op in that state too.
+                    // If you want them visually further apart, raise
+                    // this — but check the cumulative gap, not just
+                    // this value in isolation.
+                    spacing: 0
 
                     GitStatusPanel {
                         id: gitStatusPanel
@@ -231,10 +239,10 @@ Window {
                         // user can immediately start editing. Routed through
                         // `controller.open_in_nvim` — the same slot the FM
                         // overlay and the tree's onFileActivated already use.
-                        onFileActivated: function(path) {
-                            controller.open_in_nvim(path)
+                        onFileActivated: function (path) {
+                            controller.open_in_nvim(path);
                             if (editor.visible)
-                                editor.forceActiveFocus()
+                                editor.forceActiveFocus();
                         }
                     }
 
@@ -244,6 +252,15 @@ Window {
                         Layout.fillHeight: true
                         rootPath: controller.cwd
                         respectGitignore: true
+                        // Information-density mode: shrinks row height, icons,
+                        // fonts, indent, and inter-element spacing to 60% of
+                        // the FM's default size so more files fit per
+                        // viewport (target: neo-tree-style compactness for
+                        // the IDE sidebar). The FM picker overlay
+                        // (`<C-u>` → fmOverlayLoader below) keeps the
+                        // default 1.0 — picker rows benefit from the larger
+                        // hit target since they're transient and one-shot.
+                        compactScale: 0.8
                         // -1 = fully recursive expand at mount; FM caps at
                         // maxExpandDepth=8 (default) plus internal guardrails
                         // (.git skip, 200-children fanout, 10k row ceiling).
@@ -260,10 +277,10 @@ Window {
                         // color so the IDE never hardcodes hex values from
                         // the FM palette.
                         statusProvider: gitProviderAdapter
-                        onFileActivated: function(path) {
-                            controller.open_in_nvim(path)
+                        onFileActivated: function (path) {
+                            controller.open_in_nvim(path);
                             if (editor.visible)
-                                editor.forceActiveFocus()
+                                editor.forceActiveFocus();
                         }
                     }
                 }
@@ -291,11 +308,11 @@ Window {
                 // fix is for the FM to expose a public
                 // `focusInternal()` method we can call. File as a
                 // Phase 2 follow-up.
-                var listView = _findListView(fileTreeView)
+                var listView = _findListView(fileTreeView);
                 if (listView)
-                    listView.forceActiveFocus()
+                    listView.forceActiveFocus();
                 else
-                    fileTreeView.forceActiveFocus()  // safety fallback
+                    fileTreeView.forceActiveFocus();  // safety fallback
             }
 
             // Reverse direction of onFocusTreeRequested. Fired from
@@ -307,7 +324,7 @@ Window {
             // without the descendant-walker workaround needed for the
             // tree direction.
             function onFocusEditorRequested(): void {
-                editor.forceActiveFocus()
+                editor.forceActiveFocus();
             }
 
             // WORKAROUND: recursive descendant walker using toString() type detection.
@@ -319,15 +336,17 @@ Window {
             // is the most portable way to identify the type from
             // QML without importing private Qt headers.
             function _findListView(item: var): var {
-                if (!item || !item.children) return null
+                if (!item || !item.children)
+                    return null;
                 for (var i = 0; i < item.children.length; i++) {
-                    var c = item.children[i]
+                    var c = item.children[i];
                     if (c && c.toString && c.toString().indexOf("ListView") >= 0)
-                        return c
-                    var nested = _findListView(c)
-                    if (nested) return nested
+                        return c;
+                    var nested = _findListView(c);
+                    if (nested)
+                        return nested;
                 }
-                return null
+                return null;
             }
         }
 
@@ -377,7 +396,7 @@ Window {
             FmUi.FileManagerService.startPickerMode({
                 title: "Open File",
                 acceptLabel: "Open"
-            })
+            });
         }
 
         // When the overlay closes (controller.fmVisible flips to false),
@@ -396,7 +415,7 @@ Window {
                 // reconstruction, item is null exactly when we need to
                 // cancel.
                 if (!controller.fmVisible && FmUi.FileManagerService.pickerMode) {
-                    FmUi.FileManagerService.cancelPickerMode()
+                    FmUi.FileManagerService.cancelPickerMode();
                 }
                 // startPickerMode on show is handled by the Loader's
                 // onLoaded handler below — fires on every reconstruction.
@@ -410,9 +429,9 @@ Window {
                 // otherwise editor.
                 if (!controller.fmVisible) {
                     if (controller.agentVisible)
-                        agentPane.forceActiveFocus()
+                        agentPane.forceActiveFocus();
                     else
-                        editor.forceActiveFocus()
+                        editor.forceActiveFocus();
                 }
             }
         }
@@ -427,12 +446,12 @@ Window {
             target: FmUi.FileManagerService
             function onPickerCompleted(fifoPath: string, paths: var): void {
                 if (paths && paths.length > 0)
-                    controller.pick_in_nvim(paths[0])
+                    controller.pick_in_nvim(paths[0]);
                 else
-                    controller.hide_fm()
+                    controller.hide_fm();
             }
             function onPickerCancelled(fifoPath: string): void {
-                controller.hide_fm()
+                controller.hide_fm();
             }
         }
 
@@ -446,8 +465,8 @@ Window {
             Component.onCompleted: forceActiveFocus()
 
             Keys.onEscapePressed: event => {
-                controller.hide_fm()
-                event.accepted = true
+                controller.hide_fm();
+                event.accepted = true;
             }
 
             // Bare `q` also dismisses — IDE-specific UX glue, not panel
@@ -460,8 +479,8 @@ Window {
             // event.accepted = true and our handler skips.
             Keys.onPressed: event => {
                 if (event.key === Qt.Key_Q && event.modifiers === Qt.NoModifier) {
-                    controller.hide_fm()
-                    event.accepted = true
+                    controller.hide_fm();
+                    event.accepted = true;
                 }
             }
 
@@ -472,7 +491,9 @@ Window {
                 opacity: 0.45
 
                 Behavior on opacity {
-                    NumberAnimation { duration: 120 }
+                    NumberAnimation {
+                        duration: 120
+                    }
                 }
 
                 MouseArea {
@@ -521,31 +542,38 @@ Window {
     QtObject {
         id: gitProviderAdapter
 
-        signal statusChanged()
+        signal statusChanged
 
         function statusForPath(absolutePath) {
-            var s = gitController.statusForPath(absolutePath)
+            var s = gitController.statusForPath(absolutePath);
             // GitController returns {} for clean files / paths outside the
             // repo. The FM treats null and empty objects identically (no
             // badge); we return null for symmetry with the contract docs.
             if (!s || !s.char)
-                return null
+                return null;
             return {
                 char: s.char,
                 color: _colorForState(s.state),
                 tooltip: s.tooltip
-            }
+            };
         }
 
         function _colorForState(state) {
             switch (state) {
-                case "unstaged":    return FmUi.FmTheme.gitStatus.unstagedRed
-                case "staged":      return FmUi.FmTheme.gitStatus.stagedGreen
-                case "untracked":   return FmUi.FmTheme.gitStatus.untrackedBlue
-                case "renamed":     return FmUi.FmTheme.gitStatus.renamedYellow
-                case "conflicted":  return FmUi.FmTheme.gitStatus.conflictedMagenta
-                case "ignored":     return FmUi.FmTheme.gitStatus.ignoredGray
-                default:            return FmUi.FmTheme.gitStatus.unstagedRed
+            case "unstaged":
+                return FmUi.FmTheme.gitStatus.unstagedRed;
+            case "staged":
+                return FmUi.FmTheme.gitStatus.stagedGreen;
+            case "untracked":
+                return FmUi.FmTheme.gitStatus.untrackedBlue;
+            case "renamed":
+                return FmUi.FmTheme.gitStatus.renamedYellow;
+            case "conflicted":
+                return FmUi.FmTheme.gitStatus.conflictedMagenta;
+            case "ignored":
+                return FmUi.FmTheme.gitStatus.ignoredGray;
+            default:
+                return FmUi.FmTheme.gitStatus.unstagedRed;
             }
         }
     }
@@ -562,7 +590,7 @@ Window {
     Connections {
         target: gitController
         function onStatusChanged(): void {
-            gitProviderAdapter.statusChanged()
+            gitProviderAdapter.statusChanged();
         }
     }
 
@@ -581,13 +609,13 @@ Window {
     // will reassert FM focus on the next tick when the Loader settles.
     onActiveChanged: {
         if (!active)
-            return
+            return;
         if (controller.fmVisible && fmOverlayLoader.item)
-            fmOverlayLoader.item.forceActiveFocus()
+            fmOverlayLoader.item.forceActiveFocus();
         else if (controller.agentVisible)
-            agentPane.forceActiveFocus()
+            agentPane.forceActiveFocus();
         else
-            editor.forceActiveFocus()
+            editor.forceActiveFocus();
     }
 
     // Startup focus override. Component.onCompleted fires
