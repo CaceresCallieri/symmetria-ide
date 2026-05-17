@@ -24,6 +24,21 @@ Specific limitations that drive this project:
 - A progressively extracted UI: NeoVim's chrome moves into native QML panels over time.
 - Keyboard-first, Symmetria-aesthetic, opinionated.
 
+## Surface hierarchy (evolving)
+
+The IDE houses four distinct surfaces with different roles. Their relative prominence is **expected to invert** over the project's lifetime as agent capabilities mature.
+
+| Surface       | Role                                  | Today (Phase 0–2)                                     | Long-term direction                              |
+|---------------|---------------------------------------|-------------------------------------------------------|--------------------------------------------------|
+| **Agent**     | *Action* — how the user directs work  | Summoned over the editor via `<leader>aN`             | Always-on, default-visible primary surface       |
+| **Observation** | File tree + git status + (later) file manager — how the user *sees* project state | Always-on sidebar to the editor's right             | Unchanged — always-on, expands to also include diff views, build status, etc. |
+| **Navigation** | Terminal — how the user moves between projects and contexts | Not yet built (Phase 2.5)                          | Persistent home surface; cwd drives the observation pane until anchored |
+| **Edit & view** | NeoVim — opening buffers to read or hand-edit | Central pane on launch; default focus              | Summoned on demand for specific buffers; not the launch state |
+
+The **direction of travel** is from an editor-centric IDE (NeoVim as the hub, agent/file-tree as satellites) toward an *agent-and-navigation-centric* IDE (terminal as the launch state, agent as the primary action surface, file tree + git as always-on observation, NeoVim as a summoned viewer/editor for specific buffers).
+
+This is a multi-year direction, not a near-term refactor. Each Phase 2+ deliverable should be evaluated against whether it composes cleanly with the long-term topology — not whether it implements it. See `docs/future.md` for the longer-form discussion.
+
 ## What this is NOT
 
 - Not a replacement for NeoVim (NeoVim is the editor core, forever or until a gpui rewrite).

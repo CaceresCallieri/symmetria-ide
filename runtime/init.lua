@@ -1027,4 +1027,58 @@ vim.api.nvim_create_autocmd("User", {
   end,
 })
 
+-- ============================================================================
+-- Project-anchor user commands
+-- ============================================================================
+--
+-- `:SymmetriaAnchor [path]` and `:SymmetriaUnanchor` are the programmatic
+-- (scripted / macro) surface for the IDE's project-anchor concept.
+-- Anchoring pins the file-tree sidebar to a specific project root so the
+-- user can navigate freely (via :cd, or — once Phase 3 ships — via cd in
+-- the embedded terminal pane) without dragging the tree along.
+--
+-- The PRIMARY trigger for humans is a Qt application-scope shortcut
+-- (Ctrl+Shift+A in Main.qml) that works from any pane regardless of
+-- focus — anchor is an IDE-level concern, NOT a nvim concept, which is
+-- why these commands deliberately do NOT register a `<leader>` keybind.
+-- Giving anchor a `<leader>` slot would mis-locate it conceptually
+-- (binding it to the editor surface) and burn a slot that should stay
+-- nvim's. The user commands stay useful for scripted workflows
+-- (autocmds, ad-hoc macros, debugger sessions).
+--
+-- Routing: emits rpcnotify(0, "anchor", {op = "set"|"clear", path = ...}).
+-- AppController._on_anchor_event dispatches op="set" → anchor_to_path
+-- and op="clear" → release_anchor. The path arg is optional on "set":
+-- when omitted, AppController falls back to anchor_to_current_cwd
+-- (which reads `_cwd`, NOT vim's cwd directly, so it stays consistent
+-- with what the file tree was displaying at the moment of the command).
+--
+-- pcall is intentional (same pattern as every other emitter in this file):
+-- rpcnotify fails when the Python client is disconnected, and a dropped
+-- command is correct behaviour during shutdown/startup races.
+
+vim.api.nvim_create_user_command("SymmetriaAnchor", function(args)
+  -- nargs = "?" → args.args is "" when no path given, the path string
+  -- when one is provided. Empty string short-circuits to "set" without
+  -- path, leaving the choice of root to the Python side (which uses
+  -- `_cwd`). `complete = "dir"` gives Tab-completion against directory
+  -- names — same UX as `:cd <Tab>`.
+  local path = args.args or ""
+  local payload = { op = "set" }
+  if path ~= "" then
+    payload.path = vim.fn.fnamemodify(path, ":p") -- absolute path
+  end
+  pcall(vim.rpcnotify, 0, "anchor", payload)
+end, {
+  nargs = "?",
+  complete = "dir",
+  desc = "Anchor the IDE to a project root (defaults to current cwd)",
+})
+
+vim.api.nvim_create_user_command("SymmetriaUnanchor", function()
+  pcall(vim.rpcnotify, 0, "anchor", { op = "clear" })
+end, {
+  desc = "Release the IDE's project anchor; file tree resumes tracking cwd",
+})
+
 return M

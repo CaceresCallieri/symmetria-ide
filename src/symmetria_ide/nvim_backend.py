@@ -112,6 +112,13 @@ class NvimBackend(QObject):
     # `{op:"debug", event:"keymap_install", reason:...}` for diagnostic
     # traces. Same routing pattern as tree_event / fm_event / agent_event.
     nav_event = Signal(dict)
+    # Project-anchor lifecycle from `:SymmetriaAnchor` / `:SymmetriaUnanchor`.
+    # Payload: `{op:"set", path?:string}` or `{op:"clear"}`. AppController
+    # routes "set" to anchor_to_path (or anchor_to_current_cwd when path
+    # is absent) and "clear" to release_anchor. The PRIMARY anchor trigger
+    # is a Qt application-scope shortcut that calls those Slots directly
+    # — this RPC channel is the secondary (scripted) surface.
+    anchor_event = Signal(dict)
     closed = Signal()
 
     # --- Dispatch bindings --------------------------------------------

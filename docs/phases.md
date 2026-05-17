@@ -70,6 +70,26 @@ Each phase ends with a go/no-go checkpoint. If a phase's deliverable does not fe
 
 **Checkpoint:** does a full Claude Code session happen here with better observability than the terminal? — still open until the composer + permission UI land. The placeholder tells us the event vocabulary and the rendering feel are ready to design against.
 
+## Phase 2.5 — Terminal pane + project anchor  *(in progress — anchor spike landed)*
+
+**Goal:** the IDE's launch state is a terminal you navigate freely from. When you reach the project you want to work on, you anchor — file tree pins to that root, git operations target it, NeoVim becomes the focused surface for editing.
+
+**Why this is its own phase (not folded into Phase 2 or 3):** the terminal pane is the first concrete step toward the agent-primary topology inversion described in `docs/future.md`. It's the architectural seam where "pre-anchor / post-anchor" becomes a real distinction in the codebase, and it's the foundation for shell-driven cwd integration. Folding it into Phase 2 (agent) would confuse two distinct surfaces; folding it into Phase 3 (chrome extraction) would mis-locate it as a polish layer when it's actually a topology shift.
+
+**The three sub-deliverables** (each ships independently):
+
+1. **Project anchor state machine *(complete)*.** `AppController` exposes `displayedRoot` (derived from `_cwd`, `_anchored`, `_anchored_root`), `anchored` (bool), and `anchor_to_current_cwd` / `anchor_to_path` / `release_anchor` Slots. File tree binds to `displayedRoot`; git controller rebinds from `cwdChanged` to `displayedRootChanged` so git operations follow the anchored root even as the raw cwd wanders. Triggers: `Ctrl+Shift+A` Qt application-scope shortcut (works from any pane, follows the IDE-level keybind precedent established here); `:SymmetriaAnchor [path]` / `:SymmetriaUnanchor` user commands as the scripted surface. New `anchor` rpcnotify channel routes Lua-emitted events to the Slots. 16 new tests (13 state-machine + 3 dispatch); 496 total in suite.
+2. **Native PTY terminal pane *(next)*.** PySide6 + `pyte` (terminal emulator) + `QQuickPaintedItem` (renderer modelled on `nvim_view.py`'s paint loop). Single PTY per pane; per-pane shell process via `QProcess`. Renders into a Theme-tokened pane that lives in the layout's central slot pre-anchor, swappable with NvimView post-anchor (Q2-d topology: terminal is the persistent home, nvim is summoned into a swap, not the reverse). Vim-motion overlay on the terminal scrollback (Warp-block-mode pattern) is a v2 follow-up — v1 is straight live terminal.
+3. **Shell-driven cwd integration *(after terminal pane)*.** Inject a `chpwd` hook into the user's shell that emits OSC 7 (`\e]7;file://hostname/cwd\e\\`) on every directory change. The terminal pane's libvterm/`pyte` parser intercepts the OSC, extracts the path, and pushes it into the existing `cwd` capsule pipeline — same Python-side routing as today, just a second upstream source alongside nvim's `:cd`. Anchor machinery on top works unchanged.
+
+**Architectural invariants:**
+
+- Anchor is an **IDE-level concern**, not a nvim or terminal concept — triggers live as Qt application-scope shortcuts, not `<leader>` keybinds.
+- `_cwd` is the **raw signal**; `displayedRoot` is a **view transformation** on top. The terminal pane will pour into `_cwd`; the anchor still pins what the UI displays. This separation is load-bearing — see the conditional `displayedRootChanged.emit()` in `_route_capsule`'s cwd branch.
+- The terminal pane uses the **agent pane's "full-window swap" pattern** as its precedent — `terminalVisible` / `editorVisible` is the same shape as `agentVisible` today. Q2-d topology means the terminal is the *default* visible surface pre-anchor, swapping to nvim post-anchor (inverse of agent pane's "summoned over editor" today).
+
+**Checkpoint:** can you launch the IDE, `cd` to a project via the terminal, anchor, and start editing — without ever touching a shell outside the IDE window? The anchor spike unlocked the state machine; the terminal pane unlocks the workflow.
+
 ## Phase 3 — NeoVim chrome extraction
 
 **Goal:** extract NeoVim's native command line and messages into native QML.

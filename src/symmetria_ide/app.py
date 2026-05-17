@@ -256,6 +256,16 @@ class AppController(QObject):
     instanceCountChanged = Signal()
     instanceTitlesChanged = Signal()
     cwdChanged = Signal()
+    # Project-anchor signals. `anchoredChanged` fires on every anchor /
+    # release transition; `displayedRootChanged` fires whenever the
+    # *effective* root that consumers should display changes — which
+    # is either an anchor/release, OR a cwd change while NOT anchored.
+    # The conditional emit in `_route_capsule` is what makes anchoring a
+    # state machine instead of a stored value (anchor pins the root and
+    # cwd updates flow into `_cwd` silently; release re-syncs on the
+    # next cwd update).
+    anchoredChanged = Signal()
+    displayedRootChanged = Signal()
     treeVisibleChanged = Signal()
     # QML-bound focus pull. The Lua `<leader>tf` keybind routes here via
     # `_on_tree_event`; Main.qml's Connections block calls
@@ -400,6 +410,11 @@ class AppController(QObject):
         self._backend.tree_event.connect(self._on_tree_event)
         # queued: NvimBackend worker → AppController GUI (same path as tree_event)
         self._backend.nav_event.connect(self._on_nav_event)
+        # queued: NvimBackend worker → AppController GUI. Secondary surface
+        # for the project-anchor concept (the primary is a Qt application-
+        # scope shortcut in Main.qml). Lua's `:SymmetriaAnchor` /
+        # `:SymmetriaUnanchor` user commands emit through this channel.
+        self._backend.anchor_event.connect(self._on_anchor_event)
         # Seed `cwd` with $HOME so QML's `rootPath: controller.cwd` has
         # a valid path during the brief window between QML construction
         # and the first capsule push from runtime/init.lua's VimEnter +
@@ -408,6 +423,18 @@ class AppController(QObject):
         # "")` guard and leave the sidebar showing "Empty" until the
         # capsule lands.
         self._cwd: str = os.path.expanduser("~")
+        # Project-anchor state. When `_anchored` is True, `displayedRoot`
+        # returns `_anchored_root` and incoming cwd updates DO NOT fire
+        # `displayedRootChanged` — they still update `_cwd` silently so a
+        # later `release_anchor` re-syncs to the latest cwd on the next
+        # update. The split between "raw cwd" (`_cwd`) and "displayed
+        # root" (`displayedRoot`) is what lets the file tree pin to a
+        # project while a future terminal pane's shell continues to cd
+        # freely. Anchor is an IDE-level concern; triggers are a Qt
+        # application-scope shortcut + `:SymmetriaAnchor` user command,
+        # NOT a nvim `<leader>` binding (it has to fire from any pane).
+        self._anchored: bool = False
+        self._anchored_root: str = ""
         # Always-on by default per the "visualization-first" decision —
         # toggle keybind deferred (no `<leader>tt` in v1). Property
         # exists so QML's `visible: controller.treeVisible` binding has
@@ -425,18 +452,21 @@ class AppController(QObject):
         # the panel's ListView. Auto-refreshes on the controller's
         # statusChanged via a queued connection (handled internally).
         self._git_status_list = GitStatusListModel(self._git_controller, self)
-        # Drive `repoRoot` from the `cwd` capsule (NOT `project`).
-        # runtime/init.lua's `project_name()` returns `fnamemodify(cwd, ":t")`
-        # — the basename only — for status-bar display. `git rev-parse
-        # --show-toplevel` needs the FULL path as its subprocess `cwd`,
-        # so we bind against `self._cwd` which receives the full path
-        # via the `cwd` capsule (init.lua line 139). The `cwdChanged`
-        # signal fires on every directory change (BufEnter/DirChanged
-        # in nvim), so the provider rebuilds when the user `:cd`s into
-        # a different repo. Same-thread connection (capsule routing
-        # runs on the GUI thread already), no QueuedConnection needed.
-        # same-thread: cwdChanged fires on the GUI thread; GitController.set_repo_root is GUI-only
-        self.cwdChanged.connect(self._sync_git_repo_root)
+        # Drive `repoRoot` from `displayedRoot` (NOT raw `cwd`). This is
+        # the ONE place where the anchor concept leaks below the pure
+        # view-transformation line into actual behavior: when anchored,
+        # git operations target the anchored root even as cwd wanders.
+        # That IS the user-facing payoff of anchoring — `<leader>g*`
+        # operations stay scoped to the project the user committed to.
+        # Every other consumer (file-tree rootPath, future terminal
+        # new-tab cwd) is a view-layer rebind via `displayedRoot`; this
+        # is the one operational rebind. `displayedRootChanged` fires
+        # on cwd updates while NOT anchored AND on anchor/release
+        # transitions, so the provider rebuilds at exactly the right
+        # moments. Same-thread connection (anchor and capsule routing
+        # both run on the GUI thread), no QueuedConnection needed.
+        # same-thread: displayedRootChanged fires on the GUI thread; GitController.set_repo_root is GUI-only
+        self.displayedRootChanged.connect(self._sync_git_repo_root)
 
     def _create_instance(self, slot: int) -> None:
         """Allocate one pool entry: host + model + per-instance scalar state.
@@ -609,6 +639,20 @@ class AppController(QObject):
             if new_cwd != self._cwd:
                 self._cwd = new_cwd
                 self.cwdChanged.emit()
+                # The conditional below is the load-bearing line of the
+                # anchor state machine: while anchored, cwd updates still
+                # flow into `_cwd` (so a later release re-syncs cleanly),
+                # but the DISPLAYED root stays pinned to `_anchored_root`.
+                # Without this gate, anchoring would degrade to a no-op
+                # because every BufEnter would re-fire downstream binds.
+                if not self._anchored:
+                    self.displayedRootChanged.emit()
+                else:
+                    log.debug(
+                        "cwd update suppressed (anchored to %s): %s",
+                        self._anchored_root,
+                        new_cwd,
+                    )
             return
         if self._status.apply(payload):
             return
@@ -942,10 +986,98 @@ class AppController(QObject):
         """NeoVim's current working directory.
 
         Populated by the `cwd` capsule emitted from `runtime/init.lua`
-        on VimEnter + DirChanged. Bound to `FileTreeView.rootPath` in
-        Main.qml so `:cd` in nvim retargets the sidebar.
+        on VimEnter + DirChanged. Kept as a raw signal (no anchor
+        filtering) so any consumer that truly wants the live cwd can
+        bind here. UI panes that should respect anchoring bind to
+        `displayedRoot` instead.
         """
         return self._cwd
+
+    @Property(str, notify=displayedRootChanged)
+    def displayedRoot(self) -> str:
+        """The effective project root for UI panes.
+
+        Pure function of `_cwd`, `_anchored`, and `_anchored_root`:
+        returns the anchored root when anchored (and non-empty), else
+        the raw cwd. Bound by `FileTreeView.rootPath` and the git
+        controller's `repoRoot`. The `_anchored_root` non-empty guard
+        is defense-in-depth — `anchor_to_current_cwd` won't anchor on
+        an empty path, but a malformed `:SymmetriaAnchor` payload from
+        Lua could still arrive with `""`, and silently falling back to
+        cwd in that case is more forgiving than pinning the tree to
+        an empty string.
+        """
+        if self._anchored and self._anchored_root:
+            return self._anchored_root
+        return self._cwd
+
+    @Property(bool, notify=anchoredChanged)
+    def anchored(self) -> bool:
+        """Whether the IDE is currently anchored to a project root.
+
+        QML reads this to flip the application-scope shortcut between
+        anchor and release semantics, and to drive any future "anchored
+        to X" affordance in the file-tree title / status bar.
+        """
+        return self._anchored
+
+    @Slot()
+    def anchor_to_current_cwd(self) -> None:
+        """Anchor to the current `_cwd`.
+
+        Primary entrypoint for the Qt application-scope shortcut. No-op
+        on empty cwd (defense against pre-VimEnter activation — the
+        $HOME seed in __init__ makes this practically unreachable, but
+        the guard documents the precondition).
+        """
+        self.anchor_to_path(self._cwd)
+
+    @Slot(str)
+    def anchor_to_path(self, path: str) -> None:
+        """Anchor to an explicit path.
+
+        Used by `:SymmetriaAnchor /some/path` (programmatic surface) and
+        as the implementation backing `anchor_to_current_cwd`. Empty
+        paths are rejected as a no-op (logged at WARNING) to avoid the
+        "anchored to nothing" state that would render as an empty file
+        tree with no clear recovery path.
+        """
+        if not path:
+            log.warning("anchor_to_path: empty path rejected")
+            return
+        already_anchored_here = self._anchored and self._anchored_root == path
+        if already_anchored_here:
+            return
+        was_anchored = self._anchored
+        prior_displayed = self.displayedRoot
+        self._anchored = True
+        self._anchored_root = path
+        if not was_anchored:
+            self.anchoredChanged.emit()
+        if self.displayedRoot != prior_displayed:
+            self.displayedRootChanged.emit()
+        log.info("anchor: set to %s", path)
+
+    @Slot()
+    def release_anchor(self) -> None:
+        """Release the anchor; `displayedRoot` reverts to raw cwd.
+
+        Symmetric to `anchor_to_path`: emits `anchoredChanged` only on
+        actual transitions, and emits `displayedRootChanged` only when
+        the effective root actually changes (the no-change case is
+        "anchored_root happened to equal current cwd" — uncommon but
+        possible, and a spurious signal there would cost a needless
+        git rescan).
+        """
+        if not self._anchored:
+            return
+        prior_displayed = self.displayedRoot
+        self._anchored = False
+        self._anchored_root = ""
+        self.anchoredChanged.emit()
+        if self.displayedRoot != prior_displayed:
+            self.displayedRootChanged.emit()
+        log.info("anchor: released")
 
     @Property(bool, notify=treeVisibleChanged)
     def treeVisible(self) -> bool:
@@ -981,17 +1113,18 @@ class AppController(QObject):
 
     @Slot()
     def _sync_git_repo_root(self) -> None:
-        """Push the current nvim cwd into the git controller.
+        """Push the displayed root into the git controller.
 
-        Connected to `cwdChanged` (NOT `projectChanged` — `_status.project`
-        is the BASENAME via `fnamemodify(cwd, ":t")` in runtime/init.lua,
-        which fails as a subprocess `cwd` for `git rev-parse`). Same-thread
-        connection (capsule routing runs on the GUI thread already), so
-        no QueuedConnection annotation is needed at the connect site.
-        Idempotent on equal values — `GitController.set_repo_root` returns
-        early when the new path matches the current one.
+        Connected to `displayedRootChanged` (NOT `cwdChanged` — anchoring
+        pins git operations to the anchored root even as the raw cwd
+        wanders, which IS the user-facing payoff of anchoring). Reads
+        `displayedRoot` so the same code path serves both anchored and
+        unanchored states without branching. Idempotent on equal values
+        — `GitController.set_repo_root` returns early when the new path
+        matches the current one, so the no-op-on-cwd-change-while-anchored
+        path costs one comparison.
         """
-        self._git_controller.set_repo_root(self._cwd)
+        self._git_controller.set_repo_root(self.displayedRoot)
 
     @Slot()
     def focus_tree(self) -> None:
@@ -1070,6 +1203,36 @@ class AppController(QObject):
             log.debug("nav debug: %s %r", event, payload)
         else:
             log.warning("nav event with unknown op: %r", payload)
+
+    @Slot(dict)
+    def _on_anchor_event(self, payload: dict) -> None:
+        """Route Lua-emitted anchor rpcnotify events.
+
+        Payload shapes:
+          { op: "set", path?: string }
+          { op: "clear" }
+
+        `set` without `path` falls back to `anchor_to_current_cwd` —
+        the user typed `:SymmetriaAnchor` with no arg, meaning "anchor
+        wherever the file tree currently shows". The empty-string check
+        AFTER the `.get` is the right shape (the missing-key case and
+        the explicit-empty case both deserve the cwd fallback; only a
+        non-empty string should go through `anchor_to_path`). Anchor
+        is the IDE-level concern, NOT a nvim concept — the PRIMARY
+        trigger is a Qt application-scope shortcut in Main.qml. This
+        handler exists for the scripted/macro surface.
+        """
+        op = str(payload.get("op") or "").lower()
+        if op == "set":
+            path = str(payload.get("path") or "")
+            if path:
+                self.anchor_to_path(path)
+            else:
+                self.anchor_to_current_cwd()
+        elif op == "clear":
+            self.release_anchor()
+        else:
+            log.warning("anchor event with unknown op: %r", payload)
 
     def _nvim_cwd_or_home(self) -> str:
         """Default initial path for the FM overlay when none is provided.

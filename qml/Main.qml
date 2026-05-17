@@ -30,6 +30,41 @@ Window {
     minimumWidth: 800
     minimumHeight: 400
 
+    // ---------------- IDE-wide application shortcuts ----------------
+    //
+    // Anchor toggle. `Qt.ApplicationShortcut` makes this fire regardless
+    // of which pane has focus — NvimView, FileTreeView, AgentPane, future
+    // terminal pane — all of them. Anchor is an IDE-level concern (not
+    // a nvim or terminal concept), so a `<leader>`-style Lua keybind
+    // would mis-locate it; an application-scope shortcut is the right
+    // primitive.
+    //
+    // Qt resolves application shortcuts in QApplication::notify BEFORE
+    // the focused widget's keyPressEvent runs, so this wins over
+    // NvimView's keyboard capture — Ctrl+Shift+A does NOT leak to nvim
+    // even when the editor is focused and in insert mode. If a future
+    // regression breaks that ordering, the symptom is "anchor seems to
+    // be inserting characters in nvim"; the fix is upstream of this
+    // file (a parent widget intercepting the chord) and not a binding
+    // change here.
+    //
+    // Toggle semantics — same key in both directions — keeps the binding
+    // surface minimal and matches how the user will think about the
+    // feature ("am I anchored or not"). Anchored state is surfaced via
+    // `controller.anchored` so a future affordance (file-tree title
+    // badge, status-bar pill) is a single binding away from here.
+    Shortcut {
+        sequences: ["Ctrl+Shift+A"]
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (controller.anchored) {
+                controller.release_anchor();
+            } else {
+                controller.anchor_to_current_cwd();
+            }
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -250,7 +285,15 @@ Window {
                         id: fileTreeView
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        rootPath: controller.cwd
+                        // `displayedRoot` (NOT raw `cwd`) so the tree pins
+                        // to the anchored project root when the user has
+                        // anchored. When unanchored, `displayedRoot` is
+                        // identical to `cwd` — no behavior change from the
+                        // pre-anchor world. The Ctrl+Shift+A application-
+                        // scope Shortcut at the Window root toggles the
+                        // anchor; `:SymmetriaAnchor` / `:SymmetriaUnanchor`
+                        // are the scripted surface for the same Slots.
+                        rootPath: controller.displayedRoot
                         respectGitignore: true
                         // Information-density mode: shrinks row height, icons,
                         // fonts, indent, and inter-element spacing to 60% of

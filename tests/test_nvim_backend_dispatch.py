@@ -513,6 +513,39 @@ class TestNotificationRouting:
 
         assert recorder.payloads == []
 
+    def test_anchor_set_routes_to_anchor_event(self) -> None:
+        backend = NvimBackend()
+        recorder = _SignalRecorder()
+        backend.anchor_event.connect(recorder)
+
+        payload = {"op": "set", "path": "/projects/foo"}
+        backend._dispatch_notification("anchor", [payload])
+
+        assert recorder.payloads == [payload]
+
+    def test_anchor_clear_routes_to_anchor_event(self) -> None:
+        backend = NvimBackend()
+        recorder = _SignalRecorder()
+        backend.anchor_event.connect(recorder)
+
+        payload = {"op": "clear"}
+        backend._dispatch_notification("anchor", [payload])
+
+        assert recorder.payloads == [payload]
+
+    def test_anchor_drops_non_dict_payload(self) -> None:
+        backend = NvimBackend()
+        recorder = _SignalRecorder()
+        backend.anchor_event.connect(recorder)
+
+        # Non-dict → must be logged and dropped, NOT emitted. Mirrors the
+        # nav-channel defense; protects AppController._on_anchor_event from
+        # ever seeing a non-dict it would then have to .get() against.
+        backend._dispatch_notification("anchor", ["not-a-dict"])
+        backend._dispatch_notification("anchor", [])
+
+        assert recorder.payloads == []
+
     def test_unknown_notification_is_silent(self) -> None:
         """Unrecognized channel names must not raise — just log & drop."""
         backend = NvimBackend()

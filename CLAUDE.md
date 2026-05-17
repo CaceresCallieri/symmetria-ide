@@ -2,7 +2,7 @@
 
 A custom IDE wrapper built on NeoVim, in the Symmetria ecosystem.
 
-**Phase 0 spine complete. Phase 1 deferred. Phase 2 (Claude Code agent pane) is next.**
+**Phase 0 spine complete. Phase 1 deferred. Phase 2 (Claude Code agent pane) in progress. Phase 2.5 (terminal pane + project anchor) under way — anchor spike landed; native PTY pane is next. Long-term direction (see `docs/vision.md` "Surface hierarchy" + `docs/future.md` "Topology inversion"): IDE inverts from editor-centric toward agent-and-navigation-centric — terminal becomes persistent home, agent becomes default-visible primary surface, NeoVim becomes a summoned viewer/editor.**
 
 ## Status at a glance
 

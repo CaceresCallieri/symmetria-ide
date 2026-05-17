@@ -61,3 +61,17 @@ Personal NeoVim plugin for driving the Claude Code workflow. Source of the capsu
 ## Emacs
 
 The spiritual reference — *"everything inside one coherent environment"* — modernized, aesthetic, and agent-native in this project's interpretation.
+
+## Terax (terax-ai)
+
+https://github.com/crynta/terax-ai
+
+Tauri 2 + Rust + React 19 "AI-native terminal" (their term: ADE — *AI Development Environment*). ~7 MB bundle. Pairs a native PTY backend (`portable-pty`) with xterm.js + WebGL rendering, a CodeMirror 6 editor with vim mode, a file explorer, a web-preview pane that auto-detects local dev servers, and a BYOK AI side-panel supporting multiple providers + local models via LM Studio. Project memory file (`TERAX.md`) mirrors the `CLAUDE.md` convention. Shell integration injects init scripts that emit cwd / prompt markers (same approach Warp uses).
+
+- **What we take:**
+  - **Validation of the integrated four-pane shape** (terminal + editor + file tree + AI) — same target as ours, shipped and lightweight, evidence the form factor works without the bloat of an Electron IDE.
+  - **`portable-pty` as the concrete PTY crate** for the eventual gpui rewrite — Rust, cross-platform, already battle-tested in Terax + Wezterm.
+  - **Web-preview auto-detection of dev servers** — strong candidate for a Phase 3+ feature once the terminal pane lands; we can detect port-binding from process scans or shell-emitted markers.
+  - **Shell-integration via OSC sequences from injected `precmd`/`preexec` hooks** — the canonical way to report cwd and prompt boundaries; we'll need this for the "file tree follows cwd until anchored" idea.
+- **What we evaluate, not adopt blindly:** Tauri 2 as a *third* possible future-target frontend stack alongside gpui. If we ever decide the Qt → gpui migration is too heavy, Tauri is the alternative worth costing out (WebView2/WebKit shell, Rust backend, mature plugin ecosystem). Caveat: WebKitGTK on Wayland still has the rendering-glitch + DMABUF caveat Terax's own README documents — relevant for our Hyprland-first audience.
+- **What we do not take:** xterm.js. Tying our terminal to a JS canvas widget would commit us to a WebView in every frontend stack, foreclosing both gpui and pure-Qt paths.
