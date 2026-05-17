@@ -1034,7 +1034,7 @@ vim.api.nvim_create_autocmd("User", {
 -- `:SymmetriaAnchor [path]` and `:SymmetriaUnanchor` are the programmatic
 -- (scripted / macro) surface for the IDE's project-anchor concept.
 -- Anchoring pins the file-tree sidebar to a specific project root so the
--- user can navigate freely (via :cd, or — once Phase 3 ships — via cd in
+-- user can navigate freely (via :cd, or — once Phase 2.5 ships — via cd in
 -- the embedded terminal pane) without dragging the tree along.
 --
 -- The PRIMARY trigger for humans is a Qt application-scope shortcut

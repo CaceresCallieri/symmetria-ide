@@ -257,3 +257,80 @@ def test_displayed_root_falls_back_to_cwd_when_anchored_root_empty(controller):
     controller._anchored_root = ""
 
     assert controller.displayedRoot == "/tmp"
+
+
+# ---------------------------------------------------------------------------
+# `cwdChanged` still fires during anchor (raw-cwd consumers are unaffected)
+# ---------------------------------------------------------------------------
+
+
+def test_cwd_changed_fires_while_anchored(controller):
+    """While anchored, `cwdChanged` still emits on every cwd update.
+
+    The anchor machinery gates ONLY `displayedRootChanged`. Any consumer
+    that intentionally binds to the raw cwd (e.g. a future terminal pane's
+    new-tab cwd) must not be silently suppressed by the anchor state.
+    The load-bearing conditional in `_route_capsule` emits `cwdChanged`
+    unconditionally before the anchor gate, so this should hold.
+    """
+    _push_cwd(controller, "/projects/foo")
+    controller.anchor_to_current_cwd()
+    cwd_emissions = _capture(controller.cwdChanged)
+    displayed_emissions = _capture(controller.displayedRootChanged)
+
+    _push_cwd(controller, "/tmp/wandering")
+
+    # Raw cwd signal fires — raw-cwd consumers stay live.
+    assert len(cwd_emissions) == 1
+    assert controller.cwd == "/tmp/wandering"
+    # Displayed root stays pinned — no re-bind for view consumers.
+    assert displayed_emissions == []
+    assert controller.displayedRoot == "/projects/foo"
+
+
+# ---------------------------------------------------------------------------
+# `_on_anchor_event` routing (integration between Lua payload and slots)
+# ---------------------------------------------------------------------------
+
+
+def test_on_anchor_event_set_with_path_anchors_to_path(controller):
+    """op='set' + path routes to `anchor_to_path`."""
+    _push_cwd(controller, "/tmp")
+
+    controller._on_anchor_event({"op": "set", "path": "/projects/bar"})
+
+    assert controller.anchored is True
+    assert controller.displayedRoot == "/projects/bar"
+
+
+def test_on_anchor_event_set_without_path_anchors_to_cwd(controller):
+    """op='set' with no path routes to `anchor_to_current_cwd` (uses `_cwd`)."""
+    _push_cwd(controller, "/projects/baz")
+
+    controller._on_anchor_event({"op": "set"})
+
+    assert controller.anchored is True
+    assert controller.displayedRoot == "/projects/baz"
+
+
+def test_on_anchor_event_clear_releases_anchor(controller):
+    """op='clear' routes to `release_anchor`."""
+    _push_cwd(controller, "/projects/foo")
+    controller.anchor_to_current_cwd()
+    assert controller.anchored is True
+
+    controller._on_anchor_event({"op": "clear"})
+
+    assert controller.anchored is False
+    assert controller.displayedRoot == "/projects/foo"
+
+
+def test_on_anchor_event_unknown_op_is_no_op(controller):
+    """Unknown op logs a warning and leaves state unchanged."""
+    _push_cwd(controller, "/projects/foo")
+    anchored_emissions = _capture(controller.anchoredChanged)
+
+    controller._on_anchor_event({"op": "bogus"})
+
+    assert controller.anchored is False
+    assert anchored_emissions == []
