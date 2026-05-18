@@ -418,6 +418,14 @@ class TerminalView(QQuickPaintedItem):
         pyte `.reverse` is handled by swapping fg/bg at the read site —
         the rest of the paint flow stays unaware. This matches how
         every terminal emulator handles reverse-video.
+
+        Run key omissions (v1 intentional deferrals):
+        - `underscore` and `strikethrough` — not rendered in v1. Before
+          adding drawLine-based decorators in v2, add these fields to the
+          run key `(fg, bg, bold, italic, underscore, strikethrough)` so
+          attribute-boundary breaks coalesce correctly.
+        - `blink` — not animated in v1 (would need a frame clock). Same
+          key extension applies when blink support is added.
         """
         y = row_idx * ch
 
@@ -515,9 +523,10 @@ class TerminalView(QQuickPaintedItem):
         else:
             painter.setFont(self._font)
 
+        # _resolve_color with is_bg=False always returns a QColor (never None) —
+        # only is_bg=True + "default" returns None. No guard needed.
         fg_color = _resolve_color(fg, is_bg=False)
-        if fg_color is not None:
-            painter.setPen(fg_color)
+        painter.setPen(fg_color)
         painter.drawText(self._run_rect, _TEXT_ALIGN_FLAGS, "".join(self._run_chars))
 
     def _paint_cursor(

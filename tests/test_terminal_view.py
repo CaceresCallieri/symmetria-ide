@@ -227,32 +227,61 @@ def _read_theme_qml() -> str:
     return theme.read_text()
 
 
-def test_ansi_palette_matches_theme_qml_explicit_hex():
-    """The bright variants 9–14 + slot 15 carry explicit hex in Theme.qml
-    (vs slots 1–8 which alias `mode.*` / `text.*` — those are equivalent
-    by aliasing rather than by hex equality). Assert the explicit hex
-    values match the `_ANSI_PALETTE` tuple here — drift on either side
-    will fail this test, which is the contract we have until Theme is
-    wired through Python via context property.
+def test_ansi_palette_matches_theme_qml():
+    """Every ANSI slot's `_ANSI_PALETTE` hex must match the resolved hex
+    in Theme.qml. Slots 0–8 and slot 15 alias `mode.*` / `text.*` in the
+    QML side (e.g. `color1: theme.color.mode.replace`); the assertion
+    here pins the RESOLVED hex value (`#D2602D` for slot 1) so a future
+    nudge to either side surfaces as a test failure.
+
+    Pattern matches `test_default_fg_matches_theme_text_normal` /
+    `test_cursor_color_matches_theme_accent_bright` — assert the hex
+    literal appears somewhere in Theme.qml's text (it will, either
+    inline in the `color1: ...` declaration if explicit, or in the
+    aliased `mode.replace: "#D2602D"` declaration).
+
+    Drift is detected in either direction:
+      - If `_ANSI_PALETTE[1]` changes here, py_hex no longer matches `expected`.
+      - If Theme.qml's `mode.replace` (or any aliased token) drifts away
+        from #D2602D, the `in theme_src` assertion fails.
+
+    The dual-source-of-truth pain is real, but bounded: the v2 refactor
+    that wires Theme through Python via context property removes it.
     """
     theme_src = _read_theme_qml()
-    # Map: ANSI slot index → expected hex string (lowercase, no #)
+    # Map: ANSI slot index → expected hex string (lowercase, no #).
+    # Slots 0–8 + 15 are aliased in Theme.qml; slots 9–14 are explicit hex.
+    # The aliased values match the resolved `mode.*` / `text.*` literals.
     expected_hex_for_slot = {
-        9: "e58b5c",  # bright red
-        10: "86d666",  # bright green
-        11: "e5b142",  # bright yellow
-        12: "9cb6f0",  # bright blue
-        13: "e69bf0",  # bright magenta
-        14: "8ae9e4",  # bright cyan
+        0: "131313",  # black           ← Theme.mode.badgeLabel
+        1: "d2602d",  # red             ← Theme.mode.replace
+        2: "62ba46",  # green           ← Theme.mode.insert
+        3: "c28b12",  # yellow          ← Theme.mode.normal
+        4: "6d94e9",  # blue            ← Theme.mode.command
+        5: "d86de9",  # magenta         ← Theme.mode.visual
+        6: "5bdfd8",  # cyan            ← Theme.mode.terminal
+        7: "b0b0b0",  # white           ← Theme.text.normal
+        8: "7a7a7a",  # bright black    ← Theme.text.dim
+        9: "e58b5c",  # bright red      (explicit hex in Theme.qml)
+        10: "86d666",  # bright green   (explicit hex in Theme.qml)
+        11: "e5b142",  # bright yellow  (explicit hex in Theme.qml)
+        12: "9cb6f0",  # bright blue    (explicit hex in Theme.qml)
+        13: "e69bf0",  # bright magenta (explicit hex in Theme.qml)
+        14: "8ae9e4",  # bright cyan    (explicit hex in Theme.qml)
+        15: "f5f5f5",  # bright white   ← Theme.text.selected
     }
     for slot, expected in expected_hex_for_slot.items():
         py_hex = f"{_ANSI_PALETTE[slot]:06x}"
         assert py_hex == expected, (
             f"_ANSI_PALETTE[{slot}] = 0x{py_hex} but expected 0x{expected}"
         )
-        # And it must appear in Theme.qml's terminal block.
+        # And it must appear in Theme.qml — either as an explicit hex
+        # in the `Theme.color.terminal.*` block (slots 9–14) or via an
+        # aliased mode.*/text.* token declaration (slots 0–8, 15).
         assert expected.upper() in theme_src.upper(), (
-            f"Theme.qml is missing the hex value {expected} for color{slot}"
+            f"Theme.qml is missing the hex value {expected} for color{slot} — "
+            "either the explicit terminal-block hex drifted, OR the aliased "
+            "mode.*/text.* token was nudged out of sync"
         )
 
 
@@ -323,6 +352,17 @@ def test_unknown_name_falls_back_to_default():
     color = _resolve_color("aubergine", is_bg=False)
     assert color is not None
     assert color.red() == 0xB0
+
+
+def test_integer_rgb_resolves():
+    """_resolve_color accepts raw 24-bit RGB integers — the primary
+    consumer is `_paint_cursor`, which passes `_CURSOR_RGB` (an int)
+    directly instead of going through the string-keyed name table."""
+    color = _resolve_color(0xD2602D, is_bg=False)
+    assert color is not None
+    assert color.red() == 0xD2
+    assert color.green() == 0x60
+    assert color.blue() == 0x2D
 
 
 def test_qcolor_is_memoized():

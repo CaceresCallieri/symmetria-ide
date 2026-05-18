@@ -165,6 +165,7 @@ def test_alt_special_prepends_escape():
         Qt.Key.Key_Control,
         Qt.Key.Key_Alt,
         Qt.Key.Key_Meta,
+        Qt.Key.Key_AltGr,
         Qt.Key.Key_CapsLock,
         Qt.Key.Key_NumLock,
         Qt.Key.Key_ScrollLock,
