@@ -42,6 +42,7 @@ import struct
 import subprocess
 import termios
 import threading
+import urllib.parse
 from pathlib import Path
 
 import pyte
@@ -119,6 +120,120 @@ _READ_CHUNK_BYTES = 65536
 # Char namedtuple footprint silly.
 _SCROLLBACK_LINES = 1000
 
+# Cap on the partial-OSC buffer carried across reader-loop iterations.
+# A well-formed OSC 7 sequence (file://host/path) almost never exceeds
+# a few hundred bytes in practice (path length is the only variable
+# component); 4 KiB tolerates wildly long paths with margin. If the
+# buffer ever grows past this, the input is almost certainly malformed
+# (unterminated escape sequence emitted by a buggy shell hook or
+# garbled binary output) — we drop the buffer to recover.
+_OSC_BUFFER_CAP = 4096
+
+
+def _parse_osc7(buffer: bytes, new_data: bytes) -> tuple[bytes, list[str], bytes]:
+    """Extract OSC 7 sequences from a byte stream, return cleaned bytes + paths.
+
+    OSC 7 wire format (xterm spec): `ESC ] 7 ; file://<host>/<path> TERM`
+    where TERM is either BEL (`0x07`) or ST (`ESC \\` = `0x1b 0x5c`). The
+    shell-init scripts use ST; some emulators / tools emit BEL; we accept
+    both defensively. Phase 2.5 deliverable 3.
+
+    `buffer` is the partial-OSC carryover from the previous reader-loop
+    iteration (an OSC sequence can span multiple `os.read` returns when
+    the kernel splits the read across a chunk boundary). `new_data` is
+    the fresh bytes just read from the master fd. The returned tuple is
+    `(cleaned_data, paths, remaining_partial)`:
+
+      - `cleaned_data` — bytes with all completed OSC 7 sequences stripped,
+        safe to feed to pyte. The cleaned stream still contains every
+        non-OSC-7 byte from the input, in order, so the rendered terminal
+        output is unchanged.
+      - `paths` — list of cwd paths extracted from each completed OSC 7
+        sequence, in the order they appeared. The caller emits one signal
+        per path. Percent-encoded paths (e.g. `%20` for space) are decoded
+        via `urllib.parse.unquote` so the routed payload is a clean
+        filesystem path.
+      - `remaining_partial` — any unterminated `ESC ] 7 ;` prefix at the
+        very end of the input. The caller passes this back as `buffer`
+        on the next call so the sequence can complete across reads.
+
+    Pure function — no state, no I/O. The reader loop owns the buffer
+    instance attribute. Trivially testable with synthetic byte streams.
+    """
+    combined = buffer + new_data
+    paths: list[str] = []
+    output = bytearray()
+    i = 0
+    n = len(combined)
+
+    while i < n:
+        esc_idx = combined.find(b"\x1b]7;", i)
+        if esc_idx == -1:
+            # No more OSC 7 starts in this chunk — flush remainder
+            # to output and return with no partial.
+            output.extend(combined[i:])
+            return bytes(output), paths, b""
+
+        # Bytes before the OSC start pass through unchanged.
+        output.extend(combined[i:esc_idx])
+
+        # Look for the earliest terminator (BEL or ST) after the OSC body.
+        bel_idx = combined.find(b"\x07", esc_idx + 4)
+        st_idx = combined.find(b"\x1b\\", esc_idx + 4)
+
+        if bel_idx == -1 and st_idx == -1:
+            # Unterminated — save partial for the next iteration. If it
+            # never completes (buggy emitter, garbled stream), the cap
+            # below catches the runaway buffer.
+            partial = combined[esc_idx:]
+            if len(partial) > _OSC_BUFFER_CAP:
+                log.warning(
+                    "OSC 7 partial buffer exceeded %d bytes — dropping "
+                    "(unterminated sequence from emitter?). Drop length=%d",
+                    _OSC_BUFFER_CAP,
+                    len(partial),
+                )
+                return bytes(output), paths, b""
+            return bytes(output), paths, partial
+
+        # Pick the earlier of the two terminators if both are present.
+        if bel_idx == -1:
+            term_idx, term_len = st_idx, 2
+        elif st_idx == -1:
+            term_idx, term_len = bel_idx, 1
+        elif bel_idx < st_idx:
+            term_idx, term_len = bel_idx, 1
+        else:
+            term_idx, term_len = st_idx, 2
+
+        # Payload is the bytes between `ESC ] 7 ;` and the terminator.
+        # Expected shape: `file://<host>/<path>` (host may be empty).
+        payload = combined[esc_idx + 4 : term_idx]
+        if payload.startswith(b"file://"):
+            # Split on the first `/` after the `file://` prefix to skip
+            # the host portion. RFC 8089: hostname may be empty (the
+            # bare `file:///path` form is canonical for local files).
+            host_end = payload.find(b"/", 7)
+            if host_end != -1:
+                path_bytes = payload[host_end:]
+                try:
+                    decoded = path_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    log.debug("OSC 7 path bytes not valid UTF-8: %r", path_bytes)
+                else:
+                    # `unquote` is a no-op on already-unencoded paths
+                    # (the shell-init scripts pass $PWD raw — see the
+                    # HACK comment in the emitter sources). Future
+                    # percent-encoded emitters work transparently here.
+                    paths.append(urllib.parse.unquote(decoded))
+
+        # Skip past the terminator and continue scanning for more OSC 7
+        # sequences in the same chunk (some shells emit multiple per
+        # prompt — e.g. if PROMPT_COMMAND runs more than one hook).
+        i = term_idx + term_len
+
+    return bytes(output), paths, b""
+
 
 class TerminalBackend(QObject):
     """Owns the PTY + shell + pyte emulator for one terminal pane.
@@ -164,6 +279,16 @@ class TerminalBackend(QObject):
     # `TerminalBackend` when the user wants a new shell.
     closed = Signal()
 
+    # Shell-side cwd announcement (Phase 2.5 deliverable 3). Fired
+    # whenever the shell emits an OSC 7 sequence — typically on every
+    # prompt redraw after a `cd`, via the `chpwd_functions` (zsh) or
+    # `PROMPT_COMMAND` (bash) hook installed by `runtime/symmetria-
+    # shell/`. Payload is the local filesystem path extracted from
+    # `file://<host>/<path>`. `AppController` routes this into the
+    # existing `cwd` capsule pipeline so the file tree + anchor
+    # machinery work unchanged.
+    osc7_received = Signal(str)
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         # Cooperative shutdown signal — set at the top of `stop()` and
@@ -191,6 +316,11 @@ class TerminalBackend(QObject):
         # Python (signals only deliver to the main thread).
         self._self_pipe_r: int | None = None
         self._self_pipe_w: int | None = None
+        # Carryover buffer for OSC 7 sequences split across reader-loop
+        # iterations (an `os.read` chunk boundary can land mid-escape).
+        # `_parse_osc7` returns the unterminated trailing partial; we
+        # prepend it to the next read. Always owned by the reader thread.
+        self._osc_buffer: bytes = b""
 
     @property
     def stop_event(self) -> threading.Event:
@@ -517,12 +647,27 @@ class TerminalBackend(QObject):
                         # EOF — shell exited.
                         break
 
+                    # Extract OSC 7 sequences before pyte sees them.
+                    # Phase 2.5 deliverable 3 — shell-side `chpwd` hook
+                    # emits `ESC ] 7 ; file://host/cwd ESC \\` on every
+                    # prompt; we route the path to AppController via
+                    # `osc7_received` and strip the bytes so pyte
+                    # doesn't render them as garbage. `_parse_osc7` is
+                    # buffer-aware: a sequence split across an
+                    # `os.read` chunk boundary stitches on the next
+                    # iteration via `_osc_buffer`.
+                    cleaned, paths, self._osc_buffer = _parse_osc7(
+                        self._osc_buffer, data
+                    )
+                    for path in paths:
+                        self.osc7_received.emit(path)
+
                     # GC suspended across feed + dirty-extract + emit.
                     # See gotcha #10 + module docstring. Unconditional
                     # disable/enable matches NvimBackend._on_notification.
                     gc.disable()
                     try:
-                        stream.feed(data)
+                        stream.feed(cleaned)
                         if screen.dirty:
                             dirty_snapshot = frozenset(screen.dirty)
                             screen.dirty.clear()

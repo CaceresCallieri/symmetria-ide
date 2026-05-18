@@ -94,17 +94,17 @@ def backend():
 
 
 def test_signals_declared(backend):
-    """The three v1 signals exist on the class.
+    """The four v1 signals exist on the class.
 
-    These are the ONLY signals declared. `osc_received` (Phase 2.5
-    deliverable 3) and `title_changed` (no v1 consumer) are
-    intentionally absent — if they appear here later, it should be
-    because an actual consumer was added in the same PR, not because
-    of speculative scaffolding.
+    `osc7_received` was added in Phase 2.5 deliverable 3 PR 2 — paths
+    extracted from shell-emitted OSC 7 sequences are routed through
+    this signal into AppController's cwd capsule pipeline. `title_changed`
+    (no v1 consumer) remains intentionally absent.
     """
     assert hasattr(backend, "screen_dirty")
     assert hasattr(backend, "screen_resized")
     assert hasattr(backend, "closed")
+    assert hasattr(backend, "osc7_received")
 
 
 def test_stop_event_exposed_and_unset(backend):
@@ -202,6 +202,37 @@ def test_reader_thread_uses_self_pipe_wakeup():
     assert "self_pipe_r" in src, (
         "self-pipe wakeup missing — stop() would block on idle shell"
     )
+
+
+def test_reader_loop_intercepts_osc7_before_pyte():
+    """The reader loop MUST run `_parse_osc7` BEFORE `stream.feed` so
+    OSC 7 bytes are stripped before pyte sees them. Otherwise pyte
+    would render the escape sequence as a control-char glob in the
+    grid. Also asserts the buffer is carried across iterations via
+    `self._osc_buffer` so fragmented sequences stitch correctly.
+    """
+    src = inspect.getsource(TerminalBackend._run_reader_loop)
+    parse_idx = src.find("_parse_osc7(")
+    feed_idx = src.find("stream.feed(")
+    assert parse_idx >= 0, "reader loop must call _parse_osc7"
+    assert feed_idx >= 0, "reader loop must still call stream.feed"
+    assert parse_idx < feed_idx, (
+        "_parse_osc7 must run BEFORE stream.feed — otherwise pyte renders OSC 7 as garbage"
+    )
+    assert "self._osc_buffer" in src, (
+        "reader loop must carry _osc_buffer across iterations for fragmented sequences"
+    )
+    assert "osc7_received.emit" in src, (
+        "reader loop must emit osc7_received for each extracted path"
+    )
+
+
+def test_osc_buffer_pre_allocated(backend):
+    """`_osc_buffer` is the partial-OSC carryover. Must be initialised
+    in `__init__` (not lazily) so the reader thread's first iteration
+    sees a bytes-typed attr instead of AttributeError or None."""
+    assert isinstance(backend._osc_buffer, bytes)
+    assert backend._osc_buffer == b""
 
 
 # ---------------------------------------------------------------------------
