@@ -48,6 +48,10 @@ from .session_host import SessionHost
 from .session_models import (  # noqa: F401 — side-effect: @QmlElement registration
     SessionModel,
 )
+from .terminal_backend import TerminalBackend
+from .terminal_view import (  # noqa: F401 — side-effect: @QmlElement registration
+    TerminalView,
+)
 from .whichkey_models import (  # noqa: F401 — side-effect: @QmlElement registration
     WhichKeyModel,
     WhichKeyState,
@@ -278,6 +282,15 @@ class AppController(QObject):
     # entry targeted "editor", but no such entry exists today — only
     # `focus_editor()` emits this signal currently.
     focusEditorRequested = Signal()
+    # Phase 2.5 central-surface state. `_central_surface` holds either
+    # "terminal" or "editor"; both `editorVisible` and `terminalVisible`
+    # are derived `@Property(bool)` over the same notify signal so QML
+    # bindings stay declarative without a second source of truth.
+    # `focusTerminalRequested` is the symmetric counterpart of
+    # `focusTreeRequested` / `focusEditorRequested` — Main.qml's
+    # Connections block translates it into `terminalView.forceActiveFocus()`.
+    centralSurfaceChanged = Signal()
+    focusTerminalRequested = Signal()
 
     # Cycle order for Shift+Tab in the agent pane. Tuple is the source of
     # truth for both validation (gate `_set_permission_mode` against this)
@@ -322,6 +335,19 @@ class AppController(QObject):
         # when NvimView first receives a geometryChange event and calls
         # backend.resize() with the real pixel-derived cell count.
         self._backend = NvimBackend(cols=120, rows=30)
+        # Phase 2.5 terminal pane. Coexists with nvim under Main.qml's
+        # `mainContent` Item — `_central_surface` toggles which is visible.
+        # Spawned eagerly from `start()` AFTER the nvim backend so the
+        # editor's grid lands first (gates QSGRenderThread's first frame —
+        # spawning the terminal first can briefly flash an empty editor
+        # on slow hardware). The closed signal is connected here so a
+        # shell that exits on its own surfaces in the log.
+        self._terminal_backend = TerminalBackend(self)
+        # Per Q2-d topology decision: terminal is the persistent home
+        # surface, nvim is summoned over it. First-launch visible = terminal.
+        # Editor is pre-spawned hidden via `_backend.start()` so swap-to-
+        # editor is instant (Q1 answer 1b).
+        self._central_surface: str = "terminal"
         self._status = StatusBarState(self)
         self._capsules = CapsuleModel(self)
         self._cmdline = CmdlineState(self)
@@ -415,6 +441,15 @@ class AppController(QObject):
         # scope shortcut in Main.qml). Lua's `:SymmetriaAnchor` /
         # `:SymmetriaUnanchor` user commands emit through this channel.
         self._backend.anchor_event.connect(self._on_anchor_event)
+        # Terminal lifecycle event. `closed` fires when the shell process
+        # exits (EOF on master fd, user typed `exit`, or `stop()` killed
+        # it). Used only for logging in v1 — the user's next swap-to-
+        # editor presents a working editor; the dead terminal pane stays
+        # visible until then. A v2 enhancement could auto-swap to editor
+        # on close. queued: terminal reader thread → AppController GUI.
+        self._terminal_backend.closed.connect(
+            self._on_terminal_closed, Qt.ConnectionType.QueuedConnection
+        )
         # Seed `cwd` with $HOME so QML's `rootPath: controller.cwd` has
         # a valid path during the brief window between QML construction
         # and the first capsule push from runtime/init.lua's VimEnter +
@@ -1173,6 +1208,73 @@ class AppController(QObject):
         """
         self.focusEditorRequested.emit()
 
+    # --- Phase 2.5 central-surface swap ----------------------------------
+    #
+    # The terminal pane and the editor pane both live under Main.qml's
+    # `mainContent` Item. `centralSurface` toggles which is visible;
+    # `editorVisible` and `terminalVisible` are derived booleans for
+    # convenience in QML bindings (single notify signal keeps them in
+    # lockstep — no XOR drift). Swap slots are no-op-on-noop so a
+    # spurious chord press doesn't churn `centralSurfaceChanged`.
+
+    @Property(str, notify=centralSurfaceChanged)
+    def centralSurface(self) -> str:
+        return self._central_surface
+
+    @Property(bool, notify=centralSurfaceChanged)
+    def editorVisible(self) -> bool:
+        return self._central_surface == "editor"
+
+    @Property(bool, notify=centralSurfaceChanged)
+    def terminalVisible(self) -> bool:
+        return self._central_surface == "terminal"
+
+    @Slot()
+    def swap_to_terminal(self) -> None:
+        """Make the terminal pane the visible central surface.
+
+        Idempotent: if terminal is already visible, no signal fires.
+        Bound to the IDE-wide `Ctrl+Shift+T` Shortcut in Main.qml (PR 5).
+        """
+        if self._central_surface == "terminal":
+            return
+        self._central_surface = "terminal"
+        self.centralSurfaceChanged.emit()
+
+    @Slot()
+    def swap_to_editor(self) -> None:
+        """Make the editor pane the visible central surface.
+
+        Idempotent: if editor is already visible, no signal fires.
+        Bound to the IDE-wide `Ctrl+Shift+E` Shortcut in Main.qml (PR 5).
+        """
+        if self._central_surface == "editor":
+            return
+        self._central_surface = "editor"
+        self.centralSurfaceChanged.emit()
+
+    @Slot()
+    def focus_terminal(self) -> None:
+        """Ask QML to move active focus into the TerminalView.
+
+        Symmetric counterpart of `focus_editor` / `focus_tree`. Emits
+        the signal rather than touching QML focus directly — Main.qml's
+        Connections block calls `terminalView.forceActiveFocus()` on
+        receipt.
+        """
+        self.focusTerminalRequested.emit()
+
+    @Slot()
+    def _on_terminal_closed(self) -> None:
+        """Log when the shell process exits.
+
+        v1 behavior is just to log — the user's next swap-to-editor
+        gives them a working editor; the dead terminal pane stays
+        visible (last frame frozen) until then. A v2 enhancement could
+        auto-swap to editor here.
+        """
+        log.info("terminal shell process exited")
+
     @Slot(dict)
     def _on_nav_event(self, payload: dict) -> None:
         """Route Lua-emitted nav rpcnotify events.
@@ -1642,6 +1744,19 @@ class AppController(QObject):
 
     def start(self) -> None:
         self._backend.start()
+        # Phase 2.5 terminal pane — pre-warm eagerly AFTER nvim has
+        # started. nvim ordering gates the QSGRenderThread's first
+        # frame; spawning the terminal first can briefly flash an
+        # empty editor on slow hardware. Eager pre-warm matches Q1-1b
+        # (nvim is also pre-spawned) so the first user chord swap is
+        # instant in either direction. Failures from the spawn (shell
+        # missing, fd-limit, etc.) propagate as OSError per the
+        # TerminalBackend.start() docstring; we log and continue so
+        # the IDE still launches without a working terminal pane.
+        try:
+            self._terminal_backend.start(self._cwd)
+        except OSError:
+            log.exception("terminal backend pre-warm failed — pane will be inert")
         # Pool stays empty unless an env-var path explicitly opts in.
         # The first interactive `<leader>aN` lazily spawns slot 1 via
         # `_handle_agent_show("new")` → `_next_free_slot()` returns 1
@@ -1692,11 +1807,26 @@ class AppController(QObject):
         # we want it joined before the event loop tears down so its
         # cross-thread emit can't fire into a half-destroyed receiver.
         self._git_controller.stop()
+        # Stop the terminal BEFORE nvim. The terminal owns a shell process
+        # group (via setsid) that can hold nested children — TUIs the
+        # user spawned inside (vim, htop, fzf). `killpg` reaps the whole
+        # group; doing it before nvim's shutdown handshake means the
+        # event loop is still healthy when terminal_backend.stop() waits
+        # on its reader-thread join. Reverse order would mean a few
+        # hundred ms of nvim teardown competing with the killpg wait.
+        self._terminal_backend.stop()
         self._backend.stop()
 
     @property
     def backend(self) -> NvimBackend:
         return self._backend
+
+    @property
+    def terminalBackend(self) -> TerminalBackend:
+        """The Phase 2.5 terminal backend, exposed as a QML context
+        property by `_build_engine`. Main.qml binds it into TerminalView
+        the same way nvimBackend is bound into NvimView."""
+        return self._terminal_backend
 
     @property
     def status(self) -> StatusBarState:
@@ -1746,6 +1876,7 @@ def _register_qml_types() -> None:
     # means a linter can silently drop the import and break @QmlElement
     # registration. See CLAUDE.md gotcha #7 and project-standards §2 P1.
     _ = NvimView
+    _ = TerminalView
     _ = CmdlineState
     _ = CompletionModel
     _ = PopupmenuModel
@@ -1773,6 +1904,7 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # context property — keeps the QML surface small.
     ctx.setContextProperty("controller", controller)
     ctx.setContextProperty("nvimBackend", controller.backend)
+    ctx.setContextProperty("terminalBackend", controller.terminalBackend)
     ctx.setContextProperty("capsuleModel", controller.capsules)
     ctx.setContextProperty("statusState", controller.status)
     ctx.setContextProperty("cmdlineState", controller.cmdline)
