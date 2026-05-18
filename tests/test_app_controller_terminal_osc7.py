@@ -35,9 +35,9 @@ def controller():
     ctrl.shutdown()
 
 
-def _capture(signal) -> list[None]:
+def _capture(signal) -> list[object]:
     """Capture emission count for a parameterless signal."""
-    emissions: list[None] = []
+    emissions: list[object] = []
     signal.connect(lambda: emissions.append(None))
     return emissions
 
@@ -164,11 +164,12 @@ def test_osc7_empty_path_dropped(controller):
 def test_osc7_connect_uses_queued_connection():
     """§4 P2: terminal reader thread → AppController GUI thread is a
     cross-thread emit, so the connect MUST specify Qt.QueuedConnection
-    explicitly with a grep-able comment at the connect site. Asserts
-    the source of `AppController.__init__` contains the right pattern."""
-    src = inspect.getsource(AppController.__init__)
+    explicitly with a grep-able comment at the connect site. Searches
+    the full source of `AppController` so the test survives if the
+    connect call moves to a helper method."""
+    src = inspect.getsource(AppController)
     assert "terminal_backend.osc7_received" in src, (
-        "osc7_received connect missing from AppController.__init__"
+        "osc7_received connect missing from AppController"
     )
     # The connect line must specify Qt.ConnectionType.QueuedConnection —
     # without it, Qt auto-picks based on sender/receiver thread affinity,

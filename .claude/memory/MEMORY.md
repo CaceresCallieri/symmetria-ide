@@ -15,11 +15,10 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 ## Project — active — `project/active/` (operational state being maintained)
 
 - [Phase 2 current state (2026-04-25)](project/active/phase2_current_state.md) — Node SDK sidecar pivot landed, permission UI shipped; deferred: persistence, stop, turn grouping
-- [Phase 2.5 current state (2026-05-17)](project/active/phase25_current_state.md) — anchor state machine + Ctrl+Shift+A app-scope shortcut + :SymmetriaAnchor commands shipped; native PTY pane next
 
 ## Project — shipped — `project/shipped/` (past-tense systems; one consolidated bullet)
 
-_(none yet — when a system ships and earns its way to a one-line pointer, file lives under `project/shipped/`.)_
+- [Phase 2.5 — terminal pane + project anchor](project/shipped/phase25_current_state.md) — anchor (D1), PTY terminal (D2), OSC 7 cwd sync (D3) — all shipped 2026-05-18
 
 ## Reference — host — `reference/host/` (Hyprland, QuickShell, OS-level)
 

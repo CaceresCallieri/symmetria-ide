@@ -1316,7 +1316,7 @@ class AppController(QObject):
         if not path:
             log.debug("dropping empty terminal OSC 7 path")
             return
-        self._route_capsule({"id": "cwd", "label": "", "value": path})
+        self._route_capsule({"id": "cwd", "value": path})
 
     @Slot(dict)
     def _on_nav_event(self, payload: dict) -> None:
