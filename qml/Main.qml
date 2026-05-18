@@ -138,7 +138,8 @@ Window {
                     backend: nvimBackend
                     focus: visible
 
-                    Component.onCompleted: forceActiveFocus()
+                    Component.onCompleted: if (visible)
+                        forceActiveFocus()
                     onVisibleChanged: if (visible)
                         forceActiveFocus()
 
@@ -182,7 +183,7 @@ Window {
                 // blank pane — same Q1-1b pattern as nvim.
                 //
                 // Same FocusScope pattern as NvimView: `focus: visible`
-                // plus `Component.onCompleted: forceActiveFocus()` plus
+                // plus `Component.onCompleted: if (visible) forceActiveFocus()` plus
                 // `onVisibleChanged` re-grab. When the Ctrl+Shift+T
                 // chord toggles `terminalVisible` from false to true,
                 // onVisibleChanged grabs keyboard focus so the user can
@@ -233,12 +234,12 @@ Window {
             // grants — the FocusScope refused to ever enter the focus
             // chain, so arrow keys went nowhere even after focus_tree
             // fired. Replaced with a one-shot Window-level startup
-            // override below (`Component.onCompleted: editor.
-            // forceActiveFocus()`) that runs AFTER all child
-            // Component.onCompleted handlers, giving the editor the
-            // final word on initial focus without permanently
-            // disabling our FocusScope. See the startup focus override
-            // comment at Window.Component.onCompleted below.
+            // override below (Window.Component.onCompleted) that runs
+            // AFTER all child Component.onCompleted handlers, giving
+            // the active central surface the final word on initial
+            // focus without permanently disabling our FocusScope.
+            // See the startup focus override comment at
+            // Window.Component.onCompleted below.
             //
             // Visibility defaults to true; no toggle keybind in v1
             // per the "visualization-first" decision.

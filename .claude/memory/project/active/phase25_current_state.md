@@ -5,7 +5,7 @@ type: project
 originSessionId: phase25-anchor-spike
 ---
 
-# Phase 2.5 — current state (2026-05-17)
+# Phase 2.5 — current state (2026-05-18)
 
 Phase 2.5 = terminal pane + project anchor. The first concrete step toward the agent-primary topology inversion documented in `docs/future.md`. See `docs/phases.md` for the full phase entry with the three sub-deliverables and architectural invariants.
 
