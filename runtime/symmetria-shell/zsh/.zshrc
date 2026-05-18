@@ -26,6 +26,12 @@ unset ZDOTDIR
 # (xterm spec — ST terminator, supported by every emulator that
 # implements OSC 7; we use ST rather than BEL because some shells'
 # zsh print builtins mangle BEL in certain quoting contexts).
+# HACK: $PWD is passed raw without percent-encoding — paths containing
+# spaces, brackets, or other URI-reserved characters produce invalid
+# file:// URIs per RFC 8089. Most terminals (Kitty, WezTerm, Ghostty)
+# are lenient and accept unencoded paths today, but this is non-spec.
+# PR 2's OSC 7 parser in TerminalBackend must handle unencoded paths.
+# Remove once we add proper URL encoding (see bash/init.sh same HACK).
 symmetria_osc7() {
     printf '\e]7;file://%s%s\e\\' "${HOST:-${HOSTNAME:-localhost}}" "$PWD"
 }

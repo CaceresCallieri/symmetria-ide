@@ -20,10 +20,22 @@ for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
 done
 
 # Source interactive rcfile.
+# Note: if the login file above (commonly .bash_profile) already sources
+# ~/.bashrc internally (a common distro pattern), then .bashrc will run
+# twice per shell launch. Most .bashrc files are re-sourceable so this is
+# acceptable for v1; add a $SYMMETRIA_BASHRC_SOURCED guard here if
+# double-sourcing causes issues in practice.
 [[ -r "$HOME/.bashrc" ]] && source "$HOME/.bashrc"
 
 # OSC 7 emitter. Same wire format as the zsh variant: ESC ] 7 ;
 # file://<host>/<path> ESC \ (ST terminator).
+# HACK: $PWD is passed raw without percent-encoding — paths containing
+# spaces, brackets, or other URI-reserved characters produce invalid
+# file:// URIs per RFC 8089. Most terminals (Kitty, WezTerm, Ghostty)
+# are lenient and accept unencoded paths today, but this is non-spec.
+# PR 2's OSC 7 parser in TerminalBackend must handle unencoded paths.
+# Remove once we add proper URL encoding (Python urllib.parse.quote or
+# a POSIX-compatible shell encoder — sed-based encoding is fragile).
 symmetria_osc7() {
     printf '\e]7;file://%s%s\e\\' "${HOSTNAME:-localhost}" "$PWD"
 }
@@ -32,12 +44,17 @@ symmetria_osc7() {
 # bash 5.0+ supports array PROMPT_COMMAND; we use the portable string
 # form to avoid breaking on bash 4.x in unusual setups (Arch ships 5.x
 # but the IDE's user-base may include macOS / older distros).
+#
+# The guard wraps PROMPT_COMMAND with sentinel semicolons and checks for
+# ";symmetria_osc7;" (no spaces). The append must therefore also use NO
+# space after the semicolon — using "; symmetria_osc7" (space) would
+# make the guard fail to detect our hook on re-source, duplicating it.
 if [[ -z "${PROMPT_COMMAND:-}" ]]; then
     PROMPT_COMMAND="symmetria_osc7"
 elif [[ ";${PROMPT_COMMAND};" != *";symmetria_osc7;"* ]]; then
     # Idempotency guard — don't append twice if this script is sourced
     # multiple times (e.g. nested bash sessions).
-    PROMPT_COMMAND="${PROMPT_COMMAND}; symmetria_osc7"
+    PROMPT_COMMAND="${PROMPT_COMMAND};symmetria_osc7"
 fi
 
 # Fire once for the initial cwd.

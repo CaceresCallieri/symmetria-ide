@@ -128,19 +128,45 @@ def test_bash_init_defines_osc7_emitter(bash_init: str):
 def test_bash_init_appends_prompt_command(bash_init: str):
     """PROMPT_COMMAND extension MUST append (not overwrite), so any user
     PROMPT_COMMAND keeps running. The init checks if PROMPT_COMMAND is
-    unset, sets it; otherwise appends with `;` separator."""
+    unset, sets it; otherwise appends with `;` separator (NO space after
+    the semicolon — the idempotency guard checks for `;symmetria_osc7;`
+    without spaces, so the append must match that pattern exactly)."""
     assert 'PROMPT_COMMAND="symmetria_osc7"' in bash_init
-    assert "; symmetria_osc7" in bash_init
+    # No space after semicolon — must match the idempotency guard's ";symmetria_osc7;" pattern.
+    assert ";symmetria_osc7" in bash_init
 
 
 def test_bash_init_idempotent_re_source(bash_init: str):
     """Sourcing the init multiple times (nested bash) must NOT add the
     hook twice — would result in two OSC 7 emits per prompt, doubling
-    the cwd-update traffic."""
-    # The idempotency check looks for the substring `;symmetria_osc7;`
-    # in PROMPT_COMMAND before appending.
-    assert "symmetria_osc7" in bash_init  # already covered
-    assert "symmetria_osc7;" in bash_init or ";symmetria_osc7;" in bash_init
+    the cwd-update traffic.
+
+    The idempotency contract has two parts that must be consistent:
+    1. The GUARD checks for ";symmetria_osc7;" (no spaces around the name).
+    2. The APPEND must produce a value that, when wrapped with sentinel
+       semicolons, MATCHES the guard pattern — so the guard detects our
+       hook on the next sourcing and doesn't append again.
+
+    If the append uses a SPACE ("; symmetria_osc7"), wrapping it gives
+    "; symmetria_osc7;" which does NOT contain ";symmetria_osc7;" — the
+    guard silently fails and the hook is appended on every re-source.
+    """
+    # Guard pattern — must be present in the elif condition.
+    assert '";symmetria_osc7;"' in bash_init, (
+        "idempotency guard must check for ';symmetria_osc7;' (no spaces)"
+    )
+    # Append value — must use the same no-space format so that wrapping
+    # the appended PROMPT_COMMAND with sentinel semicolons produces a
+    # string containing ";symmetria_osc7;" and satisfies the guard.
+    # Specifically: "${PROMPT_COMMAND};symmetria_osc7" (no space after ;)
+    # NOT "${PROMPT_COMMAND}; symmetria_osc7" (space breaks the guard match).
+    assert '";${PROMPT_COMMAND};symmetria_osc7"' in bash_init or (
+        "${PROMPT_COMMAND};symmetria_osc7" in bash_init
+    ), (
+        "append must use ';symmetria_osc7' (no space) to match the guard pattern; "
+        "a leading space like '; symmetria_osc7' makes the guard fail to detect "
+        "our hook on re-source, causing double-append"
+    )
 
 
 # ---------------------------------------------------------------------------
