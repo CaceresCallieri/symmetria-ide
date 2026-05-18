@@ -285,7 +285,7 @@ QtObject {
 
             // 16-slot ANSI palette. Aliased where a `mode.*` color
             // already covers the slot's tonal role; explicit hex
-            // for the bright variants 9–12 that lack a mode equivalent.
+            // for the bright variants 9–14 that lack a mode equivalent.
             readonly property color color0: theme.color.mode.badgeLabel
             readonly property color color1: theme.color.mode.replace
             readonly property color color2: theme.color.mode.insert

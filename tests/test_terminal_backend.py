@@ -43,8 +43,20 @@ def test_pyte_imports_and_screen_shape() -> None:
 
     screen = pyte.Screen(80, 24)
     cell = screen.buffer[0][0]
-    # The Char namedtuple's documented fields, as of pyte 0.8.x.
-    for field in ("data", "fg", "bg", "bold", "italics", "underscore"):
+    # All 9 Char namedtuple fields as of pyte 0.8.x. Pinned in full so any drop or rename
+    # surfaces here rather than as a silent paint regression. `reverse` is especially
+    # critical — it drives reverse-video (selection highlight) in the terminal renderer.
+    for field in (
+        "data",
+        "fg",
+        "bg",
+        "bold",
+        "italics",
+        "underscore",
+        "reverse",
+        "strikethrough",
+        "blink",
+    ):
         assert hasattr(cell, field), f"pyte.Char missing field: {field}"
 
 

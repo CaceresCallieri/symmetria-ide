@@ -30,7 +30,7 @@ import threading
 from PySide6.QtCore import QObject, Signal, Slot
 
 
-log = logging.getLogger(__name__)
+log = logging.getLogger(__name__)  # noqa: F841  # used in PR 2 once log calls are added
 
 
 class TerminalBackend(QObject):
@@ -51,13 +51,13 @@ class TerminalBackend(QObject):
     gotcha #10 applies uniformly.
     """
 
-    # Dirty row indices since the previous flush. Payload is the set
+    # Dirty row indices since the previous flush. Payload is the frozenset
     # copied from `pyte.HistoryScreen.dirty` (the worker clears the
     # screen's dirty set immediately after copying). The v1 consumer
     # (`TerminalView.update()`) treats the payload as advisory and
     # repaints in full; the carried payload exists so a future v2
     # optimization can do partial-row repaints via `update(QRect)`.
-    screen_dirty = Signal(set)
+    screen_dirty = Signal(frozenset)
 
     # Terminal cell dimensions changed — emitted from `resize()`
     # AFTER pyte's screen has been re-laid-out and the TIOCSWINSZ
