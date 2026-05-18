@@ -162,6 +162,16 @@ class TerminalBackend(QObject):
         Initial screen dimensions are `_DEFAULT_COLS` × `_DEFAULT_ROWS`
         (80×24). The QML side calls `resize()` as soon as its geometry
         resolves — typically within a frame or two of mount.
+
+        Failure semantics: `subprocess.Popen` may raise `OSError` if the
+        shell binary is missing or a resource limit is hit. In that case,
+        the fds we opened are closed and `_screen`/`_stream` are reset to
+        None BEFORE the exception propagates — there's nothing to clean
+        up at the caller. The `closed` signal is NOT emitted on this
+        path because semantically the shell never lived; `closed` means
+        "the shell exited", which presupposes it spawned. AppController
+        (PR 4) handles spawn failure as an exception-catch path distinct
+        from the closed-signal path.
         """
         if self._proc is not None:
             return
@@ -222,7 +232,7 @@ class TerminalBackend(QObject):
                 stderr=slave_fd,
                 cwd=cwd,
                 env=env,
-                preexec_fn=os.setsid,  # noqa: PLW1509 — setsid is exactly what we want here
+                start_new_session=True,  # puts child in its own session+process group (killpg-reachable)
                 close_fds=True,
             )
         except OSError:
@@ -339,7 +349,9 @@ class TerminalBackend(QObject):
         keys = 3 bytes) from interleaving with any future
         secondary writer.
         """
-        if self._master_fd is None or not data:
+        if not data:
+            return
+        if self._master_fd is None:
             return
         with self._stdin_lock:
             master_fd = self._master_fd
@@ -410,6 +422,10 @@ class TerminalBackend(QObject):
         assert self._stream is not None
         assert self._screen is not None
 
+        # Capture to locals: (a) avoids repeated attr lookup in the hot path,
+        # (b) the reader retains these references after stop() clears the
+        # instance attrs -- intentional, avoids use-after-free from the
+        # reader's own perspective while it finishes draining.
         master_fd = self._master_fd
         self_pipe_r = self._self_pipe_r
         stream = self._stream
@@ -424,8 +440,9 @@ class TerminalBackend(QObject):
                     break
 
                 if self_pipe_r in ready:
-                    # Drain the wake-up byte(s). Loop because stop()
-                    # may write more than one before we observe.
+                    # Drain the wake-up byte. Multiple concurrent stop()
+                    # calls (race between natural shell exit and explicit
+                    # stop()) may each write one byte -- drain all pending.
                     try:
                         os.read(self_pipe_r, 64)
                     except OSError:
@@ -443,10 +460,9 @@ class TerminalBackend(QObject):
                         break
 
                     # GC suspended across feed + dirty-extract + emit.
-                    # See gotcha #10 + module docstring.
-                    gc_was_enabled = gc.isenabled()
-                    if gc_was_enabled:
-                        gc.disable()
+                    # See gotcha #10 + module docstring. Unconditional
+                    # disable/enable matches NvimBackend._on_notification.
+                    gc.disable()
                     try:
                         stream.feed(data)
                         if screen.dirty:
@@ -454,8 +470,7 @@ class TerminalBackend(QObject):
                             screen.dirty.clear()
                             self.screen_dirty.emit(dirty_snapshot)
                     finally:
-                        if gc_was_enabled:
-                            gc.enable()
+                        gc.enable()
         except Exception:
             if not self._stop_event.is_set():
                 log.exception("terminal reader loop crashed")

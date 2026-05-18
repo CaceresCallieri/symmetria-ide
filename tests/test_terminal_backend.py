@@ -279,9 +279,6 @@ def test_reader_thread_is_daemon(started_backend):
 def test_write_round_trip(started_backend):
     """write() forwards bytes to the shell; the shell's response
     flows back through the reader and lands in pyte's buffer."""
-    # Give the shell a moment to draw its prompt before we type.
-    time.sleep(0.2)
-
     sentinel = "symmetria_sentinel_42"
     started_backend.write(f"echo {sentinel}\r".encode())
 
