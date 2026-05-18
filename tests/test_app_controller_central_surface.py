@@ -63,6 +63,14 @@ def patched_backends(monkeypatch):
     monkeypatch.setattr(TerminalBackend, "start", fake_terminal_start)
     monkeypatch.setattr(TerminalBackend, "stop", fake_terminal_stop)
 
+    # Guard against SYMMETRIA_IDE_AGENT_PROMPT / _VIEW set in the caller's
+    # shell or CI environment — if either is live, start() invokes
+    # _create_instance/_spawn_instance which tries to spawn a real
+    # SessionHost subprocess, breaking hermeticity. Pattern from
+    # test_app_controller_awaiting.py's env-isolation fixtures.
+    monkeypatch.delenv("SYMMETRIA_IDE_AGENT_PROMPT", raising=False)
+    monkeypatch.delenv("SYMMETRIA_IDE_AGENT_VIEW", raising=False)
+
     return {
         "nvim_starts": nvim_starts,
         "nvim_stops": nvim_stops,
@@ -143,6 +151,25 @@ def test_swap_to_editor_on_editor_is_noop(controller):
     controller.swap_to_editor()
     assert emissions == []
     assert controller.centralSurface == "editor"
+
+
+def test_swap_to_terminal_changes_surface_and_emits(controller):
+    """editor → terminal flips state AND emits exactly one signal.
+
+    Symmetric counterpart of test_swap_to_editor_changes_surface_and_emits.
+    Catches a regression where swap_to_terminal mutates state but forgets to
+    emit, or emits but forgets to mutate — neither would be caught by the
+    round-trip test's aggregate emission count alone.
+    """
+    controller.swap_to_editor()  # precondition: start from editor
+    emissions = _capture(controller.centralSurfaceChanged)
+
+    controller.swap_to_terminal()
+
+    assert controller.centralSurface == "terminal"
+    assert controller.terminalVisible is True
+    assert controller.editorVisible is False
+    assert len(emissions) == 1
 
 
 def test_round_trip_swap_preserves_invariant(controller):
@@ -237,6 +264,13 @@ def test_start_oserror_does_not_abort_app(patched_backends, monkeypatch):
         ctrl.start()
     finally:
         ctrl.shutdown()
+
+    # nvim must still have started — the editor is the usable fallback when
+    # the terminal spawn fails. If _backend.start() is ever accidentally
+    # moved inside the try block, this catches the regression.
+    assert len(patched_backends["nvim_starts"]) == 1, (
+        "nvim must start even when terminal OSError fires"
+    )
 
 
 # ---------------------------------------------------------------------------

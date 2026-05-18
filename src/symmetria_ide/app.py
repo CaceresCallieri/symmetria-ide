@@ -1807,13 +1807,14 @@ class AppController(QObject):
         # we want it joined before the event loop tears down so its
         # cross-thread emit can't fire into a half-destroyed receiver.
         self._git_controller.stop()
-        # Stop the terminal BEFORE nvim. The terminal owns a shell process
-        # group (via setsid) that can hold nested children — TUIs the
-        # user spawned inside (vim, htop, fzf). `killpg` reaps the whole
-        # group; doing it before nvim's shutdown handshake means the
-        # event loop is still healthy when terminal_backend.stop() waits
-        # on its reader-thread join. Reverse order would mean a few
-        # hundred ms of nvim teardown competing with the killpg wait.
+        # Stop the terminal BEFORE nvim — reverse of startup order, and
+        # prevents the terminal reader thread's queued signals (closed,
+        # screen_dirty) from landing against a scene graph that's mid-
+        # nvim-teardown. NvimBackend.stop() blocks in a threading.join()
+        # for up to 1 s; completing terminal teardown (including the
+        # killpg that reaps nested TUIs like vim/htop) before that
+        # blocking join keeps shutdown predictable and avoids the terminal
+        # reader racing nvim's channel close.
         self._terminal_backend.stop()
         self._backend.stop()
 
