@@ -65,6 +65,29 @@ Window {
         }
     }
 
+    // Phase 2.5 central-surface swap chords. Same application-scope
+    // pattern as Ctrl+Shift+A — they fire regardless of which pane has
+    // focus, including from inside nvim's insert mode. The anchor block
+    // above documents the QApplication::notify ordering rationale in
+    // full; the same reasoning applies here.
+    //
+    // Two distinct chords (not a single toggle) per the codebase's
+    // "each IDE concept is its own chord" precedent. Ctrl+Shift+T
+    // summons the terminal; Ctrl+Shift+E summons the editor. The
+    // slots are idempotent — pressing the chord that matches the
+    // already-visible surface is a no-op (no signal, no QML re-bind).
+    Shortcut {
+        sequences: ["Ctrl+Shift+T"]
+        context: Qt.ApplicationShortcut
+        onActivated: controller.swap_to_terminal()
+    }
+
+    Shortcut {
+        sequences: ["Ctrl+Shift+E"]
+        context: Qt.ApplicationShortcut
+        onActivated: controller.swap_to_editor()
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -105,7 +128,13 @@ Window {
                 NvimView {
                     id: editor
                     anchors.fill: parent
-                    visible: !controller.agentVisible
+                    // Phase 2.5: editor is now ONE of two central surfaces
+                    // (the other is the terminal pane below). Visibility
+                    // requires BOTH "agent is not full-window overlaid"
+                    // AND "central surface is editor". `editorVisible`
+                    // is the boolean derivation of `controller.centralSurface`
+                    // — see AppController for the state machine.
+                    visible: !controller.agentVisible && controller.editorVisible
                     backend: nvimBackend
                     focus: visible
 
@@ -140,6 +169,35 @@ Window {
                         height: Math.min(implicitHeight, editor.height * 0.5)
                         z: 20
                     }
+                }
+
+                // Phase 2.5 terminal pane — sibling of NvimView under
+                // `mainContent`. Both panes are anchored to fill the
+                // same slot and gated on a `visible` binding; mutual
+                // exclusivity is guaranteed at the AppController layer
+                // (`centralSurface` is a single string, the two derived
+                // booleans are XOR by construction). Pre-warmed via
+                // `_terminal_backend.start(cwd)` in AppController.start()
+                // so the first paint shows a live shell prompt, not a
+                // blank pane — same Q1-1b pattern as nvim.
+                //
+                // Same FocusScope pattern as NvimView: `focus: visible`
+                // plus `Component.onCompleted: forceActiveFocus()` plus
+                // `onVisibleChanged` re-grab. When the Ctrl+Shift+T
+                // chord toggles `terminalVisible` from false to true,
+                // onVisibleChanged grabs keyboard focus so the user can
+                // type immediately without an extra click.
+                TerminalView {
+                    id: terminalView
+                    anchors.fill: parent
+                    visible: !controller.agentVisible && controller.terminalVisible
+                    backend: terminalBackend
+                    focus: visible
+
+                    Component.onCompleted: if (visible)
+                        forceActiveFocus()
+                    onVisibleChanged: if (visible)
+                        forceActiveFocus()
                 }
 
                 AgentPane {
@@ -370,6 +428,18 @@ Window {
                 editor.forceActiveFocus();
             }
 
+            // Phase 2.5 terminal focus pull. Fired from
+            // AppController.focus_terminal() — currently called only
+            // by Ctrl+Shift+T's swap_to_terminal slot via its own
+            // onVisibleChanged trigger, but the signal exists so a
+            // future spillover surface (e.g. tree's Ctrl+L when terminal
+            // sits to the right) can pull focus without going through
+            // the swap path. TerminalView is its own FocusScope, so a
+            // direct forceActiveFocus works (no descendant-walker needed).
+            function onFocusTerminalRequested(): void {
+                terminalView.forceActiveFocus();
+            }
+
             // WORKAROUND: recursive descendant walker using toString() type detection.
             // Root cause: FileTreeView's outer Item is not a FocusScope and exposes no
             // public focusInternal() method, so we walk children to find the ListView.
@@ -473,6 +543,8 @@ Window {
                 if (!controller.fmVisible) {
                     if (controller.agentVisible)
                         agentPane.forceActiveFocus();
+                    else if (controller.terminalVisible)
+                        terminalView.forceActiveFocus();
                     else
                         editor.forceActiveFocus();
                 }
@@ -657,6 +729,8 @@ Window {
             fmOverlayLoader.item.forceActiveFocus();
         else if (controller.agentVisible)
             agentPane.forceActiveFocus();
+        else if (controller.terminalVisible)
+            terminalView.forceActiveFocus();
         else
             editor.forceActiveFocus();
     }
@@ -675,5 +749,18 @@ Window {
     // analog: don't fight nested Component.onCompleted with
     // declaratively-disabled FocusScopes, fight it with one
     // post-construction explicit grant.
-    Component.onCompleted: editor.forceActiveFocus()
+    Component.onCompleted: {
+        // Q2-d topology — first launch shows the terminal as the persistent
+        // home surface. Pre-PR-5 this hardcoded `editor.forceActiveFocus()`;
+        // PR 4's `_central_surface = "terminal"` default + this dispatch
+        // pull the focus into whichever surface is actually visible.
+        // The terminal pane's `Component.onCompleted` ALSO grabs focus on
+        // its own first construction, but this Window-level handler is
+        // the final word per the gotcha #16 / QML-side analog argument
+        // documented above for the editor branch.
+        if (controller.terminalVisible)
+            terminalView.forceActiveFocus();
+        else
+            editor.forceActiveFocus();
+    }
 }

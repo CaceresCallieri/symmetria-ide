@@ -2,7 +2,7 @@
 
 A custom IDE wrapper built on NeoVim, in the Symmetria ecosystem.
 
-**Phase 0 spine complete. Phase 1 deferred. Phase 2 (Claude Code agent pane) in progress. Phase 2.5 (terminal pane + project anchor) under way. Long-term direction: see `docs/vision.md` "Surface hierarchy" + `docs/future.md` "Topology inversion".**
+**Phase 0 spine complete. Phase 1 deferred. Phase 2 (Claude Code agent pane) in progress. Phase 2.5 (terminal pane + project anchor) — anchor + terminal both shipped through PR 5; PR 6 (paste) is the final v1 deliverable. Long-term direction: see `docs/vision.md` "Surface hierarchy" + `docs/future.md` "Topology inversion".**
 
 ## Status at a glance
 
@@ -22,6 +22,9 @@ A custom IDE wrapper built on NeoVim, in the Symmetria ecosystem.
 - `src/symmetria_ide/nvim_events.py` — `redraw` handler functions + notification routing. Free functions bound as methods on `NvimBackend` at class scope so `backend._h_*` / `backend._dispatch_redraw` behave identically to pre-split. `_REDRAW_HANDLERS` is re-exported from `nvim_backend` for the dispatch test scaffold.
 - `src/symmetria_ide/nvim_view.py` — `QQuickPaintedItem` rendering the grid; coalesces runs of same-highlight cells into single `fillRect` + `drawText` calls.
 - `src/symmetria_ide/keys.py` — Qt key event → NeoVim keycode translator (unit-tested).
+- `src/symmetria_ide/terminal_backend.py` — PTY-attached shell + `pyte.HistoryScreen` + daemon reader thread. `start_new_session=True` so `killpg` at shutdown reaps nested TUI children. Mirrors `NvimBackend` shape (`_stop_event`, `daemon=True` worker, GC-suspended emit per gotcha #10). `screen_dirty` payload is `frozenset[int]` — Qt `QueuedConnection` passes set objects by reference, frozenset closes the GC race window and PySide6 raises TypeError if the contract slips.
+- `src/symmetria_ide/terminal_view.py` — `QQuickPaintedItem` rendering pyte's cell grid. Same paint-loop discipline as NvimView (memoized QColor, pooled QRectF, grid-exact clip, run-coalescing). Reuses `NvimView._default_font()` so editor and terminal cell metrics line up exactly.
+- `src/symmetria_ide/terminal_keys.py` — Qt key event → xterm escape-sequence bytes (normal-mode set; application-mode DECCKM deferred to v2).
 - `src/symmetria_ide/app.py` — `QGuiApplication`, `StatusBarState` (well-known capsules with per-field notify signals), `CapsuleModel` (generic extension slot), `AppController`. Owns `SessionHost` + `SessionModel` alongside the nvim backend; spawns the Node SDK sidecar when `SYMMETRIA_IDE_AGENT_PROMPT` is set.
 - `src/symmetria_ide/session_host.py` — Node SDK sidecar subprocess (`node sidecar/dist/index.js`) + daemon stdout/stderr worker threads; GC-suspends around signal emission per gotcha #10; mirrors `NvimBackend` post-refactor shape (`_stop_event`, `daemon=True` workers). Owns `send_user_message` and `send_permission_response` write paths.
 - `src/symmetria_ide/session_models.py` — `SessionModel(QAbstractListModel)` ingests sidecar events as a flat row list with partial-text coalescing for streaming assistant content; `AgentRow` is `@dataclass(slots=True, frozen=True)` and carries `permission_state` + `request_id` fields for in-pane approve/deny rows.
@@ -128,6 +131,32 @@ Thread safety:
 - `_stop_event` + daemon workers satisfy project-standards §1 P0 ("every long-running thread is daemon=True OR owns an explicit shutdown Event"). We satisfy both, matching `NvimBackend`.
 
 SDK version pin: `@anthropic-ai/claude-agent-sdk@0.2.119`. The pin is exact (no caret) so behaviour is reproducible — security patches require a manual bump. Authentication uses the same `~/.claude` credentials as the CLI; the SDK reads them at `query()` time. Turn grouping + tool-call drill-in are still deferred — the SDK exposes far richer event vocabulary than `-p` did, but the placeholder discipline (`.claude/memory/ui_surface_discipline.md`) means we ship the structural surface first and iterate the visual treatment once real cadence is observable.
+
+## The terminal pane (Phase 2.5)
+
+Distinct from the agent backend — this one wraps a real PTY-attached shell into the IDE so users can `cd`/`ls`/run TUIs without leaving the window. Coexists with NvimView under `Main.qml`'s `mainContent` Item; one of the two is visible at a time, gated on `controller.centralSurface` (single string field, "terminal" | "editor"). First-launch visible = terminal per Q2-d topology (see `docs/future.md` "Topology inversion").
+
+**Topology.** `TerminalBackend.start(cwd)` allocates `os.openpty()` for the master/slave fd pair, sets initial `TIOCSWINSZ` via ioctl, instantiates `pyte.HistoryScreen + pyte.ByteStream`, force-dirties all rows for first paint, then `subprocess.Popen([SHELL, "-l"], stdin=slave, stdout=slave, stderr=slave, start_new_session=True, env={TERM=xterm-256color, COLORTERM=truecolor})`. A daemon reader thread does `select.select([master_fd, self_pipe_r])`, feeds bytes through pyte, and emits `screen_dirty(frozenset)` cross-thread to TerminalView via `Qt.QueuedConnection`. `TerminalView.paint` reads `backend._screen.buffer` directly (the Qt event-loop posts repaint requests after `update()`), with the same run-coalescing + memoized QColor + pooled QRectF discipline as NvimView (gotchas #10, #11, #23 apply identically here).
+
+**Lifecycle in AppController.** `_terminal_backend` is instantiated in `__init__` and pre-warmed at `start()` time AFTER `_backend.start()` (Q1-1b — nvim ordering gates QSGRenderThread's first frame; spawning the terminal first can briefly flash an empty editor on slow hardware). OSError from spawn is caught + logged so the IDE still launches with a working editor when the shell binary is missing. `shutdown()` stops the terminal BEFORE nvim — terminal owns a shell process group via `start_new_session=True`, and `killpg` reaping should complete before nvim's stop blocks the controller in a `threading.join()`; the ordering also prevents the terminal reader thread's queued signals from landing against a mid-nvim-teardown scene graph. The `closed` signal connects to `_on_terminal_closed` (logs only in v1).
+
+**Swap chords.** Two IDE-wide `Qt.ApplicationShortcut`s at `Main.qml`'s Window root: `Ctrl+Shift+T` calls `controller.swap_to_terminal()`, `Ctrl+Shift+E` calls `controller.swap_to_editor()`. Same QApplication::notify ordering rationale as `Ctrl+Shift+A` (anchor) — they win over NvimView's keyboard capture even in insert mode. Slots are no-op-on-noop (no signal fires if the chord matches the already-visible surface).
+
+**ANSI palette.** 16-slot `_ANSI_PALETTE` tuple in `terminal_view.py` mirrors `Theme.color.terminal.color0..color15` in `qml/design/Theme.qml`. Slots 0–8 + 15 alias `mode.*` / `text.*` tokens on the QML side but the Python side holds explicit hex (dual source of truth — there's no clean way to read a QML singleton from Python yet). Drift detection: `tests/test_terminal_view.py::test_ansi_palette_matches_theme_qml` reads Theme.qml and asserts every slot's hex literal appears somewhere in the file. A v2 refactor would wire the Theme palette through Python via context property and remove the duplication entirely.
+
+**v2 follow-ups (not in v1).** Application-mode arrow keys (DECCKM — vim/less flip it on entry; v1 only supports normal-mode CSI sequences). Underline/strikethrough/blink rendering — currently excluded from the `(fg, bg, bold, italic)` run-coalescing key in `_paint_row`; a future renderer adding any of these MUST extend the key tuple, otherwise adjacent cells with different attribute states coalesce into one run and silently corrupt the output. Selection/copy — keyboard-first non-negotiable means the v2 design needs a vim-style visual mode, not a mouse-driven selection rectangle. Partial repaints via `update(QRect)` — the v1 consumer treats `screen_dirty`'s payload as advisory and full-repaints; per-row updates are a perf optimization for typical shell output where ≤2 rows churn per frame.
+
+**Wire shape:**
+
+```
+TerminalBackend signals             AppController              TerminalView
+─────────────────────────────────   ────────────────────────   ───────────────────────────
+screen_dirty(frozenset[int])   ──── queued ────────────────── _on_screen_dirty → update()
+screen_resized(int, int)       ──── queued ────────────────── _on_screen_resized → update()
+closed()                       ──── queued → _on_terminal_closed (log only)
+```
+
+GUI → backend (always GUI thread): `backend.write(bytes)`, `backend.resize(cols, rows)`. `_stdin_lock` serializes writes; resize inverts to pyte's `(lines, columns)` order at the boundary.
 
 ## The which-key protocol
 

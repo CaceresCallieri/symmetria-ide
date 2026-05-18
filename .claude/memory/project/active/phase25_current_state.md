@@ -1,6 +1,6 @@
 ---
 name: Phase 2.5 terminal pane + project anchor — current state
-description: 2026-05-17 snapshot. Anchor state machine + Ctrl+Shift+A application-scope shortcut + :SymmetriaAnchor commands landed. Native PTY terminal pane is the next sub-deliverable.
+description: 2026-05-18 snapshot. Anchor (deliverable 1) shipped. Native PTY terminal pane (deliverable 2) — PRs 1–5 sealed; PR 6 (paste) is the final v1 step. OSC 7 shell integration (deliverable 3) is next.
 type: project
 originSessionId: phase25-anchor-spike
 ---
@@ -70,10 +70,26 @@ The spike deliberately built Gap 2 + Gap 3 in isolation so the abstraction is va
 
 **Pre-anchor: nvim is pre-spawned in the background**, hidden, so post-anchor handoff is instant. The pragmatic compromise version of the long-term vision — eventually nvim becomes summoned-on-demand only, but for now it carries enough daily-driver weight to justify the eager-load.
 
-## What's next (deliverables 2 + 3)
+## What shipped — Deliverable 2 (native PTY terminal pane)
 
-- **Deliverable 2 — Native PTY terminal pane.** PySide6 + `pyte` (or libvterm via FFI) + `QQuickPaintedItem` rendered into the central layout slot. Single PTY per pane via `QProcess`. Theme-bound. The terminal pane's existence is what unlocks the topology — without it, the anchor machinery just sits there as scaffolding.
-- **Deliverable 3 — Shell-driven cwd integration.** Inject `chpwd` hook into user's shell emitting OSC 7. Terminal pane parses, pushes into existing `cwd` capsule pipeline. Anchor machinery on top works unchanged.
+Sealed through 5 of 6 PRs in this session (2026-05-17 → 2026-05-18). See `git log --oneline | grep terminal:` for the commit ladder.
+
+- **PR 1** (`ac71dc4` + `d64c3e6`) — pyte>=0.8.2 dep, Theme.color.terminal palette, TerminalBackend skeleton. Fix-commit hardened `screen_dirty` to `Signal(frozenset)` (Qt QueuedConnection passes set by ref — frozenset closes the gotcha #10 race).
+- **PR 2** (`a9da560` + `df3657e`) — full TerminalBackend impl: os.openpty + subprocess.Popen with `start_new_session=True` + login shell + xterm-256color env, pyte HistoryScreen + ByteStream, daemon reader thread with select+self-pipe, GC-suspended emit window, killpg shutdown with SIGTERM→SIGKILL grace, TIOCSWINSZ ioctl. Fix-commit swapped `preexec_fn=os.setsid` for `start_new_session=True` (Python fork-safe equivalent — no PLW1509 noqa needed) and dropped a `time.sleep(0.2)` from the round-trip test (§8 violation; suite 8.7s→2.6s).
+- **PR 3** (`c261563` + `0051e83`) — TerminalView QQuickPaintedItem renderer + terminal_keys.py xterm escape translator. Paint loop with run-coalescing + memoized QColor + pooled QRectF + grid-exact clip (gotchas #10/#11). Reuses `NvimView._default_font()` for cell-metric alignment (gotcha #23). 16-slot ANSI palette mirroring Theme.qml with drift-detection test. Fix-commit extended palette cross-check to all 16 slots + documented v1 run-coalesce key omissions (underscore/strikethrough/blink not rendered yet).
+- **PR 4** (`c99ef80` + `35888f5`) — AppController integration: centralSurface state machine, swap_to_terminal / swap_to_editor / focus_terminal slots, start() pre-warms terminal AFTER nvim (Q1-1b), shutdown() stops terminal BEFORE nvim, terminalBackend context property. Fix-commit corrected the shutdown ordering comment (the real rationale is signal-race prevention, NOT "event loop is healthy" — nvim's stop blocks in threading.join, not Qt exec) + hardened test fixture with env-var isolation.
+- **PR 5** (current) — Main.qml wiring: TerminalView sibling under `mainContent` Item gated on `controller.terminalVisible`, NvimView visibility tightened to `!agentVisible && editorVisible`, two new `Qt.ApplicationShortcut` blocks (Ctrl+Shift+T / Ctrl+Shift+E), `onFocusTerminalRequested` Connections handler, `Window.onActiveChanged` + `Component.onCompleted` focus dispatch extended for three-way central state, FM overlay restore-target extended. Plus docs: CLAUDE.md "The terminal pane" section, this memory file, CHANGELOG entry.
+
+**v1 deferrals** (documented at the call site so future agents have the breadcrumb):
+- Application-mode arrow keys (DECCKM). Vim/less flip it on entry — their own arrow handling masks the difference at the shell level.
+- Selection / copy. Would need a vim-style visual mode to honor the keyboard-first non-negotiable; mouse selection violates it.
+- Underline / strikethrough / blink rendering. A future PR adding any of these MUST extend the `(fg, bg, bold, italic)` run-coalescing key in `_paint_row`, otherwise adjacent cells with different attribute states silently corrupt via shared run.
+- Partial repaints via `update(QRect)`. v1 full-repaints on every `screen_dirty`; the carried payload is structurally advisory until a v2 consumer uses it.
+
+## What's next
+
+- **PR 6** — `Ctrl+Shift+V` paste. Reads `QApplication.clipboard().text()`, encodes UTF-8, calls `terminalBackend.write(bytes)`. ~10 lines + 1 test. Final v1 deliverable.
+- **Deliverable 3 — Shell-driven cwd integration.** Inject `chpwd` hook into user's shell emitting OSC 7. Terminal pane parses, pushes into existing `cwd` capsule pipeline. Anchor machinery on top works unchanged. Sidecar work, NOT yet started.
 
 ## Load-bearing invariants (don't regress)
 
@@ -82,3 +98,7 @@ The spike deliberately built Gap 2 + Gap 3 in isolation so the abstraction is va
 - **Git controller MUST stay connected to `displayedRootChanged`, not `cwdChanged`.** Reverting that connect = anchoring loses its user-facing payoff (git operations stop targeting the anchored root).
 - **Anchor triggers live at the Qt application-scope shortcut layer, NOT in Lua keymaps.** Anchor is IDE-level. Adding a `<leader>ta` keybind would mis-locate it and the architectural intent erodes.
 - **The QML `Shortcut` with `Qt.ApplicationShortcut` context is the established pattern for IDE-wide keybinds.** Future IDE-wide chords (terminal-focus in deliverable 2, project-switcher, etc.) should follow the same template — `Shortcut { context: Qt.ApplicationShortcut; onActivated: controller.<slot>() }` at the `Main.qml` Window root.
+- **`_central_surface` is a single string, the two derived booleans are XOR by construction.** `centralSurface` (str), `editorVisible` (bool), `terminalVisible` (bool) all read the same field via `@Property(..., notify=centralSurfaceChanged)`. A future refactor that splits them into stored fields would lose this guarantee — keep them derived.
+- **start() ordering: nvim FIRST, then terminal.** nvim's start gates the QSGRenderThread's first frame; spawning terminal first can briefly flash an empty editor on slow hardware. The OSError swallow on terminal spawn is intentional (editor stays usable when shell binary is missing).
+- **shutdown() ordering: terminal FIRST, then nvim.** Terminal owns a shell process group via `start_new_session=True`. killpg reaping should complete before nvim's stop blocks the controller in `threading.join()`; the ordering also prevents the terminal reader thread's queued signals from landing against a mid-nvim-teardown scene graph.
+- **ANSI palette is a dual source of truth (Python `_ANSI_PALETTE` ↔ QML `Theme.color.terminal.*`).** `test_terminal_view.py::test_ansi_palette_matches_theme_qml` reads Theme.qml and cross-checks every slot. The v2 refactor that wires Theme through Python via context property removes the duplication; until then, palette nudges need both sides updated.
