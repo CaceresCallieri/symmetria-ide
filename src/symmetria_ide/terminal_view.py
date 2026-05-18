@@ -46,6 +46,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetricsF,
+    QGuiApplication,
     QKeyEvent,
     QPainter,
 )
@@ -555,6 +556,31 @@ class TerminalView(QQuickPaintedItem):
     # --- Input ---------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        # Intercept Ctrl+Shift+V for clipboard paste — the modern
+        # xterm-class convention shared by kitty / alacritty / wezterm
+        # / gnome-terminal. Bare Ctrl+V keeps its terminal meaning
+        # (sends `\x16` / SYN, which bash readline uses as
+        # quoted-insert / literal-next-key), so this interception
+        # only fires when Shift is ALSO held.
+        #
+        # Bracketed-paste protocol (DECSET 2004) is deferred to v2 —
+        # shells that opt in will interpret newlines in the pasted
+        # text as immediate command submissions until then. Multi-line
+        # paste use is rare enough that the v1 trade-off is acceptable;
+        # opt-in via DECSET 2004 is a small follow-up.
+        if (
+            event.modifiers()
+            == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+            and event.key() == Qt.Key.Key_V
+        ):
+            clipboard = QGuiApplication.clipboard()
+            if clipboard is not None and self._backend is not None:
+                text = clipboard.text()
+                if text:
+                    self._backend.write(text.encode("utf-8"))
+            event.accept()
+            return
+
         data = translate_key(event.key(), event.text(), event.modifiers())
         if data is None:
             event.ignore()

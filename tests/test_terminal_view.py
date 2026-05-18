@@ -393,3 +393,77 @@ def test_push_current_size_clamps_to_minimums():
     assert "max(20" in src and "max(5" in src, (
         "_push_current_size must clamp cols/rows to sane minimums"
     )
+
+
+# ---------------------------------------------------------------------------
+# Ctrl+Shift+V paste (PR 6) — xterm-class convention: bare Ctrl+V keeps
+# its terminal meaning (sends SYN / `\x16`, used by bash readline's
+# quoted-insert), Ctrl+Shift+V routes through the clipboard.
+# ---------------------------------------------------------------------------
+
+
+def test_paste_chord_intercepted_in_key_press():
+    """keyPressEvent MUST intercept Ctrl+Shift+V before falling through
+    to translate_key. Without the intercept, terminal_keys.translate
+    would forward `\\x16` (the SYN char Qt encodes Ctrl+V as) to the
+    shell — the user would see no paste, just a literal control byte."""
+    src = inspect.getsource(TerminalView.keyPressEvent)
+    assert "Qt.Key.Key_V" in src, (
+        "Paste chord detection missing — keyPressEvent does not check Key_V"
+    )
+    assert "ControlModifier" in src and "ShiftModifier" in src, (
+        "Paste chord must require BOTH Ctrl AND Shift; bare Ctrl+V "
+        "must still send SYN per terminal convention"
+    )
+
+
+def test_paste_uses_qgui_application_clipboard():
+    """The paste path MUST read from QGuiApplication.clipboard().text()
+    and forward the UTF-8 encoding to backend.write(). A regression
+    that drops the clipboard read (or uses an empty literal) leaves
+    Ctrl+Shift+V as a silent no-op."""
+    src = inspect.getsource(TerminalView.keyPressEvent)
+    assert "QGuiApplication.clipboard()" in src, (
+        "Paste path must read from QGuiApplication.clipboard()"
+    )
+    assert ".text()" in src, "Paste path must call clipboard.text() to read the string"
+    assert 'encode("utf-8")' in src, (
+        "Paste payload must be UTF-8 encoded before backend.write()"
+    )
+
+
+def test_paste_returns_early_so_translate_key_skipped():
+    """After handling the paste chord, keyPressEvent MUST return
+    early so the regular translate_key path doesn't ALSO process the
+    same event — would result in double-paste (clipboard text + the
+    SYN byte that translate_key would produce for Ctrl+V)."""
+    src = inspect.getsource(TerminalView.keyPressEvent)
+    # The paste-handling block must contain `return` before falling
+    # through to `data = translate_key(...)`.
+    paste_block_end = src.find("event.accept()\n            return")
+    translate_idx = src.find("data = translate_key")
+    assert paste_block_end >= 0, "Paste path must `event.accept()` + `return`"
+    assert translate_idx >= 0, "translate_key fallthrough must still exist"
+    assert paste_block_end < translate_idx, (
+        "Paste path must return BEFORE the translate_key fallthrough; "
+        "otherwise paste also sends the SYN byte"
+    )
+
+
+def test_paste_imports_qgui_application():
+    """terminal_view.py must import QGuiApplication — without it, the
+    paste path is a NameError at runtime (silent until first chord press)."""
+    import symmetria_ide.terminal_view as module
+
+    src = inspect.getsource(module)
+    assert "QGuiApplication" in src
+    # And the import must be from QtGui, not just referenced (which
+    # would be a runtime NameError on the chord press).
+    assert "from PySide6.QtGui import" in src
+    # Ensure QGuiApplication is in that import line / block.
+    import_block_start = src.find("from PySide6.QtGui import")
+    # 200-char window covers the multi-line import parenthesis.
+    import_block = src[import_block_start : import_block_start + 200]
+    assert "QGuiApplication" in import_block, (
+        "QGuiApplication must be imported from PySide6.QtGui"
+    )
