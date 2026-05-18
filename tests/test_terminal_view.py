@@ -415,6 +415,16 @@ def test_paste_chord_intercepted_in_key_press():
         "Paste chord must require BOTH Ctrl AND Shift; bare Ctrl+V "
         "must still send SYN per terminal convention"
     )
+    # The modifier check MUST be bitwise containment, not equality.
+    # An equality check (`== (Ctrl | Shift)`) silently breaks for users
+    # with NumLock on (KeypadModifier) or AltGr keyboards
+    # (GroupSwitchModifier) — Qt ORs those state modifiers in.
+    assert re.search(
+        r"event\.modifiers\(\)\s*&\s*_PASTE_MODS\s*==\s*_PASTE_MODS", src
+    ), (
+        "Modifier check must be bitwise containment (`& _PASTE_MODS == _PASTE_MODS`), "
+        "not equality — equality breaks Ctrl+Shift+V for users with NumLock/AltGr"
+    )
 
 
 def test_paste_uses_qgui_application_clipboard():
@@ -430,6 +440,13 @@ def test_paste_uses_qgui_application_clipboard():
     assert 'encode("utf-8")' in src, (
         "Paste payload must be UTF-8 encoded before backend.write()"
     )
+    # Whitespace-only clipboard content (spaces, tabs, blank lines) is
+    # intentional paste content — the `if text:` guard was removed so
+    # that whitespace pastes are written rather than silently swallowed.
+    assert "if text:" not in src, (
+        "Paste path must not guard on `if text:` — whitespace-only "
+        "clipboard content is intentional and must be forwarded to the backend"
+    )
 
 
 def test_paste_returns_early_so_translate_key_skipped():
@@ -438,13 +455,14 @@ def test_paste_returns_early_so_translate_key_skipped():
     same event — would result in double-paste (clipboard text + the
     SYN byte that translate_key would produce for Ctrl+V)."""
     src = inspect.getsource(TerminalView.keyPressEvent)
-    # The paste-handling block must contain `return` before falling
-    # through to `data = translate_key(...)`.
-    paste_block_end = src.find("event.accept()\n            return")
+    # Use re.search so the assertion is robust against indentation
+    # changes — a fixed-indent find() would give a false -1 failure
+    # if the paste block is reformatted.
+    paste_match = re.search(r"event\.accept\(\)\s*\n\s+return", src)
     translate_idx = src.find("data = translate_key")
-    assert paste_block_end >= 0, "Paste path must `event.accept()` + `return`"
+    assert paste_match is not None, "Paste path must `event.accept()` + `return`"
     assert translate_idx >= 0, "translate_key fallthrough must still exist"
-    assert paste_block_end < translate_idx, (
+    assert paste_match.start() < translate_idx, (
         "Paste path must return BEFORE the translate_key fallthrough; "
         "otherwise paste also sends the SYN byte"
     )
@@ -457,13 +475,9 @@ def test_paste_imports_qgui_application():
 
     src = inspect.getsource(module)
     assert "QGuiApplication" in src
-    # And the import must be from QtGui, not just referenced (which
-    # would be a runtime NameError on the chord press).
-    assert "from PySide6.QtGui import" in src
-    # Ensure QGuiApplication is in that import line / block.
-    import_block_start = src.find("from PySide6.QtGui import")
-    # 200-char window covers the multi-line import parenthesis.
-    import_block = src[import_block_start : import_block_start + 200]
-    assert "QGuiApplication" in import_block, (
-        "QGuiApplication must be imported from PySide6.QtGui"
-    )
+    # Use a DOTALL regex to match the multi-line parenthesised import
+    # block — a fixed char-window would silently pass if QGuiApplication
+    # happened to appear after the 200-char boundary.
+    assert re.search(
+        r"from PySide6\.QtGui import[^)]*QGuiApplication", src, re.DOTALL
+    ), "QGuiApplication must be imported from PySide6.QtGui"

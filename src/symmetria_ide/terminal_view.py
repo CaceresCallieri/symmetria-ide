@@ -563,21 +563,36 @@ class TerminalView(QQuickPaintedItem):
         # quoted-insert / literal-next-key), so this interception
         # only fires when Shift is ALSO held.
         #
-        # Bracketed-paste protocol (DECSET 2004) is deferred to v2 —
-        # shells that opt in will interpret newlines in the pasted
-        # text as immediate command submissions until then. Multi-line
-        # paste use is rare enough that the v1 trade-off is acceptable;
-        # opt-in via DECSET 2004 is a small follow-up.
+        # WARNING — v2 deferral: bracketed-paste protocol (DECSET 2004).
+        # bash and zsh do NOT enable DECSET 2004 by default; fish does.
+        # Without it, every \n in the pasted text is sent raw to the
+        # shell, which interprets it as an immediate Return — i.e. each
+        # line in a multi-line paste executes as a separate command.
+        # The bracketed-paste fix (~20 lines: wrap bytes in
+        # `\x1b[200~ ... \x1b[201~` when DECSET 2004 is active) is
+        # the correct v2 follow-up.
+        #
+        # Modifier check — bitwise containment, NOT equality: some
+        # keyboards / XKB layouts silently OR in state modifiers
+        # (KeypadModifier when NumLock is on, GroupSwitchModifier on
+        # AltGr keyboards). An equality check breaks the chord for
+        # those users. The containment form fires iff Ctrl AND Shift
+        # are both held, regardless of other active modifiers.
+        _PASTE_MODS = (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+        )
         if (
-            event.modifiers()
-            == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+            event.modifiers() & _PASTE_MODS == _PASTE_MODS
             and event.key() == Qt.Key.Key_V
         ):
-            clipboard = QGuiApplication.clipboard()
-            if clipboard is not None and self._backend is not None:
-                text = clipboard.text()
-                if text:
-                    self._backend.write(text.encode("utf-8"))
+            # Always accept+return to suppress the SYN byte translate_key
+            # would produce for Ctrl+V — even when backend is absent or
+            # clipboard text is empty. QGuiApplication.clipboard() cannot
+            # return None here: TerminalView is a QQuickPaintedItem, which
+            # can only exist after QGuiApplication is live.
+            if self._backend is not None:
+                text = QGuiApplication.clipboard().text()
+                self._backend.write(text.encode("utf-8"))
             event.accept()
             return
 
