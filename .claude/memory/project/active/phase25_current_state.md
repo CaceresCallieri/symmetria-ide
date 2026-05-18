@@ -1,6 +1,6 @@
 ---
 name: Phase 2.5 terminal pane + project anchor — current state
-description: 2026-05-18 snapshot. Anchor (deliverable 1) shipped. Native PTY terminal pane (deliverable 2) — PRs 1–5 sealed; PR 6 (paste) is the final v1 step. OSC 7 shell integration (deliverable 3) is next.
+description: 2026-05-18 snapshot. ALL THREE DELIVERABLES SHIPPED. Anchor (D1), native PTY terminal pane (D2, 6 PRs), OSC 7 shell-driven cwd sync (D3, 3 PRs). Phase 2.5 is complete; this file ready for promotion to project/shipped/.
 type: project
 originSessionId: phase25-anchor-spike
 ---
@@ -86,10 +86,39 @@ Sealed through 5 of 6 PRs in this session (2026-05-17 → 2026-05-18). See `git 
 - Underline / strikethrough / blink rendering. A future PR adding any of these MUST extend the `(fg, bg, bold, italic)` run-coalescing key in `_paint_row`, otherwise adjacent cells with different attribute states silently corrupt via shared run.
 - Partial repaints via `update(QRect)`. v1 full-repaints on every `screen_dirty`; the carried payload is structurally advisory until a v2 consumer uses it.
 
-## What's next
+## What shipped — Deliverable 3 (OSC 7 shell-driven cwd sync)
 
-- **PR 6** — `Ctrl+Shift+V` paste. Reads `QApplication.clipboard().text()`, encodes UTF-8, calls `terminalBackend.write(bytes)`. ~10 lines + 1 test. Final v1 deliverable.
-- **Deliverable 3 — Shell-driven cwd integration.** Inject `chpwd` hook into user's shell emitting OSC 7. Terminal pane parses, pushes into existing `cwd` capsule pipeline. Anchor machinery on top works unchanged. Sidecar work, NOT yet started.
+Sealed through 3 PRs in this session (2026-05-18).
+
+- **D3 PR 1** (`f010a78` + `1da6847`) — shell-init scripts + auto-injection. `runtime/symmetria-shell/zsh/.zshenv` + `.zshrc` (ZDOTDIR redirect: source user's real rcfiles, install chpwd hook idempotently, fire once for initial cwd, unset ZDOTDIR for child shells); `runtime/symmetria-shell/bash/init.sh` (--rcfile bootstrap: source login files manually since bash ignores --rcfile in `-l` mode, install PROMPT_COMMAND hook idempotently); TerminalBackend._shell_launch_args detects zsh/bash via basename, returns (argv, env_additions) tuple per shell. Other shells (fish, nu) log a warning and continue. Fix-commit caught a real bug: bash PROMPT_COMMAND guard checked for `;symmetria_osc7;` (no space) but appended `; symmetria_osc7` (with space) — nested bash would have double-emitted on every prompt. Also added HACK markers for the URL-encoding deferral (PR 2's parser handles unencoded paths).
+
+- **D3 PR 2** (`cb1fbf0` + `7004a0a`) — OSC 7 byte-stream interception + parser + signal. New `_parse_osc7(buffer, new_data) → (cleaned, paths, partial)` pure function (testable without Qt/PTY) handles BEL + ST terminators, percent-decoding, fragmentation across reader-loop iterations via partial-buffer carryover, 4 KiB runaway-buffer cap, trailing-slash normalization, root-overwrite filter (file:/// → no emit). New `osc7_received = Signal(str)` cross-thread channel. Reader loop runs `_parse_osc7` BEFORE `stream.feed` so pyte never sees OSC 7 bytes (would render as garbage glyphs). Fix-commit moved `osc7_received.emit` inside the `gc.disable()` window (gotcha #10 extension — emit allocates QueuedConnection event + str wrapper on worker thread), restored the conditional `gc_was_enabled` pattern to match the rest of the codebase, added trailing-slash normalization and root-only filter at the parser layer.
+
+- **D3 PR 3** (current) — AppController routing into _cwd capsule pipeline + docs. New `_on_terminal_osc7(path)` slot connects via `Qt.ConnectionType.QueuedConnection` (terminal reader → GUI), synthesizes `{id:"cwd", value:path}` dict and dispatches through `_route_capsule` — identical code path to nvim's `:cd`. Anchor state machine + file tree + git controller all see terminal-driven updates through their existing wires. Empty-path guard at the slot layer (defense beyond the parser's root filter). CLAUDE.md "The terminal pane" section gained an "OSC 7 shell-driven cwd sync" paragraph + the wire shape diagram now shows `osc7_received → _on_terminal_osc7 → _route_capsule`. CHANGELOG entry. docs/phases.md marks deliverable 3 complete. 9 new integration tests verify the routing end-to-end at the AppController layer.
+
+## Phase 2.5 — DONE
+
+All three deliverables shipped in this session. The user's vision —
+"open IDE → empty terminal as primary surface → navigate via shell →
+anchor → editor accessible" — now works end-to-end:
+
+1. Launch IDE → terminal visible at $HOME (Q2-d topology).
+2. `cd ~/projects/symmetria-ide` in terminal → file tree follows (OSC 7).
+3. Ctrl+Shift+A → anchor pins tree to current project.
+4. `cd /tmp` while anchored → tree stays pinned, but `_cwd` updates silently.
+5. Ctrl+Shift+A → release anchor → tree re-syncs to /tmp (the path the user walked to).
+6. Ctrl+Shift+E → swap to nvim, edit a file from the anchored project.
+7. Ctrl+Shift+T → back to terminal.
+
+The architectural seam from the anchor spike (the conditional emit in
+`_route_capsule`'s cwd branch, the `_cwd` vs `displayedRoot` split, the
+git controller's rebind to `displayedRootChanged`) paid off — none of
+the anchor machinery needed to change when deliverable 3 shipped. The
+load-bearing claim of the spike held end-to-end.
+
+**Promotion candidate:** this file should move from `active/` to
+`shipped/` per the memory doctrine. Shrink to a one-line pointer once
+the next maintenance pass touches the memory layout.
 
 ## Load-bearing invariants (don't regress)
 

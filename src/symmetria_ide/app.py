@@ -450,6 +450,18 @@ class AppController(QObject):
         self._terminal_backend.closed.connect(
             self._on_terminal_closed, Qt.ConnectionType.QueuedConnection
         )
+        # Phase 2.5 deliverable 3: shell-driven cwd updates. The terminal
+        # reader thread extracts OSC 7 sequences (emitted by the
+        # chpwd hook in runtime/symmetria-shell/) and emits osc7_received
+        # with the parsed path. We route through `_route_capsule` with
+        # the synthetic {id:"cwd", value:path} dict shape, so the
+        # downstream consumers (anchor state machine, file tree,
+        # git controller) see the update through their existing
+        # connections — identical code path to nvim's `:cd`. queued:
+        # terminal reader thread → AppController GUI.
+        self._terminal_backend.osc7_received.connect(
+            self._on_terminal_osc7, Qt.ConnectionType.QueuedConnection
+        )
         # Seed `cwd` with $HOME so QML's `rootPath: controller.cwd` has
         # a valid path during the brief window between QML construction
         # and the first capsule push from runtime/init.lua's VimEnter +
@@ -1274,6 +1286,37 @@ class AppController(QObject):
         auto-swap to editor here.
         """
         log.info("terminal shell process exited")
+
+    @Slot(str)
+    def _on_terminal_osc7(self, path: str) -> None:
+        """Route an OSC 7 cwd announcement from the terminal pane into
+        the same `cwd` capsule machinery nvim's `:cd` uses.
+
+        Phase 2.5 deliverable 3 — the final piece of terminal-driven
+        cwd sync. The terminal reader thread parses OSC 7 sequences
+        emitted by the chpwd hook (zsh) or PROMPT_COMMAND hook (bash)
+        installed by `runtime/symmetria-shell/`. Each parsed path
+        arrives here as the `osc7_received` signal payload.
+
+        Synthesizing the `{id:"cwd", value:path}` capsule dict and
+        dispatching through `_route_capsule` is the load-bearing
+        design choice: it means every downstream consumer (the anchor
+        state machine in `_route_capsule`'s cwd branch, the file
+        tree's `displayedRoot` binding, the git controller's repo-root
+        rebind) sees terminal-driven cwd updates through their
+        existing connections. Identical code path to nvim's `:cd` —
+        no duplication, no parallel routing tree.
+
+        The path is already normalized by `_parse_osc7` (trailing
+        slash stripped, root-only filtered) so no further sanitation
+        is needed here. An empty path would update `_cwd` to `""`,
+        which the `if new_cwd != self._cwd` guard in `_route_capsule`
+        treats as a real change — guard against that explicitly.
+        """
+        if not path:
+            log.debug("dropping empty terminal OSC 7 path")
+            return
+        self._route_capsule({"id": "cwd", "label": "", "value": path})
 
     @Slot(dict)
     def _on_nav_event(self, payload: dict) -> None:

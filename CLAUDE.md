@@ -2,7 +2,7 @@
 
 A custom IDE wrapper built on NeoVim, in the Symmetria ecosystem.
 
-**Phase 0 spine complete. Phase 1 deferred. Phase 2 (Claude Code agent pane) in progress. Phase 2.5 (terminal pane + project anchor) — anchor + terminal both shipped through PR 5; PR 6 (paste) is the final v1 deliverable. Long-term direction: see `docs/vision.md` "Surface hierarchy" + `docs/future.md` "Topology inversion".**
+**Phase 0 spine complete. Phase 1 deferred. Phase 2 (Claude Code agent pane) in progress. Phase 2.5 (terminal pane + project anchor) shipped — anchor + terminal pane + OSC 7 shell-driven cwd sync all in. Long-term direction: see `docs/vision.md` "Surface hierarchy" + `docs/future.md` "Topology inversion".**
 
 ## Status at a glance
 
@@ -144,6 +144,8 @@ Distinct from the agent backend — this one wraps a real PTY-attached shell int
 
 **ANSI palette.** 16-slot `_ANSI_PALETTE` tuple in `terminal_view.py` mirrors `Theme.color.terminal.color0..color15` in `qml/design/Theme.qml`. Slots 0–8 + 15 alias `mode.*` / `text.*` tokens on the QML side but the Python side holds explicit hex (dual source of truth — there's no clean way to read a QML singleton from Python yet). Drift detection: `tests/test_terminal_view.py::test_ansi_palette_matches_theme_qml` reads Theme.qml and cross-checks every slot's hex value against the corresponding `color0..color15` tokens in the file. A v2 refactor would wire the Theme palette through Python via context property and remove the duplication entirely.
 
+**OSC 7 shell-driven cwd sync (deliverable 3).** Shell hooks installed by `runtime/symmetria-shell/{zsh,bash}/` emit `ESC ] 7 ; file://host/cwd ESC \\` on every prompt — chpwd in zsh, PROMPT_COMMAND in bash. TerminalBackend's reader loop runs `_parse_osc7(buffer, new_data)` BEFORE `stream.feed`, so pyte never sees the OSC 7 bytes (they'd render as garbage glyphs). The parser handles BEL + ST terminators, percent-decodes the path, normalizes trailing slashes, filters `file:///`-only (root-overwrite protection), and buffers partial sequences across reader-loop iterations (4 KiB cap on the partial buffer protects against runaway unterminated input). Each extracted path is emitted as `osc7_received(str)` and routed by `AppController._on_terminal_osc7` through `_route_capsule` with the synthetic `{id:"cwd", value:path}` dict — identical code path to nvim's `:cd`. Anchor state machine + file tree + git controller all see the update through their existing wires. Auto-injection per shell: zsh uses `ZDOTDIR=runtime/symmetria-shell/zsh/`; bash uses `--rcfile=runtime/symmetria-shell/bash/init.sh` (without `-l` because bash ignores --rcfile in login mode — init.sh sources login files manually). Other shells (fish, nu) get a warning log and continue without sync.
+
 **v2 follow-ups (not in v1).** Application-mode arrow keys (DECCKM — vim/less flip it on entry; v1 only supports normal-mode CSI sequences). Underline/strikethrough/blink rendering — not in v1; any future PR adding these MUST extend the run-coalescing key in `_paint_row`, otherwise adjacent cells with different attribute states coalesce and silently corrupt the output. Selection/copy — keyboard-first non-negotiable means the v2 design needs a vim-style visual mode, not a mouse-driven selection rectangle. Partial repaints via `update(QRect)` — the v1 consumer treats `screen_dirty`'s payload as advisory and full-repaints; per-row updates are a perf optimization for typical shell output where ≤2 rows churn per frame.
 
 **Wire shape:**
@@ -154,6 +156,7 @@ TerminalBackend signals          TerminalView (direct)              AppControlle
 screen_dirty(frozenset[int])  ── queued → _on_screen_dirty → update()
 screen_resized(int, int)      ── queued → _on_screen_resized → update()
 closed()                      ────────────────────────────────────── queued → _on_terminal_closed (log only)
+osc7_received(str)            ────────────────────────────────────── queued → _on_terminal_osc7 → _route_capsule
 ```
 
 GUI → backend (always GUI thread): `backend.write(bytes)`, `backend.resize(cols, rows)`. `_stdin_lock` serializes writes; resize inverts to pyte's `(lines, columns)` order at the boundary.
