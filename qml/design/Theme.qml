@@ -236,6 +236,73 @@ QtObject {
             readonly property color hunkFg: "#c8a37a"        // accent.primary
             readonly property color contextFg: "#b0b0b0"     // text.normal
         }
+
+        // Terminal pane palette — pyte cell rendering for the native
+        // PTY terminal (Phase 2.5 deliverable 2). The 16-slot ANSI
+        // palette deliberately aliases editor `mode.*` and `text.*`
+        // tokens where they line up tonally, so the terminal surface
+        // reads continuous with the editor — both panes are
+        // wine_theme-derived chrome on the same wallpaper-blend
+        // backdrop. Background is "transparent" (alpha=0) per the
+        // Q2-d topology decision: the terminal is the persistent home
+        // surface and shares the editor's ambient wallpaper tint
+        // instead of standing out as its own opaque pane.
+        //
+        // ANSI slot mapping (xterm/VT100 convention):
+        //   0 black           — mode.badgeLabel (wine_theme.bg_primary)
+        //   1 red             — mode.replace    (wine_theme.error_red)
+        //   2 green           — mode.insert     (wine_theme.string)
+        //   3 yellow          — mode.normal     (wine_theme.keyword)
+        //   4 blue            — mode.command    (wine_theme.accent_blue)
+        //   5 magenta         — mode.visual     (wine_theme.term_bright_magenta)
+        //   6 cyan            — mode.terminal   (wine_theme.term_bright_cyan)
+        //   7 white           — text.normal
+        //   8 bright black    — text.dim
+        //   9–14 bright       — lighter siblings of slots 1–6, hex values
+        //                       below; provisional until cross-referenced
+        //                       with wine_theme.lua's own `term_bright_*`
+        //                       entries in a follow-up.
+        //  15 bright white    — text.selected (brightest neutral rung)
+        //
+        // The 256-color cube (slots 16–255) is computed at runtime
+        // in `terminal_view.py`'s memoized color resolver, NOT
+        // exposed here — it's a derived xterm-256 lookup, not a
+        // design token.
+        readonly property QtObject terminal: QtObject {
+            // Background: transparent so the wallpaper ambient tint
+            // shows through, mirroring NvimView's wallpaper-blend
+            // treatment. The terminal pane sits as a sibling to
+            // NvimView in `Main.qml::mainContent`, sharing the same
+            // visual surface contract.
+            readonly property color background: "transparent"
+            readonly property color foreground: theme.color.text.normal
+
+            // Cursor block fill — `accent.bright` so the cursor
+            // reads as a warm, attention-drawing element against
+            // the neutral text ramp, matching the editor's
+            // amber-family accent grammar.
+            readonly property color cursor: theme.color.accent.bright
+
+            // 16-slot ANSI palette. Aliased where a `mode.*` color
+            // already covers the slot's tonal role; explicit hex
+            // for the bright variants 9–12 that lack a mode equivalent.
+            readonly property color color0: theme.color.mode.badgeLabel
+            readonly property color color1: theme.color.mode.replace
+            readonly property color color2: theme.color.mode.insert
+            readonly property color color3: theme.color.mode.normal
+            readonly property color color4: theme.color.mode.command
+            readonly property color color5: theme.color.mode.visual
+            readonly property color color6: theme.color.mode.terminal
+            readonly property color color7: theme.color.text.normal
+            readonly property color color8: theme.color.text.dim
+            readonly property color color9: "#E58B5C"   // bright red — lighter than mode.replace
+            readonly property color color10: "#86D666"  // bright green — lighter than mode.insert
+            readonly property color color11: "#E5B142"  // bright yellow — lighter than mode.normal
+            readonly property color color12: "#9CB6F0"  // bright blue — lighter than mode.command
+            readonly property color color13: "#E69BF0"  // bright magenta — lighter than mode.visual
+            readonly property color color14: "#8AE9E4"  // bright cyan — lighter than mode.terminal
+            readonly property color color15: theme.color.text.selected
+        }
     }
 
     // ─── Spacing ─────────────────────────────────────────────────

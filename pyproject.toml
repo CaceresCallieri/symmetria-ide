@@ -13,15 +13,19 @@ dependencies = [
     "PySide6>=6.7",
     "pynvim>=0.5",
     "msgpack>=1.0",
+    "pyte>=0.8.2",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-# Phase 2 originally planned a pty + pyte terminal emulation bridge
-# (`ptyprocess`, `pyte`). The placeholder spike pivoted to
-# `claude -p --output-format stream-json` driven as a subprocess —
-# see `docs/phases.md` and `docs/tech-stack.md`. `subprocess` and
-# `json` are stdlib, so Phase 2 picked up zero new runtime deps.
+# pyte is here for the Phase 2.5 native PTY terminal pane
+# (`src/symmetria_ide/terminal_backend.py` — pyte's HistoryScreen +
+# ByteStream drive the cell-grid that TerminalView paints). Phase 2
+# originally planned a pty + pyte bridge for the AGENT pane, but that
+# pivoted to `claude -p` and later to the Node SDK sidecar — neither
+# uses pyte. Phase 2.5 reintroduces pyte for the surface where it
+# always belonged (the terminal). See `docs/phases.md` Phase 2.5 and
+# `.claude/memory/project/active/phase25_current_state.md`.
 
 [project.scripts]
 symmetria-ide = "symmetria_ide.__main__:main"
