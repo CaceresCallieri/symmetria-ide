@@ -123,7 +123,9 @@ _SCROLLBACK_LINES = 1000
 # Cap on the partial-OSC buffer carried across reader-loop iterations.
 # A well-formed OSC 7 sequence (file://host/path) almost never exceeds
 # a few hundred bytes in practice (path length is the only variable
-# component); 4 KiB tolerates wildly long paths with margin. If the
+# component); 4 KiB tolerates wildly long paths with margin. Deliberate
+# undersize vs `_READ_CHUNK_BYTES` (64 KiB) — any OSC 7 exceeding 4 KiB
+# is certainly garbled binary output, not a real filesystem path. If the
 # buffer ever grows past this, the input is almost certainly malformed
 # (unterminated escape sequence emitted by a buggy shell hook or
 # garbled binary output) — we drop the buffer to recover.
@@ -178,6 +180,9 @@ def _parse_osc7(buffer: bytes, new_data: bytes) -> tuple[bytes, list[str], bytes
         output.extend(combined[i:esc_idx])
 
         # Look for the earliest terminator (BEL or ST) after the OSC body.
+        # NOTE: if the path itself contained ESC-\ (impossible on Linux
+        # filesystems — ESC is not a valid filename byte), the ST search
+        # would truncate the path silently at that byte. Theoretical only.
         bel_idx = combined.find(b"\x07", esc_idx + 4)
         st_idx = combined.find(b"\x1b\\", esc_idx + 4)
 
@@ -225,7 +230,15 @@ def _parse_osc7(buffer: bytes, new_data: bytes) -> tuple[bytes, list[str], bytes
                     # (the shell-init scripts pass $PWD raw — see the
                     # HACK comment in the emitter sources). Future
                     # percent-encoded emitters work transparently here.
-                    paths.append(urllib.parse.unquote(decoded))
+                    cwd = urllib.parse.unquote(decoded)
+                    # Normalize trailing slash so "/tmp/" and "/tmp" compare
+                    # equal in AppController._cwd. Preserve "/" for root.
+                    cwd = cwd.rstrip("/") or "/"
+                    # A bare "/" almost certainly means a malformed OSC 7
+                    # emitter sent file:/// with no path — skip it to avoid
+                    # overwriting the anchor's _cwd with root.
+                    if cwd != "/":
+                        paths.append(cwd)
 
         # Skip past the terminator and continue scanning for more OSC 7
         # sequences in the same chunk (some shells emit multiple per
@@ -659,21 +672,31 @@ class TerminalBackend(QObject):
                     cleaned, paths, self._osc_buffer = _parse_osc7(
                         self._osc_buffer, data
                     )
-                    for path in paths:
-                        self.osc7_received.emit(path)
 
-                    # GC suspended across feed + dirty-extract + emit.
-                    # See gotcha #10 + module docstring. Unconditional
-                    # disable/enable matches NvimBackend._on_notification.
-                    gc.disable()
+                    # GC suspended across osc7_received emit + feed +
+                    # dirty-extract + screen_dirty emit. See gotcha #10
+                    # + module docstring. `osc7_received.emit` is inside
+                    # the window because QueuedConnection arg-copying
+                    # allocates a Python str wrapper on the worker thread
+                    # — the same GC race class as stream.feed. Conditional
+                    # disable/enable matches NvimBackend._on_notification
+                    # and session_host.py — do NOT make this unconditional
+                    # (an outer gc.disable caller would have its GC
+                    # wrongly re-enabled by the finally).
+                    gc_was_enabled = gc.isenabled()
+                    if gc_was_enabled:
+                        gc.disable()
                     try:
+                        for path in paths:
+                            self.osc7_received.emit(path)
                         stream.feed(cleaned)
                         if screen.dirty:
                             dirty_snapshot = frozenset(screen.dirty)
                             screen.dirty.clear()
                             self.screen_dirty.emit(dirty_snapshot)
                     finally:
-                        gc.enable()
+                        if gc_was_enabled:
+                            gc.enable()
         except Exception:
             if not self._stop_event.is_set():
                 log.exception("terminal reader loop crashed")

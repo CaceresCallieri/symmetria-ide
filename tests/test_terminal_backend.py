@@ -1,8 +1,15 @@
 """Tests for the Phase 2.5 terminal backend.
 
 Mix of structural assertions (signal surface, gc-suspension discipline,
-killpg shutdown, frozenset emit contract) and integration-style
-lifecycle tests that spawn a real `/bin/sh` subprocess under a real PTY.
+killpg shutdown, frozenset emit contract, OSC 7 intercept ordering) and
+integration-style lifecycle tests that spawn a real `/bin/sh` subprocess
+under a real PTY.
+
+Phase 2.5 deliverable 3 additions: `test_reader_loop_intercepts_osc7_before_pyte`
+pins that `_parse_osc7` runs before `stream.feed`; `test_osc_buffer_pre_allocated`
+pins that `_osc_buffer` is initialised in `__init__`; and
+`test_reader_loop_emits_osc7_inside_gc_window` pins that `osc7_received.emit`
+is inside the `gc.disable()` window (gotcha #10 extension).
 
 Lifecycle tests pin `SHELL=/bin/sh` via `monkeypatch.setenv` so they're
 hermetic against whatever interactive shell the developer's environment
@@ -233,6 +240,39 @@ def test_osc_buffer_pre_allocated(backend):
     sees a bytes-typed attr instead of AttributeError or None."""
     assert isinstance(backend._osc_buffer, bytes)
     assert backend._osc_buffer == b""
+
+
+def test_reader_loop_emits_osc7_inside_gc_window():
+    """GC must be suspended BEFORE `osc7_received.emit` fires — the same
+    window that covers `stream.feed`. `osc7_received.emit(path)` causes
+    Qt's QueuedConnection machinery to allocate a Python str wrapper and
+    an event object on the worker thread; Python 3.14's cyclic GC can
+    race `QSGRenderThread` during that allocation (same SEGV class as
+    gotcha #10). Pin the call order structurally so a future refactor
+    that moves the emit outside the window surfaces here immediately.
+
+    Searches for the CALL `self.osc7_received.emit(` (not the comment
+    that mentions it) so the assertion is insensitive to comment text.
+    """
+    src = inspect.getsource(TerminalBackend._run_reader_loop)
+    # Use the GC-preamble line as the "window opened" marker rather than
+    # gc.disable() itself — the preamble `gc_was_enabled = gc.isenabled()`
+    # is the first thing the window does, and it appears before the actual
+    # `gc.disable()` call that follows the if-check.
+    gc_preamble_idx = src.find("gc_was_enabled = gc.isenabled()")
+    # Search for the ACTUAL CALL (not comment mentions of it).
+    emit_idx = src.find("self.osc7_received.emit(")
+    feed_idx = src.find("stream.feed(")
+    assert gc_preamble_idx >= 0, "gc_was_enabled preamble missing from reader loop"
+    assert emit_idx >= 0, "self.osc7_received.emit( call missing from reader loop"
+    assert feed_idx >= 0, "stream.feed( call missing from reader loop"
+    assert gc_preamble_idx < emit_idx, (
+        "osc7_received.emit must be INSIDE the gc.disable() window "
+        "(gotcha #10: QueuedConnection arg allocation races QSGRenderThread)"
+    )
+    assert gc_preamble_idx < feed_idx, (
+        "stream.feed must also be inside the gc.disable() window"
+    )
 
 
 # ---------------------------------------------------------------------------

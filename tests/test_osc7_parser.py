@@ -265,3 +265,38 @@ def test_buffer_carryover_does_not_lose_prefix_bytes():
     assert cleaned == b"some output"  # NOT in partial
     assert partial == b"\x1b]7;file://h/x"
     assert paths == []
+
+
+# ---------------------------------------------------------------------------
+# Path normalization — trailing slashes and root-slash filter
+# ---------------------------------------------------------------------------
+
+
+def test_trailing_slash_normalized():
+    """A shell cwd with a trailing slash (e.g. `file:///tmp/`) must be
+    normalized to `/tmp` before emission so that AppController._cwd
+    comparisons are stable regardless of whether the emitter includes the
+    trailing slash. `unquote("/tmp/").rstrip("/")` → "/tmp"."""
+    data = b"\x1b]7;file:///tmp/\x1b\\"
+    cleaned, paths, partial = _parse_osc7(b"", data)
+    assert paths == ["/tmp"], "trailing slash must be stripped"
+
+
+def test_root_slash_filtered():
+    """A malformed OSC 7 emitter sending `file:///` (three slashes, no
+    path after) decodes to path `/`. Emitting `/` as cwd would overwrite
+    AppController's anchor path with root — almost certainly wrong.
+    The parser filters this case rather than emitting a spurious root path.
+    Sequence is still stripped from the cleaned output (pyte never sees it)."""
+    data = b"\x1b]7;file:///\x1b\\"
+    cleaned, paths, partial = _parse_osc7(b"", data)
+    assert paths == [], "bare root path from malformed emitter must be filtered"
+    assert cleaned == b"", "OSC 7 bytes must still be stripped from cleaned output"
+
+
+def test_root_path_from_named_host_filtered():
+    """Same filter applies when the host portion is non-empty but the path
+    component is just `/`: `file://hostname/` → `/` → filtered."""
+    data = b"\x1b]7;file://myhost/\x1b\\"
+    cleaned, paths, partial = _parse_osc7(b"", data)
+    assert paths == [], "host-only URI with bare / path must be filtered"
