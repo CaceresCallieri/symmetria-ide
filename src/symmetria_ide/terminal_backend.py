@@ -42,12 +42,63 @@ import struct
 import subprocess
 import termios
 import threading
+from pathlib import Path
 
 import pyte
 from PySide6.QtCore import QObject, Signal, Slot
 
 
 log = logging.getLogger(__name__)
+
+
+# Path to the Symmetria-IDE-managed shell-init scripts that auto-inject
+# the OSC 7 cwd emitter. Phase 2.5 deliverable 3.
+_SHELL_INIT_DIR = (
+    Path(__file__).resolve().parent.parent.parent / "runtime" / "symmetria-shell"
+)
+
+
+def _shell_launch_args(shell_path: str) -> tuple[list[str], dict[str, str]]:
+    """Build (argv, env_additions) tuple to spawn `shell_path` with
+    Symmetria's OSC 7 auto-injection enabled.
+
+    zsh: ZDOTDIR redirects rcfile lookup to runtime/symmetria-shell/zsh/,
+    which has a .zshenv + .zshrc that source the user's real files first
+    and then append the chpwd hook. Same pattern Kitty / Ghostty / WezTerm
+    use for zsh shell integration.
+
+    bash: --rcfile points at runtime/symmetria-shell/bash/init.sh, which
+    sources the user's login + interactive rcfiles manually then installs
+    the PROMPT_COMMAND hook. We pass `-i` (interactive) WITHOUT `-l`
+    because bash ignores --rcfile when invoked as a login shell. The
+    init script handles `.bash_profile` / `.profile` sourcing explicitly
+    to make up for the dropped login semantics.
+
+    Other shells (fish, nu, etc.): plain `[shell, "-l"]` with no env
+    injection — log a warning so the user knows OSC 7 won't fire until
+    they manually install a chpwd hook in their shell's config. Adding
+    auto-injection for these is a v2 follow-up; the wire format is
+    shell-independent, only the hook installation differs.
+    """
+    shell_name = os.path.basename(shell_path)
+
+    if shell_name == "zsh":
+        zdotdir = str(_SHELL_INIT_DIR / "zsh")
+        return [shell_path, "-l"], {"ZDOTDIR": zdotdir}
+
+    if shell_name == "bash":
+        rcfile = str(_SHELL_INIT_DIR / "bash" / "init.sh")
+        # `-i` without `-l`: bash ignores --rcfile in login mode, so the
+        # init.sh sources login files manually instead.
+        return [shell_path, "--rcfile", rcfile, "-i"], {}
+
+    log.warning(
+        "No Symmetria OSC 7 auto-injection for shell %r — "
+        "terminal-driven cwd sync will not work until the user manually "
+        "installs a chpwd hook. zsh and bash are auto-injected in v1.",
+        shell_name,
+    )
+    return [shell_path, "-l"], {}
 
 
 # Default screen dimensions used at start() time, before the QML
@@ -213,20 +264,27 @@ class TerminalBackend(QObject):
         # first prompt redraw.
         self._screen.dirty.update(range(_DEFAULT_ROWS))
 
-        # Shell launch. Login shell (-l) so the user's rc-files run —
-        # required for Phase 2.5 deliverable 3's OSC 7 hook to be
-        # installable from a normal `.zshrc` / `.bashrc`. setsid puts
-        # the shell into its own session+process group so `killpg` at
-        # shutdown reaps any TUIs (vim, htop) the user launched inside.
+        # Shell launch with Symmetria-managed OSC 7 auto-injection. The
+        # shell type ($SHELL basename) determines the injection mechanism:
+        # zsh uses ZDOTDIR redirect to runtime/symmetria-shell/zsh/, bash
+        # uses --rcfile pointing at runtime/symmetria-shell/bash/init.sh,
+        # other shells (fish, nu, etc.) get a plain login-shell spawn
+        # with a log warning — terminal works but the file tree won't
+        # follow shell-side `cd` until the user manually installs a
+        # chpwd hook. setsid puts the shell into its own session+process
+        # group so `killpg` at shutdown reaps any TUIs (vim, htop) the
+        # user launched inside.
         shell = os.environ.get("SHELL") or "/bin/bash"
+        argv, env_additions = _shell_launch_args(shell)
         env = {
             **os.environ,
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
+            **env_additions,
         }
         try:
             self._proc = subprocess.Popen(
-                [shell, "-l"],
+                argv,
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,

@@ -38,7 +38,15 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-symmetria_ide = ["qml/*.qml", "runtime/*.lua"]
+symmetria_ide = [
+    "qml/*.qml",
+    "runtime/*.lua",
+    # Phase 2.5 deliverable 3 — shell-init scripts for OSC 7 cwd
+    # auto-injection. `.zshenv` / `.zshrc` are dotfiles, so the glob
+    # must use `.*` to include them; the bash init is a regular file.
+    "runtime/symmetria-shell/zsh/.*",
+    "runtime/symmetria-shell/bash/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
