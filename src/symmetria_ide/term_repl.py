@@ -18,6 +18,8 @@ Protocol (one JSON object per line, both directions):
     {"type": "write_b64", "data_b64": "BQ=="}        -> bytes via base64
     {"type": "resize", "cols": 120, "rows": 40}
     {"type": "snapshot"}                              -> current viewport text
+    {"type": "wait_for", "pattern": "...",            -> wait for regex in viewport
+                         "timeout_ms": 5000}
     {"type": "stop"}                                  -> clean shutdown + quit
 
   Stdout events:
@@ -25,9 +27,17 @@ Protocol (one JSON object per line, both directions):
     {"id": "...", "type": "ack", "status": "ok"}
     {"id": "...", "type": "snapshot", "rows": [...], "cursor": [r, c],
                   "cols": N, "rows_count": N}
+    {"id": "...", "type": "match", "elapsed_ms": N}  -> wait_for matched
+    {"id": "...", "type": "timeout"}                  -> wait_for timed out
     {"type": "closed"}                                -> shell exited
     {"id": "...", "type": "error", "message": "...",
                   "command_type": "..."}
+
+`wait_for` semantics: ack-on-completion, NOT ack-on-receipt. The
+response is exactly one of `match` or `timeout`, carrying the same
+`id` as the request. Patterns are Python regexes searched against the
+viewport text (rows joined by `\\n`). Single-watch at a time —
+concurrent `wait_for` commands receive an `error` envelope.
 
 Single-shell, single-client by design — multiple concurrent writers to
 the PTY would interleave bytes mid-escape-sequence. Spawn a fresh
@@ -45,12 +55,21 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import sys
 import threading
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QCoreApplication, QObject, Qt, Signal, Slot
+from PySide6.QtCore import (
+    QCoreApplication,
+    QElapsedTimer,
+    QObject,
+    Qt,
+    QTimer,
+    Signal,
+    Slot,
+)
 
 from .terminal_backend import TerminalBackend
 
@@ -99,6 +118,14 @@ class TermRepl(QObject):
         self._backend.closed.connect(
             self._on_closed, Qt.ConnectionType.QueuedConnection
         )
+        # wait_for state — single-watch at a time (concurrent waits are
+        # rejected with an error envelope rather than queued; see the
+        # protocol note in the module docstring). All members are set
+        # together by `_start_wait_for` and cleared by `_cancel_wait_for`.
+        self._wait_req_id: Any = None
+        self._wait_regex: re.Pattern[str] | None = None
+        self._wait_started: QElapsedTimer | None = None
+        self._wait_timeout_timer: QTimer | None = None
 
     def start_stdin_loop(self) -> None:
         """Spawn the daemon thread that consumes stdin."""
@@ -162,6 +189,12 @@ class TermRepl(QObject):
                 self._ack(req_id)
             elif cmd_type == "snapshot":
                 self._emit_snapshot(req_id)
+            elif cmd_type == "wait_for":
+                pattern = cmd.get("pattern", "")
+                if not isinstance(pattern, str):
+                    raise ValueError("'pattern' must be a JSON string")
+                timeout_ms = int(cmd.get("timeout_ms", 5000))
+                self._start_wait_for(req_id, pattern, timeout_ms)
             elif cmd_type == "stop":
                 # `_eof` marker is set by the stdin reader on stdin close;
                 # in that case the client has already gone away and the
@@ -211,6 +244,102 @@ class TermRepl(QObject):
             }
         )
 
+    # --- wait_for: subscribe to screen updates until pattern or timeout -
+
+    def _check_pattern(self, regex: re.Pattern[str]) -> bool:
+        screen = self._backend._screen  # noqa: SLF001 — debug surface
+        if screen is None:
+            return False
+        # Join rows with `\n` so the regex can span lines via `.` if the
+        # user passes the DOTALL flag, but in the common case patterns
+        # match within a single row and the newlines are inert.
+        return bool(regex.search("\n".join(_snapshot_rows(screen))))
+
+    def _start_wait_for(self, req_id: Any, pattern: str, timeout_ms: int) -> None:
+        if self._wait_regex is not None:
+            self._emit_event(
+                {
+                    "id": req_id,
+                    "type": "error",
+                    "message": "another wait_for is in progress",
+                    "command_type": "wait_for",
+                }
+            )
+            return
+        try:
+            regex = re.compile(pattern)
+        except re.error as exc:
+            self._emit_event(
+                {
+                    "id": req_id,
+                    "type": "error",
+                    "message": f"invalid regex: {exc}",
+                    "command_type": "wait_for",
+                }
+            )
+            return
+
+        # Connect-first ordering: if the backend's reader thread fires
+        # `screen_dirty` during the brief window between our initial
+        # check and the connect, we'd miss it. Connecting first means
+        # the queued signal lands and triggers a check on the next
+        # event-loop iteration regardless.
+        self._backend.screen_dirty.connect(
+            self._on_wait_screen_dirty, Qt.ConnectionType.QueuedConnection
+        )
+
+        elapsed = QElapsedTimer()
+        elapsed.start()
+        self._wait_req_id = req_id
+        self._wait_regex = regex
+        self._wait_started = elapsed
+
+        if self._check_pattern(regex):
+            self._finish_wait_for_match(elapsed_ms=0)
+            return
+
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._on_wait_timeout)
+        timer.start(timeout_ms)
+        self._wait_timeout_timer = timer
+
+    @Slot(frozenset)
+    def _on_wait_screen_dirty(self, _: frozenset[int]) -> None:
+        regex = self._wait_regex
+        if regex is None:
+            return
+        if self._check_pattern(regex):
+            elapsed_ms = self._wait_started.elapsed() if self._wait_started else 0
+            self._finish_wait_for_match(elapsed_ms=elapsed_ms)
+
+    def _on_wait_timeout(self) -> None:
+        if self._wait_regex is None:
+            return
+        req_id = self._wait_req_id
+        self._cancel_wait_for()
+        self._emit_event({"id": req_id, "type": "timeout"})
+
+    def _finish_wait_for_match(self, elapsed_ms: int) -> None:
+        req_id = self._wait_req_id
+        self._cancel_wait_for()
+        self._emit_event({"id": req_id, "type": "match", "elapsed_ms": int(elapsed_ms)})
+
+    def _cancel_wait_for(self) -> None:
+        if self._wait_regex is not None:
+            try:
+                self._backend.screen_dirty.disconnect(self._on_wait_screen_dirty)
+            except (RuntimeError, TypeError):
+                # Already disconnected — Qt raises RuntimeError on
+                # PySide6, TypeError on older bindings. Either is fine.
+                pass
+        if self._wait_timeout_timer is not None:
+            self._wait_timeout_timer.stop()
+            self._wait_timeout_timer = None
+        self._wait_req_id = None
+        self._wait_regex = None
+        self._wait_started = None
+
     def _on_closed(self) -> None:
         # Shell exited (EOF on master fd or `exit` typed). We do NOT
         # auto-quit the app — the parent process may want to query final
@@ -218,6 +347,12 @@ class TermRepl(QObject):
         self._emit_event({"type": "closed"})
 
     def _shutdown(self, req_id: Any, suppress_ack: bool = False) -> None:
+        # Cancel any pending wait_for so its timer + signal connection
+        # don't outlive the backend. Without this, a wait_for in flight
+        # at shutdown time would emit a stale `timeout` event onto a
+        # closed stdout (or worse, segfault when the timer fires after
+        # QCoreApplication.quit).
+        self._cancel_wait_for()
         try:
             self._backend.stop()
         finally:

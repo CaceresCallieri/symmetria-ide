@@ -67,6 +67,85 @@ def _by_id(events: list[dict], req_id: str) -> list[dict]:
     return [e for e in events if e.get("id") == req_id]
 
 
+class _Interactive:
+    """Bidirectional term_repl driver: send commands one at a time, read
+    events synchronously, so tests can pace `wait_for` against actual
+    shell output (the shotgun `_run_repl` helper above gives stop a
+    chance to win the race before shell bytes even arrive).
+
+    Usage:
+        with _Interactive() as repl:
+            repl.send({"id": "1", "type": "start", "cwd": "/tmp"})
+            assert repl.read_event_with_id("1")["type"] == "ack"
+            ...
+    """
+
+    def __init__(self) -> None:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [str(SRC_DIR), os.environ.get("PYTHONPATH", "")])
+        )
+        self._proc = subprocess.Popen(
+            [sys.executable, "-m", "symmetria_ide.term_repl"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,  # line-buffered
+            env=env,
+        )
+
+    def __enter__(self) -> "_Interactive":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        # Best-effort shutdown: send stop, then ensure the process exits.
+        try:
+            if self._proc.stdin is not None and not self._proc.stdin.closed:
+                try:
+                    self.send({"id": "__teardown__", "type": "stop"})
+                except (BrokenPipeError, OSError):
+                    pass
+                self._proc.stdin.close()
+        finally:
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait(timeout=2)
+
+    def send(self, cmd: dict) -> None:
+        assert self._proc.stdin is not None
+        self._proc.stdin.write(json.dumps(cmd) + "\n")
+        self._proc.stdin.flush()
+
+    def read_event(self) -> dict:
+        """Read one event (JSON object) from stdout. Raises if subprocess
+        closes stdout before producing one. Blocks indefinitely on a
+        hung subprocess — pytest's own per-test timeout (or the
+        `wait_for` command's own timeout_ms) is the safety net."""
+        assert self._proc.stdout is not None
+        line = self._proc.stdout.readline()
+        if not line:
+            stderr = self._proc.stderr.read() if self._proc.stderr else ""
+            raise AssertionError(
+                f"term_repl stdout closed unexpectedly\nstderr: {stderr}"
+            )
+        return json.loads(line.strip())
+
+    def read_event_with_id(self, req_id: str, max_skip: int = 32) -> dict:
+        """Block until an event with the given id arrives. Skips up to
+        `max_skip` unrelated events first (e.g. async `closed` events
+        from a misbehaving shell)."""
+        for _ in range(max_skip):
+            event = self.read_event()
+            if event.get("id") == req_id:
+                return event
+        raise AssertionError(
+            f"never received event for id={req_id!r} within {max_skip} reads"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Protocol mechanics
 # ---------------------------------------------------------------------------
@@ -258,3 +337,116 @@ def test_write_b64_rejects_invalid_base64():
     assert len(err) == 1
     assert err[0]["type"] == "error"
     assert err[0]["command_type"] == "write_b64"
+
+
+# ---------------------------------------------------------------------------
+# wait_for (interactive, bidirectional)
+# ---------------------------------------------------------------------------
+
+
+def test_wait_for_matches_pattern_in_shell_output():
+    """End-to-end: install a wait_for, write a command that triggers
+    output containing the pattern, observe the match event arrive with
+    a non-negative elapsed_ms before stop closes the session."""
+    with _Interactive() as repl:
+        repl.send({"id": "start", "type": "start", "cwd": "/tmp"})
+        assert repl.read_event_with_id("start")["type"] == "ack"
+
+        # Install wait_for BEFORE writing — guarantees the screen_dirty
+        # subscription is live when the shell renders the output.
+        repl.send(
+            {
+                "id": "wait",
+                "type": "wait_for",
+                "pattern": "hello-WAIT-FOR-PROBE",
+                "timeout_ms": 5000,
+            }
+        )
+
+        repl.send(
+            {
+                "id": "write",
+                "type": "write",
+                "data": "echo hello-WAIT-FOR-PROBE\n",
+            }
+        )
+        assert repl.read_event_with_id("write")["type"] == "ack"
+
+        match = repl.read_event_with_id("wait")
+        assert match["type"] == "match"
+        assert match["elapsed_ms"] >= 0
+
+
+def test_wait_for_emits_timeout_when_pattern_never_appears():
+    """A pattern that never lands must produce a `timeout` event after
+    the deadline, NOT hang indefinitely."""
+    with _Interactive() as repl:
+        repl.send({"id": "start", "type": "start", "cwd": "/tmp"})
+        assert repl.read_event_with_id("start")["type"] == "ack"
+
+        repl.send(
+            {
+                "id": "wait",
+                "type": "wait_for",
+                "pattern": "ABSOLUTELY-NOT-IN-THIS-OUTPUT-XYZ",
+                "timeout_ms": 250,
+            }
+        )
+
+        event = repl.read_event_with_id("wait")
+        assert event["type"] == "timeout"
+
+
+def test_wait_for_rejects_concurrent_request():
+    """Single-watch contract: a second wait_for while one is pending
+    must produce an `error` envelope, NOT replace or queue."""
+    with _Interactive() as repl:
+        repl.send({"id": "start", "type": "start", "cwd": "/tmp"})
+        assert repl.read_event_with_id("start")["type"] == "ack"
+
+        # First wait_for — long timeout so it's still pending when the
+        # second arrives.
+        repl.send(
+            {
+                "id": "first",
+                "type": "wait_for",
+                "pattern": "NEVER-MATCH",
+                "timeout_ms": 5000,
+            }
+        )
+
+        repl.send(
+            {
+                "id": "second",
+                "type": "wait_for",
+                "pattern": "alsoNEVER",
+                "timeout_ms": 5000,
+            }
+        )
+
+        err = repl.read_event_with_id("second")
+        assert err["type"] == "error"
+        assert err["command_type"] == "wait_for"
+        assert "in progress" in err["message"]
+
+
+def test_wait_for_invalid_regex_returns_error():
+    """A pattern that fails `re.compile` must produce an `error`
+    envelope at request time — not a delayed timeout."""
+    with _Interactive() as repl:
+        repl.send({"id": "start", "type": "start", "cwd": "/tmp"})
+        assert repl.read_event_with_id("start")["type"] == "ack"
+
+        repl.send(
+            {
+                "id": "bad",
+                "type": "wait_for",
+                "pattern": "(unbalanced",  # missing close paren
+                "timeout_ms": 5000,
+            }
+        )
+
+        err = repl.read_event_with_id("bad")
+        assert err["type"] == "error"
+        assert "invalid regex" in err["message"]
+        assert err["command_type"] == "wait_for"
