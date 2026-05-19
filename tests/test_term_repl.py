@@ -374,7 +374,8 @@ def test_wait_for_matches_pattern_in_shell_output():
 
         match = repl.read_event_with_id("wait")
         assert match["type"] == "match"
-        assert match["elapsed_ms"] >= 0
+        assert isinstance(match["elapsed_ms"], int)
+        assert 0 <= match["elapsed_ms"] < 10_000  # sanity: ms, not float/overflow
 
 
 def test_wait_for_emits_timeout_when_pattern_never_appears():
@@ -405,7 +406,11 @@ def test_wait_for_rejects_concurrent_request():
         assert repl.read_event_with_id("start")["type"] == "ack"
 
         # First wait_for — long timeout so it's still pending when the
-        # second arrives.
+        # second arrives. No ack-wait between the two sends is needed:
+        # the stdin loop processes commands serially (FIFO), so the
+        # second command cannot reach _dispatch_command until the first
+        # has been fully dispatched. The single-watch check in
+        # _start_wait_for sees a non-None _wait_regex on the second call.
         repl.send(
             {
                 "id": "first",

@@ -279,20 +279,19 @@ class TermRepl(QObject):
             )
             return
 
-        # Connect-first ordering: if the backend's reader thread fires
-        # `screen_dirty` during the brief window between our initial
-        # check and the connect, we'd miss it. Connecting first means
-        # the queued signal lands and triggers a check on the next
-        # event-loop iteration regardless.
-        self._backend.screen_dirty.connect(
-            self._on_wait_screen_dirty, Qt.ConnectionType.QueuedConnection
-        )
-
+        # Set state BEFORE connecting: _on_wait_screen_dirty reads
+        # self._wait_regex on dispatch; setting it first makes the slot
+        # provably safe regardless of Qt's queued-delivery timing.
         elapsed = QElapsedTimer()
         elapsed.start()
         self._wait_req_id = req_id
         self._wait_regex = regex
         self._wait_started = elapsed
+
+        # queued: TerminalBackend reader → TermRepl main thread (§4 P2)
+        self._backend.screen_dirty.connect(
+            self._on_wait_screen_dirty, Qt.ConnectionType.QueuedConnection
+        )
 
         if self._check_pattern(regex):
             self._finish_wait_for_match(elapsed_ms=0)
@@ -323,16 +322,15 @@ class TermRepl(QObject):
     def _finish_wait_for_match(self, elapsed_ms: int) -> None:
         req_id = self._wait_req_id
         self._cancel_wait_for()
-        self._emit_event({"id": req_id, "type": "match", "elapsed_ms": int(elapsed_ms)})
+        self._emit_event({"id": req_id, "type": "match", "elapsed_ms": elapsed_ms})
 
     def _cancel_wait_for(self) -> None:
-        if self._wait_regex is not None:
-            try:
-                self._backend.screen_dirty.disconnect(self._on_wait_screen_dirty)
-            except (RuntimeError, TypeError):
-                # Already disconnected — Qt raises RuntimeError on
-                # PySide6, TypeError on older bindings. Either is fine.
-                pass
+        try:
+            self._backend.screen_dirty.disconnect(self._on_wait_screen_dirty)
+        except (RuntimeError, TypeError):
+            # Already disconnected — Qt raises RuntimeError on
+            # PySide6, TypeError on older bindings. Either is fine.
+            pass
         if self._wait_timeout_timer is not None:
             self._wait_timeout_timer.stop()
             self._wait_timeout_timer = None
@@ -341,9 +339,14 @@ class TermRepl(QObject):
         self._wait_started = None
 
     def _on_closed(self) -> None:
-        # Shell exited (EOF on master fd or `exit` typed). We do NOT
-        # auto-quit the app — the parent process may want to query final
-        # screen state via `snapshot`, then send `stop` explicitly.
+        # Shell exited (EOF on master fd or `exit` typed). Cancel any
+        # pending wait_for first — the screen_dirty signal won't fire
+        # again, so the timer would eventually produce a stale timeout
+        # event onto a half-closed stdout if left running.
+        self._cancel_wait_for()
+        # We do NOT auto-quit the app — the parent process may want to
+        # query final screen state via `snapshot`, then send `stop`
+        # explicitly.
         self._emit_event({"type": "closed"})
 
     def _shutdown(self, req_id: Any, suppress_ack: bool = False) -> None:
