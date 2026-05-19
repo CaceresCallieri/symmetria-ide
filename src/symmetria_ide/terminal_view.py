@@ -39,6 +39,7 @@ asserts the bright-variant hex values match.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from PySide6.QtCore import Property, QObject, QRectF, Qt, Signal, Slot
@@ -556,6 +557,18 @@ class TerminalView(QQuickPaintedItem):
     # --- Input ---------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        # Diagnostic: SYMMETRIA_IDE_KEY_TRACE=1 logs every key event that
+        # reaches us. Used to triage cases like Ctrl+E silently doing
+        # nothing — answers (a) does the event reach keyPressEvent at all,
+        # (b) what Qt.Key value, (c) what text(). No-cost when unset.
+        if os.environ.get("SYMMETRIA_IDE_KEY_TRACE"):
+            log.info(
+                "key event: key=0x%x text=%r mods=%r",
+                event.key(),
+                event.text(),
+                event.modifiers(),
+            )
+
         # Intercept Ctrl+Shift+V for clipboard paste — the modern
         # xterm-class convention shared by kitty / alacritty / wezterm
         # / gnome-terminal. Bare Ctrl+V keeps its terminal meaning

@@ -434,6 +434,17 @@ class TerminalBackend(QObject):
                 cwd=cwd,
                 env=env,
                 start_new_session=True,  # puts child in its own session+process group (killpg-reachable)
+                # start_new_session calls setsid() but does NOT make the slave
+                # PTY the controlling TTY of the new session. Without that,
+                # any subprocess that opens /dev/tty (fzf inside a zle widget,
+                # vim's xterm-bg detection, etc.) gets ENXIO and either fails
+                # outright or silently falls back to stderr. preexec_fn runs
+                # in the child after setsid + dup2 but before exec — at that
+                # point fd 0 IS the slave PTY (subprocess dup2'd it), so the
+                # ioctl makes it the ctty. fork-safety note: preexec_fn is
+                # generally unsafe in multi-threaded Python, but this body is
+                # a single syscall with no Python state / locks — safe.
+                preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0),
                 close_fds=True,
             )
         except OSError:
