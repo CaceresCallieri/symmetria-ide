@@ -43,6 +43,7 @@ import subprocess
 import termios
 import threading
 import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 
 import pyte
@@ -130,6 +131,55 @@ _SCROLLBACK_LINES = 1000
 # (unterminated escape sequence emitted by a buggy shell hook or
 # garbled binary output) — we drop the buffer to recover.
 _OSC_BUFFER_CAP = 4096
+
+
+class _AnswerbackHistoryScreen(pyte.HistoryScreen):
+    """HistoryScreen wired to actually answer DA1 / DSR queries.
+
+    pyte's stock `Screen` already builds the correct CSI response
+    strings inside `report_device_attributes` (DA1, `ESC [ ? 6 c` for
+    VT102 identity) and `report_device_status` (DSR mode 5 -> terminal
+    status, mode 6 -> cursor position `ESC [ <row> ; <col> R`). Both
+    end with `self.write_process_input(reply)` — which is a NO-OP stub
+    by default. Programs that issue these queries (fzf's `--height`
+    mode used by `zoxide query -i`, vim's `xterm-bg` detection, less,
+    btop, …) block waiting for the reply and either hang forever or
+    fall back to broken defaults when none arrives.
+
+    Empirical context: `zoxide query -i` invoked from this terminal
+    hung indefinitely until we wired up DSR responses — direct
+    `fzf < /etc/passwd` renders in ~30ms because fullscreen fzf does
+    not issue DSR; only the `--height` codepath does. Diagnostic
+    scripts under `tools/diag_*.py` reproduce both before/after.
+
+    Threading: `write_process_input` runs synchronously inside
+    `pyte.feed()`, which only runs on `TerminalBackend`'s reader
+    thread. The callback we pass is `TerminalBackend.write`, which
+    serialises via `_stdin_lock` against main-thread keystroke writes.
+
+    GC: this call lands inside the gc-suspended window in
+    `_run_reader_loop` (gotcha #10) — the small `bytes` allocation
+    from `data.encode("latin-1")` is safe there.
+    """
+
+    def __init__(
+        self,
+        columns: int,
+        lines: int,
+        history: int = 100,
+        ratio: float = 0.5,
+        write_callback: Callable[[bytes], None] | None = None,
+    ) -> None:
+        super().__init__(columns, lines, history=history, ratio=ratio)
+        self._write_callback = write_callback
+
+    def write_process_input(self, data: str) -> None:
+        # pyte responses are pure ASCII CSI sequences; latin-1 is a
+        # safe 1:1 codec for bytes 0-255 if any future pyte release
+        # broadens the response alphabet. Empty payload is a noop.
+        if not data or self._write_callback is None:
+            return
+        self._write_callback(data.encode("latin-1"))
 
 
 def _parse_osc7(buffer: bytes, new_data: bytes) -> tuple[bytes, list[str], bytes]:
@@ -394,12 +444,17 @@ class TerminalBackend(QObject):
 
         # pyte instances. HistoryScreen keeps scrollback; ByteStream
         # tokenises raw bytes (handles UTF-8 multi-byte) and feeds
-        # the screen.
-        self._screen = pyte.HistoryScreen(
+        # the screen. `_AnswerbackHistoryScreen` adds DA1/DSR replies
+        # — fzf's `--height` mode (used by `zoxide query -i`) and
+        # several TUIs (vim xterm-bg, less, btop) hang without them.
+        # Callback is `self.write` so replies share `_stdin_lock`
+        # with main-thread keystroke writes; see the subclass docstring.
+        self._screen = _AnswerbackHistoryScreen(
             _DEFAULT_COLS,
             _DEFAULT_ROWS,
             history=_SCROLLBACK_LINES,
             ratio=0.5,
+            write_callback=self.write,
         )
         self._stream = pyte.ByteStream(self._screen)
         # Force a full-screen repaint on the first frame so the QML

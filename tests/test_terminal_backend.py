@@ -34,6 +34,7 @@ from symmetria_ide.terminal_backend import (
     _DEFAULT_COLS,
     _DEFAULT_ROWS,
     TerminalBackend,
+    _AnswerbackHistoryScreen,
 )
 
 
@@ -119,6 +120,66 @@ def test_stop_event_exposed_and_unset(backend):
     that's initially unset, set only at teardown or worker-exit."""
     assert isinstance(backend.stop_event, threading.Event)
     assert backend.stop_event.is_set() is False
+
+
+# ---------------------------------------------------------------------------
+# DA1 / DSR answerback — `fzf --height` (used by `zoxide query -i`) hangs
+# indefinitely without these replies, even when /dev/tty is otherwise fine
+# (TIOCSCTTY ioctl in place). Stock pyte builds the right reply strings
+# but hands them to a no-op `write_process_input`; our subclass routes
+# them back to the master fd via a callback. Empirically diagnosed via
+# tools/diag_zoxide_query.py — see post-TIOCSCTTY active memory note.
+# ---------------------------------------------------------------------------
+
+
+def test_answerback_dsr_cursor_position_reply() -> None:
+    """A DSR-cursor (`ESC [ 6 n`) query routes the reply through the callback.
+
+    The reply MUST match `ESC [ <row> ; <col> R` in 1-indexed coords
+    (pyte's stock contract). At cursor (0, 0) after a fresh screen,
+    the reply is `\\x1b[1;1R`. If a future pyte release changes
+    `report_device_status`'s 1-indexing, this test catches it.
+    """
+    import pyte
+
+    received: list[bytes] = []
+    screen = _AnswerbackHistoryScreen(
+        80, 24, history=100, ratio=0.5, write_callback=received.append
+    )
+    stream = pyte.ByteStream(screen)
+    stream.feed(b"\x1b[6n")
+    assert received == [b"\x1b[1;1R"]
+
+
+def test_answerback_da1_primary_attributes_reply() -> None:
+    """A DA1 (`ESC [ c`) query routes back the VT102 identity `ESC [ ? 6 c`.
+
+    `zoxide query -i`'s fzf doesn't currently issue DA1, but several
+    other TUIs do (vim's xterm-bg-color detection, less). Pinned so a
+    pyte regression that drops the DA1 path surfaces here.
+    """
+    import pyte
+
+    received: list[bytes] = []
+    screen = _AnswerbackHistoryScreen(
+        80, 24, history=100, ratio=0.5, write_callback=received.append
+    )
+    stream = pyte.ByteStream(screen)
+    stream.feed(b"\x1b[c")
+    assert received == [b"\x1b[?6c"]
+
+
+def test_answerback_noop_when_callback_missing() -> None:
+    """With no callback wired, the screen silently drops DSR replies.
+
+    Defensive default — keeps the subclass safely constructible in
+    unit tests (or hypothetical future contexts that want pyte without
+    a backing fd) without leaking writes to stdout/stderr."""
+    import pyte
+
+    screen = _AnswerbackHistoryScreen(80, 24, history=100, ratio=0.5)
+    stream = pyte.ByteStream(screen)
+    stream.feed(b"\x1b[6n")  # must NOT raise
 
 
 def test_locks_pre_allocated(backend):
