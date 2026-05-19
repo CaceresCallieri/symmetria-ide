@@ -22,12 +22,23 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src"
 
 
-def _run_repl(commands: list[dict], timeout: float = 8.0) -> list[dict]:
+def _run_repl(
+    commands: list[dict],
+    timeout: float = 8.0,
+    raw_prefix: str = "",
+) -> list[dict]:
     """Spawn term_repl, send each command on its own line, parse the
-    JSONL stdout. Returns the list of event objects in arrival order."""
-    payload = "\n".join(json.dumps(cmd) for cmd in commands) + "\n"
+    JSONL stdout. Returns the list of event objects in arrival order.
+
+    ``raw_prefix`` is prepended verbatim before the JSON-serialised
+    commands — use it to inject malformed or non-JSON lines that
+    ``json.dumps`` cannot produce (e.g. for parse-error tests).
+    """
+    payload = raw_prefix + "\n".join(json.dumps(cmd) for cmd in commands) + "\n"
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(SRC_DIR)
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(SRC_DIR), os.environ.get("PYTHONPATH", "")])
+    )
     result = subprocess.run(
         [sys.executable, "-m", "symmetria_ide.term_repl"],
         input=payload,
@@ -41,7 +52,14 @@ def _run_repl(commands: list[dict], timeout: float = 8.0) -> list[dict]:
         line = line.strip()
         if not line:
             continue
-        events.append(json.loads(line))
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            # Surface bad stdout lines in test failures rather than crashing the helper.
+            raise AssertionError(
+                f"term_repl emitted non-JSON stdout line: {line!r}\n"
+                f"stderr: {result.stderr}"
+            ) from None
     return events
 
 
@@ -70,6 +88,13 @@ def test_start_then_stop_emits_two_acks():
     assert starts[0]["status"] == "ok"
     assert len(stops) == 1
     assert stops[0]["type"] == "ack"
+    assert stops[0]["status"] == "ok"
+    # EOF-triggered synthetic stop must NOT emit a trailing null-id ack:
+    # the client has already closed stdin so the ack would be unread
+    # noise. Without suppression, automated test harnesses would see a
+    # spurious `{"id": null, "type": "ack"}` after the legitimate stop.
+    null_acks = [e for e in events if e.get("id") is None and e.get("type") == "ack"]
+    assert null_acks == []
 
 
 def test_unknown_command_emits_error_with_command_type():
@@ -87,19 +112,10 @@ def test_unknown_command_emits_error_with_command_type():
 def test_malformed_json_does_not_crash_repl():
     """Garbage on stdin must produce an error event, NOT terminate the
     REPL — the next valid command should still process."""
-    # Send a malformed line, then a valid stop.
-    payload = "{not valid json\n" + json.dumps({"id": "ok", "type": "stop"}) + "\n"
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(SRC_DIR)
-    result = subprocess.run(
-        [sys.executable, "-m", "symmetria_ide.term_repl"],
-        input=payload,
-        capture_output=True,
-        text=True,
-        timeout=8.0,
-        env=env,
+    events = _run_repl(
+        [{"id": "ok", "type": "stop"}],
+        raw_prefix="{not valid json\n",
     )
-    events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
     # The malformed line emits an error event with no id.
     parse_errors = [
         e
@@ -209,3 +225,36 @@ def test_write_rejects_non_string_data():
     assert len(err) == 1
     assert err[0]["type"] == "error"
     assert "string" in err[0]["message"].lower()
+
+
+def test_write_b64_rejects_non_string_data_b64():
+    """`write_b64` requires `data_b64` to be a JSON string. A number must
+    produce an error envelope, not silently coerce."""
+    events = _run_repl(
+        [
+            {"id": "1", "type": "start", "cwd": "/tmp"},
+            {"id": "bad", "type": "write_b64", "data_b64": 42},
+            {"id": "3", "type": "stop"},
+        ]
+    )
+    err = _by_id(events, "bad")
+    assert len(err) == 1
+    assert err[0]["type"] == "error"
+    assert err[0]["command_type"] == "write_b64"
+    assert "string" in err[0]["message"].lower()
+
+
+def test_write_b64_rejects_invalid_base64():
+    """`write_b64` with an invalid base64 payload must produce an error
+    envelope carrying the command_type — not crash or silently drop the data."""
+    events = _run_repl(
+        [
+            {"id": "1", "type": "start", "cwd": "/tmp"},
+            {"id": "bad64", "type": "write_b64", "data_b64": "not-valid-base64!!!"},
+            {"id": "3", "type": "stop"},
+        ]
+    )
+    err = _by_id(events, "bad64")
+    assert len(err) == 1
+    assert err[0]["type"] == "error"
+    assert err[0]["command_type"] == "write_b64"

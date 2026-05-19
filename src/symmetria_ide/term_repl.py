@@ -62,13 +62,10 @@ def _snapshot_rows(screen: Any) -> list[str]:
     """Render pyte's current viewport buffer to a list of strings, one
     per row. Trailing spaces are stripped so the JSON payload stays
     compact (most rows in a fresh shell are empty after the prompt)."""
-    rows: list[str] = []
-    for y in range(screen.lines):
-        chars: list[str] = []
-        for x in range(screen.columns):
-            chars.append(screen.buffer[y][x].data)
-        rows.append("".join(chars).rstrip())
-    return rows
+    return [
+        "".join(screen.buffer[y][x].data for x in range(screen.columns)).rstrip()
+        for y in range(screen.lines)
+    ]
 
 
 class TermRepl(QObject):
@@ -129,9 +126,10 @@ class TermRepl(QObject):
                 continue
             self.command_received.emit(cmd)
         # stdin EOF — request clean shutdown of the main loop. The
-        # synthetic `_eof` marker lets `_dispatch_command` distinguish
-        # this from a client-requested stop (no observable difference
-        # today, but useful if we ever want different exit semantics).
+        # synthetic `_eof` marker tells `_shutdown` to skip the trailing
+        # ack: the client has closed its end of the pipe so the ack
+        # would be unread noise (and would clutter test output captured
+        # via subprocess.PIPE).
         self.command_received.emit({"type": "stop", "_eof": True})
 
     # --- Main thread (Qt event loop) -----------------------------------
@@ -165,10 +163,14 @@ class TermRepl(QObject):
             elif cmd_type == "snapshot":
                 self._emit_snapshot(req_id)
             elif cmd_type == "stop":
-                self._shutdown(req_id)
+                # `_eof` marker is set by the stdin reader on stdin close;
+                # in that case the client has already gone away and the
+                # ack would be unread noise. Skip it for protocol cleanliness.
+                self._shutdown(req_id, suppress_ack=bool(cmd.get("_eof")))
             else:
                 raise ValueError(f"unknown command type: {cmd_type!r}")
         except Exception as exc:  # noqa: BLE001 — REPL must not crash on bad input
+            log.exception("unhandled error dispatching %r command", cmd_type)
             self._emit_event(
                 {
                     "id": req_id,
@@ -215,19 +217,20 @@ class TermRepl(QObject):
         # screen state via `snapshot`, then send `stop` explicitly.
         self._emit_event({"type": "closed"})
 
-    def _shutdown(self, req_id: Any) -> None:
+    def _shutdown(self, req_id: Any, suppress_ack: bool = False) -> None:
         try:
             self._backend.stop()
         finally:
-            self._ack(req_id)
+            if not suppress_ack:
+                self._ack(req_id)
             QCoreApplication.quit()
 
     def _emit_event(self, event: dict[str, Any]) -> None:
-        # Stdout writes are serialized via lock because _on_closed may
-        # fire from the backend's reader thread via QueuedConnection
-        # (lands on main thread, but emit_snapshot from a follow-up
-        # command might be in-flight). Cheap insurance against
-        # interleaved JSON lines.
+        # Stdout writes are serialized via lock because _stdin_loop
+        # (daemon thread) calls _emit_event directly for parse errors,
+        # concurrent with the main thread writing acks and snapshots.
+        # Both threads share the same sys.stdout file object; the lock
+        # prevents interleaved JSON lines.
         line = json.dumps(event, ensure_ascii=False)
         with self._stdout_lock:
             sys.stdout.write(line + "\n")
@@ -235,7 +238,11 @@ class TermRepl(QObject):
 
 
 def main() -> int:
-    # Logs go to stderr so stdout stays a clean JSON event stream.
+    # Arm crash traceback capture before any Qt / pyte import paths run.
+    # Logs + crashes both go to stderr; stdout stays a clean JSON event stream.
+    import faulthandler
+
+    faulthandler.enable(file=sys.stderr, all_threads=True)
     logging.basicConfig(
         level=logging.WARNING,
         stream=sys.stderr,
