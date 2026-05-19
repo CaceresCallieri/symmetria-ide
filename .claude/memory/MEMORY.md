@@ -15,6 +15,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 ## Project — active — `project/active/` (operational state being maintained)
 
 - [Phase 2 current state (2026-04-25)](project/active/phase2_current_state.md) — Node SDK sidecar pivot landed, permission UI shipped; deferred: persistence, stop, turn grouping
+- [Post-TIOCSCTTY fzf lag (2026-05-19)](project/active/post_tiocsctty_lag_investigation.md) — Ctrl+E works; 2-3s fzf launch lag suspected as unresponded DSR/DA1; term_repl + wait_for ready
 
 ## Project — shipped — `project/shipped/` (past-tense systems; one consolidated bullet)
 
