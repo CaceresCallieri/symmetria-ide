@@ -292,11 +292,21 @@ def test_default_fg_matches_theme_text_normal():
     assert "#b0b0b0" in theme_src.lower()
 
 
-def test_cursor_color_matches_theme_accent_bright():
-    """_CURSOR_RGB must equal Theme.color.accent.bright (#e8ab6f)."""
+def test_cursor_color_is_white():
+    """_CURSOR_RGB must equal `0xF5F5F5` (same hex as ANSI slot 15 /
+    Theme.text.selected). The original choice (`0xE8AB6F`, the editor's
+    warm-amber accent) read as a yellow-orange tint against the
+    wallpaper-blend bg rather than as a cursor — kitty / alacritty /
+    ghostty all default to a near-white cursor for the same readability
+    reason. If a future refactor pins this back to the amber accent,
+    the visual symptom returns instantly.
+    """
+    assert f"{_CURSOR_RGB:06x}".upper() == "F5F5F5"
+    # Same hex appears as bright-white slot 15 in the ANSI palette and
+    # as Theme.text.selected in Theme.qml; cross-check the latter as
+    # drift-protection in case Theme.qml drifts independently.
     theme_src = _read_theme_qml()
-    assert f"{_CURSOR_RGB:06x}".upper() == "E8AB6F"
-    assert "#e8ab6f" in theme_src.lower()
+    assert "#f5f5f5" in theme_src.lower()
 
 
 # ---------------------------------------------------------------------------

@@ -100,10 +100,28 @@ _ANSI_PALETTE: tuple[int, ...] = (
 # fills — same wallpaper-blend pattern NvimView uses).
 _DEFAULT_FG_RGB = 0xB0B0B0
 
-# Cursor block fill = Theme.accent.bright. Aliased from the editor's
-# warm-amber accent family so the cursor reads as the same "attention"
-# affordance across both panes.
-_CURSOR_RGB = 0xE8AB6F
+# Cursor block fill = pure-ish white (same hex as ANSI slot 15 /
+# Theme.text.selected). The warm-amber accent (`0xE8AB6F`) was tried
+# first to match the editor's cursor color, but on the dim
+# wallpaper-blend background it read as a yellow-orange tint rather
+# than a cursor — the eye lost track of it against amber-toned cells.
+# White contrasts cleanly with both dark and light foregrounds and
+# matches user expectation for terminal cursors (kitty/alacritty/
+# ghostty all default to a near-white cursor).
+_CURSOR_RGB = 0xF5F5F5
+
+# Inner padding around the cell grid, in pixels. Mirrors Ghostty's
+# `window-padding-x = 20` / `window-padding-y = 20` so the IDE's
+# terminal pane reads with the same "framed" composition as the
+# user's standalone Ghostty windows. The ambient tint paints the
+# full boundingRect (including this padding ring) so the dim
+# wallpaper-blend extends right to the pane edges; only the cell
+# grid + cursor are inset by this amount.
+#
+# Defined here (not in `qml/design/Theme.qml`) because paint() reads
+# it directly; piping a Theme token through a QML context property
+# is a v2 refactor — same dual-source pattern the ANSI palette uses.
+_PADDING_PX = 20
 
 # pyte's color-name vocabulary. pyte uses 'brown' for slot 3 (the
 # historical name on real DEC terminals); 'yellow' is accepted as an
@@ -352,11 +370,18 @@ class TerminalView(QQuickPaintedItem):
         h = self.height()
         if w <= 0 or h <= 0:
             return
+        # Subtract the inner padding ring (both sides) BEFORE floor-div,
+        # so pyte's column/row count reflects only the cell-paintable
+        # region — otherwise pyte would think the screen is wider/taller
+        # than what we actually paint and the right/bottom rows would
+        # silently fall outside the clip.
+        inner_w = max(0.0, w - 2 * _PADDING_PX)
+        inner_h = max(0.0, h - 2 * _PADDING_PX)
         # Floor-div the pixel dims by cell dims, clamp to sane minimums
         # (20×5) so a too-small QML geometry doesn't push pyte into a
         # degenerate state. Same clamps as NvimView._push_current_size.
-        cols = max(20, int(w // self._cell_w))
-        rows = max(5, int(h // self._cell_h))
+        cols = max(20, int(inner_w // self._cell_w))
+        rows = max(5, int(inner_h // self._cell_h))
         if (cols, rows) != (self._cols, self._rows):
             self._cols = cols
             self._rows = rows
@@ -381,12 +406,25 @@ class TerminalView(QQuickPaintedItem):
 
         # Ambient tint over the wallpaper — same Ghostty-parity dim as
         # NvimView so both surfaces share the visual base layer.
+        # Painted in untranslated coords so the dim extends through the
+        # padding ring; only the cell grid + cursor are inset.
         painter.fillRect(self.boundingRect(), self._ambient_tint_color)
+
+        # Inset the cell grid + cursor by `_PADDING_PX` on all sides.
+        # `translate()` chains into every subsequent painter op (clip,
+        # fillRect, drawText) so _paint_row / _flush_run / _paint_cursor
+        # stay 0-relative — no per-method offset plumbing needed.
+        # Pairs with `_push_current_size`'s `inner_w/inner_h` math so
+        # pyte's column/row count matches what we actually paint.
+        painter.save()
+        painter.translate(_PADDING_PX, _PADDING_PX)
 
         # Grid-exact clip (gotcha #11). QML's float-sized boundingRect
         # can extend marginally past the cell grid; clipping to the
         # exact (cols*cw, rows*ch) prevents stale-content leaks at the
         # edges. Pooled _clip_rect — no fresh QRectF allocation.
+        # In translated coords this clip projects to
+        # (pad, pad, pad+cols*cw, pad+rows*ch) in widget space.
         self._clip_rect.setRect(0, 0, cols * cw, rows * ch)
         painter.setClipRect(self._clip_rect)
 
@@ -400,6 +438,8 @@ class TerminalView(QQuickPaintedItem):
         # inside the shell, not in our chrome.
         if not screen.cursor.hidden:
             self._paint_cursor(painter, screen, cw, ch)
+
+        painter.restore()
 
     def _paint_row(
         self,
