@@ -581,11 +581,11 @@ class TerminalView(QQuickPaintedItem):
         """Solid block cursor — no blink, no mode-shape variants in v1.
 
         The cell's glyph stays painted behind; the cursor fills over it
-        with `Theme.accent.bright`. Reverse-video readability is good
-        enough for v1 because the amber-bright cursor color contrasts
-        with both light text and dark text rows. v2 could repaint the
-        cell's glyph in inverted fg over the cursor block for a more
-        accurate selection-style appearance.
+        with `_CURSOR_RGB` (near-white, same as `Theme.text.selected`).
+        Near-white contrasts cleanly against both light text and dark text
+        rows — matching the convention kitty / alacritty / ghostty all use.
+        v2 could repaint the cell's glyph in inverted fg over the cursor
+        block for a more accurate selection-style appearance.
         """
         cur_x = screen.cursor.x * cw
         cur_y = screen.cursor.y * ch

@@ -30,6 +30,7 @@ from symmetria_ide.terminal_view import (
     _ANSI_PALETTE,
     _CURSOR_RGB,
     _DEFAULT_FG_RGB,
+    _PADDING_PX,
     _COLOR_NAME_TO_INDEX,
     _qcolor_cache,
     _resolve_color,
@@ -402,6 +403,65 @@ def test_push_current_size_clamps_to_minimums():
     src = inspect.getsource(TerminalView._push_current_size)
     assert "max(20" in src and "max(5" in src, (
         "_push_current_size must clamp cols/rows to sane minimums"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Padding constant — drift detection + _push_current_size accounting
+# ---------------------------------------------------------------------------
+
+
+def test_padding_px_constant_value():
+    """_PADDING_PX must equal 20 — mirrors Ghostty's
+    `window-padding-x = 20` / `window-padding-y = 20` so the terminal
+    pane reads with the same framed composition as standalone Ghostty
+    windows. If this drifts, the visual contract silently breaks.
+    """
+    assert _PADDING_PX == 20
+
+
+def test_push_current_size_subtracts_padding():
+    """_push_current_size MUST subtract `2 * _PADDING_PX` from width
+    and height before floor-dividing by cell metrics. Without this,
+    pyte thinks the terminal is wider/taller than the actual inset
+    paint region, causing the rightmost column to fall outside the clip.
+    """
+    src = inspect.getsource(TerminalView._push_current_size)
+    # The subtraction can appear as either `2 * _PADDING_PX` or
+    # `_PADDING_PX * 2`; the `inner_w` / `inner_h` locals are what
+    # the existing codebase uses.
+    assert "inner_w" in src and "inner_h" in src, (
+        "_push_current_size must derive inner_w/inner_h by subtracting "
+        "the padding ring before computing cols/rows"
+    )
+    assert "_PADDING_PX" in src, (
+        "_push_current_size must reference _PADDING_PX for the subtraction "
+        "so the constant stays the single source of truth"
+    )
+
+
+def test_paint_uses_save_restore_around_translate():
+    """paint() MUST bracket the `painter.translate(_PADDING_PX, …)` call
+    with `painter.save()` and `painter.restore()`. Without `restore()`,
+    the translation accumulates across frames (no fresh QPainter per
+    frame guarantee from QQuickPaintedItem), causing subsequent ambient-
+    tint fills to drift by the padding offset — a silent visual bug.
+    """
+    paint_src = inspect.getsource(TerminalView.paint)
+    assert "painter.save()" in paint_src, (
+        "paint() must call painter.save() before translate() so the "
+        "padding transform is bounded to the cell-grid region"
+    )
+    assert "painter.restore()" in paint_src, (
+        "paint() must call painter.restore() after painting rows+cursor "
+        "to undo the translate() applied for the padding inset"
+    )
+    save_idx = paint_src.find("painter.save()")
+    translate_idx = paint_src.find("painter.translate(")
+    restore_idx = paint_src.find("painter.restore()")
+    assert save_idx < translate_idx < restore_idx, (
+        "save() must come before translate(), and restore() must come after "
+        "all cell painting — order: save → translate → paint rows+cursor → restore"
     )
 
 
