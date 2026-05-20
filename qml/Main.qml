@@ -463,11 +463,21 @@ Window {
                         // re-evaluates whenever the worker publishes a new
                         // scan, no manual refresh wiring needed.
                         stats: gitController.stats
-                        // Same activation contract as the FileTreeView: open
-                        // the path in nvim and re-focus the editor so the
-                        // user can immediately start editing. Routed through
-                        // `controller.open_in_nvim` — the same slot the FM
-                        // overlay and the tree's onFileActivated already use.
+                        // Drive the embedded FileTreeView's rootPath +
+                        // status badges + pathFilter. All three derive
+                        // from the same scan as `stats`, so they re-emit
+                        // in the same `gc.disable` window on the Python
+                        // side — QML sees one consistent snapshot per
+                        // scan, no inter-prop tearing.
+                        repoRoot: gitController.repoRoot
+                        statusProvider: gitProviderAdapter
+                        pathFilter: gitController.changedPathSet
+                        // Same activation contract as the main FileTreeView:
+                        // open the path in nvim and re-focus the editor so
+                        // the user can immediately start editing. Routed
+                        // through `controller.open_in_nvim` — the same slot
+                        // the FM overlay and the main tree's onFileActivated
+                        // already use.
                         onFileActivated: function (path) {
                             controller.open_in_nvim(path);
                             if (editor.visible)
@@ -807,10 +817,19 @@ Window {
             // badge); we return null for symmetry with the contract docs.
             if (!s || !s.char)
                 return null;
+            // `adds` / `dels` populate the FileTreeView delegate's inline
+            // `+adds -dels` accessory. They're always present on the
+            // GitStatus payload (default 0); rows with 0/0 render no
+            // accessory by the FM's own visibility guard, so we don't
+            // need to gate them here. The main FileTreeView consumes the
+            // same statusProvider; for unchanged paths it never sees this
+            // branch (returns null above).
             return {
                 char: s.char,
                 color: _colorForState(s.state),
-                tooltip: s.tooltip
+                tooltip: s.tooltip,
+                adds: s.additions || 0,
+                dels: s.deletions || 0
             };
         }
 

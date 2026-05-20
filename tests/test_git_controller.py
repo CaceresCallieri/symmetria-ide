@@ -487,7 +487,16 @@ def test_controller_status_for_path_relative_conversion() -> None:
                 ),
             }
         result = controller.statusForPath("/home/jc/repo/src/foo.py")
-        assert result == {"char": "M", "state": STATE_UNSTAGED, "tooltip": "Modified"}
+        # `additions`/`deletions` default to 0 on GitStatus and are
+        # always present in the return dict so the QML adapter can
+        # forward them as `adds`/`dels` without an absent-vs-zero check.
+        assert result == {
+            "char": "M",
+            "state": STATE_UNSTAGED,
+            "tooltip": "Modified",
+            "additions": 0,
+            "deletions": 0,
+        }
     finally:
         controller.stop()
 
@@ -1264,6 +1273,128 @@ def test_controller_stats_default_zero() -> None:
         assert s["stagedAdd"] == 0
         assert s["unstagedFiles"] == 0
         assert s["untrackedCount"] == 0
+    finally:
+        controller.stop()
+
+
+# ---------------------------------------------------------------------------
+# changedPathSet — absolute-path membership map driving the embedded
+# FileTreeView's `pathFilter` prop on the Active Changes panel.
+# ---------------------------------------------------------------------------
+
+
+def test_controller_changed_path_set_empty_when_no_repo() -> None:
+    # No `_resolved_root` => not in a repo => empty filter map.
+    # The panel's auto-hide on `model.count > 0` normally suppresses
+    # the empty case before it reaches the embedded tree, but the
+    # property must still degrade gracefully.
+    controller = GitController()
+    try:
+        assert controller.changedPathSet == {}
+    finally:
+        controller.stop()
+
+
+def test_controller_changed_path_set_empty_on_clean_repo() -> None:
+    # In a repo but nothing changed — same empty-map contract.
+    controller = GitController()
+    try:
+        with controller._lock:
+            controller._resolved_root = "/home/jc/repo"
+            controller._status_map = {}
+        assert controller.changedPathSet == {}
+    finally:
+        controller.stop()
+
+
+def test_controller_changed_path_set_single_nested_file() -> None:
+    # One leaf file plus the ancestor directories synthesized by
+    # `_add_directory_aggregates`. The fold should produce 4 entries:
+    # rootPath + 2 ancestor dirs + 1 leaf file. Mirrors what the
+    # production scan emits — we inject the post-aggregate map directly
+    # to keep the test scoped to the property's fold logic.
+    controller = GitController()
+    try:
+        with controller._lock:
+            controller._resolved_root = "/home/jc/repo"
+            controller._status_map = {
+                "src/foo/bar.py": GitStatus(
+                    path="src/foo/bar.py",
+                    char="M",
+                    state=STATE_UNSTAGED,
+                    tooltip="Modified",
+                ),
+                # These two ancestor entries are what
+                # `_add_directory_aggregates` would have synthesized.
+                "src": GitStatus(
+                    path="src",
+                    char="·",
+                    state=STATE_UNSTAGED,
+                    tooltip="1 file changed",
+                ),
+                "src/foo": GitStatus(
+                    path="src/foo",
+                    char="·",
+                    state=STATE_UNSTAGED,
+                    tooltip="1 file changed",
+                ),
+            }
+        result = controller.changedPathSet
+        assert result == {
+            "/home/jc/repo": True,
+            "/home/jc/repo/src": True,
+            "/home/jc/repo/src/foo": True,
+            "/home/jc/repo/src/foo/bar.py": True,
+        }
+    finally:
+        controller.stop()
+
+
+def test_controller_changed_path_set_root_level_file() -> None:
+    # A file at the repo root has no ancestor directory; the map carries
+    # exactly two entries: rootPath itself + the leaf.
+    controller = GitController()
+    try:
+        with controller._lock:
+            controller._resolved_root = "/home/jc/repo"
+            controller._status_map = {
+                "README.md": GitStatus(
+                    path="README.md",
+                    char="M",
+                    state=STATE_UNSTAGED,
+                    tooltip="Modified",
+                ),
+            }
+        result = controller.changedPathSet
+        assert result == {
+            "/home/jc/repo": True,
+            "/home/jc/repo/README.md": True,
+        }
+    finally:
+        controller.stop()
+
+
+def test_controller_changed_path_set_all_paths_absolute() -> None:
+    # Every key in the returned map must be an absolute path rooted at
+    # _resolved_root — the FM's pathFilter compares against
+    # FileSystemModel.entries[i].path which is always absolute.
+    controller = GitController()
+    try:
+        with controller._lock:
+            controller._resolved_root = "/home/jc/repo"
+            controller._status_map = {
+                "src/foo.py": _make("src/foo.py"),
+                "src": _make("src", char="·"),
+                "tests/test_x.py": _make("tests/test_x.py"),
+                "tests": _make("tests", char="·"),
+            }
+        result = controller.changedPathSet
+        for key in result:
+            assert key.startswith("/home/jc/repo"), (
+                f"non-absolute key in pathFilter map: {key!r}"
+            )
+        # Sanity: the count matches root + 4 source-map entries.
+        assert len(result) == 5
     finally:
         controller.stop()
 

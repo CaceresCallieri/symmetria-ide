@@ -629,6 +629,42 @@ class GitController(QObject):
             "untrackedCount": s.untracked_count,
         }
 
+    @Property("QVariant", notify=statusChanged)
+    def changedPathSet(self) -> dict:
+        """Absolute-path membership set for `FileTreeView.pathFilter`.
+
+        Returns a dict shaped as ``{absPath: True, ...}`` covering
+        rootPath itself plus every leaf file's absolute path plus every
+        ancestor directory's absolute path. The ancestor entries are
+        already present in ``_status_map`` (synthesized eagerly by
+        ``_add_directory_aggregates``) — iterating the map is therefore
+        a single-pass fold; no separate graph walk needed.
+
+        Returns ``{}`` when there's no resolved repo OR the working tree
+        is clean. Callers (the panel's auto-hide on ``model.count > 0``)
+        normally suppress the empty case before it can render an empty
+        embedded tree.
+
+        Notify on ``statusChanged`` rather than a new signal — the
+        membership set is fully derived from ``_status_map`` and changes
+        exactly when the map does, so reusing the existing emit (already
+        guarded by ``gc.disable`` per gotcha #10) keeps a single
+        cross-thread emit window for everything the panel binds against.
+
+        Lock-snapshotted so the worker can't mutate ``_status_map`` mid-
+        iteration. The fold itself is O(N) over the map and runs on the
+        GUI thread (QML binding evaluation context).
+        """
+        with self._lock:
+            m, root = self._status_map, self._resolved_root
+        if not m or not root:
+            return {}
+        root_path = Path(root)
+        out: dict[str, bool] = {root: True}
+        for rel in m:
+            out[str(root_path / rel)] = True
+        return out
+
     def set_repo_root(self, value: str) -> None:
         """Switch the repo being watched. Idempotent on equal values.
 
@@ -680,10 +716,20 @@ class GitController(QObject):
             status = self._status_map.get(rel)
         if status is None:
             return {}
-        result: dict[str, str] = {
+        # `additions` / `deletions` flow through to the adapter in
+        # Main.qml, which forwards them as `adds` / `dels` on the
+        # statusProvider payload. The embedded FileTreeView in
+        # `GitStatusPanel` renders those as a `+N -M` accessory next to
+        # the badge. Always included (default 0 means no accessory) so
+        # the QML side never has to disambiguate "field absent" from
+        # "zero counts". Mirrors the role payload used by
+        # `GitStatusListModel` so both consumption paths stay in sync.
+        result: dict[str, object] = {
             "char": status.char,
             "state": status.state,
             "tooltip": status.tooltip,
+            "additions": status.additions,
+            "deletions": status.deletions,
         }
         if status.orig_path is not None:
             result["origPath"] = status.orig_path
