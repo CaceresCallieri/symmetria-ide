@@ -88,6 +88,81 @@ Window {
         onActivated: controller.swap_to_editor()
     }
 
+    // IDE-wide horizontal pane navigation.
+    //
+    // Spatial chord: Ctrl+H = move left, Ctrl+L = move right. The
+    // window has a two-column topology — a central surface on the
+    // left (agent / editor / terminal, one visible at a time) and
+    // the file-tree sidebar on the right — so:
+    //
+    //   - Ctrl+L from any central surface         -> focus tree
+    //   - Ctrl+H from the tree                    -> focus visible central
+    //   - Ctrl+L from the tree (no right neighbor) -> silent no-op
+    //   - Ctrl+H from a central (no left neighbor) -> silent no-op
+    //
+    // Application-scope chord per the project-wide principle in
+    // `.claude/memory/project/meta/ide_owns_keybind_layer.md`: IDE
+    // owns horizontal navigation; nvim/terminal/agent are demoted
+    // to bare engines and never see the chord (Qt resolves
+    // ApplicationShortcut in QApplication::notify BEFORE the focused
+    // widget's keyPressEvent, exactly like Ctrl+Shift+A — see the
+    // anchor block above for the full ordering rationale).
+    //
+    // Why bare Ctrl+H/L, not Ctrl+Shift+H/L: matches the user's
+    // existing vim-tmux-navigator muscle memory. The cost is
+    // terminal Ctrl+H (= ASCII Backspace) and Ctrl+L (= clear
+    // screen) being unreachable inside the terminal pane — TUIs
+    // that bind those literals separately lose them. Regular
+    // Backspace is unaffected. Accepted tradeoff per the design
+    // discussion on 2026-05-20.
+    //
+    // Capture pitfall preserved from the previous tree-scoped
+    // Ctrl+H Shortcut: FileTreeView's internal ListView matches
+    // `event.key === Qt.Key_H` WITHOUT a modifier check, so
+    // without an external Shortcut interception, Ctrl+H gets eaten
+    // as plain `h` (collapse node) and never reaches a focus-chain
+    // handler at the FocusScope level. ApplicationShortcut bypasses
+    // focus-chain delivery entirely, sidestepping that descendant
+    // capture. Do NOT replace this with a focus-chain handler
+    // (Keys.onPressed on treeScope, Keys.priority: BeforeItem,
+    // etc.) — Qt always delivers key events to the focused item
+    // first, and BeforeItem orders OUR handlers vs OUR auto-handling,
+    // not vs a descendant focusItem's handlers.
+    //
+    // Why the chord lives in QML (not as `controller.navigate_left/
+    // right` slots in Python): all the state it needs to consult
+    // — `treeScope.activeFocus`, `agentVisible`, `terminalVisible`,
+    // `treeVisible` — is already declarative QML state plus
+    // controller properties. Round-tripping through a Python slot
+    // would just push the dispatch logic across the JS/Python
+    // boundary for no benefit.
+    Shortcut {
+        sequences: ["Ctrl+H"]
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (!treeScope.activeFocus)
+                return;
+            if (controller.agentVisible)
+                agentPane.forceActiveFocus();
+            else if (controller.terminalVisible)
+                terminalView.forceActiveFocus();
+            else
+                editor.forceActiveFocus();
+        }
+    }
+
+    Shortcut {
+        sequences: ["Ctrl+L"]
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (treeScope.activeFocus)
+                return;
+            if (!controller.treeVisible)
+                return;
+            controller.focus_tree();
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -250,39 +325,15 @@ Window {
                 Layout.fillHeight: true
                 visible: controller.treeVisible
 
-                // Ctrl+H reverse-spillover: focus is in the tree, user
-                // wants to go back to the editor.
-                //
-                // Implemented as a window-scoped Shortcut rather than
-                // Keys.onPressed because FileTreeView's internal ListView
-                // captures the key event before it can bubble up to this
-                // FocusScope: the ListView's own `Keys.onPressed` matches
-                // `event.key === Qt.Key_H` without checking modifiers
-                // (the standard vim-style pattern), so it treats Ctrl+H
-                // as plain `h` (collapse node) and accepts the event,
-                // halting propagation. `Keys.priority: BeforeItem` on
-                // this FocusScope does NOT solve that — BeforeItem orders
-                // OUR own handlers relative to OUR own auto-handling, not
-                // relative to a descendant focusItem's handlers. Qt
-                // always delivers key events to the focused item first.
-                //
-                // Shortcut bypasses focus-chain delivery entirely. The
-                // `enabled: treeScope.activeFocus` gate scopes the
-                // binding to "focus is somewhere inside the tree's
-                // subtree" — for a FocusScope, `activeFocus` is true
-                // when ANY descendant has the active focus, which is
-                // exactly the scope we want.
-                //
-                // Other directions (Ctrl+J/K/L) currently no-op from
-                // the tree: nothing above, below, or right of it. Adding
-                // an agent dock down the road extends this with another
-                // Shortcut entry.
-                Shortcut {
-                    sequence: "Ctrl+H"
-                    enabled: treeScope.activeFocus
-                    context: Qt.WindowShortcut
-                    onActivated: controller.focus_editor()
-                }
+                // Tree-scoped Ctrl+H was previously installed here as a
+                // Qt.WindowShortcut to handle "tree has focus, user wants
+                // editor". That responsibility has moved up to the
+                // application-scope Ctrl+H Shortcut at the Window root —
+                // same dispatch rationale (ListView eats `h` without
+                // modifier check, focus-chain handlers can't intercept
+                // in time), now applied uniformly across every pane
+                // boundary instead of just tree→editor. See the
+                // Ctrl+H / Ctrl+L Shortcut block at the Window root.
 
                 // Panel-level chrome matte. Painted on the FocusScope itself
                 // (not each child) so the spacing gap between GitStatusPanel

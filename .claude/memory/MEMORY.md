@@ -11,6 +11,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 
 - [Project governance layer](project/meta/project_governance.md) — read .claude/project-standards.md, CONTRIBUTING.md, and Theme.qml before planning non-trivial work
 - [Agent dashboard dual-feed commitment](project/meta/agent_dashboard_commitment.md) — IDE keeps hooks AND adds SDK feed; phased execution plan in docs/orchestrator-replacement-prd.md
+- [IDE owns the keybind layer](project/meta/ide_owns_keybind_layer.md) — Symmetria IDE is canonical UX surface; nvim/terminal are bare engines; IDE chords always win
 
 ## Project — active — `project/active/` (operational state being maintained)
 
