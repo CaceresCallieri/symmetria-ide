@@ -346,7 +346,7 @@ A grep audit at the time of this document:
 |---|---|---|
 | `clip: true` | 2 | `qml/WhichKeyOverlay.qml`, `qml/CommandLine.qml` — likely justified (rounded corners / overflow); verify when touching. |
 | `layer.enabled: true` | 0 | Clean. |
-| `property var` | 0 | Clean. |
+| `property var` | 3 | `qml/GitStatusPanel.qml` — `stats` (pre-existing), `statusProvider` + `pathFilter` (added for FM duck-typed seam in feat(git) tree pane). All three are genuinely heterogeneous JS objects; `var` is the correct QML type here. Warning threshold (1–5); no zero-regress action needed unless count grows. |
 | `Qt.DirectConnection` (cross-thread) | 0 | Clean. |
 | Python functions without return-type annotation | 4 | `QAbstractItemModel.data()` overrides — intentionally un-annotated due to pyright stub conflict; see gotcha #7. Do not "fix" by adding return types — that breaks Qt's metaobject system. Locations after Issue #5 extraction: `app.py:166`, `cmdline_models.py:188`, `cmdline_models.py:279`, `whichkey_models.py:134`. |
 | `# type: ignore` | check before each release | Keep ≤2 per 1k LOC. |

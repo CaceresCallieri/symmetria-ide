@@ -828,8 +828,8 @@ Window {
                 char: s.char,
                 color: _colorForState(s.state),
                 tooltip: s.tooltip,
-                adds: s.additions || 0,
-                dels: s.deletions || 0
+                adds: s.additions,
+                dels: s.deletions
             };
         }
 

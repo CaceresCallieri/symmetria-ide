@@ -547,6 +547,10 @@ def test_controller_status_for_path_includes_orig_path_for_renames() -> None:
             }
         result = controller.statusForPath("/home/jc/repo/new.py")
         assert result["origPath"] == "old.py"
+        # additions/deletions are always present since this commit — verify
+        # the rename path includes them at their default-zero values.
+        assert result["additions"] == 0
+        assert result["deletions"] == 0
     finally:
         controller.stop()
 

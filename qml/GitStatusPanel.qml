@@ -155,6 +155,7 @@ Item {
                         font.pixelSize: Theme.font.size.xs
                     }
                     Text {
+                        visible: modelData.add > 0
                         text: "+" + modelData.add
                         color: Theme.color.diff.addedFg
                         font.family: Theme.font.family

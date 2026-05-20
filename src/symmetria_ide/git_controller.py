@@ -651,9 +651,15 @@ class GitController(QObject):
         guarded by ``gc.disable`` per gotcha #10) keeps a single
         cross-thread emit window for everything the panel binds against.
 
-        Lock-snapshotted so the worker can't mutate ``_status_map`` mid-
-        iteration. The fold itself is O(N) over the map and runs on the
-        GUI thread (QML binding evaluation context).
+        Reference-snapshotted: the lock captures a stable reference to
+        the current ``_status_map`` dict. This is safe because
+        ``_publish`` replaces ``_status_map`` with a new dict (never
+        mutates it in place), so the captured reference remains valid
+        after the lock is released. Contrast with ``_file_entries``,
+        which copies via ``list(items())`` inside the lock — that
+        method predates the replace-not-mutate invariant. The fold
+        itself is O(N) over the map and runs on the GUI thread (QML
+        binding evaluation context).
         """
         with self._lock:
             m, root = self._status_map, self._resolved_root
