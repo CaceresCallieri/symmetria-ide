@@ -87,8 +87,10 @@ QtObject {
             readonly property color selected: "#f5f5f5"
         }
 
-        // Warm accents — amber family. Both derive from wine_theme
+        // Warm accents. `primary` and `bright` derive from wine_theme
         // highlights so they feel continuous with the editor palette.
+        // `focus` is a deliberate outlier — white at ~40% alpha rather than
+        // amber (see the block comment below for the full rationale).
         //
         // `focus` is the active-pane hairline that lights up when
         // keyboard focus enters a pane (Main.qml's mainContent /

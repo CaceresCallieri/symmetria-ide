@@ -311,15 +311,22 @@ Window {
                 // accent line or a fully transparent line; the layout
                 // never moves.
                 //
-                // z-order: above the panes (so the border draws on top
-                // of the outermost pixel of the pane content) but below
-                // the FM overlay (z: 100) so a Ctrl+U opening the
-                // file-picker scrim cleanly covers the border too.
+                // z-order: above the pane siblings in mainContent
+                // (editor / terminalView / agentPane are all z: 0 by
+                // default, so z: 50 guarantees the border draws on top
+                // of their outermost pixel). The FM overlay (Loader at
+                // Window root, z: 100) is a sibling of the ColumnLayout
+                // that contains this item — it covers the border by
+                // document order + stacking context, not because 50 < 100.
+                // No z value here can interfere with the FM overlay, and
+                // no intermediate z slot between 50 and 100 exists today
+                // in this subtree (WhichKeyOverlay is z: 20 inside editor,
+                // a different stacking context).
                 Rectangle {
                     id: mainContentFocusBorder
                     anchors.fill: parent
                     color: "transparent"
-                    border.color: (agentPane.activeFocus
+                    border.color: (agentPane.paneActive
                                    || editor.activeFocus
                                    || terminalView.activeFocus)
                                   ? Theme.color.accent.focus
@@ -399,11 +406,13 @@ Window {
                 // descendant has the active focus. Uses FocusScope's
                 // `activeFocus` directly (which propagates from
                 // descendants), so we don't need to track the internal
-                // ListView's focus state explicitly. Same z-stacking
-                // and transparent-when-inactive contract as the
-                // mainContent overlay; see that block's comment for
-                // the full rationale (especially the "don't toggle
+                // ListView's focus state explicitly. Same
+                // transparent-when-inactive contract as the mainContent
+                // overlay; see that block's comment for the geometry-
+                // stability rationale (especially the "don't toggle
                 // border.width" point — costs a layout round-trip).
+                // z: 50 here beats the chrome Rectangle sibling (z: 0)
+                // within treeScope's stacking context.
                 Rectangle {
                     id: treeScopeFocusBorder
                     anchors.fill: parent
