@@ -335,6 +335,7 @@ QtObject {
     // rhythm stays uniform across panes. Values are ~20% smaller than
     // a default terminal chrome would use.
     readonly property QtObject spacing: QtObject {
+        readonly property int xxs: 2   // tighter internal header gaps
         readonly property int xs: 4
         readonly property int sm: 6
         readonly property int md: 10

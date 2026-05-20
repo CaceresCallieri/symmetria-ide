@@ -1,6 +1,6 @@
 """Git status parsing + the GitController Qt facade.
 
-Three layers, top-down:
+Four layers, top-down:
 
   1. ``parse_porcelain_v2(blob: bytes) -> dict[str, GitStatus]`` — a pure
      parser for `git status --porcelain=v2 -z` stdout. No subprocess, no Qt,
@@ -11,12 +11,18 @@ Three layers, top-down:
      every changed path, so the file tree can render a badge on directories
      whose subtrees contain changes.
 
-  3. ``GitController(QObject)`` — the Qt facade. Owns a worker thread that
-     runs ``git rev-parse`` + ``git status`` on demand, a ``QFileSystemWatcher``
-     on ``.git/{index,HEAD,MERGE_HEAD,refs/heads/<branch>}`` to trigger
-     re-scans, and a 200ms debounce timer to coalesce bursts. Exposes
-     ``statusForPath(absolute_path) -> QVariantMap`` to QML and emits
-     ``statusChanged`` once per scan.
+  3. Numstat layer — ``parse_numstat_blob``, ``_merge_numstat_into_map``,
+     ``_compute_stats``: pure functions that parse ``git diff --numstat -z``
+     output and fold additions/deletions into the status map and the
+     ``GitStats`` header aggregate. No subprocess, no Qt, no I/O.
+
+  4. ``GitController(QObject)`` — the Qt facade. Owns a worker thread that
+     runs ``git rev-parse`` + ``git status`` + numstat passes on demand, a
+     ``QFileSystemWatcher`` on ``.git/{index,HEAD,MERGE_HEAD,refs/heads/<branch>}``
+     to trigger re-scans, and a 200ms debounce timer to coalesce bursts.
+     Exposes ``statusForPath(absolute_path) -> QVariantMap`` and
+     ``stats -> QVariantMap`` to QML and emits ``statusChanged`` /
+     ``statsChanged`` once per scan.
 
 Future phases will grow ``GitController`` with ``stage()`` / ``unstage()`` /
 ``commit()`` / ``branchList()`` slots — per the "same class, additive"
@@ -31,7 +37,7 @@ import logging
 import os
 import subprocess
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -424,8 +430,6 @@ def _merge_numstat_into_map(
 
     `dataclasses.replace` is used because GitStatus is frozen.
     """
-    from dataclasses import replace
-
     result: dict[str, GitStatus] = {}
     for path, status in file_map.items():
         adds, dels = 0, 0

@@ -89,7 +89,7 @@ Item {
         // clean staging area collapses to just the title.
         ColumnLayout {
             Layout.fillWidth: true
-            spacing: 2
+            spacing: Theme.spacing.xxs
 
             Text {
                 Layout.fillWidth: true

@@ -886,7 +886,7 @@ def _numstat(adds: str, dels: str, path: str) -> bytes:
     return f"{adds}\t{dels}\t{path}".encode("utf-8")
 
 
-def _numstat_rename(adds: str, dels: str, orig: str, new: str) -> bytes:
+def _numstat_rename(adds: str, dels: str, new: str) -> bytes:
     """One rename row with `-z`: empty path slot, then a second NUL field."""
     head = f"{adds}\t{dels}\t".encode("utf-8")  # trailing tab, empty path
     return head + b"\x00" + new.encode("utf-8")
@@ -925,7 +925,7 @@ def test_numstat_handles_renames_keys_on_new_path() -> None:
     # Renames in -z mode put the NEW path in a second NUL-terminated field.
     # We key on the new path because the porcelain status row's path is
     # also the new path — keeps the merge step's lookup trivial.
-    blob = _numstat_rename("5", "2", "old/a.py", "new/a.py") + b"\x00"
+    blob = _numstat_rename("5", "2", "new/a.py") + b"\x00"
     assert parse_numstat_blob(blob) == {"new/a.py": (5, 2)}
 
 
@@ -945,6 +945,20 @@ def test_numstat_non_integer_counts_dropped() -> None:
         + b"\x00"
     )
     assert parse_numstat_blob(blob) == {"src/y.py": (1, 0)}
+
+
+def test_numstat_binary_rename_skips_and_realigns() -> None:
+    # The defensive branch in parse_numstat_blob: when a binary row (-/-) has
+    # an empty path slot (i.e. it's a rename with binary marker), the iterator
+    # must consume the second NUL-terminated field so it realigns on the next
+    # ordinary entry. Without the `i += 1` guard, "other.py" would be
+    # misinterpreted as the continuation of a normal row.
+    blob = b"-\t-\t\x00new/a.py\x00" + b"3\t1\tother.py\x00"
+    result = parse_numstat_blob(blob)
+    assert "new/a.py" not in result, "binary rename must be dropped"
+    assert result == {"other.py": (3, 1)}, (
+        "entry after binary rename must parse correctly"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1278,5 +1292,38 @@ def test_publish_emits_stats_changed_on_stats_change() -> None:
         controller._publish({"src/foo.py": status}, "/repo", GitStats(unstaged_add=10))
         assert len(status_received) == 0
         assert len(stats_received) == 1
+    finally:
+        controller.stop()
+
+
+def test_publish_suppresses_stats_changed_on_equal_stats() -> None:
+    # When _publish is called with the same stats AND the same map, neither
+    # statusChanged nor statsChanged should fire — a spurious statsChanged
+    # would cause unnecessary QML re-evaluations of the header repeater.
+    controller = GitController()
+    try:
+        initial_stats = GitStats(unstaged_add=5)
+        status = GitStatus(
+            path="src/foo.py",
+            char="M",
+            state=STATE_UNSTAGED,
+            tooltip="Modified",
+        )
+        with controller._lock:
+            controller._status_map = {"src/foo.py": status}
+            controller._resolved_root = "/repo"
+            controller._stats = initial_stats
+        status_received: list[None] = []
+        stats_received: list[None] = []
+        controller.statusChanged.connect(lambda: status_received.append(None))
+        controller.statsChanged.connect(lambda: stats_received.append(None))
+        # Publish the SAME map AND SAME stats — both signals must be suppressed.
+        controller._publish({"src/foo.py": status}, "/repo", GitStats(unstaged_add=5))
+        assert len(status_received) == 0, (
+            "statusChanged must not fire when map is unchanged"
+        )
+        assert len(stats_received) == 0, (
+            "statsChanged must not fire when stats are unchanged"
+        )
     finally:
         controller.stop()
