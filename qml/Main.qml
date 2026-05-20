@@ -470,12 +470,14 @@ Window {
 
             // Reverse direction of onFocusTreeRequested. Fired from
             // AppController._on_nav_event (nvim spillover with dir
-            // matching the editor in the focus chain) and from the
-            // tree's Ctrl+H handler. NvimView itself IS a FocusScope
-            // (NvimView.qml manages its own focus), so a direct
-            // forceActiveFocus on `editor` lands the focus correctly
-            // without the descendant-walker workaround needed for the
-            // tree direction.
+            // matching the editor in the focus chain).
+            // NOTE: the Ctrl+H ApplicationShortcut at the Window root
+            // calls `editor.forceActiveFocus()` directly and does NOT
+            // fire this signal — keep in sync if adding new nav targets.
+            // NvimView itself IS a FocusScope (NvimView.qml manages its
+            // own focus), so a direct forceActiveFocus on `editor` lands
+            // correctly without the descendant-walker workaround needed
+            // for the tree direction.
             function onFocusEditorRequested(): void {
                 editor.forceActiveFocus();
             }
@@ -484,10 +486,13 @@ Window {
             // AppController.focus_terminal() — currently called only
             // by Ctrl+Shift+T's swap_to_terminal slot via its own
             // onVisibleChanged trigger, but the signal exists so a
-            // future spillover surface (e.g. tree's Ctrl+L when terminal
-            // sits to the right) can pull focus without going through
-            // the swap path. TerminalView is its own FocusScope, so a
-            // direct forceActiveFocus works (no descendant-walker needed).
+            // future Lua nvim-spillover surface can request terminal
+            // focus without going through the swap path.
+            // NOTE: the Ctrl+H / Ctrl+L ApplicationShortcuts call
+            // `terminalView.forceActiveFocus()` directly and do NOT
+            // go through this signal.
+            // TerminalView is its own FocusScope, so a direct
+            // forceActiveFocus works (no descendant-walker needed).
             function onFocusTerminalRequested(): void {
                 terminalView.forceActiveFocus();
             }

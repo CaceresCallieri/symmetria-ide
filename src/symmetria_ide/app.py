@@ -276,11 +276,13 @@ class AppController(QObject):
     # `fileTreeView.forceActiveFocus()`. Decoupled from the data-bearing
     # signals above because it carries no payload — it's a one-way ask.
     focusTreeRequested = Signal()
-    # Reverse direction of focusTreeRequested — fired from the QML tree's
-    # Ctrl+H Shortcut handler (`controller.focus_editor()` in Main.qml).
-    # `_on_nav_event` would also emit this if a future `_NAV_FROM_EDITOR`
-    # entry targeted "editor", but no such entry exists today — only
-    # `focus_editor()` emits this signal currently.
+    # Reverse direction of focusTreeRequested — fired from
+    # `_on_nav_event` when nvim spillover targets the editor (no
+    # `_NAV_FROM_EDITOR` entry maps to "editor" today, so only the
+    # `focus_editor()` public slot emits this signal currently).
+    # NOTE: the QML Ctrl+H ApplicationShortcut calls
+    # `editor.forceActiveFocus()` directly and does NOT go through this
+    # slot — keep the two paths in sync when adding new nav targets.
     focusEditorRequested = Signal()
     # Phase 2.5 central-surface state. `_central_surface` holds either
     # "terminal" or "editor"; both `editorVisible` and `terminalVisible`
@@ -320,8 +322,8 @@ class AppController(QObject):
     # pane (tree) on the right; future panes (agent dock, terminal,
     # etc.) extend the table without restructuring the dispatch path.
     # Reverse direction (tree → editor) is handled directly from QML
-    # (the tree's Ctrl+H handler calls `controller.focus_editor()`
-    # without going through this table), so this dict only encodes
+    # via the Ctrl+H ApplicationShortcut's `editor.forceActiveFocus()` call
+    # — it does NOT go through this table. This dict therefore only encodes
     # editor-as-source edges.
     _NAV_FROM_EDITOR: ClassVar[dict[str, str]] = {
         "right": "tree",
@@ -1208,12 +1210,13 @@ class AppController(QObject):
     def focus_editor(self) -> None:
         """Ask QML to move active focus into the NvimView.
 
-        Mirror of `focus_tree`. Called from two routes:
+        Mirror of `focus_tree`. Called from:
         (a) `_on_nav_event` when nvim spillover targets the editor
-            (no current source path, but symmetric for future docks
-            that sit to the editor's left/up/down).
-        (b) Directly from QML when the tree-side Ctrl+H handler fires
-            — `controller.focus_editor()` from Main.qml.
+            (no `_NAV_FROM_EDITOR` entry maps to "editor" today, but
+            the path is wired for future docks left/up/down).
+        NOTE: the QML Ctrl+H ApplicationShortcut calls
+        `editor.forceActiveFocus()` directly and does NOT route through
+        this slot. Keep them in sync when adding new nav targets.
         Emits the signal rather than touching QML focus directly,
         matching the project-standards §4 pattern for cross-layer
         focus asks.
