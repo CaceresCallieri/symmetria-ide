@@ -89,9 +89,32 @@ QtObject {
 
         // Warm accents — amber family. Both derive from wine_theme
         // highlights so they feel continuous with the editor palette.
+        //
+        // `focus` is the active-pane hairline that lights up when
+        // keyboard focus enters a pane (Main.qml's mainContent /
+        // treeScope border overlays). DELIBERATELY NEUTRAL (white @
+        // ~40% alpha) rather than an amber alias — the amber accent
+        // at full saturation reads as "warm/important" against the
+        // dark chrome and over-signals what is really just a focus
+        // hint. White at sub-50% alpha drops both the saturation cue
+        // and the contrast cue, leaving the indicator perceptible
+        // without competing with the cmdline / branch / mode badges
+        // that legitimately own the amber accent. The token still
+        // lives under `accent` because semantically it's a "focus
+        // accent", not a chrome surface or text rung; only the visual
+        // realization shifted (per the aliasing-can-drift rationale
+        // already anticipated in this file).
+        //
+        // Alpha rung: `border.hairline` is ~12% white (matte-pill
+        // border, "barely there"); 40% gives clear daylight above
+        // that for the active state without crossing into "loud."
+        // Tune-up: bump alpha (e.g. `#80ffffff` ≈ 50%) if too subtle
+        // on Hyprland with the user's actual wallpaper contrast.
+        // Tune-down: drop to `#4dffffff` (~30%) if it still pops.
         readonly property QtObject accent: QtObject {
             readonly property color primary: "#c8a37a"     // cmdline firstchar, branch glyph
             readonly property color bright: "#e8ab6f"      // which-key group headers
+            readonly property color focus: "#66ffffff"     // white @ ~40% alpha — active-pane hairline
         }
 
         // Mode badge palette — wine_theme derivations. See the mapping

@@ -281,6 +281,52 @@ Window {
                     anchors.fill: parent
                     visible: controller.agentVisible
                 }
+
+                // Active-pane focus border. Renders a 1px accent hairline
+                // around the visible central surface when any of its three
+                // candidate panes (agent / editor / terminal) has the
+                // active keyboard focus. When focus moves to the tree or
+                // to the FM overlay, the border disappears — the existing
+                // 1px static separator between mainContent and treeScope
+                // remains as the always-visible delineator, so the layout
+                // never gains visual weight in the idle state.
+                //
+                // Why a sibling Rectangle (not Rectangle.border on each
+                // pane): NvimView and TerminalView are Python-side
+                // QQuickPaintedItem subclasses that don't expose a
+                // `border` property; AgentPane is a QML composite that
+                // already has its own internal Rectangle chrome we
+                // don't want to wrap. A sibling overlay with
+                // `anchors.fill: parent` covers all three panes
+                // uniformly via the parent Item's geometry — one
+                // binding, one place to tune.
+                //
+                // Why `color: "transparent"` + conditional border.color
+                // (not `border.width: focused ? 1 : 0`): keeps the
+                // Rectangle's geometry stable across focus transitions
+                // — Qt re-computes anchor children when the bordering
+                // item's width/height changes, and a flickering 1px
+                // resize would cost a paint round-trip per chord. The
+                // transparent-when-inactive approach paints either an
+                // accent line or a fully transparent line; the layout
+                // never moves.
+                //
+                // z-order: above the panes (so the border draws on top
+                // of the outermost pixel of the pane content) but below
+                // the FM overlay (z: 100) so a Ctrl+U opening the
+                // file-picker scrim cleanly covers the border too.
+                Rectangle {
+                    id: mainContentFocusBorder
+                    anchors.fill: parent
+                    color: "transparent"
+                    border.color: (agentPane.activeFocus
+                                   || editor.activeFocus
+                                   || terminalView.activeFocus)
+                                  ? Theme.color.accent.focus
+                                  : "transparent"
+                    border.width: 1
+                    z: 50
+                }
             }
 
             // 1px vertical separator between editor and sidebar.
@@ -345,6 +391,28 @@ Window {
                 Rectangle {
                     anchors.fill: parent
                     color: Theme.color.bg.chrome
+                }
+
+                // Active-pane focus border. Symmetric counterpart of
+                // `mainContentFocusBorder` — lights up a 1px accent
+                // hairline around the tree's FocusScope when any
+                // descendant has the active focus. Uses FocusScope's
+                // `activeFocus` directly (which propagates from
+                // descendants), so we don't need to track the internal
+                // ListView's focus state explicitly. Same z-stacking
+                // and transparent-when-inactive contract as the
+                // mainContent overlay; see that block's comment for
+                // the full rationale (especially the "don't toggle
+                // border.width" point — costs a layout round-trip).
+                Rectangle {
+                    id: treeScopeFocusBorder
+                    anchors.fill: parent
+                    color: "transparent"
+                    border.color: treeScope.activeFocus
+                                  ? Theme.color.accent.focus
+                                  : "transparent"
+                    border.width: 1
+                    z: 50
                 }
 
                 // Two-section composition inside the side panel:
