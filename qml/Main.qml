@@ -456,6 +456,13 @@ Window {
                         id: gitStatusPanel
                         Layout.fillWidth: true
                         model: gitStatusList
+                        // Header-bucket aggregates (staged/unstaged/untracked
+                        // adds/dels/files) — populated by the same worker
+                        // scan as the file list. Binding to a `@Property
+                        // notify=statsChanged` on the Python side means QML
+                        // re-evaluates whenever the worker publishes a new
+                        // scan, no manual refresh wiring needed.
+                        stats: gitController.stats
                         // Same activation contract as the FileTreeView: open
                         // the path in nvim and re-focus the editor so the
                         // user can immediately start editing. Routed through

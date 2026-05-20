@@ -22,9 +22,13 @@ from symmetria_ide.git_controller import (
     STATE_UNSTAGED,
     STATE_UNTRACKED,
     GitController,
+    GitStats,
     GitStatus,
     GitStatusListModel,
     _add_directory_aggregates,
+    _compute_stats,
+    _merge_numstat_into_map,
+    parse_numstat_blob,
     parse_porcelain_v2,
 )
 
@@ -822,11 +826,11 @@ def test_publish_suppresses_signal_on_equal_map() -> None:
             controller._resolved_root = "/repo"
         received: list[None] = []
         controller.statusChanged.connect(lambda: received.append(None))
-        # Publish the SAME map — should be a no-op.
-        controller._publish({"src/foo.py": status}, "/repo")
+        # Publish the SAME map + same stats — should be a no-op.
+        controller._publish({"src/foo.py": status}, "/repo", GitStats())
         assert len(received) == 0, "statusChanged must not fire when map is unchanged"
         # Publish a DIFFERENT map — should fire.
-        controller._publish({}, "")
+        controller._publish({}, "", GitStats())
         assert len(received) == 1, "statusChanged must fire when map changes"
     finally:
         controller.stop()
@@ -868,5 +872,411 @@ def test_controller_set_repo_root_to_empty_clears_state() -> None:
             assert controller._resolved_root == ""
         assert len(root_changes) == 1, "repoRootChanged must fire on root change"
         assert len(status_changes) == 1, "statusChanged must fire to clear the panel"
+    finally:
+        controller.stop()
+
+
+# ---------------------------------------------------------------------------
+# parse_numstat_blob — `git diff --numstat -z` parser.
+# ---------------------------------------------------------------------------
+
+
+def _numstat(adds: str, dels: str, path: str) -> bytes:
+    """One ordinary numstat row: ``adds\\tdels\\tpath``."""
+    return f"{adds}\t{dels}\t{path}".encode("utf-8")
+
+
+def _numstat_rename(adds: str, dels: str, orig: str, new: str) -> bytes:
+    """One rename row with `-z`: empty path slot, then a second NUL field."""
+    head = f"{adds}\t{dels}\t".encode("utf-8")  # trailing tab, empty path
+    return head + b"\x00" + new.encode("utf-8")
+
+
+def test_numstat_empty_blob_returns_empty_map() -> None:
+    assert parse_numstat_blob(b"") == {}
+
+
+def test_numstat_parses_ordinary_entries() -> None:
+    blob = (
+        b"\x00".join(
+            [_numstat("12", "3", "src/foo.py"), _numstat("0", "8", "src/bar.py")]
+        )
+        + b"\x00"
+    )
+    assert parse_numstat_blob(blob) == {
+        "src/foo.py": (12, 3),
+        "src/bar.py": (0, 8),
+    }
+
+
+def test_numstat_skips_binary_rows() -> None:
+    # Binary files are emitted with `-` for both counts. Skip them — the
+    # panel can't render `+? -?` and the bash reference does the same.
+    blob = (
+        b"\x00".join(
+            [_numstat("-", "-", "assets/logo.png"), _numstat("4", "1", "src/foo.py")]
+        )
+        + b"\x00"
+    )
+    assert parse_numstat_blob(blob) == {"src/foo.py": (4, 1)}
+
+
+def test_numstat_handles_renames_keys_on_new_path() -> None:
+    # Renames in -z mode put the NEW path in a second NUL-terminated field.
+    # We key on the new path because the porcelain status row's path is
+    # also the new path — keeps the merge step's lookup trivial.
+    blob = _numstat_rename("5", "2", "old/a.py", "new/a.py") + b"\x00"
+    assert parse_numstat_blob(blob) == {"new/a.py": (5, 2)}
+
+
+def test_numstat_malformed_rows_dropped_silently() -> None:
+    # Rows missing the third tab-separated field would crash a strict
+    # parser; we drop them so a partial pipe read can't kill the worker.
+    blob = b"only_one\x00" + _numstat("1", "0", "src/foo.py") + b"\x00"
+    assert parse_numstat_blob(blob) == {"src/foo.py": (1, 0)}
+
+
+def test_numstat_non_integer_counts_dropped() -> None:
+    # Defensive: a future git version emitting non-numeric values in the
+    # count columns shouldn't crash. (Today only `-` does that, but a
+    # value-error skip is cheap insurance.)
+    blob = (
+        b"\x00".join([_numstat("abc", "1", "src/x.py"), _numstat("1", "0", "src/y.py")])
+        + b"\x00"
+    )
+    assert parse_numstat_blob(blob) == {"src/y.py": (1, 0)}
+
+
+# ---------------------------------------------------------------------------
+# _merge_numstat_into_map — fold numstat data into the GitStatus map.
+# ---------------------------------------------------------------------------
+
+
+def test_merge_populates_unstaged_from_unstaged_numstat() -> None:
+    file_map = {
+        "src/foo.py": GitStatus(
+            path="src/foo.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
+        )
+    }
+    merged = _merge_numstat_into_map(file_map, {}, {"src/foo.py": (10, 3)}, {})
+    assert merged["src/foo.py"].additions == 10
+    assert merged["src/foo.py"].deletions == 3
+
+
+def test_merge_populates_staged_from_staged_numstat() -> None:
+    file_map = {
+        "src/foo.py": GitStatus(
+            path="src/foo.py", char="M", state=STATE_STAGED, tooltip="Modified (staged)"
+        )
+    }
+    merged = _merge_numstat_into_map(file_map, {"src/foo.py": (4, 1)}, {}, {})
+    assert merged["src/foo.py"].additions == 4
+    assert merged["src/foo.py"].deletions == 1
+
+
+def test_merge_untracked_uses_line_count_as_additions() -> None:
+    # Untracked files don't have a diff — they're new in their entirety.
+    # We surface the file's line count as `additions` so the row reads
+    # `+N`, mirroring how the reference statusline shows untracked work.
+    file_map = {
+        "new.py": GitStatus(
+            path="new.py", char="?", state=STATE_UNTRACKED, tooltip="Untracked"
+        )
+    }
+    merged = _merge_numstat_into_map(file_map, {}, {}, {"new.py": 42})
+    assert merged["new.py"].additions == 42
+    assert merged["new.py"].deletions == 0
+
+
+def test_merge_renamed_uses_staged_numstat_first() -> None:
+    # Rename rows in porcelain v2 live on the staged side (X=R, Y=.), so
+    # the matching numstat entry is in the staged map.
+    file_map = {
+        "new/a.py": GitStatus(
+            path="new/a.py",
+            char="R",
+            state=STATE_RENAMED,
+            tooltip="Renamed",
+            orig_path="old/a.py",
+        )
+    }
+    merged = _merge_numstat_into_map(file_map, {"new/a.py": (3, 2)}, {}, {})
+    assert merged["new/a.py"].additions == 3
+    assert merged["new/a.py"].deletions == 2
+
+
+def test_merge_unmatched_entry_defaults_to_zero() -> None:
+    # A file in the status map but missing from numstat (binary, rename
+    # arrow mismatch, etc.) keeps the dataclass defaults so the row's
+    # delta column hides itself.
+    file_map = {
+        "src/foo.py": GitStatus(
+            path="src/foo.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
+        )
+    }
+    merged = _merge_numstat_into_map(file_map, {}, {}, {})
+    assert merged["src/foo.py"].additions == 0
+    assert merged["src/foo.py"].deletions == 0
+
+
+def test_merge_ignored_files_get_zero_delta() -> None:
+    file_map = {
+        "build/out.o": GitStatus(
+            path="build/out.o", char="!", state=STATE_IGNORED, tooltip="Ignored"
+        )
+    }
+    # Even if a numstat entry exists (it shouldn't for ignored files,
+    # but defensively), the merge selects 0/0 for STATE_IGNORED.
+    merged = _merge_numstat_into_map(file_map, {"build/out.o": (5, 5)}, {}, {})
+    assert merged["build/out.o"].additions == 0
+    assert merged["build/out.o"].deletions == 0
+
+
+def test_merge_conflicted_uses_staged_or_unstaged() -> None:
+    # Conflicted files live in unmerged state; numstat may show them on
+    # either side depending on which side the user has touched. We try
+    # staged first, then unstaged, so the row carries SOMETHING when
+    # data is available.
+    file_map = {
+        "src/x.py": GitStatus(
+            path="src/x.py", char="U", state=STATE_CONFLICTED, tooltip="Conflicted"
+        )
+    }
+    merged = _merge_numstat_into_map(file_map, {}, {"src/x.py": (7, 4)}, {})
+    assert merged["src/x.py"].additions == 7
+    assert merged["src/x.py"].deletions == 4
+
+
+# ---------------------------------------------------------------------------
+# _compute_stats — header bucket aggregation.
+# ---------------------------------------------------------------------------
+
+
+def test_compute_stats_sums_per_bucket() -> None:
+    stats = _compute_stats(
+        staged_ns={"a.py": (10, 3), "b.py": (2, 0)},
+        unstaged_ns={"c.py": (5, 1)},
+        untracked_lc={"d.py": 8, "e.py": 12},
+        untracked_total=2,
+    )
+    assert stats.staged_add == 12
+    assert stats.staged_del == 3
+    assert stats.staged_files == 2
+    assert stats.unstaged_add == 5
+    assert stats.unstaged_del == 1
+    assert stats.unstaged_files == 1
+    assert stats.untracked_lines == 20
+    assert stats.untracked_count == 2
+
+
+def test_compute_stats_double_counts_mm_files() -> None:
+    # A doubly-modified ("MM") file appears in both numstat dicts and is
+    # counted in both buckets — accurate, because it has real work on
+    # both sides. The panel renders only one row for it (worktree
+    # precedence) but the header is meant to answer per-side.
+    stats = _compute_stats(
+        staged_ns={"foo.py": (3, 0)},
+        unstaged_ns={"foo.py": (1, 5)},
+        untracked_lc={},
+        untracked_total=0,
+    )
+    assert stats.staged_files == 1
+    assert stats.unstaged_files == 1
+    assert stats.staged_add == 3
+    assert stats.unstaged_del == 5
+
+
+def test_compute_stats_untracked_total_separate_from_lines() -> None:
+    # When the line-count map is partial (cap hit), `untracked_count`
+    # still reflects the full count.
+    stats = _compute_stats(
+        staged_ns={},
+        unstaged_ns={},
+        untracked_lc={"a.py": 3, "b.py": 5},  # only 2 sampled
+        untracked_total=100,  # but 100 actual untracked files
+    )
+    assert stats.untracked_lines == 8
+    assert stats.untracked_count == 100
+
+
+def test_compute_stats_empty_returns_default() -> None:
+    assert _compute_stats({}, {}, {}, 0) == GitStats()
+
+
+# ---------------------------------------------------------------------------
+# _count_untracked_lines — Python file-read pass with binary skip + cap.
+# ---------------------------------------------------------------------------
+
+
+def test_count_untracked_lines_counts_newlines(tmp_path) -> None:
+    from symmetria_ide.git_controller import GitController
+
+    (tmp_path / "a.txt").write_text("one\ntwo\nthree\n")
+    (tmp_path / "b.txt").write_text("hi\n")
+    controller = GitController()
+    try:
+        result = controller._count_untracked_lines(str(tmp_path), ["a.txt", "b.txt"])
+        assert result == {"a.txt": 3, "b.txt": 1}
+    finally:
+        controller.stop()
+
+
+def test_count_untracked_lines_skips_binary_files(tmp_path) -> None:
+    from symmetria_ide.git_controller import GitController
+
+    (tmp_path / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00binary")
+    (tmp_path / "a.txt").write_text("line1\nline2\n")
+    controller = GitController()
+    try:
+        result = controller._count_untracked_lines(str(tmp_path), ["logo.png", "a.txt"])
+        # Binary file dropped, text file present with correct count.
+        assert "logo.png" not in result
+        assert result["a.txt"] == 2
+    finally:
+        controller.stop()
+
+
+def test_count_untracked_lines_respects_cap(tmp_path) -> None:
+    from symmetria_ide.git_controller import GitController
+
+    # Twenty-five untracked text files, cap at 5.
+    paths: list[str] = []
+    for i in range(25):
+        name = f"f{i:02d}.txt"
+        (tmp_path / name).write_text(f"{i}\n")
+        paths.append(name)
+    controller = GitController()
+    try:
+        result = controller._count_untracked_lines(str(tmp_path), paths, cap=5)
+        assert len(result) == 5
+    finally:
+        controller.stop()
+
+
+def test_count_untracked_lines_missing_file_silently_dropped(tmp_path) -> None:
+    from symmetria_ide.git_controller import GitController
+
+    (tmp_path / "real.txt").write_text("a\nb\n")
+    controller = GitController()
+    try:
+        result = controller._count_untracked_lines(
+            str(tmp_path), ["real.txt", "ghost.txt"]
+        )
+        assert result == {"real.txt": 2}
+    finally:
+        controller.stop()
+
+
+def test_count_untracked_lines_empty_paths_returns_empty() -> None:
+    from symmetria_ide.git_controller import GitController
+
+    controller = GitController()
+    try:
+        assert controller._count_untracked_lines("/tmp", []) == {}
+    finally:
+        controller.stop()
+
+
+# ---------------------------------------------------------------------------
+# GitStatusListModel — new additions/deletions roles.
+# ---------------------------------------------------------------------------
+
+
+def test_list_model_exposes_additions_deletions_roles() -> None:
+    controller = GitController()
+    try:
+        model = GitStatusListModel(controller)
+        _inject(
+            controller,
+            "/repo",
+            GitStatus(
+                path="src/foo.py",
+                char="M",
+                state=STATE_UNSTAGED,
+                tooltip="Modified",
+                additions=12,
+                deletions=5,
+            ),
+        )
+        model._refresh()
+        idx = model.index(0, 0)
+        assert model.data(idx, GitStatusListModel.AdditionsRole) == 12
+        assert model.data(idx, GitStatusListModel.DeletionsRole) == 5
+        names = model.roleNames()
+        assert names[GitStatusListModel.AdditionsRole] == b"additions"
+        assert names[GitStatusListModel.DeletionsRole] == b"deletions"
+    finally:
+        controller.stop()
+
+
+# ---------------------------------------------------------------------------
+# GitController.stats — QML property serializes GitStats fields correctly.
+# ---------------------------------------------------------------------------
+
+
+def test_controller_stats_property_serializes_fields() -> None:
+    controller = GitController()
+    try:
+        with controller._lock:
+            controller._stats = GitStats(
+                staged_add=10,
+                staged_del=3,
+                staged_files=2,
+                unstaged_add=5,
+                unstaged_del=1,
+                unstaged_files=1,
+                untracked_lines=42,
+                untracked_count=3,
+            )
+        s = controller.stats
+        assert s == {
+            "stagedAdd": 10,
+            "stagedDel": 3,
+            "stagedFiles": 2,
+            "unstagedAdd": 5,
+            "unstagedDel": 1,
+            "unstagedFiles": 1,
+            "untrackedLines": 42,
+            "untrackedCount": 3,
+        }
+    finally:
+        controller.stop()
+
+
+def test_controller_stats_default_zero() -> None:
+    controller = GitController()
+    try:
+        s = controller.stats
+        assert s["stagedAdd"] == 0
+        assert s["unstagedFiles"] == 0
+        assert s["untrackedCount"] == 0
+    finally:
+        controller.stop()
+
+
+def test_publish_emits_stats_changed_on_stats_change() -> None:
+    # Even when the map is unchanged, stats changing must emit
+    # statsChanged so the header re-binds (e.g. user changes the
+    # working-tree diff size without changing the file SET).
+    controller = GitController()
+    try:
+        status = GitStatus(
+            path="src/foo.py",
+            char="M",
+            state=STATE_UNSTAGED,
+            tooltip="Modified",
+        )
+        with controller._lock:
+            controller._status_map = {"src/foo.py": status}
+            controller._resolved_root = "/repo"
+            controller._stats = GitStats(unstaged_add=5)
+        status_received: list[None] = []
+        stats_received: list[None] = []
+        controller.statusChanged.connect(lambda: status_received.append(None))
+        controller.statsChanged.connect(lambda: stats_received.append(None))
+        # Same map, NEW stats — statsChanged only.
+        controller._publish({"src/foo.py": status}, "/repo", GitStats(unstaged_add=10))
+        assert len(status_received) == 0
+        assert len(stats_received) == 1
     finally:
         controller.stop()

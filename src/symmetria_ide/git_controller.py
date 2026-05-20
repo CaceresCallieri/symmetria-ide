@@ -67,6 +67,12 @@ class GitStatus:
     the repo root). `char` is the single character the badge displays.
     `state` selects the color via the FM's named-color palette.
     `orig_path` is populated only for rename/copy records (type `2`).
+    `additions`/`deletions` carry the line-count delta from
+    ``git diff (--cached)? --numstat`` for tracked files, or
+    ``additions`` = file line count and ``deletions = 0`` for untracked.
+    They default to 0 so `parse_porcelain_v2` can construct entries
+    without knowing the diff yet — the merge step in `_do_scan`
+    populates the fields afterward via ``dataclasses.replace``.
     """
 
     path: str
@@ -74,6 +80,36 @@ class GitStatus:
     state: str
     tooltip: str
     orig_path: str | None = None
+    additions: int = 0
+    deletions: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class GitStats:
+    """Aggregate line-change counts for the git status panel header.
+
+    Three buckets mirroring the reference Claude statusline shape:
+    staged (●), unstaged (○), untracked (✦). File counts come from the
+    numstat output's path set, NOT from the rendered panel row count —
+    a doubly-modified "MM" file legitimately appears in both the staged
+    and unstaged buckets even though the panel renders only one row for
+    it (worktree precedence per `_classify_xy`). The header is meant to
+    answer "how much work do I have on each side", and that question is
+    naturally split.
+
+    Frozen so the cross-thread emit moves a single immutable value —
+    QML reads it without holding a controller lock. Same discipline as
+    `GitStatus`.
+    """
+
+    staged_add: int = 0
+    staged_del: int = 0
+    staged_files: int = 0
+    unstaged_add: int = 0
+    unstaged_del: int = 0
+    unstaged_files: int = 0
+    untracked_lines: int = 0
+    untracked_count: int = 0
 
 
 # Human-readable tooltips, indexed by (char, state).
@@ -292,6 +328,161 @@ def _add_directory_aggregates(file_map: dict[str, GitStatus]) -> dict[str, GitSt
 
 
 # ---------------------------------------------------------------------------
+# numstat parsing + merge — pure functions that turn `git diff --numstat -z`
+# output into a path-keyed (additions, deletions) dict, and fold those plus
+# untracked line counts back into a GitStatus map / GitStats aggregate.
+# ---------------------------------------------------------------------------
+
+
+def parse_numstat_blob(blob: bytes) -> dict[str, tuple[int, int]]:
+    """Parse ``git diff --numstat -z`` stdout into a path→(adds, dels) map.
+
+    Wire format with `-z`:
+
+      ``<adds>\\t<dels>\\t<path>\\x00``        — ordinary entry
+      ``<adds>\\t<dels>\\t<orig>\\x00<new>\\x00`` — rename (two NUL fields)
+
+    Binary files emit ``-`` for both numeric columns and are SKIPPED — the
+    panel can't meaningfully render `+? -?` for a binary, and the bash
+    reference behaves the same way (status-line.sh:77 / :89).
+
+    For rename rows we key the result on the NEW path (the post-rename
+    identity), so the merge step can match it against the porcelain v2
+    type-2 record whose path field is also the new path. Original-path
+    matching for renames isn't needed: the porcelain row already carries
+    the rename pairing via `orig_path`, and the numstat row's delta is
+    semantically attached to "the file as it now exists".
+
+    Malformed records are silently dropped — partial pipe reads or future
+    git output variants must not crash the watcher worker.
+    """
+    result: dict[str, tuple[int, int]] = {}
+    if not blob:
+        return result
+
+    fields = blob.split(b"\x00")
+    if fields and fields[-1] == b"":
+        fields.pop()
+
+    i = 0
+    while i < len(fields):
+        rec = fields[i].decode("utf-8", errors="replace")
+        i += 1
+        if not rec:
+            continue
+        # Split into max 3 cols: adds, dels, path-or-orig. Renames put the
+        # new path in a SECOND NUL-terminated field that follows.
+        parts = rec.split("\t", 2)
+        if len(parts) < 3:
+            continue
+        adds_s, dels_s, path = parts
+        # Binary rows: skip with no consumption beyond the row itself.
+        if adds_s == "-" or dels_s == "-":
+            if path == "" and i < len(fields):
+                # Defensive: rename row with binary marker. Consume the
+                # second field so the iterator realigns.
+                i += 1
+            continue
+        try:
+            adds = int(adds_s)
+            dels = int(dels_s)
+        except ValueError:
+            continue
+        # Rename detection: with `-z`, the FIRST field's path slot is empty
+        # and the new path lives in the next NUL-terminated field.
+        if path == "":
+            if i >= len(fields):
+                continue
+            path = fields[i].decode("utf-8", errors="replace")
+            i += 1
+        result[path] = (adds, dels)
+
+    return result
+
+
+def _merge_numstat_into_map(
+    file_map: dict[str, GitStatus],
+    staged_ns: dict[str, tuple[int, int]],
+    unstaged_ns: dict[str, tuple[int, int]],
+    untracked_lc: dict[str, int],
+) -> dict[str, GitStatus]:
+    """Return a new map with additions/deletions populated on each GitStatus.
+
+    Selection rule mirrors `_classify_xy`'s worktree-precedence:
+      - state == unstaged  → unstaged_ns entry (worktree diff)
+      - state == staged    → staged_ns entry (index diff)
+      - state == untracked → (untracked_lc.get(path, 0), 0)
+      - state == renamed/conflicted → staged_ns first, then unstaged_ns
+        (rename rows live in the staged side; conflicts have entries in
+        both depending on which side the user has touched — staged-first
+        is the most useful default).
+      - state == ignored   → no diff; leave 0/0.
+
+    Files with no matching numstat entry (binary, rename-arrow path
+    mismatch, etc.) keep the dataclass default of 0/0 — the row delegate
+    hides its delta column when both are 0, so the failure is silent.
+
+    `dataclasses.replace` is used because GitStatus is frozen.
+    """
+    from dataclasses import replace
+
+    result: dict[str, GitStatus] = {}
+    for path, status in file_map.items():
+        adds, dels = 0, 0
+        if status.state == STATE_UNSTAGED:
+            adds, dels = unstaged_ns.get(path, (0, 0))
+        elif status.state == STATE_STAGED:
+            adds, dels = staged_ns.get(path, (0, 0))
+        elif status.state == STATE_UNTRACKED:
+            adds = untracked_lc.get(path, 0)
+        elif status.state in (STATE_RENAMED, STATE_CONFLICTED):
+            if path in staged_ns:
+                adds, dels = staged_ns[path]
+            elif path in unstaged_ns:
+                adds, dels = unstaged_ns[path]
+        # STATE_IGNORED falls through with 0/0.
+        if adds or dels:
+            result[path] = replace(status, additions=adds, deletions=dels)
+        else:
+            result[path] = status
+    return result
+
+
+def _compute_stats(
+    staged_ns: dict[str, tuple[int, int]],
+    unstaged_ns: dict[str, tuple[int, int]],
+    untracked_lc: dict[str, int],
+    untracked_total: int,
+) -> GitStats:
+    """Sum numstat entries into the three header buckets.
+
+    ``staged_files``/``unstaged_files`` count the path set of each numstat
+    map. A doubly-modified "MM" file appears in BOTH dicts and is counted
+    on both sides — that's intentional: it has real work on both the
+    staging area and the worktree, and the user should see that.
+
+    ``untracked_total`` is passed in separately so the count reflects the
+    FULL untracked set even when ``untracked_lc`` is partial (cap hit).
+    ``untracked_lines`` is the sum over whatever line counts we collected.
+    """
+    staged_add = sum(a for a, _ in staged_ns.values())
+    staged_del = sum(d for _, d in staged_ns.values())
+    unstaged_add = sum(a for a, _ in unstaged_ns.values())
+    unstaged_del = sum(d for _, d in unstaged_ns.values())
+    untracked_lines = sum(untracked_lc.values())
+    return GitStats(
+        staged_add=staged_add,
+        staged_del=staged_del,
+        staged_files=len(staged_ns),
+        unstaged_add=unstaged_add,
+        unstaged_del=unstaged_del,
+        unstaged_files=len(unstaged_ns),
+        untracked_lines=untracked_lines,
+        untracked_count=untracked_total,
+    )
+
+
+# ---------------------------------------------------------------------------
 # GitController — the Qt facade. Worker thread + watcher + debounce.
 # ---------------------------------------------------------------------------
 
@@ -341,6 +532,7 @@ class GitController(QObject):
     """
 
     statusChanged = Signal()
+    statsChanged = Signal()
     repoRootChanged = Signal()
     # Internal worker→GUI signal that asks the GUI thread to rebuild the
     # QFileSystemWatcher entries for a newly-resolved repo root. Connected
@@ -360,9 +552,14 @@ class GitController(QObject):
         self._repo_root: str = ""
         self._resolved_root: str = ""
         self._status_map: dict[str, GitStatus] = {}
+        # Header-bucket aggregates (staged/unstaged/untracked +a -d (n)).
+        # Worker writes via `_publish`; GUI thread reads via the `stats`
+        # property (which copies under the lock into a QVariantMap).
+        self._stats: GitStats = GitStats()
 
-        # Guards `_status_map` and `_resolved_root` against the worker
-        # mutating them while the GUI thread reads in `statusForPath`.
+        # Guards `_status_map`, `_stats`, and `_resolved_root` against the
+        # worker mutating them while the GUI thread reads via
+        # `statusForPath` / the `stats` property.
         self._lock = threading.Lock()
 
         # Worker lifecycle.
@@ -402,6 +599,32 @@ class GitController(QObject):
     def repoRoot(self) -> str:
         return self._repo_root
 
+    @Property("QVariant", notify=statsChanged)
+    def stats(self) -> dict:
+        """Header-bucket aggregates exposed to QML as a JS object.
+
+        Marshalled as a `QVariantMap` so QML reads it as a plain object
+        with the field names below. We copy under the lock so the worker
+        can't swap the underlying `_stats` mid-read. Same idiom as
+        `statusForPath` — small fixed-shape dict so QML can do
+        `stats.stagedAdd` etc. without a roleNames dance.
+
+        Field names match the QML-side use in `GitStatusPanel.qml`'s
+        header repeater; renaming requires touching that file too.
+        """
+        with self._lock:
+            s = self._stats
+        return {
+            "stagedAdd": s.staged_add,
+            "stagedDel": s.staged_del,
+            "stagedFiles": s.staged_files,
+            "unstagedAdd": s.unstaged_add,
+            "unstagedDel": s.unstaged_del,
+            "unstagedFiles": s.unstaged_files,
+            "untrackedLines": s.untracked_lines,
+            "untrackedCount": s.untracked_count,
+        }
+
     def set_repo_root(self, value: str) -> None:
         """Switch the repo being watched. Idempotent on equal values.
 
@@ -419,8 +642,10 @@ class GitController(QObject):
         self._clear_watcher()
         with self._lock:
             self._status_map = {}
+            self._stats = GitStats()
             self._resolved_root = ""
         self.statusChanged.emit()
+        self.statsChanged.emit()
         self._wake_worker()
 
     @Slot(str, result="QVariantMap")
@@ -516,17 +741,32 @@ class GitController(QObject):
                 log.exception("git status scan failed")
 
     def _do_scan(self) -> None:
-        """One scan: resolve repo root, run git status, update map."""
+        """One scan: resolve repo root, run status + numstat, update map.
+
+        Sequence:
+          1. `git rev-parse --show-toplevel` — resolve real repo root.
+          2. `git status --porcelain=v2 -z` — file-state map.
+          3. `git diff --cached --numstat -z` — staged additions/deletions.
+          4. `git diff --numstat -z` — unstaged additions/deletions.
+          5. Python file-read pass over untracked files (cap 20).
+          6. Merge into status map; compute header stats; publish.
+
+        Steps 3-5 are best-effort: each falls back to an empty dict on
+        subprocess failure, so a transient git-shell hiccup degrades to
+        "no line counts shown" rather than blinking the whole panel away.
+        The status scan (step 2) keeps its preserve-previous-on-None
+        contract because it drives the file LIST, not just the counts.
+        """
         with self._lock:
             repo_root = self._repo_root
         if not repo_root:
-            self._publish({}, "")
+            self._publish({}, "", GitStats())
             return
 
         resolved = self._resolve_repo_root(repo_root)
         if not resolved:
             # Not a git repo — clear map, emit (panel hides), no watcher.
-            self._publish({}, "")
+            self._publish({}, "", GitStats())
             return
 
         new_map = self._run_status(resolved)
@@ -535,8 +775,20 @@ class GitController(QObject):
             # on a transient error (timeout, fsmonitor hiccup).
             return
 
+        staged_ns = self._run_numstat_staged(resolved) or {}
+        unstaged_ns = self._run_numstat_unstaged(resolved) or {}
+        untracked_paths = [
+            rel for rel, st in new_map.items() if st.state == STATE_UNTRACKED
+        ]
+        untracked_lc = self._count_untracked_lines(resolved, untracked_paths)
+
+        new_map = _merge_numstat_into_map(new_map, staged_ns, unstaged_ns, untracked_lc)
+        new_stats = _compute_stats(
+            staged_ns, unstaged_ns, untracked_lc, len(untracked_paths)
+        )
+
         new_map = _add_directory_aggregates(new_map)
-        self._publish(new_map, resolved)
+        self._publish(new_map, resolved, new_stats)
 
         # Hand the watcher rebuild back to the GUI thread — QFileSystemWatcher
         # is not thread-safe and lives on `self`'s thread.
@@ -596,21 +848,133 @@ class GitController(QObject):
             return None
         return parse_porcelain_v2(proc.stdout)
 
-    def _publish(self, new_map: dict[str, GitStatus], resolved: str) -> None:
-        """Swap the map under the lock and emit statusChanged.
+    def _run_numstat_staged(self, cwd: str) -> dict[str, tuple[int, int]] | None:
+        """Run ``git diff --cached --numstat -z`` and parse the output.
 
-        GC is suspended around the emit because the worker thread is mid-
+        Captures additions/deletions for files staged in the index. Returns
+        an empty dict when nothing is staged, ``None`` on subprocess failure
+        — callers fold ``None`` to ``{}`` so a transient error degrades to
+        "no staged line counts" rather than blanking the panel.
+        """
+        return self._run_numstat(cwd, cached=True)
+
+    def _run_numstat_unstaged(self, cwd: str) -> dict[str, tuple[int, int]] | None:
+        """Run ``git diff --numstat -z`` and parse the output.
+
+        Captures additions/deletions for worktree changes (not yet staged).
+        Same failure semantics as :meth:`_run_numstat_staged`.
+        """
+        return self._run_numstat(cwd, cached=False)
+
+    def _run_numstat(
+        self, cwd: str, *, cached: bool
+    ) -> dict[str, tuple[int, int]] | None:
+        """Shared subprocess shell for staged / unstaged numstat passes.
+
+        Splitting the public-named methods keeps the call sites in
+        ``_do_scan`` self-documenting; the shared body just toggles the
+        ``--cached`` flag. ``-z`` makes path delimiters NUL so we can
+        round-trip filenames containing tabs / newlines safely.
+        """
+        cmd = ["git", "diff", "--cached" if cached else None, "--numstat", "-z"]
+        cmd = [c for c in cmd if c is not None]
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                timeout=_SCAN_TIMEOUT_SEC,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            log.warning(
+                "git diff --numstat (cached=%s) failed for %s: %s",
+                cached,
+                cwd,
+                exc,
+            )
+            return None
+        if proc.returncode != 0:
+            log.warning(
+                "git diff --numstat (cached=%s) exited %d for %s: %s",
+                cached,
+                proc.returncode,
+                cwd,
+                proc.stderr.decode("utf-8", errors="replace").strip(),
+            )
+            return None
+        return parse_numstat_blob(proc.stdout)
+
+    def _count_untracked_lines(
+        self,
+        resolved: str,
+        rel_paths: list[str],
+        cap: int = 20,
+    ) -> dict[str, int]:
+        """Count newlines in each untracked file (binary heuristic + cap).
+
+        Pure-Python file I/O, not ``wc -l``: spawning 20 subprocesses per
+        debounced scan would add ~10ms+ of fork+exec on this system, well
+        inside what users feel as a sluggish refresh. Python's ``open +
+        read + count`` runs at ~50k files/s on a modern SSD.
+
+        Cap: when more than ``cap`` paths are untracked (e.g. fresh clone
+        of a repo with thousands of build artifacts), we sample only the
+        first ``cap``. The header still shows the FULL untracked file
+        count via ``untracked_count`` (computed separately upstream); only
+        the line total reflects the partial sample. This mirrors the bash
+        reference's responsiveness budget (status-line.sh:103).
+
+        Binary heuristic: skip files whose first 8 KiB contain a NUL byte,
+        matching how ``git diff --numstat`` itself classifies binaries.
+        Empty files count as 0 newlines (correct).
+
+        Returns repo-relative-path → line-count. Missing / unreadable
+        files are silently dropped — best-effort by contract.
+        """
+        result: dict[str, int] = {}
+        if not rel_paths:
+            return result
+        sample = rel_paths[:cap]
+        for rel in sample:
+            abs_path = os.path.join(resolved, rel)
+            try:
+                with open(abs_path, "rb") as f:
+                    head = f.read(8192)
+                    if b"\x00" in head:
+                        continue  # binary file — skip per `git diff` semantics
+                    rest = f.read()
+            except OSError:
+                continue
+            result[rel] = head.count(b"\n") + rest.count(b"\n")
+        return result
+
+    def _publish(
+        self,
+        new_map: dict[str, GitStatus],
+        resolved: str,
+        new_stats: GitStats,
+    ) -> None:
+        """Swap the map + stats under the lock and emit change signals.
+
+        GC is suspended around the emits because the worker thread is mid-
         cross-thread signal dispatch — same hazard as nvim_backend's
         ``_dispatch_redraw`` per gotcha #10 (Python 3.14 cyclic GC racing
-        the Qt receiver-side wrapper allocation).
+        the Qt receiver-side wrapper allocation). One ``gc.disable`` window
+        covers both signals so the protection is unbroken across them.
         """
         with self._lock:
             old_map = self._status_map
+            old_stats = self._stats
             old_root = self._resolved_root
             self._status_map = new_map
+            self._stats = new_stats
             self._resolved_root = resolved
 
-        if old_map != new_map or old_root != resolved:
+        map_or_root_changed = old_map != new_map or old_root != resolved
+        stats_changed = old_stats != new_stats
+
+        if map_or_root_changed:
             # Counting non-aggregate entries for the log line — directory
             # aggregates are an implementation detail, the user cares about
             # how many actual files have changes.
@@ -623,9 +987,14 @@ class GitController(QObject):
                 )
             else:
                 log.info("git scan: cleared (not in a repo)")
+
+        if map_or_root_changed or stats_changed:
             gc.disable()
             try:
-                self.statusChanged.emit()
+                if map_or_root_changed:
+                    self.statusChanged.emit()
+                if stats_changed:
+                    self.statsChanged.emit()
             finally:
                 gc.enable()
 
@@ -767,6 +1136,8 @@ class GitStatusListModel(QAbstractListModel):
       - ``statusChar``   — single-character badge ("M", "?", "A", …)
       - ``statusState``  — semantic state name (for color lookup in QML)
       - ``tooltip``      — human-readable hover text
+      - ``additions``    — int, lines added (0 if unknown / binary)
+      - ``deletions``    — int, lines removed (0 if untracked / binary)
     """
 
     PathRole = Qt.ItemDataRole.UserRole + 1
@@ -774,6 +1145,8 @@ class GitStatusListModel(QAbstractListModel):
     CharRole = Qt.ItemDataRole.UserRole + 3
     StateRole = Qt.ItemDataRole.UserRole + 4
     TooltipRole = Qt.ItemDataRole.UserRole + 5
+    AdditionsRole = Qt.ItemDataRole.UserRole + 6
+    DeletionsRole = Qt.ItemDataRole.UserRole + 7
 
     countChanged = Signal()
 
@@ -784,7 +1157,7 @@ class GitStatusListModel(QAbstractListModel):
     ) -> None:
         super().__init__(parent)
         self._controller = controller
-        self._items: list[dict[str, str]] = []
+        self._items: list[dict[str, object]] = []
         # The controller emits `statusChanged` on the worker thread when a
         # scan completes (the cross-thread emit is wrapped in gc.disable
         # per gotcha #10). Receivers MUST use QueuedConnection to hop onto
@@ -804,6 +1177,8 @@ class GitStatusListModel(QAbstractListModel):
             self.CharRole: b"statusChar",
             self.StateRole: b"statusState",
             self.TooltipRole: b"tooltip",
+            self.AdditionsRole: b"additions",
+            self.DeletionsRole: b"deletions",
         }
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: B008 — QModelIndex() default required by Qt; ARG002 — parent unused per QAbstractListModel contract
@@ -823,6 +1198,10 @@ class GitStatusListModel(QAbstractListModel):
             return item["state"]
         if role == self.TooltipRole:
             return item["tooltip"]
+        if role == self.AdditionsRole:
+            return item["additions"]
+        if role == self.DeletionsRole:
+            return item["deletions"]
         return None
 
     @Property(int, notify=countChanged)
@@ -844,7 +1223,11 @@ class GitStatusListModel(QAbstractListModel):
         for typical change-set sizes (tens of files) a reset is cheaper
         than computing a diff, and the panel re-binds in one pass.
         """
-        new_items: list[dict[str, str]] = []
+        # Item dicts are heterogeneous now (str | int) — the older
+        # `dict[str, str]` annotation no longer holds since additions /
+        # deletions are ints. Using `dict[str, object]` so downstream
+        # readers don't get a misleading type cue.
+        new_items: list[dict[str, object]] = []
         for abs_path, status in self._controller._file_entries():
             new_items.append(
                 {
@@ -853,6 +1236,8 @@ class GitStatusListModel(QAbstractListModel):
                     "char": status.char,
                     "state": status.state,
                     "tooltip": status.tooltip,
+                    "additions": status.additions,
+                    "deletions": status.deletions,
                 }
             )
         if new_items == self._items:

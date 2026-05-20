@@ -27,6 +27,13 @@ Item {
     // site so this component stays portable / reusable.
     property QtObject model: null
 
+    // Header-bucket aggregates exposed by `GitController.stats`
+    // (QVariantMap). Each bucket carries adds / dels / file-count; the
+    // header repeater binds against these. Default `{}` lets us render
+    // gracefully on first paint before the worker has produced numbers
+    // (every `modelData.n > 0` guard handles the undefined case).
+    property var stats: ({})
+
     // Emitted when the user clicks a row. Carries the ABSOLUTE filesystem
     // path of the activated file. Main.qml connects this to
     // `controller.open_in_nvim(path)` and then re-focuses the editor —
@@ -74,15 +81,73 @@ Item {
         anchors.rightMargin: Theme.spacing.xs
         spacing: Theme.spacing.xs
 
-        // Section header — quiet label so the panel reads as a labelled
-        // bucket of changes rather than a generic list. `dim` text colour
-        // keeps it secondary to the file rows themselves.
-        Text {
+        // Section header — quiet label + three aggregate bucket rows
+        // (staged ●, unstaged ○, untracked ✦) carrying +adds -dels (n).
+        // The icons + colour mapping reuse `_colorForState` so the
+        // header reads continuous with the per-row badge palette below.
+        // Bucket rows hide themselves when their file count is 0, so a
+        // clean staging area collapses to just the title.
+        ColumnLayout {
             Layout.fillWidth: true
-            text: "Changes" + (root.model ? " · " + root.model.count : "")
-            color: Theme.color.text.dim
-            font.family: Theme.font.family
-            font.pixelSize: Theme.font.size.xs
+            spacing: 2
+
+            Text {
+                Layout.fillWidth: true
+                text: "Changes" + (root.model ? " · " + root.model.count : "")
+                color: Theme.color.text.dim
+                font.family: Theme.font.family
+                font.pixelSize: Theme.font.size.xs
+            }
+
+            Repeater {
+                model: [
+                    {icon: "●", stateName: "staged",
+                     add: (root.stats && root.stats.stagedAdd) || 0,
+                     del: (root.stats && root.stats.stagedDel) || 0,
+                     n:   (root.stats && root.stats.stagedFiles) || 0},
+                    {icon: "○", stateName: "unstaged",
+                     add: (root.stats && root.stats.unstagedAdd) || 0,
+                     del: (root.stats && root.stats.unstagedDel) || 0,
+                     n:   (root.stats && root.stats.unstagedFiles) || 0},
+                    {icon: "✦", stateName: "untracked",
+                     add: (root.stats && root.stats.untrackedLines) || 0,
+                     del: 0,
+                     n:   (root.stats && root.stats.untrackedCount) || 0},
+                ]
+                delegate: RowLayout {
+                    visible: modelData.n > 0
+                    spacing: Theme.spacing.xs
+
+                    Text {
+                        text: modelData.icon
+                        color: _colorForState(modelData.stateName)
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.xs
+                    }
+                    Text {
+                        text: "+" + modelData.add
+                        color: Theme.color.diff.addedFg
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.xs
+                    }
+                    Text {
+                        visible: modelData.del > 0
+                        text: "-" + modelData.del
+                        color: Theme.color.diff.removedFg
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.xs
+                    }
+                    Text {
+                        text: "(" + modelData.n + ")"
+                        color: Theme.color.text.dim
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.xs
+                    }
+                    // Soak up remaining space so the row left-aligns
+                    // tightly rather than spreading across the width.
+                    Item { Layout.fillWidth: true }
+                }
+            }
         }
 
         // The list of changed files. Cap height to ~40% of available
@@ -162,6 +227,33 @@ Item {
                         // tooltip deferred — the panel is keyboard-first
                         // (non-negotiable #1); adding QtQuick.Controls just
                         // for a mouse-only affordance isn't justified yet.
+                    }
+
+                    // Per-row line delta. Tinted with the same diff palette
+                    // as the header buckets so the visual grammar matches.
+                    // Hidden when both numbers are 0 (binary file, rename
+                    // mismatch, or a file whose row state doesn't have a
+                    // matching numstat entry) — silent failure mode by
+                    // contract; the file row still renders.
+                    RowLayout {
+                        Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                        visible: model.additions > 0 || model.deletions > 0
+                        spacing: Theme.spacing.xs
+
+                        Text {
+                            visible: model.additions > 0
+                            text: "+" + model.additions
+                            color: Theme.color.diff.addedFg
+                            font.family: Theme.font.family
+                            font.pixelSize: Theme.font.size.xs
+                        }
+                        Text {
+                            visible: model.deletions > 0
+                            text: "-" + model.deletions
+                            color: Theme.color.diff.removedFg
+                            font.family: Theme.font.family
+                            font.pixelSize: Theme.font.size.xs
+                        }
                     }
                 }
             }
