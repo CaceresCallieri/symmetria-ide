@@ -474,6 +474,18 @@ Window {
                     GitStatusPanel {
                         id: gitStatusPanel
                         Layout.fillWidth: true
+                        // Cap the changes pane at half the side panel
+                        // column so a pathological changeset (e.g. a
+                        // fresh checkout with hundreds of untracked
+                        // files, or a project with a giant `node_modules`
+                        // surfaced via `respectGitignore: false`) cannot
+                        // push the main FileTreeView below off-screen.
+                        // When the cap engages, the panel's embedded
+                        // FileTreeView scrolls via its own ListView.
+                        // `parent` is the enclosing ColumnLayout, whose
+                        // height is anchored to the side panel
+                        // Rectangle — stable, no binding loop.
+                        maxHeight: parent.height * 0.5
                         model: gitStatusList
                         // Header-bucket aggregates (staged/unstaged/untracked
                         // adds/dels/files) — populated by the same worker

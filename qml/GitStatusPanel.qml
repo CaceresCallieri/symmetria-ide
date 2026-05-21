@@ -70,6 +70,17 @@ Item {
     // empty-but-valid on first paint.
     property var pathFilter: ({})
 
+    // Optional upper bound on the pane's height. `-1` (default) preserves
+    // pure content-fit behaviour. Consumers in a tall column (e.g.
+    // Main.qml's side panel) bind this to a fraction of the column
+    // height so a pathologically large changeset can't push the
+    // FileTreeView below off-screen — when implicitHeight exceeds
+    // maxHeight, the panel clamps and the embedded FileTreeView's
+    // own ListView scrollbar engages (the inner tree uses
+    // `Layout.fillHeight: true` so its rendered height tracks whatever
+    // the panel was actually granted, not its content-fit ideal).
+    property real maxHeight: -1
+
     // Emitted when the user clicks a file row. Carries the ABSOLUTE
     // filesystem path of the activated file. Main.qml connects this to
     // `controller.open_in_nvim(path)` and then re-focuses the editor.
@@ -86,6 +97,10 @@ Item {
         ? content.implicitHeight + Theme.spacing.sm * 2
         : 0
     Layout.preferredHeight: implicitHeight
+    // `-1` is Qt's "no cap" sentinel for Layout.maximumHeight, matching
+    // the property's own default. Binding rather than gating keeps the
+    // expression reactive when maxHeight changes (e.g. window resize).
+    Layout.maximumHeight: maxHeight > 0 ? maxHeight : -1
     Layout.fillWidth: true
 
     // Chrome — same matte tone the status bar and which-key overlay use.
@@ -181,15 +196,26 @@ Item {
 
         // The tree-shaped list of changed files. Reuses the FM's
         // FileTreeView with `pathFilter` narrowing visible rows to the
-        // current changeset. Height is content-fit: we don't set
-        // `Layout.preferredHeight`, so the Layout falls back to the
-        // FileTreeView's own `implicitHeight` (FM-side: tracks
-        // `view.contentHeight`). The pane grows with the changeset —
-        // no internal scrollbar, no fixed cap. A 4-file changeset
-        // takes ~5 rows of vertical space; a 50-file changeset takes
-        // ~60 rows. The main FileTreeView below uses `Layout.fillHeight`
-        // and is unaffected — Layouts override implicit height when
-        // fillHeight is set.
+        // current changeset.
+        //
+        // Sizing is dual-mode. The inner FileTreeView sets
+        // `Layout.fillHeight: true`, so it claims whatever vertical
+        // space the panel was granted. Two cases:
+        //   1. Panel under maxHeight (or maxHeight unset). The root
+        //      Item's `implicitHeight` is the sum of header impl +
+        //      tree impl (= contentHeight + padding), so the
+        //      `Layout.preferredHeight: implicitHeight` upstream
+        //      hands the panel exactly enough room for all rows.
+        //      fillHeight then assigns the tree exactly contentHeight,
+        //      and the ScrollBar stays hidden (FM-side gate:
+        //      `view.contentHeight > view.height + 0.5`).
+        //   2. Panel clamped by maxHeight. Tree gets less than its
+        //      contentHeight, the FM ListView starts scrolling, and
+        //      the ScrollBar appears. Users mouse-wheel through the
+        //      changeset within the cap; the main FileTreeView below
+        //      stays reachable because the parent column granted it
+        //      at least `column.height - maxHeight` of vertical
+        //      space.
         //
         // `respectGitignore: false` is deliberate — users genuinely want
         // to see force-added gitignored files (e.g. a build artifact
@@ -202,6 +228,7 @@ Item {
         FmUi.FileTreeView {
             id: changesTree
             Layout.fillWidth: true
+            Layout.fillHeight: true
 
             rootPath: root.repoRoot
             initialExpandDepth: -1
