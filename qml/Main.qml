@@ -485,6 +485,9 @@ Window {
                         // `parent` is the enclosing ColumnLayout, whose
                         // height is anchored to the side panel
                         // Rectangle — stable, no binding loop.
+                        // TODO: promote to Theme.sizing.gitPanelMaxFraction
+                        // once this pattern recurs (Theme token is the right
+                        // escape hatch per project-standards §3 P2).
                         maxHeight: parent.height * 0.5
                         model: gitStatusList
                         // Header-bucket aggregates (staged/unstaged/untracked

@@ -206,16 +206,16 @@ Item {
         //      tree impl (= contentHeight + padding), so the
         //      `Layout.preferredHeight: implicitHeight` upstream
         //      hands the panel exactly enough room for all rows.
-        //      fillHeight then assigns the tree exactly contentHeight,
-        //      and the ScrollBar stays hidden (FM-side gate:
+        //      fillHeight gives the tree the remaining granted height,
+        //      which in this case equals its contentHeight, and the
+        //      ScrollBar stays hidden (FM-side gate:
         //      `view.contentHeight > view.height + 0.5`).
         //   2. Panel clamped by maxHeight. Tree gets less than its
         //      contentHeight, the FM ListView starts scrolling, and
         //      the ScrollBar appears. Users mouse-wheel through the
-        //      changeset within the cap; the main FileTreeView below
-        //      stays reachable because the parent column granted it
-        //      at least `column.height - maxHeight` of vertical
-        //      space.
+        //      changeset within the cap; when the cap is engaged,
+        //      the main FileTreeView below is guaranteed at least
+        //      `column.height - maxHeight` of vertical space.
         //
         // `respectGitignore: false` is deliberate — users genuinely want
         // to see force-added gitignored files (e.g. a build artifact
