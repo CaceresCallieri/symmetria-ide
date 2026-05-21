@@ -200,3 +200,33 @@ def test_osc7_slot_signature_accepts_str():
     # the string form (or use typing.get_type_hints for the resolved
     # form, but that's heavier and overkill for a structural test).
     assert params[1].annotation in (str, "str")
+
+
+# ---------------------------------------------------------------------------
+# Initialization invariant — _cwd seeds from launch dir, not home dir
+# ---------------------------------------------------------------------------
+
+
+def test_initial_cwd_is_launch_dir(tmp_path, monkeypatch):
+    """AppController._cwd must be initialized to `os.getcwd()` (the launch
+    directory), NOT `os.path.expanduser("~")`.
+
+    This invariant is load-bearing for the terminal pre-warm path:
+    `AppController.start()` calls `_terminal_backend.start(self._cwd)`
+    synchronously, before nvim's VimEnter capsule can update `_cwd`. Whatever
+    placeholder sits in `_cwd` at that moment is what the embedded shell
+    process inherits as its starting directory. Using `~` instead of the
+    launch dir would land the terminal in the wrong project until the first
+    OSC 7 or nvim cwd capsule arrives.
+    """
+    # Simulate the user running `cd /some/project && python -m symmetria_ide`
+    monkeypatch.chdir(tmp_path)
+    ctrl = AppController()
+    try:
+        assert ctrl._cwd == str(tmp_path), (
+            f"_cwd should be the launch dir {tmp_path!r}, got {ctrl._cwd!r}. "
+            "If this regresses, the terminal pre-warm in AppController.start() "
+            "will inherit the wrong starting directory."
+        )
+    finally:
+        ctrl.shutdown()

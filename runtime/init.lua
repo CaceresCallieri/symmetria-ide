@@ -125,7 +125,7 @@ local function push_mode(mode_str)
 end
 
 -- Dedup cache for the cwd capsule. Critical because `push_state` is wired
--- to BufEnter / BufWritePost (line 157), neither of which signal a real
+-- to BufEnter / BufWritePost (line 183), neither of which signal a real
 -- cwd change — they fire on every buffer focus or save, while `getcwd()`
 -- only changes on `:cd` (or autochdir traversal). Without this dedup,
 -- every BufEnter re-emits nvim's CURRENT cwd as a "fresh" capsule, and on

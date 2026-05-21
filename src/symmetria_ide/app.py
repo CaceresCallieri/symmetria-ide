@@ -478,8 +478,8 @@ class AppController(QObject):
         # report (nvim inherits Python's cwd). Using the launch dir as
         # the initial `_cwd` is what makes the terminal pre-warm at
         # `start()` below land in the right project — `_terminal_backend
-        # .start(self._cwd)` fires synchronously during AppController
-        # construction, BEFORE nvim's VimEnter can update `_cwd` via a
+        # .start(self._cwd)` fires synchronously during AppController.start()
+        # (not __init__), BEFORE nvim's VimEnter can update `_cwd` via a
         # capsule, so any placeholder set here is what the shell process
         # inherits. A `~` placeholder was the pre-Phase-2.5 default when
         # there was no terminal pane to inherit it. Falls back to `~` if
