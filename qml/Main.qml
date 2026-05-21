@@ -318,7 +318,13 @@ Window {
                     // AND "central surface is editor". `editorVisible`
                     // is the boolean derivation of `controller.centralSurface`
                     // — see AppController for the state machine.
-                    visible: !controller.agentVisible && controller.editorVisible
+                    //
+                    // Also gated on `!controller.fmVisible` — the file
+                    // manager is co-mounted as a sibling pane below and,
+                    // when active, fully occupies the central slot (no
+                    // overlay/scrim anymore). The three panes form an
+                    // editor / terminal / agent / FM XOR cluster.
+                    visible: !controller.agentVisible && !controller.fmVisible && controller.editorVisible
                     backend: nvimBackend
                     focus: visible
 
@@ -375,7 +381,7 @@ Window {
                 TerminalView {
                     id: terminalView
                     anchors.fill: parent
-                    visible: !controller.agentVisible && controller.terminalVisible
+                    visible: !controller.agentVisible && !controller.fmVisible && controller.terminalVisible
                     backend: terminalBackend
                     focus: visible
 
@@ -388,7 +394,7 @@ Window {
                 AgentPane {
                     id: agentPane
                     anchors.fill: parent
-                    visible: controller.agentVisible
+                    visible: controller.agentVisible && !controller.fmVisible
                 }
 
                 // Active-pane focus border. Renders a 1px accent hairline
@@ -421,27 +427,205 @@ Window {
                 // never moves.
                 //
                 // z-order: above the pane siblings in mainContent
-                // (editor / terminalView / agentPane are all z: 0 by
-                // default, so z: 50 guarantees the border draws on top
-                // of their outermost pixel). The FM overlay (Loader at
-                // Window root, z: 100) is a sibling of the ColumnLayout
-                // that contains this item — it covers the border by
-                // document order + stacking context, not because 50 < 100.
-                // No z value here can interfere with the FM overlay, and
-                // no intermediate z slot between 50 and 100 exists today
-                // in this subtree (WhichKeyOverlay is z: 20 inside editor,
-                // a different stacking context).
+                // (editor / terminalView / agentPane / fmOverlayLoader are
+                // all z: 0 by default, so z: 50 guarantees the border draws
+                // on top of their outermost pixel). WhichKeyOverlay is z: 20
+                // inside editor, a different stacking context, so no
+                // interference there.
                 Rectangle {
                     id: mainContentFocusBorder
                     anchors.fill: parent
                     color: "transparent"
+                    // FM is treated like a regular central surface for the
+                    // focus hairline: when fmVisible is true and the side
+                    // panel doesn't own the focus, the FM is the active
+                    // pane by elimination (editor/terminal/agent are all
+                    // gated off by !fmVisible). Using fmVisible directly
+                    // — rather than walking the focus chain into the FM's
+                    // internal ListView — keeps the binding declarative
+                    // and matches the XOR shape that already governs the
+                    // other panes.
                     border.color: (agentPane.paneActive
                                    || editor.activeFocus
-                                   || terminalView.activeFocus)
+                                   || terminalView.activeFocus
+                                   || (controller.fmVisible && !treeScope.activeFocus))
                                   ? Theme.color.accent.focus
                                   : "transparent"
                     border.width: 1
                     z: 50
+                }
+
+                // File manager — central-pane surface (not an overlay).
+                // Was a Window-root Loader at z:100 with a dim scrim
+                // covering the whole window; now lives in `mainContent`
+                // as a sibling of editor/terminal/agent. The other panes
+                // are gated on `!controller.fmVisible` so exactly one
+                // central surface is visible at a time, matching the
+                // editor/terminal/agent XOR cluster.
+                //
+                // Loader.active toggles per visibility — the panel is
+                // reconstructed on each show. An earlier "keep loaded"
+                // approach (`active: visible || item !== null`) preserved
+                // tab/scroll/selection state across toggles, but it
+                // conflicted with the FM's focus-on-construction pattern:
+                // FileList.view grabs active focus inside its
+                // `Component.onCompleted` hook (FileList.qml:221), which
+                // only fires once per construction. After we hand focus
+                // back to the editor on dismiss, a subsequent show
+                // couldn't re-route focus into `view` (the FM panel's
+                // root is Item, not FocusScope, so focus restoration
+                // doesn't propagate from a parent forceActiveFocus). For
+                // picker-mode use (each Ctrl+E is a fresh "open file"
+                // flow), losing tab/scroll between toggles is acceptable;
+                // the ~50-100ms reconstruction cost is also acceptable
+                // for a binding that fires on user keypress, not in any
+                // hot path.
+                Loader {
+                    id: fmOverlayLoader
+                    anchors.fill: parent
+                    active: controller.fmVisible
+
+                    // Start picker mode when the panel first opens. The
+                    // panel reuses its existing picker infrastructure
+                    // (built for the XDG portal) as a clean "select a
+                    // file" affordance: confirming a selection emits
+                    // FileManagerService.pickerCompleted; cancelling
+                    // emits pickerCancelled. We connect to both below —
+                    // no fifoPath is passed, so the panel's
+                    // standalone-host FIFO writer is dormant.
+                    onLoaded: {
+                        FmUi.FileManagerService.startPickerMode({
+                            title: "Open File",
+                            acceptLabel: "Open"
+                        });
+                    }
+
+                    // When the FM closes (controller.fmVisible flips to
+                    // false), also clear picker mode so the panel returns
+                    // to its idle state. Without this, re-opening would
+                    // pile a second startPickerMode call on top of an
+                    // already-active picker.
+                    Connections {
+                        target: controller
+                        function onFmVisibleChanged(): void {
+                            // Cancel any in-flight picker mode when the
+                            // panel closes. FileManagerService is a
+                            // singleton — its state outlives the Loader's
+                            // reconstruction cycle, so without this the
+                            // next show would skip startPickerMode and
+                            // the panel would have no way to emit
+                            // pickerCompleted. Note: no fmOverlayLoader.item
+                            // guard — under per-show reconstruction, item
+                            // is null exactly when we need to cancel.
+                            if (!controller.fmVisible && FmUi.FileManagerService.pickerMode) {
+                                FmUi.FileManagerService.cancelPickerMode();
+                            }
+
+                            // Focus return on dismiss. Without this,
+                            // focus stays on the now-destroyed fmOverlay
+                            // subtree's parent and keystrokes go nowhere
+                            // — nvim/agent appears frozen until alt-tab.
+                            // Mirrors the priority ordering in
+                            // Window.onActiveChanged below: agent if
+                            // visible, terminal if visible, otherwise
+                            // editor.
+                            if (!controller.fmVisible) {
+                                if (controller.agentVisible)
+                                    agentPane.forceActiveFocus();
+                                else if (controller.terminalVisible)
+                                    terminalView.forceActiveFocus();
+                                else
+                                    editor.forceActiveFocus();
+                            }
+                        }
+                    }
+
+                    // Bridge picker completion → nvim :edit. The signal
+                    // fires whether the user pressed Enter on a file or
+                    // the panel auto-completed (e.g. Shift+Enter
+                    // copy-then-confirm flow). pick_in_nvim does the
+                    // fnameescape + :edit AND dismisses the panel —
+                    // distinct from open_in_nvim (used by the sidebar's
+                    // onFileActivated) which keeps the sidebar visible
+                    // after activation.
+                    Connections {
+                        target: FmUi.FileManagerService
+                        function onPickerCompleted(fifoPath: string, paths: var): void {
+                            if (paths && paths.length > 0)
+                                controller.pick_in_nvim(paths[0]);
+                            else
+                                controller.hide_fm();
+                        }
+                        function onPickerCancelled(fifoPath: string): void {
+                            controller.hide_fm();
+                        }
+                    }
+
+                    sourceComponent: Item {
+                        id: fmOverlay
+                        anchors.fill: parent
+                        // No forceActiveFocus() on construction. Children's
+                        // Component.onCompleted runs BEFORE parents' — so
+                        // FileList's ListView inside the FM subtree has
+                        // already claimed activeFocus via its own
+                        // `view.forceActiveFocus()` (FileList.qml:245 in
+                        // the installed module) by the time we get here.
+                        // A parent-level forceActiveFocus would STEAL
+                        // focus from the ListView onto fmOverlay (a plain
+                        // Item, not a FocusScope, so focus stops here and
+                        // never propagates back down) — which is exactly
+                        // what broke arrow-key navigation once the Lua
+                        // `<C-u>` path was retired in favor of an
+                        // IDE-wide Ctrl+E ApplicationShortcut. Esc and
+                        // bare-q still dismiss: Esc is handled inside the
+                        // panel's NormalModeHandler (cancels picker mode
+                        // → hide_fm); bare-q isn't accepted by the panel
+                        // (it only consumes Ctrl+Q), so the unaccepted
+                        // KeyEvent bubbles up to the Keys handlers below.
+
+                        Keys.onEscapePressed: event => {
+                            controller.hide_fm();
+                            event.accepted = true;
+                        }
+
+                        // Bare `q` also dismisses — IDE-specific UX glue,
+                        // not panel default. The FM panel's
+                        // NormalModeHandler.js only handles Ctrl+Q
+                        // (close-tab); bare `q` falls through unhandled
+                        // and bubbles up to here. `Qt.NoModifier` guard
+                        // means Ctrl+Q still routes to the panel's tab
+                        // logic. Keys.onPressed fires AFTER child items,
+                        // so any future FM mode that wants to consume `q`
+                        // (e.g. inline rename) just sets event.accepted =
+                        // true and our handler skips.
+                        Keys.onPressed: event => {
+                            if (event.key === Qt.Key_Q && event.modifiers === Qt.NoModifier) {
+                                controller.hide_fm();
+                                event.accepted = true;
+                            }
+                        }
+
+                        // FM panel fills the pane. Previously this was
+                        // anchored to centerIn with width/height at 80%
+                        // of parent, on top of a dim scrim — both gone
+                        // now that the FM is the central surface rather
+                        // than a modal overlay. No scrim, no MouseArea
+                        // click-to-dismiss: dismissal is via Esc, bare-q,
+                        // Ctrl+E (toggle), or picker
+                        // completion/cancellation.
+                        FmUi.FileManager {
+                            id: fmPanel
+                            anchors.fill: parent
+                            // initialPath flips between empty (FM
+                            // closed) and the controller's resolved path
+                            // (FM open). Setting on close clears panel
+                            // state for the next open — see
+                            // controller.hide_fm which resets
+                            // _fm_initial_path = "".
+                            initialPath: controller.fmInitialPath || ""
+                            onCloseRequested: controller.hide_fm()
+                        }
+                    }
                 }
             }
 
@@ -669,10 +853,11 @@ Window {
                             // fonts, indent, and inter-element spacing to 60% of
                             // the FM's default size so more files fit per
                             // viewport (target: neo-tree-style compactness for
-                            // the IDE sidebar). The FM picker overlay
-                            // (`<C-u>` → fmOverlayLoader below) keeps the
-                            // default 1.0 — picker rows benefit from the larger
-                            // hit target since they're transient and one-shot.
+                            // the IDE sidebar). The FM central-pane surface
+                            // (Ctrl+E → fmOverlayLoader inside mainContent)
+                            // keeps the default 1.0 — picker rows benefit
+                            // from the larger hit target since they're
+                            // transient and one-shot.
                             compactScale: 0.8
                             // -1 = fully recursive expand at mount; FM caps at
                             // maxExpandDepth=8 (default) plus internal guardrails
@@ -808,180 +993,6 @@ Window {
             id: statusBar
             Layout.fillWidth: true
             Layout.preferredHeight: Theme.size.statusBarHeight
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // File manager toggle-overlay.
-    //
-    // Imported as `FmUi` (alias) from Symmetria.FileManager.UI to avoid
-    // singleton-name collision with the IDE's own Theme: both modules
-    // export a `Theme`/`FmTheme` singleton, and the alias keeps the
-    // FM's symbols in their own namespace so this file can mention
-    // `Theme` (IDE) and `FmUi.FmTheme` (FM) without ambiguity.
-    //
-    // Loader.active toggles per visibility — the panel is reconstructed
-    // on each show. An earlier "keep loaded" approach (`active: visible
-    // || item !== null`) preserved tab/scroll/selection state across
-    // toggles, but it conflicted with the FM's focus-on-construction
-    // pattern: FileList.view grabs active focus inside its
-    // `Component.onCompleted` hook (FileList.qml:221), which only fires
-    // once per construction. After we hand focus back to the editor on
-    // dismiss, a subsequent show couldn't re-route focus into `view`
-    // (the FM panel's root is Item, not FocusScope, so focus
-    // restoration doesn't propagate from a parent forceActiveFocus).
-    // For picker-mode use (each <C-u> is a fresh "open file" flow),
-    // losing tab/scroll between toggles is acceptable; the
-    // ~50-100ms reconstruction cost is also acceptable for a binding
-    // that fires on user keypress, not in any hot path.
-    Loader {
-        id: fmOverlayLoader
-        anchors.fill: parent
-        z: 100
-        active: controller.fmVisible
-
-        // Start picker mode when the overlay first opens. The panel reuses
-        // its existing picker infrastructure (built for the XDG portal) as
-        // a clean "select a file" affordance: confirming a selection emits
-        // FileManagerService.pickerCompleted; cancelling emits
-        // pickerCancelled. We connect to both below — no fifoPath is
-        // passed, so the panel's standalone-host FIFO writer is dormant.
-        onLoaded: {
-            FmUi.FileManagerService.startPickerMode({
-                title: "Open File",
-                acceptLabel: "Open"
-            });
-        }
-
-        // When the overlay closes (controller.fmVisible flips to false),
-        // also clear picker mode so the panel returns to its idle state.
-        // Without this, re-opening the overlay would pile a second
-        // startPickerMode call on top of an already-active picker.
-        Connections {
-            target: controller
-            function onFmVisibleChanged(): void {
-                // Cancel any in-flight picker mode when the overlay
-                // closes. FileManagerService is a singleton — its state
-                // outlives the Loader's reconstruction cycle, so without
-                // this the next show would skip startPickerMode and
-                // the panel would have no way to emit pickerCompleted.
-                // Note: no fmOverlayLoader.item guard — under per-show
-                // reconstruction, item is null exactly when we need to
-                // cancel.
-                if (!controller.fmVisible && FmUi.FileManagerService.pickerMode) {
-                    FmUi.FileManagerService.cancelPickerMode();
-                }
-                // startPickerMode on show is handled by the Loader's
-                // onLoaded handler below — fires on every reconstruction.
-
-                // ----------------------------------------------------------------
-                // Focus return on dismiss. Without this, focus stays on
-                // the now-destroyed fmOverlay subtree's parent and
-                // keystrokes go nowhere — nvim/agent appears frozen
-                // until alt-tab. Mirrors the priority ordering in
-                // Window.onActiveChanged below: agent if visible,
-                // otherwise editor.
-                if (!controller.fmVisible) {
-                    if (controller.agentVisible)
-                        agentPane.forceActiveFocus();
-                    else if (controller.terminalVisible)
-                        terminalView.forceActiveFocus();
-                    else
-                        editor.forceActiveFocus();
-                }
-            }
-        }
-
-        // Bridge picker completion → nvim :edit. The signal fires whether
-        // the user pressed Enter on a file or the panel auto-completed
-        // (e.g. Shift+Enter copy-then-confirm flow). pick_in_nvim does
-        // the fnameescape + :edit AND dismisses the overlay — distinct
-        // from open_in_nvim (used by the sidebar's onFileActivated)
-        // which keeps the sidebar visible after activation.
-        Connections {
-            target: FmUi.FileManagerService
-            function onPickerCompleted(fifoPath: string, paths: var): void {
-                if (paths && paths.length > 0)
-                    controller.pick_in_nvim(paths[0]);
-                else
-                    controller.hide_fm();
-            }
-            function onPickerCancelled(fifoPath: string): void {
-                controller.hide_fm();
-            }
-        }
-
-        sourceComponent: Item {
-            id: fmOverlay
-            anchors.fill: parent
-            // No forceActiveFocus() on construction. Children's
-            // Component.onCompleted runs BEFORE parents' — so FileList's
-            // ListView inside the FM subtree has already claimed
-            // activeFocus via its own `view.forceActiveFocus()`
-            // (FileList.qml:245 in the installed module) by the time we
-            // get here. A parent-level forceActiveFocus would STEAL focus
-            // from the ListView onto fmOverlay (a plain Item, not a
-            // FocusScope, so focus stops here and never propagates back
-            // down) — which is exactly what broke arrow-key navigation
-            // once the Lua `<C-u>` path was retired in favor of an
-            // IDE-wide Ctrl+E ApplicationShortcut. Esc and bare-q still
-            // dismiss the overlay: Esc is handled inside the panel's
-            // NormalModeHandler (cancels picker mode → hide_fm); bare-q
-            // isn't accepted by the panel (it only consumes Ctrl+Q), so
-            // the unaccepted KeyEvent bubbles up to the Keys handlers
-            // below.
-
-            Keys.onEscapePressed: event => {
-                controller.hide_fm();
-                event.accepted = true;
-            }
-
-            // Bare `q` also dismisses — IDE-specific UX glue, not panel
-            // default. The FM panel's NormalModeHandler.js only handles
-            // Ctrl+Q (close-tab); bare `q` falls through unhandled and
-            // bubbles up to here. `Qt.NoModifier` guard means Ctrl+Q
-            // still routes to the panel's tab logic. Keys.onPressed
-            // fires AFTER child items, so any future FM mode that wants
-            // to consume `q` (e.g. inline rename) just sets
-            // event.accepted = true and our handler skips.
-            Keys.onPressed: event => {
-                if (event.key === Qt.Key_Q && event.modifiers === Qt.NoModifier) {
-                    controller.hide_fm();
-                    event.accepted = true;
-                }
-            }
-
-            // Dim scrim — clicking dismisses.
-            Rectangle {
-                anchors.fill: parent
-                color: "#000000"
-                opacity: 0.45
-
-                Behavior on opacity {
-                    NumberAnimation {
-                        duration: 120
-                    }
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    onClicked: controller.hide_fm()
-                }
-            }
-
-            // Telescope-style centered panel.
-            FmUi.FileManager {
-                id: fmPanel
-                anchors.centerIn: parent
-                width: parent.width * 0.8
-                height: parent.height * 0.8
-                // initialPath flips between empty (overlay closed) and the
-                // controller's resolved path (overlay open). Setting on
-                // close clears panel state for the next open — see
-                // controller.hide_fm which resets _fm_initial_path = "".
-                initialPath: controller.fmInitialPath || ""
-                onCloseRequested: controller.hide_fm()
-            }
         }
     }
 
