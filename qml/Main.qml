@@ -93,8 +93,14 @@ Window {
     // so the FM opens uniformly from any pane — editor, agent, terminal,
     // tree sidebar — without depending on nvim having focus. Same
     // ApplicationShortcut + Qt.ApplicationShortcut pattern as the swap
-    // chords above. Empty string defers to AppController._fm_default_path
-    // which reads `displayedRoot` (anchored root, then cached cwd).
+    // chords above. Opens at the anchored project root (or cached cwd when
+    // unanchored), the same path the file-tree and git panes use.
+    //
+    // Trade-off: Qt.ApplicationShortcut intercepts before NvimView.keyPressEvent,
+    // so nvim's built-in `<C-e>` (scroll viewport down one line) is silently
+    // consumed when the editor pane is focused. Same precedence as Ctrl+Shift+T
+    // and Ctrl+Shift+E (see CLAUDE.md swap-chords entry). Accepted: FM-from-any-
+    // pane uniformity is worth the nvim scroll key loss for this project.
     Shortcut {
         sequences: ["Ctrl+E"]
         context: Qt.ApplicationShortcut

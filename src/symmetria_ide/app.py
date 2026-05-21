@@ -1405,7 +1405,11 @@ class AppController(QObject):
 
         Payload shapes:
           { op: "show"|"hide"|"toggle", initialPath?: string }
-          { op: "debug", event: "keymap_install", keys, reason }
+
+        The "debug" op (previously emitted by the now-removed
+        install_fm_keymap keymap self-heal) is no longer emitted by
+        any Lua code. If a future :SymFm user-command needs diagnostics,
+        add the branch back at that point.
         """
         op = str(payload.get("op") or "").lower()
         initial_path = str(payload.get("initialPath") or "")
@@ -1418,13 +1422,6 @@ class AppController(QObject):
                 self.hide_fm()
             else:
                 self.show_fm(initial_path)
-        elif op == "debug":
-            # Diagnostic trail from the Lua-side install_fm_keymap
-            # (keymap reinstall observability). Mirrors `_on_agent_event`'s
-            # debug branch — log at DEBUG, don't WARNING-spam the app log
-            # on every BufEnter.
-            event = str(payload.get("event") or "")
-            log.debug("fm debug: %s %r", event, payload)
         else:
             log.warning("fm event with unknown op: %r", payload)
 

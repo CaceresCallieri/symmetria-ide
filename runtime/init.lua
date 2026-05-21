@@ -714,7 +714,7 @@ vim.api.nvim_create_autocmd("User", {
 -- Promoted out of nvim's layer. The Ctrl+E chord is now an IDE-wide
 -- ApplicationShortcut declared in qml/Main.qml — see `controller.toggle_fm`.
 -- AppController owns visibility state and now derives the initial path from
--- the anchored project root (AppController._anchored_cwd), so the FM opens
+-- the anchored project root (AppController.displayedRoot), so the FM opens
 -- the same way regardless of which pane has focus.
 --
 -- The `"fm"` rpcnotify envelope (NvimBackend.fm_event → _on_fm_event) is
