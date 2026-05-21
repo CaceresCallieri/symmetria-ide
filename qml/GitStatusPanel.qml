@@ -268,6 +268,16 @@ FocusScope {
         // added with `git add -f`); hiding them would lie about the
         // working-tree state.
         //
+        // `showHidden: true` is the same principle applied to dotfiles
+        // and dotdirs (`.claude/`, `.config/`, `.github/`, `.vscode/`).
+        // The FM's default hides them as filesystem noise, which is right
+        // for the general-purpose tree below — but a CHANGED dotfile is
+        // by definition not noise; suppressing it would lie about the
+        // working-tree state the same way hiding gitignored adds would.
+        // The pathFilter already bounds visible rows to the actual
+        // changeset, so flipping this on does not expose unrelated
+        // dotfiles — only ancestors of files the user has actually touched.
+        //
         // `compactScale: 0.75` makes rows tighter than the main tree
         // below — the changes pane benefits from packing more rows
         // into the vertical space it claims.
@@ -279,6 +289,7 @@ FocusScope {
             rootPath: root.repoRoot
             initialExpandDepth: -1
             respectGitignore: false
+            showHidden: true
             compactScale: 0.75
             statusProvider: root.statusProvider
             pathFilter: root.pathFilter
