@@ -25,20 +25,53 @@
 // FM's FmTheme — the same palette the main file tree uses, so the two
 // trees are visually unified by construction.
 //
-// Known v1 limitation: focus competes between this tree and the main
-// FileTreeView below. Both have `focus: true` on their inner ListView;
-// the first to call `forceActiveFocus()` on Component.onCompleted wins
-// at startup. v1 accepts this — clicks resolve focus correctly. v2 plan:
-// FocusScope wrappers + controller-side focused-pane state routed
-// through Ctrl+H/Ctrl+L chords (the same mechanism used elsewhere in
-// `Main.qml`).
+// Keyboard navigation: sub-pane parity with the main FileTreeView.
+//
+// The embedded `FmUi.FileTreeView` owns a comprehensive `Keys.onPressed`
+// handler on its inner ListView — j/k/h/l, Ctrl+D / Ctrl+U half-page
+// scroll, Return/Enter activation, gg/G jump-to-end, `/` search,
+// `s` flash. ALL of those keys work the moment focus reaches that
+// ListView. The `onFileActivated` signal Main.qml binds to is the
+// SAME signal the main FileTreeView below emits, so an Enter
+// keystroke in either tree ends up calling `controller.open_in_nvim`
+// via an identical path — no per-tree handler divergence.
+//
+// Focus reachability is wired through three coordinated surfaces:
+//   1. FM `FileTreeView.focusInternal()` (cross-repo) — public
+//      function that delegates `forceActiveFocus()` to the FM's
+//      internal `view` ListView. The outer Item is NOT a FocusScope,
+//      so calling `forceActiveFocus()` on it is a no-op for keys.
+//   2. This panel's `focusInternal()` proxy — forwards to
+//      `changesTree.focusInternal()` so consumers don't reach inside.
+//   3. Main.qml's Ctrl+J / Ctrl+K ApplicationShortcuts — vim-style
+//      directional sub-pane nav. Ctrl+K (up) lands here, Ctrl+J
+//      (down) lands on the main tree. Both gated on
+//      `treeScope.activeFocus` so the chords pass through to
+//      nvim/terminal when the side panel isn't focused. Ctrl+L from
+//      a central pane respects a sticky `activeTreeSubPane`
+//      property — re-entering the side panel lands on whichever
+//      sub-pane the user was last in, not always on the main tree.
+//
+// Auto-fallback when the panel hides (clean tree): Main.qml's
+// `onVisibleChanged` Connection on this item resets
+// `activeTreeSubPane` to 0 and re-routes focus to the main tree
+// if needed — invisible items can't hold activeFocus, so we have to
+// move focus proactively before Qt silently drops it.
 
 import QtQuick
 import QtQuick.Layouts
 import Symmetria.FileManager.UI as FmUi
 import "design"
 
-Item {
+// FocusScope (not plain Item) — `activeFocus` propagates true when the
+// embedded FileTreeView's inner ListView has the active focus, which
+// lets Main.qml render a per-sub-pane focus border via a plain binding
+// (`gitStatusPanel.activeFocus ? Theme.color.accent.focus : ...`) AND
+// drive the sticky `activeTreeSubPane` property via
+// `onActiveFocusChanged` — works for both keyboard chords AND mouse
+// clicks (the inner ListView gains focus naturally on either path,
+// and FocusScope.activeFocus bubbles up regardless).
+FocusScope {
     id: root
 
     // Backing model exposed via the `gitStatusList` context property — a
@@ -85,6 +118,19 @@ Item {
     // filesystem path of the activated file. Main.qml connects this to
     // `controller.open_in_nvim(path)` and then re-focuses the editor.
     signal fileActivated(string absolutePath)
+
+    // Public focus-routing proxy. Delegates to the embedded
+    // `FmUi.FileTreeView`'s `focusInternal()` — the FM-side public
+    // function that hands focus to the inner ListView (which is what
+    // actually owns `Keys.onPressed`, so j/k/Ctrl+D/Ctrl+U/Enter only
+    // fire when THAT item has activeFocus, not the FileTreeView's
+    // outer Item). Symmetric with `fileTreeView.focusInternal()` in
+    // Main.qml — a future chord can hand focus to either tree
+    // identically. See the file header comment for the v1.5 focus
+    // scaffolding rationale.
+    function focusInternal(): void {
+        changesTree.focusInternal();
+    }
 
     // Auto-hide when there are no changes. Hidden state collapses the
     // vertical real estate so the main file tree below claims it back.

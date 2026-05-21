@@ -30,6 +30,19 @@ Window {
     minimumWidth: 800
     minimumHeight: 400
 
+    // Side-panel sub-pane focus memory. 0 = main fileTreeView, 1 =
+    // gitStatusPanel (Active Changes). Updated by the Ctrl+J / Ctrl+K
+    // chords below; read by `onFocusTreeRequested` so re-entering the
+    // side panel from a central pane (via Ctrl+L) lands focus on
+    // whichever sub-pane the user was last in, NOT always on the main
+    // tree. This gives the two sub-panes true parity — the user can
+    // "live in" the changes pane across editor round-trips without
+    // re-navigating each time. Default 0 preserves prior behavior on
+    // first Ctrl+L. Auto-reset to 0 when gitStatusPanel hides (clean
+    // tree → invisible item can't accept focus; without the reset,
+    // Ctrl+L would silently bind focus to a hidden item).
+    property int activeTreeSubPane: 0
+
     // ---------------- IDE-wide application shortcuts ----------------
     //
     // Anchor toggle. `Qt.ApplicationShortcut` makes this fire regardless
@@ -179,6 +192,72 @@ Window {
             if (!controller.treeVisible)
                 return;
             controller.focus_tree();
+        }
+    }
+
+    // IDE-wide vertical sub-pane navigation INSIDE the side panel.
+    //
+    // The side panel is sub-divided into two co-mounted FileTreeViews:
+    // the Active Changes pane (gitStatusPanel, sits on top, hidden when
+    // the working tree is clean) and the main FileTreeView below. Both
+    // own identical FM-level Keys.onPressed handlers (j/k/Ctrl+D/
+    // Ctrl+U/Return/...), so once focus lands on either inner ListView
+    // the keys all "just work" inside that sub-pane — the only thing
+    // missing was a way to ROUTE focus between the two sub-panes.
+    //
+    // Spatial chord, vim-style: Ctrl+K = up (the changes pane is
+    // physically above), Ctrl+J = down (the main tree is below).
+    // Directional, NOT toggle — Ctrl+K from the main tree always lands
+    // on the changes pane; Ctrl+K when already in the changes pane is a
+    // silent no-op. This is the same shape as Ctrl+H / Ctrl+L for
+    // horizontal cross-pane nav (always-directional, never-wrap), so
+    // the muscle memory is consistent.
+    //
+    // CRITICAL gating: `enabled: treeScope.activeFocus` — and for Ctrl+K
+    // ALSO `gitStatusPanel.visible`. When the side panel doesn't have
+    // focus (e.g. focus is on editor, terminal, or agent pane), the
+    // Shortcut is `enabled: false` and Qt does NOT consume the key —
+    // it passes through the focus chain normally. That preserves:
+    //   - nvim's Ctrl+K (no default binding; many plugins use it)
+    //   - terminal Ctrl+J (= ASCII LF, literal newline; critical for
+    //     readline/zsh/anything that reads stdin)
+    //   - terminal Ctrl+K (= readline kill-to-end-of-line)
+    // When the side panel DOES have focus, these meanings would be
+    // unreachable anyway (you're not typing into nvim/terminal here),
+    // so the chord interception is the only sensible behavior.
+    //
+    // Why ApplicationShortcut not Keys.onPressed at treeScope: the FM's
+    // inner ListView matches `event.key === Qt.Key_J/K` WITHOUT a
+    // modifier check (FileTreeView.qml:1024,1030) — bare j/k for
+    // next/prev row. Without ApplicationShortcut interception, Ctrl+J
+    // would be eaten by the ListView handler as plain `j` (advance
+    // row) before any focus-chain handler could see it. Same rationale
+    // as the Ctrl+H Shortcut comment block above; the precedent is
+    // already canonical here.
+    //
+    // gitStatusPanel.visible gate on Ctrl+K is important: when the
+    // working tree is clean the changes pane is `visible: false` and
+    // its inner items can't accept focus. Without the gate, Ctrl+K
+    // would land focus on an invisible item — focus would silently
+    // disappear and the user couldn't navigate anywhere with keys
+    // until they clicked or pressed Ctrl+H back to a central pane.
+    Shortcut {
+        sequences: ["Ctrl+K"]
+        context: Qt.ApplicationShortcut
+        enabled: treeScope.activeFocus && gitStatusPanel.visible
+        onActivated: {
+            root.activeTreeSubPane = 1;
+            gitStatusPanel.focusInternal();
+        }
+    }
+
+    Shortcut {
+        sequences: ["Ctrl+J"]
+        context: Qt.ApplicationShortcut
+        enabled: treeScope.activeFocus
+        onActivated: {
+            root.activeTreeSubPane = 0;
+            fileTreeView.focusInternal();
         }
     }
 
@@ -419,29 +498,16 @@ Window {
                     color: Theme.color.bg.chrome
                 }
 
-                // Active-pane focus border. Symmetric counterpart of
-                // `mainContentFocusBorder` — lights up a 1px accent
-                // hairline around the tree's FocusScope when any
-                // descendant has the active focus. Uses FocusScope's
-                // `activeFocus` directly (which propagates from
-                // descendants), so we don't need to track the internal
-                // ListView's focus state explicitly. Same
-                // transparent-when-inactive contract as the mainContent
-                // overlay; see that block's comment for the geometry-
-                // stability rationale (especially the "don't toggle
-                // border.width" point — costs a layout round-trip).
-                // z: 50 here beats the chrome Rectangle sibling (z: 0)
-                // within treeScope's stacking context.
-                Rectangle {
-                    id: treeScopeFocusBorder
-                    anchors.fill: parent
-                    color: "transparent"
-                    border.color: treeScope.activeFocus
-                                  ? Theme.color.accent.focus
-                                  : "transparent"
-                    border.width: 1
-                    z: 50
-                }
+                // Whole-side-panel focus border removed — replaced by
+                // per-sub-pane focus indicators inside each sub-pane
+                // (see the Rectangle children of GitStatusPanel and the
+                // mainTreeScope FocusScope below). A single envelope
+                // around the entire side panel couldn't communicate
+                // WHICH sub-pane (changes vs main tree) had focus, which
+                // mattered once Ctrl+J/Ctrl+K subdivided the side panel
+                // into two independently-navigable regions. The per-pane
+                // borders use the same 1px hairline / accent-on-focus /
+                // transparent-otherwise contract as `mainContentFocusBorder`.
 
                 // Two-section composition inside the side panel:
                 //   1. GitStatusPanel — auto-hidden when clean; collapses
@@ -517,51 +583,123 @@ Window {
                             if (editor.visible)
                                 editor.forceActiveFocus();
                         }
+
+                        // GitStatusPanel's root is a FocusScope, so
+                        // `activeFocus` is true whenever the embedded
+                        // inner ListView has activeFocus — works for
+                        // BOTH keyboard chord arrivals (Ctrl+K via
+                        // `focusInternal()`) and mouse clicks (the FM
+                        // delegate focuses the ListView naturally).
+                        // The sticky `activeTreeSubPane` property gets
+                        // updated here too, so Ctrl+L re-entry from the
+                        // editor lands here even after a click-driven
+                        // focus arrival — no click-vs-keyboard desync.
+                        onActiveFocusChanged: {
+                            if (activeFocus)
+                                root.activeTreeSubPane = 1;
+                        }
+
+                        // Per-sub-pane focus indicator. Replaces the
+                        // prior whole-side-panel `treeScopeFocusBorder`
+                        // — the user couldn't tell WHICH sub-pane had
+                        // focus from a single envelope around the whole
+                        // column. Same 1px hairline / transparent-when-
+                        // inactive contract as `mainContentFocusBorder`,
+                        // just scoped to this individual sub-pane.
+                        // border.color flips (not border.width) to keep
+                        // the geometry stable — toggling width costs a
+                        // layout round-trip that's visibly janky during
+                        // focus transitions.
+                        Rectangle {
+                            anchors.fill: parent
+                            color: "transparent"
+                            border.color: gitStatusPanel.activeFocus
+                                          ? Theme.color.accent.focus
+                                          : "transparent"
+                            border.width: 1
+                            z: 50
+                        }
                     }
 
-                    FmUi.FileTreeView {
-                        id: fileTreeView
+                    // Wrap the main FileTreeView in a FocusScope so its
+                    // `activeFocus` propagates from the inner ListView,
+                    // mirroring GitStatusPanel's FocusScope-rooted
+                    // behavior. This is what lets the per-sub-pane
+                    // focus border + sticky-property tracking work for
+                    // the main tree too — `mainTreeScope.activeFocus`
+                    // is true on click OR keyboard arrival. Layout
+                    // properties (fillWidth/fillHeight) live on the
+                    // wrapper; the FileTreeView itself uses anchors.fill
+                    // to match the wrapper's geometry.
+                    FocusScope {
+                        id: mainTreeScope
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        // `displayedRoot` (NOT raw `cwd`) so the tree pins
-                        // to the anchored project root when the user has
-                        // anchored. When unanchored, `displayedRoot` is
-                        // identical to `cwd` — no behavior change from the
-                        // pre-anchor world. The Ctrl+Shift+A application-
-                        // scope Shortcut at the Window root toggles the
-                        // anchor; `:SymmetriaAnchor` / `:SymmetriaUnanchor`
-                        // are the scripted surface for the same Slots.
-                        rootPath: controller.displayedRoot
-                        respectGitignore: true
-                        // Information-density mode: shrinks row height, icons,
-                        // fonts, indent, and inter-element spacing to 60% of
-                        // the FM's default size so more files fit per
-                        // viewport (target: neo-tree-style compactness for
-                        // the IDE sidebar). The FM picker overlay
-                        // (`<C-u>` → fmOverlayLoader below) keeps the
-                        // default 1.0 — picker rows benefit from the larger
-                        // hit target since they're transient and one-shot.
-                        compactScale: 0.8
-                        // -1 = fully recursive expand at mount; FM caps at
-                        // maxExpandDepth=8 (default) plus internal guardrails
-                        // (.git skip, 200-children fanout, 10k row ceiling).
-                        initialExpandDepth: -1
-                        // Git status badges. The FM's `statusProvider` is a
-                        // duck-typed seam (property var) — it calls our
-                        // adapter's `statusForPath(absolutePath)` per visible
-                        // row and re-binds on `statusChanged`. We use
-                        // `gitProviderAdapter` rather than `gitController`
-                        // directly because the FM expects
-                        // `{char, color, tooltip}` (a resolved color), while
-                        // `GitController` returns `{char, state, tooltip}`
-                        // (a state name). The adapter maps state→FmTheme
-                        // color so the IDE never hardcodes hex values from
-                        // the FM palette.
-                        statusProvider: gitProviderAdapter
-                        onFileActivated: function (path) {
-                            controller.open_in_nvim(path);
-                            if (editor.visible)
-                                editor.forceActiveFocus();
+
+                        onActiveFocusChanged: {
+                            if (activeFocus)
+                                root.activeTreeSubPane = 0;
+                        }
+
+                        FmUi.FileTreeView {
+                            id: fileTreeView
+                            anchors.fill: parent
+                            // `displayedRoot` (NOT raw `cwd`) so the tree pins
+                            // to the anchored project root when the user has
+                            // anchored. When unanchored, `displayedRoot` is
+                            // identical to `cwd` — no behavior change from the
+                            // pre-anchor world. The Ctrl+Shift+A application-
+                            // scope Shortcut at the Window root toggles the
+                            // anchor; `:SymmetriaAnchor` / `:SymmetriaUnanchor`
+                            // are the scripted surface for the same Slots.
+                            rootPath: controller.displayedRoot
+                            respectGitignore: true
+                            // Information-density mode: shrinks row height, icons,
+                            // fonts, indent, and inter-element spacing to 60% of
+                            // the FM's default size so more files fit per
+                            // viewport (target: neo-tree-style compactness for
+                            // the IDE sidebar). The FM picker overlay
+                            // (`<C-u>` → fmOverlayLoader below) keeps the
+                            // default 1.0 — picker rows benefit from the larger
+                            // hit target since they're transient and one-shot.
+                            compactScale: 0.8
+                            // -1 = fully recursive expand at mount; FM caps at
+                            // maxExpandDepth=8 (default) plus internal guardrails
+                            // (.git skip, 200-children fanout, 10k row ceiling).
+                            initialExpandDepth: -1
+                            // Git status badges. The FM's `statusProvider` is a
+                            // duck-typed seam (property var) — it calls our
+                            // adapter's `statusForPath(absolutePath)` per visible
+                            // row and re-binds on `statusChanged`. We use
+                            // `gitProviderAdapter` rather than `gitController`
+                            // directly because the FM expects
+                            // `{char, color, tooltip}` (a resolved color), while
+                            // `GitController` returns `{char, state, tooltip}`
+                            // (a state name). The adapter maps state→FmTheme
+                            // color so the IDE never hardcodes hex values from
+                            // the FM palette.
+                            statusProvider: gitProviderAdapter
+                            onFileActivated: function (path) {
+                                controller.open_in_nvim(path);
+                                if (editor.visible)
+                                    editor.forceActiveFocus();
+                            }
+                        }
+
+                        // Per-sub-pane focus indicator for the main
+                        // FileTreeView. Symmetric counterpart of
+                        // GitStatusPanel's overlay border above. Bound
+                        // to `mainTreeScope.activeFocus` (the wrapping
+                        // FocusScope), which flips when the inner
+                        // ListView gains/loses activeFocus.
+                        Rectangle {
+                            anchors.fill: parent
+                            color: "transparent"
+                            border.color: mainTreeScope.activeFocus
+                                          ? Theme.color.accent.focus
+                                          : "transparent"
+                            border.width: 1
+                            z: 50
                         }
                     }
                 }
@@ -571,29 +709,29 @@ Window {
         Connections {
             target: controller
             function onFocusTreeRequested(): void {
-                // FileTreeView's outer root is a plain Item (NOT a
-                // FocusScope), so calling forceActiveFocus() on it
-                // only makes the OUTER ITEM the activeFocusItem —
-                // the internal ListView (which owns Keys.onPressed
-                // for j/k/h/l navigation) never receives the focus,
-                // and arrow keys go nowhere even after <leader>tf.
+                // Honors the sticky `activeTreeSubPane` property — Ctrl+L
+                // re-entry lands focus on whichever sub-pane the user
+                // last navigated to (via Ctrl+J / Ctrl+K), not always
+                // on the main tree. The visibility guard handles the
+                // race where the changes pane was last-active but
+                // hid mid-session before this signal fired (clean
+                // tree); in that case we fall back to the main tree.
                 //
-                // Walk fileTreeView's descendants to find the
-                // ListView and call forceActiveFocus() directly on
-                // it, which mirrors what FileTreeView does internally
-                // (FileTreeView.qml:493 — `view.forceActiveFocus()`
-                // in the ListView's Component.onCompleted).
-                //
-                // Slightly hacky — depends on FileTreeView keeping a
-                // single ListView descendant. The clean long-term
-                // fix is for the FM to expose a public
-                // `focusInternal()` method we can call. File as a
-                // Phase 2 follow-up.
-                var listView = _findListView(fileTreeView);
-                if (listView)
-                    listView.forceActiveFocus();
+                // Both panes expose `focusInternal()` — a public
+                // function on the FM FileTreeView that delegates
+                // `forceActiveFocus()` to its internal `view` ListView
+                // (the item that actually owns `Keys.onPressed` for
+                // j/k/h/l/Ctrl+D/Ctrl+U/Return). Calling
+                // `forceActiveFocus()` on the FileTreeView's outer Item
+                // directly is a no-op for keyboard nav — the outer
+                // Item becomes activeFocusItem but keystrokes never
+                // reach the ListView. GitStatusPanel forwards through
+                // the same `focusInternal()` surface so both sub-panes
+                // are structurally symmetric.
+                if (root.activeTreeSubPane === 1 && gitStatusPanel.visible)
+                    gitStatusPanel.focusInternal();
                 else
-                    fileTreeView.forceActiveFocus();  // safety fallback
+                    fileTreeView.focusInternal();
             }
 
             // Reverse direction of onFocusTreeRequested. Fired from
@@ -625,26 +763,33 @@ Window {
                 terminalView.forceActiveFocus();
             }
 
-            // WORKAROUND: recursive descendant walker using toString() type detection.
-            // Root cause: FileTreeView's outer Item is not a FocusScope and exposes no
-            // public focusInternal() method, so we walk children to find the ListView.
-            // Remove once FM exposes FocusScope or a public focusView() slot.
-            // `toString()` on a QML object returns a class-name-prefixed string like
-            // "QQuickListView_QML_NN(0x...)" — checking the prefix
-            // is the most portable way to identify the type from
-            // QML without importing private Qt headers.
-            function _findListView(item: var): var {
-                if (!item || !item.children)
-                    return null;
-                for (var i = 0; i < item.children.length; i++) {
-                    var c = item.children[i];
-                    if (c && c.toString && c.toString().indexOf("ListView") >= 0)
-                        return c;
-                    var nested = _findListView(c);
-                    if (nested)
-                        return nested;
-                }
-                return null;
+        }
+
+        // Auto-reset `activeTreeSubPane` when the changes pane hides
+        // (clean working tree). Without this, the sticky-focus property
+        // could point at an invisible sub-pane — Ctrl+L would then call
+        // `gitStatusPanel.focusInternal()` and the FM would
+        // forceActiveFocus on an item Qt refuses to focus (invisible
+        // items can't be activeFocusItem), silently dropping focus
+        // into a black hole. Resetting to 0 (main tree) keeps Ctrl+L
+        // always landing on a reachable sub-pane. The Ctrl+K chord
+        // that originally set activeTreeSubPane=1 is also gated on
+        // `gitStatusPanel.visible`, so the symmetric guard there
+        // prevents the bad state from being re-entered while the
+        // pane is hidden.
+        Connections {
+            target: gitStatusPanel
+            function onVisibleChanged(): void {
+                if (gitStatusPanel.visible || root.activeTreeSubPane !== 1)
+                    return;
+                root.activeTreeSubPane = 0;
+                // If the side panel currently has focus, the previously-
+                // active sub-pane is the one that just hid — its inner
+                // items can no longer hold activeFocus. Hand focus to
+                // the main tree so the user can keep navigating without
+                // having to round-trip through Ctrl+H+Ctrl+L.
+                if (treeScope.activeFocus)
+                    fileTreeView.focusInternal();
             }
         }
 
