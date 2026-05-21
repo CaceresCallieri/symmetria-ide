@@ -124,6 +124,32 @@ local function push_mode(mode_str)
   end
 end
 
+-- Dedup cache for the cwd capsule. Critical because `push_state` is wired
+-- to BufEnter / BufWritePost (line 157), neither of which signal a real
+-- cwd change — they fire on every buffer focus or save, while `getcwd()`
+-- only changes on `:cd` (or autochdir traversal). Without this dedup,
+-- every BufEnter re-emits nvim's CURRENT cwd as a "fresh" capsule, and on
+-- the Python side `_route_capsule` accepts it as authoritative — which
+-- clobbers any cwd previously set by the terminal pane's OSC 7 sync.
+--
+-- Concrete repro: user `cd`s in the terminal to repo B; OSC 7 fires and
+-- `controller.cwd` becomes B. User then opens a file from the Active
+-- Changes pane (which dispatches `:edit <path>` in nvim). BufEnter fires,
+-- push_state emits `cwd = vim.fn.getcwd()` — still repo A because nvim's
+-- own cwd never changed — and the file tree + git status snap back to A.
+-- Deduping on the lua side keeps nvim a well-behaved emitter on the
+-- shared cwd channel: it speaks ONLY when its own cwd actually changes
+-- (DirChanged real edges, plus the initial VimEnter baseline).
+local last_emitted_cwd = nil
+
+local function push_cwd()
+  local cwd = vim.fn.getcwd()
+  if cwd ~= last_emitted_cwd then
+    last_emitted_cwd = cwd
+    emit_capsule("cwd", "", cwd)
+  end
+end
+
 function M.push_state()
   push_mode(vim.api.nvim_get_mode().mode)
   emit_capsule("project", "", project_name())
@@ -133,10 +159,10 @@ function M.push_state()
   -- `cwd` is NOT a status-bar field — it's intercepted on the Python
   -- side by AppController._route_capsule before reaching StatusBarState
   -- and routed to controller.cwd, which the sidebar's FileTreeView
-  -- binds against as rootPath. Emitted alongside the rest of push_state
-  -- so the DirChanged/BufEnter/VimEnter triggers retarget the sidebar
-  -- without a second autocmd plumbing.
-  emit_capsule("cwd", "", vim.fn.getcwd())
+  -- binds against as rootPath. Deduped via `push_cwd` so BufEnter ticks
+  -- don't re-assert nvim's cwd over a terminal-OSC-7-set value — see the
+  -- comment block on `last_emitted_cwd` above for the failure mode.
+  push_cwd()
 end
 
 function M.push_position()

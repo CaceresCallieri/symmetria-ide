@@ -471,7 +471,23 @@ class AppController(QObject):
         # Empty string here would trip FileTreeView's `if (rootPath !==
         # "")` guard and leave the sidebar showing "Empty" until the
         # capsule lands.
-        self._cwd: str = os.path.expanduser("~")
+        #
+        # `os.getcwd()` rather than `~`: the launch cwd is what the user
+        # implicitly chose by running `cd <project> && python -m
+        # symmetria_ide`, and matches what nvim's VimEnter capsule will
+        # report (nvim inherits Python's cwd). Using the launch dir as
+        # the initial `_cwd` is what makes the terminal pre-warm at
+        # `start()` below land in the right project — `_terminal_backend
+        # .start(self._cwd)` fires synchronously during AppController
+        # construction, BEFORE nvim's VimEnter can update `_cwd` via a
+        # capsule, so any placeholder set here is what the shell process
+        # inherits. A `~` placeholder was the pre-Phase-2.5 default when
+        # there was no terminal pane to inherit it. Falls back to `~` if
+        # `getcwd()` raises (deleted cwd — extreme edge case).
+        try:
+            self._cwd: str = os.getcwd()
+        except OSError:
+            self._cwd = os.path.expanduser("~")
         # Project-anchor state. When `_anchored` is True, `displayedRoot`
         # returns `_anchored_root` and incoming cwd updates DO NOT fire
         # `displayedRootChanged` — they still update `_cwd` silently so a
