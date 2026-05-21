@@ -711,132 +711,15 @@ vim.api.nvim_create_autocmd("User", {
 -- File manager toggle-overlay keybind
 -- ============================================================================
 --
--- <leader>e (mnemonic: "explorer") toggles the embedded Symmetria File
--- Manager overlay. The overlay floats above NvimView with a dim scrim
--- behind it and dismisses on Escape. AppController owns the visibility
--- state; this keybind only emits the rpcnotify event.
+-- Promoted out of nvim's layer. The Ctrl+E chord is now an IDE-wide
+-- ApplicationShortcut declared in qml/Main.qml — see `controller.toggle_fm`.
+-- AppController owns visibility state and now derives the initial path from
+-- the anchored project root (AppController._anchored_cwd), so the FM opens
+-- the same way regardless of which pane has focus.
 --
--- Initial path is the current buffer's directory if it exists on disk,
--- otherwise nvim's cwd. Sending the path explicitly lets the overlay
--- boot into the right directory without an extra RPC roundtrip.
---
--- Hijack discipline (mirrors <leader>aN at line 533+):
---   1. The user's nvim config commonly registers <leader>e as a
---      which-key group declaration ("File explorers") in core/keymaps.lua,
---      and lazy-loaded plugins like yazi.nvim add <leader>ey / <leader>eY
---      via their `keys = {...}` spec. Both land AFTER our --cmd dofile of
---      this file, so a plain file-scope `vim.keymap.set` is overwritten.
---   2. Countermeasure: install on `VimEnter` (deferred via vim.schedule
---      so we land last among non-lazy plugins) and self-heal on
---      `BufEnter` (cheap reconciliation point + buffer-local keymaps die
---      with their buffer, so we need to re-install per-buffer anyway).
---   3. `buffer = 0` + `nowait = true` per gotcha #20: nowait only honors
---      buffer-local maps, and yazi's <leader>ey/eY are longer global maps
---      that would otherwise force a timeoutlen wait at <leader>e.
-
-local SYMMETRIA_FM_DESC = "Toggle Symmetria File Manager overlay"
-
-local function open_file_manager()
-  local buf_path = vim.api.nvim_buf_get_name(0)
-  local initial_path = ""
-  if buf_path ~= "" then
-    -- Prefer the buffer's parent directory so users navigating from
-    -- a file see siblings, not the project root.
-    local parent = vim.fn.fnamemodify(buf_path, ":p:h")
-    if parent ~= "" and vim.fn.isdirectory(parent) == 1 then
-      initial_path = parent
-    end
-  end
-  if initial_path == "" then
-    initial_path = vim.fn.getcwd()
-  end
-  pcall(vim.rpcnotify, 0, "fm", {
-    op = "toggle",
-    initialPath = initial_path,
-  })
-end
-
--- HACK: <C-u> is a temporary escape-hatch test binding while the <leader>e
--- hijack fight against yazi.nvim's lazy-loaded children is still being worked
--- out. <C-u> shadows nvim's built-in half-page scroll-up — accepted as a
--- temporary testing tradeoff. Remove <C-u> from this list (and from the
--- CLAUDE.md comment block above) once <leader>e wins reliably.
-local SYMMETRIA_FM_KEYS = { "<leader>e", "<C-u>" }
-
-local function fm_slot_owned_by_us(keys)
-  local mapping = vim.fn.maparg(keys, "n", false, true)
-  if type(mapping) ~= "table" or vim.tbl_isempty(mapping) then
-    return false
-  end
-  return (mapping.desc or "") == SYMMETRIA_FM_DESC
-end
-
-local function install_fm_keymap(reason)
-  reason = reason or "unknown"
-  for _, keys in ipairs(SYMMETRIA_FM_KEYS) do
-    if not fm_slot_owned_by_us(keys) then
-      vim.keymap.set("n", keys, open_file_manager, {
-        buffer = 0,
-        silent = true,
-        nowait = true,
-        desc = SYMMETRIA_FM_DESC,
-      })
-      -- Diagnostic trail — mirrors install_agent_keymaps pattern so the
-      -- operator can confirm the FM hijack ran. Especially useful for
-      -- confirming <C-u> is active while the fight with yazi is unresolved.
-      -- pcall intentional: rpcnotify fails if Python client is disconnected.
-      pcall(vim.rpcnotify, 0, "fm", {
-        op = "debug",
-        event = "keymap_install",
-        keys = keys,
-        reason = reason,
-      })
-    end
-  end
-end
-
-local fm_grp = vim.api.nvim_create_augroup("symmetria_fm_keys", { clear = true })
-
-vim.api.nvim_create_autocmd("VimEnter", {
-  group = fm_grp,
-  callback = function()
-    vim.schedule(function()
-      install_fm_keymap("VimEnter")
-    end)
-  end,
-})
-
-vim.api.nvim_create_autocmd("BufEnter", {
-  group = fm_grp,
-  callback = function()
-    install_fm_keymap("BufEnter")
-  end,
-})
-
--- Self-heal when yazi.nvim (or any other FM plugin) lazy-loads via its
--- `keys = {"<leader>ey", ...}` spec. lazy.nvim fires `User LazyLoad`
--- synchronously inside its load path, BEFORE the triggering keypress is
--- re-dispatched — so we win back the <leader>e slot for the trailing stroke.
--- Narrowed to FM-plugin names so the install cost is zero for other lazy loads.
--- BufEnter self-heal remains the fallback if a plugin uses a different name.
-vim.api.nvim_create_autocmd("User", {
-  group = fm_grp,
-  pattern = "LazyLoad",
-  callback = function(ev)
-    local name = ev.data or ""
-    if type(name) == "string" then
-      local lower = name:lower()
-      if
-        lower:find("yazi", 1, true)
-        or lower:find("neo-tree", 1, true)
-        or lower:find("nvim-tree", 1, true)
-        or lower:find("oil", 1, true)
-      then
-        install_fm_keymap("LazyLoad:" .. name)
-      end
-    end
-  end,
-})
+-- The `"fm"` rpcnotify envelope (NvimBackend.fm_event → _on_fm_event) is
+-- preserved as a stable contract for any future Lua-side opener (e.g. a
+-- `:SymFm` user-command), but no auto-installed hijack lives here anymore.
 
 -- ============================================================================
 -- File-tree sidebar focus keybind
@@ -847,14 +730,12 @@ vim.api.nvim_create_autocmd("User", {
 -- AppController.treeVisible (defaults to True, no v1 toggle keybind per
 -- the "visualization-first" scope decision).
 --
--- This is a SEPARATE hijack surface from <leader>e / install_fm_keymap.
--- The two are conceptually independent — sidebar focus vs FM overlay
--- toggle compete with different plugin sets (nvim-tree / neo-tree
--- contend for <leader>t* prefixes; yazi.nvim contends for <leader>e).
--- Consolidating into one install function would couple lifecycle
--- decisions that should evolve separately (see CLAUDE.md's
--- `slot_owned_by_us` vs `fm_slot_owned_by_us` reasoning for the same
--- pattern applied to agent and FM hijacks).
+-- This is a hijack surface (nvim-tree / neo-tree contend for <leader>t*
+-- prefixes). Kept distinct from the agent-keymap hijacks so lifecycle
+-- decisions can evolve separately — see CLAUDE.md's `slot_owned_by_us`
+-- reasoning for the same pattern applied to agent hijacks. The FM
+-- overlay was previously hijacked here too; it's now an IDE-wide Ctrl+E
+-- ApplicationShortcut and no longer competes for nvim-layer keymap slots.
 
 local SYMMETRIA_TREE_DESC = "Focus Symmetria file-tree sidebar"
 
@@ -883,7 +764,7 @@ local function install_tree_keymap(reason)
         nowait = true,
         desc = SYMMETRIA_TREE_DESC,
       })
-      -- Diagnostic trail — mirrors install_fm_keymap so the operator
+      -- Diagnostic trail — mirrors install_agent_keymaps so the operator
       -- can confirm the tree hijack ran via the app log.
       -- pcall intentional: rpcnotify fails if Python client is disconnected.
       pcall(vim.rpcnotify, 0, "tree", {
@@ -915,10 +796,9 @@ vim.api.nvim_create_autocmd("BufEnter", {
 })
 
 -- Self-heal when nvim-tree / neo-tree / other <leader>t*-claiming plugins
--- lazy-load. Same pattern as install_fm_keymap's LazyLoad self-heal —
--- lazy.nvim's `User LazyLoad` fires synchronously inside its load path
--- BEFORE the triggering keypress is re-dispatched, so we win the slot
--- back for the trailing key in the chord.
+-- lazy-load. lazy.nvim's `User LazyLoad` fires synchronously inside its
+-- load path BEFORE the triggering keypress is re-dispatched, so we win
+-- the slot back for the trailing key in the chord.
 vim.api.nvim_create_autocmd("User", {
   group = tree_grp,
   pattern = "LazyLoad",

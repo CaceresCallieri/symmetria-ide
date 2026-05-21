@@ -32,7 +32,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 
 ## Reference — qt-pyside — `reference/qt-pyside/` (Qt 6, PySide6, QML, shiboken)
 
-_(empty — gotchas live in CLAUDE.md until a session-relevant pitfall earns a dedicated file.)_
+- [QML overlay focus discipline](reference/qt-pyside/qml_overlay_focus.md) — wrapper Item's `Component.onCompleted: forceActiveFocus()` steals focus from inner self-focusing widgets
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
 

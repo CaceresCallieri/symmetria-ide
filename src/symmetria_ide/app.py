@@ -971,10 +971,10 @@ class AppController(QObject):
 
     @Slot(str)
     def show_fm(self, initial_path: str = "") -> None:
-        """Open the file-manager overlay at `initial_path` (or nvim cwd)."""
+        """Open the file-manager overlay at `initial_path` (or anchored root)."""
         if self._fm_visible:
             return
-        self._fm_initial_path = initial_path or self._nvim_cwd_or_home()
+        self._fm_initial_path = initial_path or self._fm_default_path()
         self._fm_visible = True
         self.fmVisibleChanged.emit()
 
@@ -1382,19 +1382,22 @@ class AppController(QObject):
         else:
             log.warning("anchor event with unknown op: %r", payload)
 
-    def _nvim_cwd_or_home(self) -> str:
+    def _fm_default_path(self) -> str:
         """Default initial path for the FM overlay when none is provided.
 
-        The Lua keybind in runtime/init.lua already passes the buffer's
-        parent directory via `rpcnotify(0, "fm", { initialPath = … })`,
-        so this fallback is reached only when the keybind hasn't been
-        wired up or no buffer is loaded. $HOME is the safe default.
+        Delegates to `displayedRoot` — the same anchored-then-cwd fallback
+        chain the file-tree and git panes use — so the FM opens uniformly
+        from any pane (Ctrl+E is an IDE-wide ApplicationShortcut, with
+        no "current buffer" notion in the agent / terminal panes). The
+        anchored-root path is kept fresh by the unified capsule routing
+        (nvim's :cd and the terminal's OSC 7 both flow through
+        `_route_capsule` with the synthetic `cwd` id).
 
-        If we ever need nvim's actual cwd here, subscribe to nvim's
-        DirChanged autocmd and cache the path on AppController — don't
-        block the GUI thread on a synchronous RPC.
+        Falls back to $HOME when neither the anchor nor the cached cwd
+        resolves to a real path — defense-in-depth against an empty
+        capsule payload at startup before the first DirChanged.
         """
-        return os.path.expanduser("~")
+        return self.displayedRoot or os.path.expanduser("~")
 
     @Slot(dict)
     def _on_fm_event(self, payload: dict) -> None:

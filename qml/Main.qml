@@ -88,6 +88,19 @@ Window {
         onActivated: controller.swap_to_editor()
     }
 
+    // IDE-wide file-manager toggle. Promoted out of the nvim layer
+    // (previously `<leader>e` / `<C-u>` via `runtime/init.lua`'s hijack)
+    // so the FM opens uniformly from any pane — editor, agent, terminal,
+    // tree sidebar — without depending on nvim having focus. Same
+    // ApplicationShortcut + Qt.ApplicationShortcut pattern as the swap
+    // chords above. Empty string defers to AppController._fm_default_path
+    // which reads `displayedRoot` (anchored root, then cached cwd).
+    Shortcut {
+        sequences: ["Ctrl+E"]
+        context: Qt.ApplicationShortcut
+        onActivated: controller.toggle_fm()
+    }
+
     // IDE-wide horizontal pane navigation.
     //
     // Spatial chord: Ctrl+H = move left, Ctrl+L = move right. The
@@ -724,11 +737,22 @@ Window {
         sourceComponent: Item {
             id: fmOverlay
             anchors.fill: parent
-            // No visible/focus/onVisibleChanged bindings needed: this Item
-            // only exists while controller.fmVisible is true (Loader.active
-            // tears it down on hide). forceActiveFocus on construction is
-            // all that is required.
-            Component.onCompleted: forceActiveFocus()
+            // No forceActiveFocus() on construction. Children's
+            // Component.onCompleted runs BEFORE parents' — so FileList's
+            // ListView inside the FM subtree has already claimed
+            // activeFocus via its own `view.forceActiveFocus()`
+            // (FileList.qml:245 in the installed module) by the time we
+            // get here. A parent-level forceActiveFocus would STEAL focus
+            // from the ListView onto fmOverlay (a plain Item, not a
+            // FocusScope, so focus stops here and never propagates back
+            // down) — which is exactly what broke arrow-key navigation
+            // once the Lua `<C-u>` path was retired in favor of an
+            // IDE-wide Ctrl+E ApplicationShortcut. Esc and bare-q still
+            // dismiss the overlay: Esc is handled inside the panel's
+            // NormalModeHandler (cancels picker mode → hide_fm); bare-q
+            // isn't accepted by the panel (it only consumes Ctrl+Q), so
+            // the unaccepted KeyEvent bubbles up to the Keys handlers
+            // below.
 
             Keys.onEscapePressed: event => {
                 controller.hide_fm();
