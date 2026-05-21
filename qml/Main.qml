@@ -174,7 +174,14 @@ Window {
         onActivated: {
             if (!treeScope.activeFocus)
                 return;
-            if (controller.agentVisible)
+            // FM is a co-mounted central-pane sibling — when it is
+            // visible, editor/terminal/agent are all gated off by
+            // !controller.fmVisible and cannot hold activeFocus.
+            // Route back to the FM item directly; fall through to
+            // the three-way dispatch below only when FM is not open.
+            if (controller.fmVisible && fmPaneLoader.item)
+                fmPaneLoader.item.forceActiveFocus();
+            else if (controller.agentVisible)
                 agentPane.forceActiveFocus();
             else if (controller.terminalVisible)
                 terminalView.forceActiveFocus();
@@ -427,7 +434,7 @@ Window {
                 // never moves.
                 //
                 // z-order: above the pane siblings in mainContent
-                // (editor / terminalView / agentPane / fmOverlayLoader are
+                // (editor / terminalView / agentPane / fmPaneLoader are
                 // all z: 0 by default, so z: 50 guarantees the border draws
                 // on top of their outermost pixel). WhichKeyOverlay is z: 20
                 // inside editor, a different stacking context, so no
@@ -481,7 +488,7 @@ Window {
                 // for a binding that fires on user keypress, not in any
                 // hot path.
                 Loader {
-                    id: fmOverlayLoader
+                    id: fmPaneLoader
                     anchors.fill: parent
                     active: controller.fmVisible
 
@@ -508,28 +515,27 @@ Window {
                     Connections {
                         target: controller
                         function onFmVisibleChanged(): void {
-                            // Cancel any in-flight picker mode when the
-                            // panel closes. FileManagerService is a
-                            // singleton — its state outlives the Loader's
-                            // reconstruction cycle, so without this the
-                            // next show would skip startPickerMode and
-                            // the panel would have no way to emit
-                            // pickerCompleted. Note: no fmOverlayLoader.item
-                            // guard — under per-show reconstruction, item
-                            // is null exactly when we need to cancel.
-                            if (!controller.fmVisible && FmUi.FileManagerService.pickerMode) {
-                                FmUi.FileManagerService.cancelPickerMode();
-                            }
-
-                            // Focus return on dismiss. Without this,
-                            // focus stays on the now-destroyed fmOverlay
-                            // subtree's parent and keystrokes go nowhere
-                            // — nvim/agent appears frozen until alt-tab.
-                            // Mirrors the priority ordering in
-                            // Window.onActiveChanged below: agent if
-                            // visible, terminal if visible, otherwise
-                            // editor.
                             if (!controller.fmVisible) {
+                                // Cancel any in-flight picker mode when the
+                                // panel closes. FileManagerService is a
+                                // singleton — its state outlives the Loader's
+                                // reconstruction cycle, so without this the
+                                // next show would skip startPickerMode and
+                                // the panel would have no way to emit
+                                // pickerCompleted. Note: no fmPaneLoader.item
+                                // guard — under per-show reconstruction, item
+                                // is null exactly when we need to cancel.
+                                if (FmUi.FileManagerService.pickerMode)
+                                    FmUi.FileManagerService.cancelPickerMode();
+
+                                // Focus return on dismiss. Without this,
+                                // focus stays on the now-destroyed fmPane
+                                // subtree's parent and keystrokes go nowhere
+                                // — nvim/agent appears frozen until alt-tab.
+                                // Mirrors the priority ordering in
+                                // Window.onActiveChanged below: agent if
+                                // visible, terminal if visible, otherwise
+                                // editor.
                                 if (controller.agentVisible)
                                     agentPane.forceActiveFocus();
                                 else if (controller.terminalVisible)
@@ -562,7 +568,7 @@ Window {
                     }
 
                     sourceComponent: Item {
-                        id: fmOverlay
+                        id: fmPane
                         anchors.fill: parent
                         // No forceActiveFocus() on construction. Children's
                         // Component.onCompleted runs BEFORE parents' — so
@@ -571,7 +577,7 @@ Window {
                         // `view.forceActiveFocus()` (FileList.qml:245 in
                         // the installed module) by the time we get here.
                         // A parent-level forceActiveFocus would STEAL
-                        // focus from the ListView onto fmOverlay (a plain
+                        // focus from the ListView onto fmPane (a plain
                         // Item, not a FocusScope, so focus stops here and
                         // never propagates back down) — which is exactly
                         // what broke arrow-key navigation once the Lua
@@ -854,7 +860,7 @@ Window {
                             // the FM's default size so more files fit per
                             // viewport (target: neo-tree-style compactness for
                             // the IDE sidebar). The FM central-pane surface
-                            // (Ctrl+E → fmOverlayLoader inside mainContent)
+                            // (Ctrl+E → fmPaneLoader inside mainContent)
                             // keeps the default 1.0 — picker rows benefit
                             // from the larger hit target since they're
                             // transient and one-shot.
@@ -1085,7 +1091,7 @@ Window {
     // view is currently visible grabs focus, so alt-tabbing back
     // never leaves the user typing into a dead surface.
     //
-    // The `&& fmOverlayLoader.item` guard is still required under the
+    // The `&& fmPaneLoader.item` guard is still required under the
     // per-show Loader.active reconstruction model — Qt does not
     // guarantee that `Loader.active: controller.fmVisible` (a binding)
     // and this `Window.onActiveChanged` (a signal handler) are
@@ -1097,8 +1103,8 @@ Window {
     onActiveChanged: {
         if (!active)
             return;
-        if (controller.fmVisible && fmOverlayLoader.item)
-            fmOverlayLoader.item.forceActiveFocus();
+        if (controller.fmVisible && fmPaneLoader.item)
+            fmPaneLoader.item.forceActiveFocus();
         else if (controller.agentVisible)
             agentPane.forceActiveFocus();
         else if (controller.terminalVisible)
@@ -1130,7 +1136,14 @@ Window {
         // its own first construction, but this Window-level handler is
         // the final word per the gotcha #16 / QML-side analog argument
         // documented above for the editor branch.
-        if (controller.terminalVisible)
+        //
+        // FM guard mirrors onActiveChanged priority: fmPaneLoader.item is
+        // null at startup (FM is never the initial surface), so this branch
+        // is purely defensive — it ensures the two handlers stay symmetric
+        // if startup state ever includes fmVisible.
+        if (controller.fmVisible && fmPaneLoader.item)
+            fmPaneLoader.item.forceActiveFocus();
+        else if (controller.terminalVisible)
             terminalView.forceActiveFocus();
         else
             editor.forceActiveFocus();
