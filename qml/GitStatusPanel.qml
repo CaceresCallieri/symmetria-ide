@@ -276,7 +276,8 @@ FocusScope {
         // working-tree state the same way hiding gitignored adds would.
         // The pathFilter already bounds visible rows to the actual
         // changeset, so flipping this on does not expose unrelated
-        // dotfiles — only ancestors of files the user has actually touched.
+        // dotfiles — only the changed paths themselves and their
+        // ancestor directories up to the repo root.
         //
         // `compactScale: 0.75` makes rows tighter than the main tree
         // below — the changes pane benefits from packing more rows
