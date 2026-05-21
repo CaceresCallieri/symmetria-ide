@@ -126,8 +126,8 @@ FocusScope {
     // fire when THAT item has activeFocus, not the FileTreeView's
     // outer Item). Symmetric with `fileTreeView.focusInternal()` in
     // Main.qml — a future chord can hand focus to either tree
-    // identically. See the file header comment for the v1.5 focus
-    // scaffolding rationale.
+    // identically. See the file header comment for the focus routing
+    // rationale (FocusScope, ApplicationShortcut gating, auto-fallback).
     function focusInternal(): void {
         changesTree.focusInternal();
     }

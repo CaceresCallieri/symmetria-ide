@@ -246,6 +246,9 @@ Window {
         context: Qt.ApplicationShortcut
         enabled: treeScope.activeFocus && gitStatusPanel.visible
         onActivated: {
+            // Optimistic update — onActiveFocusChanged (gitStatusPanel) also writes
+            // this property, but we set it here as a defensive fallback in case
+            // focusInternal() doesn't land focus (e.g. item not yet ready).
             root.activeTreeSubPane = 1;
             gitStatusPanel.focusInternal();
         }
@@ -254,8 +257,16 @@ Window {
     Shortcut {
         sequences: ["Ctrl+J"]
         context: Qt.ApplicationShortcut
+        // No gitStatusPanel.visible guard here — intentional asymmetry with Ctrl+K.
+        // Ctrl+J must stay enabled even when the changes pane is hidden, so the
+        // user can still reach the main tree. If we added the guard, a user in the
+        // changes pane when it hides (clean tree) would have no keyboard path to the
+        // main tree until a Ctrl+H+Ctrl+L round-trip.
         enabled: treeScope.activeFocus
         onActivated: {
+            // Optimistic update — onActiveFocusChanged (mainTreeScope) also writes
+            // this property, but we set it here as a defensive fallback in case
+            // focusInternal() doesn't land focus (e.g. item not yet ready).
             root.activeTreeSubPane = 0;
             fileTreeView.focusInternal();
         }
