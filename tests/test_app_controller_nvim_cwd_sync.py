@@ -174,10 +174,13 @@ def test_compact_leaves_non_home_paths_unchanged(controller):
 def test_compact_fires_change_signal_on_root_update(controller):
     """`displayedRootCompact` is a @Property over `displayedRootChanged`.
     QML bindings re-evaluate on that signal — assert the signal does
-    fire on a cwd update so the side-panel header re-binds."""
+    fire on a cwd update so the side-panel header re-binds.
+    Also verifies the compact value is correct after the emission,
+    proving the property AND the signal are wired to the same source."""
     emissions: list[None] = []
     controller.displayedRootChanged.connect(lambda: emissions.append(None))
 
     controller._on_terminal_osc7("/tmp/some-project")
 
     assert len(emissions) >= 1
+    assert controller.displayedRootCompact == "/tmp/some-project"

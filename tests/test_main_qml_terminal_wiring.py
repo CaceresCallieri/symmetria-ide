@@ -94,14 +94,20 @@ def test_terminal_view_visibility_gated(main_qml: str):
     factor in agentVisible so the agent overlay hides BOTH central
     surfaces."""
     assert "controller.terminalVisible" in main_qml
-    assert "!controller.agentVisible && controller.terminalVisible" in main_qml
+    assert (
+        "!controller.agentVisible && !controller.fmVisible && controller.terminalVisible"
+        in main_qml
+    )
 
 
 def test_editor_visibility_tightened_for_terminal(main_qml: str):
     """NvimView's visibility must now require BOTH editorVisible AND
     not-agentVisible. Pre-PR-5 it was just `!agentVisible`, which
     would leave the editor visible underneath the terminal pane."""
-    assert "!controller.agentVisible && controller.editorVisible" in main_qml
+    assert (
+        "!controller.agentVisible && !controller.fmVisible && controller.editorVisible"
+        in main_qml
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +163,7 @@ def test_fm_overlay_restore_considers_terminal(main_qml: str):
     fm_idx = main_qml.find("if (!controller.fmVisible)")
     assert fm_idx >= 0
     # Body should reference terminalVisible.
-    body = main_qml[fm_idx : fm_idx + 400]
+    body = main_qml[fm_idx : fm_idx + 2000]
     assert "controller.terminalVisible" in body
 
 

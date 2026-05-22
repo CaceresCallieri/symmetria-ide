@@ -195,6 +195,24 @@ class TestRpcThreadMarshalling:
 
         fake_nvim.async_call.assert_not_called()
 
+    def test_set_current_dir_closure_calls_nvim_api(self) -> None:
+        """The `_do` closure passed to async_call must invoke
+        `nvim.api.set_current_dir` with the path argument. The previous
+        test only asserts that `async_call` was called, but not what the
+        closure does — this test extracts the closure and invokes it to
+        assert the RPC call arrives at the API layer."""
+        backend = NvimBackend()
+        fake_nvim = MagicMock()
+        backend._nvim = fake_nvim  # type: ignore[assignment]
+
+        backend.set_current_dir("/tmp/test-project")
+
+        # Extract the closure that was passed to async_call and invoke it.
+        assert fake_nvim.async_call.called
+        _do = fake_nvim.async_call.call_args[0][0]
+        _do()
+        fake_nvim.api.set_current_dir.assert_called_once_with("/tmp/test-project")
+
 
 # ---------------------------------------------------------------------------
 # Gotcha #9 — cmdline / popupmenu arity forward-compat

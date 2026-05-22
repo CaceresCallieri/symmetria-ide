@@ -794,6 +794,7 @@ Window {
                             // it scales if the panel chrome is ever
                             // re-tuned. Radius = half = circle.
                             Rectangle {
+                                id: anchorDot
                                 Layout.preferredWidth: Theme.spacing.xs * 2
                                 Layout.preferredHeight: Theme.spacing.xs * 2
                                 Layout.alignment: Qt.AlignVCenter

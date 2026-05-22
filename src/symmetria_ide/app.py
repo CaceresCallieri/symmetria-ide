@@ -488,6 +488,10 @@ class AppController(QObject):
             self._cwd: str = os.getcwd()
         except OSError:
             self._cwd = os.path.expanduser("~")
+        # Cache HOME once so displayedRootCompact doesn't re-expand on every
+        # cwd change. os.path.expanduser("~") is a pure function of the
+        # process environment and never changes at runtime.
+        self._home: str = os.path.expanduser("~")
         # Project-anchor state. When `_anchored` is True, `displayedRoot`
         # returns `_anchored_root` and incoming cwd updates DO NOT fire
         # `displayedRootChanged` — they still update `_cwd` silently so a
@@ -1104,7 +1108,7 @@ class AppController(QObject):
         root = self.displayedRoot
         if not root:
             return ""
-        home = os.path.expanduser("~")
+        home = self._home  # cached in __init__; HOME never changes at runtime
         if home and (root == home or root.startswith(home + os.sep)):
             return "~" + root[len(home) :]
         return root
