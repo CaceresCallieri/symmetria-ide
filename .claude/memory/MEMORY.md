@@ -33,7 +33,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 ## Reference — qt-pyside — `reference/qt-pyside/` (Qt 6, PySide6, QML, shiboken)
 
 - [QML overlay focus discipline](reference/qt-pyside/qml_overlay_focus.md) — wrapper Item's `Component.onCompleted: forceActiveFocus()` steals focus from inner self-focusing widgets
-- [RowLayout center-drift on partially-hidden rows](reference/qt-pyside/rowlayout_center_drift.md) — hide-the-only-fillWidth-item + bare Qt.AlignVCenter ⇒ items drift to center; need both AlignLeft AND spacer
+- [RowLayout center-drift](reference/qt-pyside/rowlayout_center_drift.md) — hidden fillWidth+bare AlignVCenter→center drift; fix: AlignLeft+spacer
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
 

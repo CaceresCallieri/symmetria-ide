@@ -157,12 +157,11 @@ Rectangle {
                 // working in the shell. Workspace context (project,
                 // branch) stays visible.
                 //
-                // `Layout.fillWidth: visible` keeps the slack claim
-                // bound to the item's actual presence — in editor mode
+                // `Layout.fillWidth: root.editorActive` keeps the slack
+                // claim bound to the surface mode — in editor mode
                 // the file expands to push position to the right edge;
-                // in terminal mode the slack claim collapses with the
-                // hidden item so other rows' items don't get pushed
-                // around by a phantom fillWidth.
+                // in terminal mode the slack claim collapses so other
+                // items don't get pushed around by a phantom fillWidth.
                 Text {
                     visible: root.editorActive
                     text: statusState.file
@@ -171,7 +170,7 @@ Rectangle {
                     font.pixelSize: Theme.font.size.sm
                     font.weight: Theme.font.weight.medium
                     Layout.alignment: Qt.AlignLeft | Qt.AlignVCenter
-                    Layout.fillWidth: visible
+                    Layout.fillWidth: root.editorActive
                     elide: Text.ElideMiddle
                     renderType: Text.NativeRendering
                 }

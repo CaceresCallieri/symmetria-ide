@@ -45,7 +45,7 @@ items" if you forget to gate it; explicit AlignLeft only helps when the cell act
 grows). Both together survive every order-of-hiding case I tested in StatusBar.qml.
 
 **Canonical reference:** `qml/StatusBar.qml` — the comment block above
-`Rectangle { id: modeBadge ... }` and around `Item { Layout.fillWidth: !root.editorActive }`
+`Rectangle { visible: root.editorActive ... }` and around `Item { Layout.fillWidth: !root.editorActive }`
 are the durable in-code reminders. Both blocks call out that reverting them returns
 the centering bug.
 
