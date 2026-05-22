@@ -2,7 +2,7 @@
 
 A custom IDE wrapper built on NeoVim, in the Symmetria ecosystem.
 
-**Phase 0 spine complete. Phase 1 deferred. Phase 2 (Claude Code agent pane) in progress. Phase 2.5 (terminal pane + project anchor) shipped — anchor + terminal pane + OSC 7 shell-driven cwd sync + nvim cwd sync + side-panel location header all in. Long-term direction: see `docs/vision.md` "Surface hierarchy" + `docs/future.md` "Topology inversion".**
+**Phase 0 spine complete. Phase 1 deferred. Phase 2 (IDE-native chat surface) parked as a self-contained surface — AgentPane, SessionHost, and the Node SDK sidecar all stay live, driven by `AppController` public methods. The Lua keymap hijacks (`<leader>aN`, `<C-1..5>`, `<C-S-q>`, `<leader>tf`) that previously routed orchestrator-style triggers through `agent_event` / `tree_event` rpcnotify channels have been stripped; orchestrator.nvim is the active multi-instance agent runtime inside the embedded NeoVim. Reintroducing an IDE-side chord namespace is Track-2 work (see `docs/orchestrator-replacement-prd.md`, shelved). Phase 2.5 (terminal pane + project anchor) shipped — anchor + terminal pane + OSC 7 shell-driven cwd sync + nvim cwd sync + side-panel location header all in. Long-term direction: see `docs/vision.md` "Surface hierarchy" + `docs/future.md` "Topology inversion".**
 
 ## Status at a glance
 
@@ -269,4 +269,4 @@ Cross-cutting design rules that hold across every Phase 2 follow-up:
 - Symmetria Shell (QuickShell-based desktop shell)
 - Symmetria File Manager (QML, to be integrated in Phase 1)
 - Symmetria WhatsApp (standalone, not integrated)
-- `orchestrator.nvim` (NeoVim plugin driving the Claude Code workflow — slated for deprecation once the IDE meets the gates in `docs/agent-dashboard-integration.md`)
+- `orchestrator.nvim` (NeoVim plugin driving the Claude Code workflow — **active agent runtime** as of 2026-05-21; the IDE no longer intercepts its `<leader>a*` / `<C-1..5>` keymaps. The IDE-side chat pane is preserved but currently has no in-IDE activation chord — Track-2 will add one on a non-colliding namespace)

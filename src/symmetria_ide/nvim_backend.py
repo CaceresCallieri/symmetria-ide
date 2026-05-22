@@ -87,30 +87,20 @@ class NvimBackend(QObject):
     # Each item is { key, desc, is_group, icon, icon_color }.
     # See `runtime/lua/orchestrator/whichkey/init.lua` for the emitter.
     whichkey_event = Signal(dict)
-    # Agent-pane lifecycle triggered from Lua (via rpcnotify). Payload:
-    #   { op: "show"|"hide"|"toggle" }
-    # `show` opens full-window agent view; `hide` returns to editor;
-    # `toggle` flips based on current state. AppController owns the
-    # state — this signal is advisory, routing only.
-    agent_event = Signal(dict)
-    # File manager toggle-overlay lifecycle. Same shape as agent_event:
+    # File manager toggle-overlay lifecycle. Payload shape:
     #   { op: "show"|"hide"|"toggle", initialPath?: string }
     # The overlay floats above NvimView; the user's compositor is not
     # involved (unlike the standalone Symmetria File Manager which spawns
     # a separate window). Source of truth is AppController.fmVisible.
+    # The `"fm"` rpcnotify channel is preserved as a stable contract for
+    # a future Lua-side opener (e.g. a `:SymFm` user command); no
+    # currently-installed Lua emitter exists post-decoupling.
     fm_event = Signal(dict)
-    # Always-on file-tree sidebar lifecycle. Same shape as fm_event:
-    #   { op: "focus" }
-    # Sidebar visibility itself is controlled by AppController.treeVisible
-    # — this signal only carries focus-management asks (the user's
-    # <leader>tf keybind). Distinct from fm_event because the sidebar is
-    # always-mounted whereas fm_event drives the toggle-overlay path.
-    tree_event = Signal(dict)
     # Window-navigation bridge. Lua emits via rpcnotify when <C-h/j/k/l>
     # is pressed at the edge of nvim's window splits — payload is
     # `{op:"move", dir:"left|right|up|down"}` for spillover, or
     # `{op:"debug", event:"keymap_install", reason:...}` for diagnostic
-    # traces. Same routing pattern as tree_event / fm_event / agent_event.
+    # traces. Same routing pattern as fm_event.
     nav_event = Signal(dict)
     # Project-anchor lifecycle from `:SymmetriaAnchor` / `:SymmetriaUnanchor`.
     # Payload: `{op:"set", path?:string}` or `{op:"clear"}`. AppController
@@ -326,9 +316,8 @@ class NvimBackend(QObject):
             self._nvim.subscribe("completions")
             self._nvim.subscribe("scroll")
             self._nvim.subscribe("whichkey")
-            self._nvim.subscribe("agent")
             log.info(
-                "subscribed to 'capsule' + 'completions' + 'scroll' + 'whichkey' + 'agent' notifications"
+                "subscribed to 'capsule' + 'completions' + 'scroll' + 'whichkey' notifications"
             )
         except Exception:  # noqa: BLE001
             log.exception("subscribe(capsule/completions) failed")

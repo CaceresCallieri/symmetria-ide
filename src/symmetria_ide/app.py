@@ -244,11 +244,14 @@ class AppController(QObject):
 
     Also owns the agent-pane visibility state. The agent view is a
     full-window mode (not a side panel): when `agentVisible` is True
-    the editor is hidden and the `AgentPane` takes over. Triggered
-    by the `<leader>A` Lua keymap (runtime/init.lua emits an `agent`
-    rpcnotify) or programmatically via `show_agent` / `hide_agent`.
-    The composer's Escape keypress in `AgentPane.qml` calls
-    `hide_agent` to return focus to the editor.
+    the editor is hidden and the `AgentPane` takes over. Driven
+    entirely from the IDE side — `show_agent` / `hide_agent` /
+    `toggle_agent` are the public entry points, callable from QML
+    chrome (the composer's Escape press in `AgentPane.qml` calls
+    `hide_agent`) and from tests. The Lua `<leader>aN` / `<C-1..5>` /
+    `<C-S-q>` hijack path that previously routed through `agent_event`
+    has been stripped so orchestrator.nvim's own keymaps own those
+    slots inside the embedded NeoVim.
     """
 
     backendReady = Signal()
@@ -271,10 +274,10 @@ class AppController(QObject):
     anchoredChanged = Signal()
     displayedRootChanged = Signal()
     treeVisibleChanged = Signal()
-    # QML-bound focus pull. The Lua `<leader>tf` keybind routes here via
-    # `_on_tree_event`; Main.qml's Connections block calls
-    # `fileTreeView.forceActiveFocus()`. Decoupled from the data-bearing
-    # signals above because it carries no payload — it's a one-way ask.
+    # QML-bound focus pull. Main.qml's Connections block listens for this
+    # signal and calls `fileTreeView.forceActiveFocus()`. Emitted by the
+    # `focus_tree()` Slot, which the Ctrl+J ApplicationShortcut in
+    # qml/Main.qml dispatches. Carries no payload — it's a one-way ask.
     focusTreeRequested = Signal()
     # Reverse direction of focusTreeRequested — fired from
     # `_on_nav_event` when nvim spillover targets the editor (no
@@ -416,27 +419,22 @@ class AppController(QObject):
         # handles visibility/trail, model handles the items list.
         self._backend.whichkey_event.connect(self._whichkey_state.apply)
         self._backend.whichkey_event.connect(self._whichkey_model.apply)
-        # Lua-driven agent-pane lifecycle. The rpcnotify emitter lives
-        # in `runtime/init.lua`; BackendEvents routes it here. No Qt
-        # thread hop — pynvim's worker already ran the notification
-        # through the auto-queued `nvim_backend._on_notification`
-        # path before emitting `agent_event`.
-        self._backend.agent_event.connect(self._on_agent_event)
+        # Agent-pane visibility lives on the IDE side only — the Lua-driven
+        # `agent_event` rpcnotify channel was stripped when orchestrator.nvim
+        # took back ownership of `<leader>aN` / `<C-1..5>` / `<C-S-q>`. The
+        # `_on_agent_event` dispatcher below remains callable from tests and
+        # from future Track-2 QML chord wirings.
         self._agent_visible = False
-        # File manager toggle-overlay lifecycle. Same routing pattern as
-        # agent_event — Lua emits via rpcnotify, NvimBackend re-emits as
+        # File manager toggle-overlay lifecycle. Lua may emit via rpcnotify
+        # in the future (no live emitter today); NvimBackend re-emits as
         # fm_event, this controller owns the state. The panel itself is a
         # QML overlay over NvimView (not a separate window).
         self._backend.fm_event.connect(self._on_fm_event)
         self._fm_visible = False
         self._fm_initial_path = ""
-        # Always-on file-tree sidebar. Same Lua → rpcnotify → backend signal
-        # → controller routing as fm_event; the only op today is "focus",
-        # which the Main.qml Connections block translates into a
-        # `forceActiveFocus()` on the FileTreeView instance.
-        # queued: NvimBackend worker → AppController GUI (same path as agent_event/fm_event)
-        self._backend.tree_event.connect(self._on_tree_event)
-        # queued: NvimBackend worker → AppController GUI (same path as tree_event)
+        # File-tree sidebar focus is driven entirely from QML
+        # (Ctrl+J ApplicationShortcut → focus_tree()); the Lua `<leader>tf`
+        # → `tree` rpcnotify path was stripped alongside the agent hijacks.
         self._backend.nav_event.connect(self._on_nav_event)
         # queued: NvimBackend worker → AppController GUI. Secondary surface
         # for the project-anchor concept (the primary is a Qt application-
@@ -1261,26 +1259,6 @@ class AppController(QObject):
         """
         self.focusTreeRequested.emit()
 
-    @Slot(dict)
-    def _on_tree_event(self, payload: dict) -> None:
-        """Route Lua-emitted tree rpcnotify events.
-
-        Payload shapes:
-          { op: "focus" }
-          { op: "debug", event: "keymap_install", keys, reason }
-        Only one user-facing op today (focus tree from `<leader>tf`);
-        shape mirrors `_on_fm_event` so a future `{op: "toggle"}` or
-        `{op: "reveal_current"}` is a single-line dispatch addition.
-        """
-        op = str(payload.get("op") or "").lower()
-        if op == "focus":
-            self.focus_tree()
-        elif op == "debug":
-            event = str(payload.get("event") or "")
-            log.debug("tree debug: %s %r", event, payload)
-        else:
-            log.warning("tree event with unknown op: %r", payload)
-
     @Slot()
     def focus_editor(self) -> None:
         """Ask QML to move active focus into the NvimView.
@@ -1607,13 +1585,21 @@ class AppController(QObject):
 
     @Slot(dict)
     def _on_agent_event(self, payload: dict) -> None:
-        """Route a Lua-emitted agent lifecycle event.
+        """Route an agent lifecycle event.
+
+        Historically driven by Lua rpcnotify ("agent" channel from
+        `runtime/init.lua`). That coupling was stripped when
+        orchestrator.nvim took back ownership of `<leader>aN` /
+        `<C-1..5>` / `<C-S-q>`; this dispatcher is now callable directly
+        from tests and from future Track-2 QML chord wirings that will
+        re-introduce the spawn / focus / close surface on non-colliding
+        chords. The op semantics below are unchanged.
 
         Payload shape: `{op: "show"|"hide"|"toggle"|"focus"|"close"|"debug",
         ...}`. Unknown ops log at DEBUG and no-op — additive protocol
         evolution doesn't crash the controller.
 
-        Phase B dispatch table (PRD §5.1):
+        Dispatch table (originally Phase B / PRD §5.1):
 
         - `op="show"`, `action="new"` → spawn into next free slot (1..5)
           and focus it. Pool full = warn + focus the highest-numbered
@@ -1621,16 +1607,15 @@ class AppController(QObject):
         - `op="show"` without `action` → just open the pane on the
           currently-focused instance. No spawn.
         - `op="focus"`, `index=N` → switch focus to slot N. No-op if
-          slot N is empty (per PRD B2 — focus does not spawn).
+          slot N is empty (focus does not spawn).
         - `op="close"` → close the focused instance. With `index=N`,
           close that specific slot. After close: refocus to the
-          next-lowest occupied slot (PRD §5.3 walk-down-then-up rule),
-          or hide the pane if the pool emptied.
+          next-lowest occupied slot (walk-down-then-up rule), or hide
+          the pane if the pool emptied.
         - `op="hide"` / `op="toggle"` → pane visibility only, no
           per-instance impact.
-        - `op="debug"` → diagnostic trail from the Lua side
-          (keymap-install attempts, orchestrator race observations).
-          Payload carries an `event` string discriminating category.
+        - `op="debug"` → diagnostic trail (historically from Lua
+          keymap-install attempts; retained for forward compatibility).
         """
         op = str(payload.get("op") or "").strip()
         if op == "show":
@@ -1704,11 +1689,11 @@ class AppController(QObject):
     def close_focused_instance(self) -> None:
         """QML-facing close — used by the agent pane's Ctrl+Shift+Q binding.
 
-        Mirrors the editor-side `<C-S-q>` keymap installed in
-        `runtime/init.lua`, which dispatches via `agent_event` →
-        `_handle_agent_close`. The QML composer / pane chrome can't reach
-        nvim's keymap system (focus sits on a TextField), so a parallel
-        QML→Python bridge is required.
+        The editor-side `<C-S-q>` hijack that previously dispatched via
+        `agent_event` → `_handle_agent_close` has been stripped (orchestrator.nvim
+        owns the chord again inside embedded nvim). The QML composer /
+        pane chrome can't reach nvim's keymap system anyway — focus sits
+        on a TextField — so this in-pane bridge is the canonical path.
 
         Routes through `_handle_agent_close({})` rather than calling
         `_close_instance` directly — `_handle_agent_close` carries the

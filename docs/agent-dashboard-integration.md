@@ -1,5 +1,7 @@
 # Agent dashboard integration
 
+> **Status: parked (2026-05-21).** The IDE-side absorption of `orchestrator.nvim` has been shelved (see `orchestrator-replacement-prd.md` for the shelving banner). The dual-feed architecture described in this document remains architecturally valid in principle but is **not actively being implemented**. The IDE's chat surface is currently self-contained — it does NOT feed Symmetria Shell's `agent-bridge.py`; orchestrator.nvim's hook-based feed is the sole live producer for the dashboard. Revisit when Track-2 (IDE-native orchestrator on non-colliding chords) ships.
+
 How Symmetria IDE will participate in the existing Symmetria Shell agent dashboard, and the planned deprecation of `orchestrator.nvim`.
 
 This document is the canonical reference for a long-horizon architectural commitment that crosses three repositories:
