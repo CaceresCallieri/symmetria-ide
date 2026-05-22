@@ -560,6 +560,17 @@ class GitController(QObject):
         # Worker writes via `_publish`; GUI thread reads via the `stats`
         # property (which copies under the lock into a QVariantMap).
         self._stats: GitStats = GitStats()
+        # Absolute-path membership map of every gitignored file + directory
+        # in the working tree. Computed via a single
+        # ``git ls-files --others --ignored --exclude-standard --directory``
+        # pass per status scan and exposed via the ``ignoredPathSet`` Qt
+        # property. The FM ``FileTreeView`` consumes this through its
+        # ``ignoredPathSet`` prop to short-circuit the per-directory
+        # ``git check-ignore`` shell pipeline that ``Gitignore.qml`` would
+        # otherwise spawn — which was the dominant cost driver for
+        # auto-expand on medium-to-large repos (≥100 directories serialised
+        # through one queue at ~30–40ms each).
+        self._ignored_set: dict[str, bool] = {}
 
         # Guards `_status_map`, `_stats`, and `_resolved_root` against the
         # worker mutating them while the GUI thread reads via
@@ -630,6 +641,48 @@ class GitController(QObject):
         }
 
     @Property("QVariant", notify=statusChanged)
+    def ignoredPathSet(self) -> dict | None:
+        """Absolute-path membership set of gitignored entries in the worktree.
+
+        Returned as a ``{absPath: True}`` dict so the FM's QML can do an
+        O(1) membership check inside its fan-out skip gate. Replaces the
+        per-directory ``git check-ignore --stdin`` shell pipeline the FM
+        otherwise spawns through ``Gitignore.qml``, which was strictly
+        sequential (one subprocess at a time across the whole cascade)
+        and dominated mount time on big repos.
+
+        Paths are stripped of trailing slashes so they match the FM's
+        ``FileSystemEntry.path`` semantics (also slash-free). Both files
+        AND directories are included: an ignored directory (e.g.
+        ``node_modules``) is listed via ``--directory`` aggregation so a
+        single map entry covers the whole subtree without enumerating
+        every child.
+
+        Returns ``None`` (NOT an empty dict) when there's no resolved repo
+        OR the first scan hasn't completed yet. The FM's QML gates its
+        short-circuit on truthiness via ``if (root.ignoredPathSet)``, so a
+        ``None`` return makes the FM fall back to its per-directory
+        ``check-ignore`` path until real data arrives — crucial because a
+        truthy-empty dict would cause the FM to treat NOTHING as ignored,
+        over-expanding ``.venv`` / ``node_modules`` / etc. and exploding
+        the cascade past the model ceiling before the GitController's
+        first emit catches up.
+
+        Notify on ``statusChanged`` — the ignored set is recomputed in the
+        same worker pass that produces ``_status_map``, so reusing the
+        existing emit keeps every binding consistent under one signal.
+        """
+        with self._lock:
+            ignored, root = self._ignored_set, self._resolved_root
+        if not root:
+            return None
+        # Empty repo (no ignored files) still publishes the empty map —
+        # the consumer should treat empty-but-known as "skip nothing", not
+        # as "data not available". Truthiness of `{}` is false in Python
+        # but truthy in JS, so this contract reads cleanly on both sides.
+        return dict(ignored)
+
+    @Property("QVariant", notify=statusChanged)
     def changedPathSet(self) -> dict:
         """Absolute-path membership set for `FileTreeView.pathFilter`.
 
@@ -684,12 +737,22 @@ class GitController(QObject):
         self.repoRootChanged.emit()
         # Tear down old watcher + map synchronously so callers don't see
         # stale data from the previous project for the brief window before
-        # the worker produces the new scan.
+        # the worker produces the new scan. Clearing `_ignored_set` here
+        # too is load-bearing for the FM `FileTreeView`'s gating contract:
+        # the IDE-side Main.qml binds rootPath to a conditional that holds
+        # at "" while `ignoredPathSet` is null. Leaving the previous
+        # project's ignored set live across a switch would let the FM
+        # mount the new tree with stale data — an ignored path from the
+        # OLD project would either accidentally match (path collision) or
+        # silently NOT match (treating nothing as ignored), producing
+        # over-expansion of `.venv` / `node_modules` etc. before the new
+        # scan catches up.
         self._clear_watcher()
         with self._lock:
             self._status_map = {}
             self._stats = GitStats()
             self._resolved_root = ""
+            self._ignored_set = {}
         self.statusChanged.emit()
         self.statsChanged.emit()
         self._wake_worker()
@@ -816,13 +879,13 @@ class GitController(QObject):
         with self._lock:
             repo_root = self._repo_root
         if not repo_root:
-            self._publish({}, "", GitStats())
+            self._publish({}, "", GitStats(), {})
             return
 
         resolved = self._resolve_repo_root(repo_root)
         if not resolved:
             # Not a git repo — clear map, emit (panel hides), no watcher.
-            self._publish({}, "", GitStats())
+            self._publish({}, "", GitStats(), {})
             return
 
         new_map = self._run_status(resolved)
@@ -844,7 +907,12 @@ class GitController(QObject):
         )
 
         new_map = _add_directory_aggregates(new_map)
-        self._publish(new_map, resolved, new_stats)
+        # Ignored-path set published alongside the status map so QML
+        # consumers see them together under one `statusChanged` emit.
+        # Best-effort: on subprocess failure we publish an empty set
+        # (the FM falls back to its per-dir check-ignore path).
+        new_ignored = self._run_ignored_set(resolved)
+        self._publish(new_map, resolved, new_stats, new_ignored)
 
         # Hand the watcher rebuild back to the GUI thread — QFileSystemWatcher
         # is not thread-safe and lives on `self`'s thread.
@@ -1005,11 +1073,69 @@ class GitController(QObject):
             result[rel] = head.count(b"\n") + rest.count(b"\n")
         return result
 
+    def _run_ignored_set(self, cwd: str) -> dict[str, bool]:
+        """Run ``git ls-files --others --ignored --exclude-standard --directory``
+        and return absolute paths of every ignored entry in the worktree.
+
+        ``--directory`` collapses entirely-ignored subtrees into a single
+        directory entry (e.g. ``node_modules/`` rather than every file
+        inside), keeping the result set small even on heavy repos like
+        Node projects. Returned paths are absolute and slash-stripped so
+        membership checks match the FM's ``FileSystemEntry.path``
+        semantics. On subprocess failure we return ``{}`` — the FM falls
+        through to its own per-directory ``check-ignore`` path, which is
+        slower but functionally equivalent.
+        """
+        try:
+            proc = subprocess.run(
+                [
+                    "git",
+                    "ls-files",
+                    "--others",
+                    "--ignored",
+                    "--exclude-standard",
+                    "--directory",
+                    "-z",
+                ],
+                cwd=cwd,
+                capture_output=True,
+                timeout=_SCAN_TIMEOUT_SEC,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            log.warning("git ls-files (ignored) failed for %s: %s", cwd, exc)
+            return {}
+        if proc.returncode != 0:
+            log.warning(
+                "git ls-files (ignored) exited %d for %s: %s",
+                proc.returncode,
+                cwd,
+                proc.stderr.decode("utf-8", errors="replace").strip(),
+            )
+            return {}
+        out: dict[str, bool] = {}
+        # -z gives NUL-delimited paths so newlines in filenames are safe.
+        for chunk in proc.stdout.split(b"\x00"):
+            if not chunk:
+                continue
+            try:
+                rel = chunk.decode("utf-8")
+            except UnicodeDecodeError:
+                rel = chunk.decode("utf-8", errors="replace")
+            # `--directory` includes a trailing slash on dir entries; the
+            # FM's entry.path has no trailing slash, so strip it for
+            # consistent membership comparison.
+            if rel.endswith("/"):
+                rel = rel[:-1]
+            out[os.path.join(cwd, rel)] = True
+        return out
+
     def _publish(
         self,
         new_map: dict[str, GitStatus],
         resolved: str,
         new_stats: GitStats,
+        new_ignored: dict[str, bool],
     ) -> None:
         """Swap the map + stats under the lock and emit change signals.
 
@@ -1023,11 +1149,15 @@ class GitController(QObject):
             old_map = self._status_map
             old_stats = self._stats
             old_root = self._resolved_root
+            old_ignored = self._ignored_set
             self._status_map = new_map
             self._stats = new_stats
             self._resolved_root = resolved
+            self._ignored_set = new_ignored
 
-        map_or_root_changed = old_map != new_map or old_root != resolved
+        map_or_root_changed = (
+            old_map != new_map or old_root != resolved or old_ignored != new_ignored
+        )
         stats_changed = old_stats != new_stats
 
         if map_or_root_changed:

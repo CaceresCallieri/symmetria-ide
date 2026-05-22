@@ -1888,6 +1888,26 @@ class AppController(QObject):
 
     def start(self) -> None:
         self._backend.start()
+        # Seed the GitController with the launch cwd by firing
+        # `displayedRootChanged` once at startup. Without this, the very
+        # first nvim cwd capsule arrives with a value equal to `_cwd`
+        # (because `_cwd` is initialised from `os.getcwd()` at
+        # AppController.__init__, and nvim's `BufEnter` cwd capsule
+        # reports the same path), so `_route_capsule` hits the
+        # `new_cwd != self._cwd` no-op gate and never emits — leaving
+        # `_sync_git_repo_root` unwired. The GitController worker would
+        # then sleep forever, the Active Changes panel stays hidden
+        # (`gitStatusList.count == 0`), and the FileTreeView's
+        # `ignoredPathSet` binding never sees a non-null value (the
+        # option 1 gitignore short-circuit silently becomes a no-op).
+        # Bug observed on 2026-05-22 — both panels stayed empty when
+        # launching the IDE in its own project dir, despite the same
+        # logic working when nvim later changed buffer to a file
+        # outside the initial cwd. One synthetic emit at the end of
+        # `start()` is enough; downstream slots (`_sync_git_repo_root`,
+        # `_sync_nvim_cwd`, QML bindings) all run with the correct
+        # initial value.
+        self.displayedRootChanged.emit()
         # Phase 2.5 terminal pane — pre-warm eagerly AFTER nvim has
         # started. nvim ordering gates the QSGRenderThread's first
         # frame; spawning the terminal first can briefly flash an
@@ -2043,6 +2063,30 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     change.
     """
     engine = QQmlApplicationEngine()
+
+    # Dev-mode override: prepend a source-tree path to the QML import resolver
+    # so edits to the Symmetria FM's QML files (e.g. FileTreeView.qml) take
+    # effect without reinstalling /usr/lib/qt6/qml/Symmetria/. QML2_IMPORT_PATH
+    # and QML_IMPORT_PATH env vars are not reliably honored once the installed
+    # plugin's qmldir has been cached, but `engine.addImportPath` is documented
+    # to take precedence. Production deployments leave the env var unset and
+    # behavior is unchanged.
+    #
+    # The Models C++ plugin is NOT shipped from the source tree (it builds to
+    # `plugin/build/`), so the resolver falls through to the installed path
+    # for Symmetria.FileManager.Models — only the UI QML overlays.
+    _fm_dev_path = os.environ.get("SYMMETRIA_IDE_FM_QML_PATH", "").strip()
+    if _fm_dev_path:
+        # Prepend rather than append: addImportPath() in Qt 6.x adds to the
+        # END of the path list, but the resolver searches in list order, so
+        # an appended dev path loses to the installed /usr/lib/qt6/qml entry
+        # for any module name that already resolves there. Replace the full
+        # path list with our prefix to guarantee precedence.
+        new_paths = [_fm_dev_path, *engine.importPathList()]
+        engine.setImportPathList(new_paths)
+        log.info("FM QML dev override active: %s", _fm_dev_path)
+        log.info("QML import path list: %s", engine.importPathList())
+
     ctx = engine.rootContext()
 
     # Make backend + capsules available to QML as a single `controller`

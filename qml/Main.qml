@@ -922,6 +922,21 @@ Window {
                             // are the scripted surface for the same Slots.
                             rootPath: controller.displayedRoot
                             respectGitignore: true
+                            // Pre-computed ignored-path set from the IDE's
+                            // GitController. Lets the FM short-circuit its
+                            // per-directory `git check-ignore --stdin`
+                            // shell pipeline (sequential, ~30–40ms per dir),
+                            // which dominated tree-mount time on
+                            // medium-to-large repos (bambin: ~4s → target
+                            // sub-100ms). The GitController computes this
+                            // in a single `git ls-files --others --ignored
+                            // --exclude-standard --directory` pass per
+                            // status scan. Falls back to gitignoreSvc when
+                            // null (initial state before the first scan
+                            // completes), so the first-frame tree may
+                            // briefly use the slow path before the
+                            // GitController emits.
+                            ignoredPathSet: gitController.ignoredPathSet
                             // Information-density mode: shrinks row height, icons,
                             // fonts, indent, and inter-element spacing to 60% of
                             // the FM's default size so more files fit per
