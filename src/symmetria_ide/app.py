@@ -1036,12 +1036,26 @@ class AppController(QObject):
         (terminal mode would otherwise type `:execute ...` into the
         running shell instead of running an ex-command).
 
+        Also swaps the central surface to the editor first, so the user
+        actually SEES the file. Activating a file from the file tree
+        while the terminal pane is the active central surface (the user
+        has Ctrl+Shift+E'd over to the shell) used to silently load the
+        buffer in an unseen nvim — the swap eliminates that surprise.
+        `swap_to_editor` is idempotent (no-op when editor is already
+        the central surface), so the dominant case — file tree clicked
+        while the editor is visible — emits no spurious
+        `centralSurfaceChanged`. Swap-first / edit-after ordering means
+        the editor is mounted + repainting before the nvim `:edit`
+        async-marshal completes, so the file appears in an
+        already-visible pane rather than popping in pre-loaded.
+
         `pick_in_nvim` wraps this with the overlay-dismiss step the
         picker needs; the sidebar caller wants the sidebar to stay
         visible, so it calls this directly.
         """
         if not path:
             return
+        self.swap_to_editor()
         self._backend.edit_file(path)
 
     @Slot(str)
