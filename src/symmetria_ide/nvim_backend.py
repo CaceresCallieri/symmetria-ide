@@ -424,6 +424,42 @@ class NvimBackend(QObject):
         except Exception:  # noqa: BLE001
             log.exception("async_call(set_current_dir) failed")
 
+    @Slot(str)
+    def edit_file(self, path: str) -> None:
+        """Open `path` in the current window — mode-independent.
+
+        Uses `nvim_cmd` (via `nvim.api.cmd`) instead of feeding
+        `:execute 'edit ...'` through `input()`. The keystroke route is
+        mode-dependent: in terminal mode `:` is a printable char that
+        gets shipped down the PTY to the running shell; in insert mode
+        the whole command would be typed into the buffer; in
+        operator-pending mode it's meaningless. `nvim_cmd` runs above
+        mode dispatch in nvim's command layer.
+
+        Structured `{cmd, args}` form means nvim never re-parses a
+        composed string, so paths with spaces / `%` / `#` / `[` need no
+        `fnameescape` ceremony — the path is already an opaque arg.
+
+        Marshalled via `nvim.async_call` per gotcha #1. No-op when nvim
+        hasn't spawned yet (matches `input` / `resize` / `set_current_dir`).
+        No `bang=True`: a dirty current buffer should error out the same
+        way `:edit foo` does at the cmdline, not silently discard work.
+        """
+        nvim = self._nvim
+        if nvim is None or not path:
+            return
+
+        def _do() -> None:
+            try:
+                nvim.api.cmd({"cmd": "edit", "args": [path]}, {})
+            except Exception:  # noqa: BLE001
+                log.exception("nvim_cmd edit failed for %r", path)
+
+        try:
+            nvim.async_call(_do)
+        except Exception:  # noqa: BLE001
+            log.exception("async_call(edit_file) failed")
+
     @Slot(int, int)
     def resize(self, cols: int, rows: int) -> None:
         """Tell nvim to re-lay-out to this cell dimension."""

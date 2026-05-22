@@ -1027,19 +1027,22 @@ class AppController(QObject):
     def open_in_nvim(self, path: str) -> None:
         """Open a file in NeoVim without touching overlay/sidebar state.
 
-        The "always-on sidebar" caller (FileTreeView's onFileActivated)
-        wants the file to land in nvim while the sidebar stays visible
-        and the editor regains focus. The overlay-picker caller has
-        different semantics — it dismisses the overlay after opening —
-        and lives in `pick_in_nvim`.
+        Single funnel for every IDE surface that opens files — the
+        sidebar file tree (`FileTreeView.onFileActivated`), the file
+        manager overlay (Ctrl+E picker via `pick_in_nvim`), and the
+        git status panel. Delegates to `NvimBackend.edit_file` so the
+        request rides the `nvim_cmd` RPC path, not a keystroke — see
+        that method's docstring for why mode-independence matters
+        (terminal mode would otherwise type `:execute ...` into the
+        running shell instead of running an ex-command).
+
+        `pick_in_nvim` wraps this with the overlay-dismiss step the
+        picker needs; the sidebar caller wants the sidebar to stay
+        visible, so it calls this directly.
         """
         if not path:
             return
-        # `fnameescape` is the safe quoting routine for nvim ex-command
-        # arguments — handles spaces, percent, hash, etc. Wrapping the
-        # whole call in a single `:execute` keeps the input() one shot.
-        cmd = f":execute 'edit ' . fnameescape({path!r})\n"
-        self._backend.input(cmd)
+        self._backend.edit_file(path)
 
     @Slot(str)
     def pick_in_nvim(self, path: str) -> None:

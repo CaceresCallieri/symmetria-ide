@@ -547,8 +547,8 @@ Window {
                     // Bridge picker completion → nvim :edit. The signal
                     // fires whether the user pressed Enter on a file or
                     // the panel auto-completed (e.g. Shift+Enter
-                    // copy-then-confirm flow). pick_in_nvim does the
-                    // fnameescape + :edit AND dismisses the panel —
+                    // copy-then-confirm flow). pick_in_nvim runs the
+                    // edit via nvim_cmd RPC AND dismisses the panel —
                     // distinct from open_in_nvim (used by the sidebar's
                     // onFileActivated) which keeps the sidebar visible
                     // after activation.
