@@ -214,6 +214,90 @@ class TestRpcThreadMarshalling:
         fake_nvim.api.set_current_dir.assert_called_once_with("/tmp/test-project")
 
 
+class TestEditFile:
+    """edit_file() must marshal through nvim.async_call.
+
+    Mirrors the four set_current_dir tests directly above — the
+    contracts are identical: (1) the slot goes via async_call, not
+    a direct RPC; (2) no-op when nvim is None; (3) no-op on empty path;
+    (4) the closure passed to async_call invokes nvim.api.cmd
+    with the structured {cmd, args} form.
+
+    This suite guards gotcha #1 for the new slot: nvim_cmd called
+    from the GUI thread raises NvimError: request from non-main
+    thread, exactly like nvim.input and nvim.api.set_current_dir.
+    """
+
+    def test_edit_file_marshals_through_async_call(self) -> None:
+        """edit_file() must go through nvim.async_call.
+
+        Direct nvim.api.cmd(...) from the GUI thread raises the same
+        cross-thread NvimError as input (gotcha #1).
+        """
+        backend = NvimBackend()
+        fake_nvim = MagicMock()
+        backend._nvim = fake_nvim  # type: ignore[assignment]
+
+        backend.edit_file("/home/user/project/src/main.py")
+
+        assert fake_nvim.async_call.called, (
+            "edit_file() must marshal via nvim.async_call — direct "
+            "nvim.api.cmd() from the GUI thread raises cross-thread "
+            "NvimError (gotcha #1)."
+        )
+        # The RPC itself is invoked inside the async_call closure, not
+        # synchronously from the slot.
+        fake_nvim.api.cmd.assert_not_called()
+
+    def test_edit_file_no_ops_when_nvim_is_none(self) -> None:
+        """No nvim handle — silent no-op.
+
+        The slot may be called before start() returns (e.g., a file
+        is clicked in the sidebar during startup). Must not raise.
+        """
+        backend = NvimBackend()
+        assert backend._nvim is None
+        backend.edit_file("/tmp/some/file.py")  # must not raise
+
+    def test_edit_file_no_ops_on_empty_path(self) -> None:
+        """Empty path is skipped before any marshal attempt.
+
+        Defence against the slot firing with a transient empty value —
+        mirrors the input() and set_current_dir() empty-string guards.
+        """
+        backend = NvimBackend()
+        fake_nvim = MagicMock()
+        backend._nvim = fake_nvim  # type: ignore[assignment]
+
+        backend.edit_file("")
+
+        fake_nvim.async_call.assert_not_called()
+
+    def test_edit_file_closure_calls_nvim_api_cmd(self) -> None:
+        """The _do closure must call nvim.api.cmd with the
+        structured {cmd: 'edit', args: [path]} form and an empty
+        opts dict — NOT a composed string through nvim.input.
+
+        The structured form is what makes the call mode-independent
+        (runs above nvim's mode dispatch) and fnameescape-free (the
+        path is an opaque arg, never re-parsed by nvim's ex-command
+        parser). Paths containing spaces, %, #, or [ are handled
+        correctly without any quoting ceremony.
+        """
+        backend = NvimBackend()
+        fake_nvim = MagicMock()
+        backend._nvim = fake_nvim  # type: ignore[assignment]
+
+        path = "/home/user/project/src/module with spaces.py"
+        backend.edit_file(path)
+
+        # Extract and invoke the closure passed to async_call.
+        assert fake_nvim.async_call.called
+        _do = fake_nvim.async_call.call_args[0][0]
+        _do()
+        fake_nvim.api.cmd.assert_called_once_with({"cmd": "edit", "args": [path]}, {})
+
+
 # ---------------------------------------------------------------------------
 # Gotcha #9 — cmdline / popupmenu arity forward-compat
 # ---------------------------------------------------------------------------
