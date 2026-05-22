@@ -400,6 +400,41 @@ class NvimBackend(QObject):
         except Exception:  # noqa: BLE001
             log.exception("async_call(input) failed")
 
+    @Slot(str)
+    def set_current_dir(self, path: str) -> None:
+        """Change nvim's working directory to `path`.
+
+        Goes through the `nvim_set_current_dir` RPC (via
+        `nvim.api.set_current_dir`) rather than a `:cd <path>` command
+        string — the API call accepts a raw path without us having to
+        worry about shell-style escaping of spaces or special chars.
+        Marshalled through `nvim.async_call` per gotcha #1 (pynvim is
+        not thread-safe). No-op when nvim hasn't been spawned yet
+        (matches `input` / `resize`); the caller's slot may fire before
+        `start()` returns and we don't want to crash that path.
+
+        Does NOT touch open buffers. Wiping or refreshing buffers on a
+        project change is a deliberate non-goal here — that belongs to
+        the future session-open flow, where the user has explicitly
+        chosen to switch project context. This method only updates
+        `:pwd` so file pickers, `:find`, and git-from-nvim follow the
+        IDE's displayed project root.
+        """
+        nvim = self._nvim
+        if nvim is None or not path:
+            return
+
+        def _do() -> None:
+            try:
+                nvim.api.set_current_dir(path)
+            except Exception:  # noqa: BLE001
+                log.exception("nvim_set_current_dir failed for %r", path)
+
+        try:
+            nvim.async_call(_do)
+        except Exception:  # noqa: BLE001
+            log.exception("async_call(set_current_dir) failed")
+
     @Slot(int, int)
     def resize(self, cols: int, rows: int) -> None:
         """Tell nvim to re-lay-out to this cell dimension."""

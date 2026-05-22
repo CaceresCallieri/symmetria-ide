@@ -24,6 +24,30 @@ Specific limitations that drive this project:
 - A progressively extracted UI: NeoVim's chrome moves into native QML panels over time.
 - Keyboard-first, Symmetria-aesthetic, opinionated.
 
+## Modes of inhabiting the IDE
+
+The IDE serves two distinct usage modes; both must feel native, and the transition between them is **implicit, not modal** — there is no "mode switch" command.
+
+### Navigation mode
+
+Drifting around the filesystem. Light edits. No commitment to any particular project. The user is `cd`-ing through directories in the terminal, glancing at files briefly, popping into the file manager, asking the agent a one-shot question. State is ephemeral — closing the IDE loses nothing of value.
+
+This is the **unanchored** state. Terminal cwd drives `displayedRoot`, the file tree follows the terminal, no project root is pinned. Quick edits land in scratch buffers or one-shot file opens; no session bookkeeping happens.
+
+### Project mode
+
+The user has committed to a project. They want IDE state preserved — open buffers, terminal layout, agent conversation — so they can return to exactly the same workspace later (in the same launch, and eventually across launches).
+
+This is the **anchored** state. The anchor pins a project root, `displayedRoot` stops following the terminal's cwd, and git operations target the anchored root. Anchoring is the user-visible face of "I'm working on this thing now."
+
+### Why both matter
+
+A pure navigation tool (terminal + FM, no anchor concept) loses context every time the user wanders. A pure project IDE ("open project" required before anything works) is heavyweight for the 80% case of "I just want to look at this file." Symmetria IDE refuses to force the choice: navigation mode is the default, project mode is what you opt into when the work earns it.
+
+### Future direction
+
+The anchor concept is the seed of a future **session model**: opening a project rehydrates persisted state (nvim buffers via `:mksession`, terminal cwd, agent SDK `resume`-able conversations); closing a project snapshots it back. Today we have the anchor primitive but not the persistence layer — that's a Phase 3+ deliverable. The dual-mode framing here is what keeps the eventual session work from feeling like a bolt-on; it's the natural extension of a concept that already lives in the codebase.
+
 ## Surface hierarchy (evolving)
 
 The IDE houses four distinct surfaces with different roles. Their relative prominence is **expected to invert** over the project's lifetime as agent capabilities mature.

@@ -533,6 +533,19 @@ class AppController(QObject):
         # same-thread: displayedRootChanged fires on the GUI thread; GitController.set_repo_root is GUI-only
         self.displayedRootChanged.connect(self._sync_git_repo_root)
 
+        # Mirror the displayed root into nvim's `:pwd`. Without this, nvim's
+        # working directory stays frozen at Python's launch-time cwd, so
+        # file pickers / `:find` / `:term` spawned from nvim all target the
+        # wrong project after the user has wandered. The slot itself marshals
+        # the call through `nvim.async_call` (gotcha #1), so the connect is
+        # a plain same-thread one — `displayedRootChanged` fires on the GUI
+        # thread; `set_current_dir` is safe to invoke from there.
+        # Deliberately non-destructive: no buffer wipe, no `:bd`. That layers
+        # on later inside the session-open flow once that exists; for now we
+        # just keep `:pwd` honest. See docs/vision.md "Modes of inhabiting
+        # the IDE" for the dual-mode framing this lands inside.
+        self.displayedRootChanged.connect(self._sync_nvim_cwd)
+
     def _create_instance(self, slot: int) -> None:
         """Allocate one pool entry: host + model + per-instance scalar state.
 
@@ -1076,6 +1089,26 @@ class AppController(QObject):
             return self._anchored_root
         return self._cwd
 
+    @Property(str, notify=displayedRootChanged)
+    def displayedRootCompact(self) -> str:
+        """`displayedRoot` rendered with `$HOME` collapsed to `~`.
+
+        Pure view-layer transformation for the side-panel header (and
+        any other "where am I right now" affordance). Kept Python-side
+        — and not pushed into QML as inline JS — so the HOME-prefix
+        logic has a single home, can be unit-tested, and stays in sync
+        with however the future session model might want to format
+        paths (e.g., showing the session's display name instead of the
+        raw path once that exists).
+        """
+        root = self.displayedRoot
+        if not root:
+            return ""
+        home = os.path.expanduser("~")
+        if home and (root == home or root.startswith(home + os.sep)):
+            return "~" + root[len(home) :]
+        return root
+
     @Property(bool, notify=anchoredChanged)
     def anchored(self) -> bool:
         """Whether the IDE is currently anchored to a project root.
@@ -1192,6 +1225,28 @@ class AppController(QObject):
         self._git_controller.set_repo_root(self.displayedRoot)
 
     @Slot()
+    def _sync_nvim_cwd(self) -> None:
+        """Push the displayed root into nvim as its `:pwd`.
+
+        Same `displayedRootChanged` source as `_sync_git_repo_root`,
+        same anchored-pins-the-target semantic: anchored → pwd stays on
+        the anchored root; unanchored → pwd follows the terminal's cwd
+        via the OSC 7 capsule routing. Empty / missing path is a no-op
+        (covers the initialization edge case where `displayedRoot` is
+        briefly the empty string before the first cwd capsule lands).
+
+        The underlying `NvimBackend.set_current_dir` is itself a no-op
+        when nvim hasn't spawned yet, so this is also safe if any
+        startup ordering shuffles around — `_sync_nvim_cwd` will simply
+        miss the very first emission and the next one (or the explicit
+        cwd capsule push that always follows VimEnter) will land.
+        """
+        root = self.displayedRoot
+        if not root:
+            return
+        self._backend.set_current_dir(root)
+
+    @Slot()
     def focus_tree(self) -> None:
         """Ask QML to move active focus into the FileTreeView.
 
@@ -1277,12 +1332,36 @@ class AppController(QObject):
         """Make the editor pane the visible central surface.
 
         Idempotent: if editor is already visible, no signal fires.
-        Bound to the IDE-wide `Ctrl+Shift+E` Shortcut in Main.qml (PR 5).
+        Retained as a primitive used by `toggle_editor_terminal` and
+        callable from internal slots/tests; the user-facing chord
+        (`Ctrl+Shift+E`) now goes through the toggle.
         """
         if self._central_surface == "editor":
             return
         self._central_surface = "editor"
         self.centralSurfaceChanged.emit()
+
+    @Slot()
+    def toggle_editor_terminal(self) -> None:
+        """Flip the central surface between editor and terminal.
+
+        Bound to `Ctrl+Shift+E` in Main.qml. Pressing from editor →
+        terminal; pressing from any other surface (terminal today, a
+        hypothetical tertiary central surface tomorrow) → editor. The
+        asymmetry is intentional: 'E' names the editor, so the chord
+        always lands you on the editor unless you were already there.
+
+        Always emits exactly one `centralSurfaceChanged`; never a noop
+        from the user's perspective. Composes the existing
+        `swap_to_editor` / `swap_to_terminal` primitives rather than
+        mutating state directly so any future invariants (logging,
+        focus side-effects, session bookkeeping) added to those slots
+        are honored by the toggle as well.
+        """
+        if self._central_surface == "editor":
+            self.swap_to_terminal()
+        else:
+            self.swap_to_editor()
 
     @Slot()
     def focus_terminal(self) -> None:

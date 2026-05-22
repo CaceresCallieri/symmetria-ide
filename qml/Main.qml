@@ -78,27 +78,25 @@ Window {
         }
     }
 
-    // Phase 2.5 central-surface swap chords. Same application-scope
-    // pattern as Ctrl+Shift+A — they fire regardless of which pane has
+    // Phase 2.5 central-surface toggle chord. Same application-scope
+    // pattern as Ctrl+Shift+A — fires regardless of which pane has
     // focus, including from inside nvim's insert mode. The anchor block
     // above documents the QApplication::notify ordering rationale in
     // full; the same reasoning applies here.
     //
-    // Two distinct chords (not a single toggle) per the codebase's
-    // "each IDE concept is its own chord" precedent. Ctrl+Shift+T
-    // summons the terminal; Ctrl+Shift+E summons the editor. The
-    // slots are idempotent — pressing the chord that matches the
-    // already-visible surface is a no-op (no signal, no QML re-bind).
-    Shortcut {
-        sequences: ["Ctrl+Shift+T"]
-        context: Qt.ApplicationShortcut
-        onActivated: controller.swap_to_terminal()
-    }
-
+    // Single toggle, not two distinct chords. Earlier iteration shipped
+    // Ctrl+Shift+T (→ terminal) + Ctrl+Shift+E (→ editor) under the
+    // "each IDE concept is its own chord" precedent, but day-to-day
+    // ergonomics didn't bear it out for a binary swap. Now: Ctrl+Shift+E
+    // flips between editor and terminal — pressing from a non-editor
+    // surface lands you on the editor; pressing from the editor returns
+    // you to the terminal. See AppController.toggle_editor_terminal for
+    // the asymmetry rationale (chord names the editor, so non-editor →
+    // editor is the dominant direction).
     Shortcut {
         sequences: ["Ctrl+Shift+E"]
         context: Qt.ApplicationShortcut
-        onActivated: controller.swap_to_editor()
+        onActivated: controller.toggle_editor_terminal()
     }
 
     // IDE-wide file-manager toggle. Promoted out of the nvim layer
@@ -710,33 +708,101 @@ Window {
                 // borders use the same 1px hairline / accent-on-focus /
                 // transparent-otherwise contract as `mainContentFocusBorder`.
 
-                // Two-section composition inside the side panel:
-                //   1. GitStatusPanel — auto-hidden when clean; collapses
+                // Three-section composition inside the side panel:
+                //   1. LocationHeader — current displayedRoot + anchor
+                //      glyph. Always visible (the "where am I" question
+                //      is load-bearing for the dual-mode navigation-vs-
+                //      project framing in docs/vision.md).
+                //   2. GitStatusPanel — auto-hidden when clean; collapses
                 //      to zero height so the tree below claims its space.
-                //   2. FileTreeView   — fills the remaining vertical space.
+                //   3. FileTreeView   — fills the remaining vertical space.
                 //
                 // No separator between them — the panel's chrome border
                 // already provides visual delineation, and a hairline
-                // separator would just add noise when the panel hides.
+                // separator would just add noise when GitStatusPanel hides.
                 ColumnLayout {
                     anchors.fill: parent
-                    // No explicit spacing between GitStatusPanel and
-                    // FileTreeView. Both already contribute ~10px of
-                    // intra-component padding (GitStatusPanel's
-                    // `anchors.bottomMargin: Theme.spacing.sm` + the FM
-                    // ListView's `anchors.margins: FmTheme.padding.sm`),
-                    // which is enough visual breath to distinguish the
-                    // two surfaces. Adding `spacing.lg` on top of that
-                    // (previous setup, commit 59d602a) produced a
-                    // ~26px band that read as "blank wallpaper" rather
-                    // than panel separation. When GitStatusPanel is
-                    // hidden (clean tree) the layout naturally collapses
-                    // — `spacing` only applies between visible siblings,
-                    // so 0 is the cleanest no-op in that state too.
-                    // If you want them visually further apart, raise
-                    // this — but check the cumulative gap, not just
-                    // this value in isolation.
+                    // No explicit spacing between sub-sections. Each
+                    // contributes its own intra-component padding (header
+                    // has `anchors.margins`, GitStatusPanel has
+                    // `anchors.bottomMargin: Theme.spacing.sm`, the FM
+                    // ListView has `anchors.margins: FmTheme.padding.sm`),
+                    // which is enough visual breath to distinguish them.
+                    // Adding `spacing.lg` on top of that (previous setup,
+                    // commit 59d602a) produced a ~26px band that read as
+                    // "blank wallpaper" rather than panel separation. When
+                    // GitStatusPanel is hidden (clean tree) the layout
+                    // naturally collapses — `spacing` only applies between
+                    // visible siblings, so 0 is the cleanest no-op too.
+                    // If you want them visually further apart, raise this
+                    // — but check the cumulative gap, not just this value
+                    // in isolation.
                     spacing: 0
+
+                    // Side-panel "where am I" header. Binds
+                    // `controller.displayedRootCompact` (HOME-collapsed)
+                    // and `controller.anchored` — both are reactive @Property
+                    // bindings, so cd-ing in the terminal or pressing
+                    // Ctrl+Shift+A updates this header without any extra
+                    // wiring. Anchored state surfaces two ways:
+                    //   (a) text color flips from text.normal → accent.primary
+                    //       so the header reads as "this is committed work"
+                    //       vs "I'm just looking around"
+                    //   (b) a small accent dot appears to the right of the path
+                    // Redundancy is intentional — color alone fails on the
+                    // edge case where the user has reduced palette saturation
+                    // at the compositor level. See docs/vision.md "Modes of
+                    // inhabiting the IDE" for the framing this surface
+                    // operationalizes.
+                    Rectangle {
+                        id: locationHeader
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Theme.size.statusBarHeight
+                        color: Theme.color.bg.chrome
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: Theme.spacing.sm
+                            anchors.rightMargin: Theme.spacing.sm
+                            spacing: Theme.spacing.xs
+
+                            Text {
+                                id: locationLabel
+                                text: controller.displayedRootCompact
+                                color: controller.anchored
+                                       ? Theme.color.accent.primary
+                                       : Theme.color.text.normal
+                                font.family: editorFontFamily
+                                font.pixelSize: Theme.font.size.sm
+                                font.weight: controller.anchored
+                                             ? Theme.font.weight.medium
+                                             : Theme.font.weight.normal
+                                // ElideMiddle keeps the leading `~` AND
+                                // the trailing project basename visible
+                                // when the path overflows — both ends are
+                                // the most informative bits ("where it
+                                // is" + "what it is"). ElideRight would
+                                // hide the basename, ElideLeft hides the
+                                // ~-anchor and reads as a stray subpath.
+                                elide: Text.ElideMiddle
+                                verticalAlignment: Text.AlignVCenter
+                                Layout.fillWidth: true
+                            }
+
+                            // Anchor dot — appears only when anchored.
+                            // Width/height tied to the spacing token so
+                            // it scales if the panel chrome is ever
+                            // re-tuned. Radius = half = circle.
+                            Rectangle {
+                                Layout.preferredWidth: Theme.spacing.xs * 2
+                                Layout.preferredHeight: Theme.spacing.xs * 2
+                                Layout.alignment: Qt.AlignVCenter
+                                radius: width / 2
+                                color: Theme.color.accent.primary
+                                visible: controller.anchored
+                            }
+                        }
+                    }
 
                     GitStatusPanel {
                         id: gitStatusPanel
@@ -951,11 +1017,12 @@ Window {
             }
 
             // Phase 2.5 terminal focus pull. Fired from
-            // AppController.focus_terminal() — currently called only
-            // by Ctrl+Shift+T's swap_to_terminal slot via its own
-            // onVisibleChanged trigger, but the signal exists so a
-            // future Lua nvim-spillover surface can request terminal
-            // focus without going through the swap path.
+            // AppController.focus_terminal() — called from internal
+            // slots (e.g. swap_to_terminal's onVisibleChanged trigger
+            // path when reached via the Ctrl+Shift+E toggle), and
+            // the signal exists so a future Lua nvim-spillover surface
+            // can request terminal focus without going through the
+            // swap path.
             // NOTE: the Ctrl+H / Ctrl+L ApplicationShortcuts call
             // `terminalView.forceActiveFocus()` directly and do NOT
             // go through this signal.

@@ -24,6 +24,29 @@ Things that are years out but influence today's decisions.
 
 **What this is NOT:** a plan to remove NeoVim. NeoVim remains the editor core forever (or until the gpui rewrite, per the "Own editor core" section below). The change is in *prominence and default visibility*, not in *which tool does the editing*. When the user needs to hand-edit, NeoVim is the tool. The question is only how often that need arises and how it's surfaced.
 
+## NeoVim reclamation roadmap
+
+A direct consequence of the topology inversion above: capabilities historically routed through NeoVim plugins (because a terminal couldn't host anything else) progressively migrate into native Symmetria UI. This is **not a hostile takeover** — NeoVim remains the text-editing core indefinitely. It's a redistribution of *responsibilities* that no longer have to live inside the editor surface now that the IDE owns a real GUI.
+
+**Reclaimed (already shipped):**
+
+- **Agent / Claude Code surface.** Previously `orchestrator.nvim` driving a NeoVim-floated TUI; now the native QML agent pane backed by the Node SDK sidecar (Phase 2). The Lua orchestrator is slated for deprecation once the IDE meets the gates in `docs/agent-dashboard-integration.md`.
+- **Status line.** Previously `lualine`; now native QML status bar driven by the capsule protocol (Phase 0).
+- **Which-key overlay.** Previously `which-key.nvim`'s own floating window; now native QML overlay driven by our trie + state machine (Phase 0; see CLAUDE.md gotchas #15–#21 for the burned-in lessons).
+- **Cmdline + completion popup.** Previously NeoVim's built-in cmdline (or `noice.nvim` overlay); now native QML cmdline with our own `getcompletion()`-driven pipeline (Phase 0).
+- **File manager pane.** Symmetria File Manager hosted as a central pane (Phase 1 partial). Replaces ad-hoc nvim file pickers for project-tree browsing.
+
+**Queued (near-term):**
+
+- **Fuzzy file finder.** Currently `fff.nvim` inside NeoVim. The File Manager already has a basic fuzzy match primitive that needs hardening and broadening. Plan: a single native fuzzy finder reachable from the FM pane, from the terminal (as a callable), and eventually from nvim (replacing the leader binding). The point is **one search index, one ranking algorithm, one keyboard model** — invocable from any surface. The current per-pane patchwork is exactly the kind of nvim dependency the reclamation thesis targets.
+- **Git operations surface.** Currently a mix of leader bindings, fugitive-style commands, and the existing git status capsule. Long-term direction: a native QML git pane with stage / unstage / diff / commit inline, reducing the `:G` surface area to "git operations from outside the editor."
+
+**Far future (post-gpui or post-WM):**
+
+- **Edit buffer itself.** Only if gpui produces meaningfully better text-editing primitives AND a specific NeoVim limitation justifies it. See "Own editor core" below. NeoVim remains the editing core indefinitely otherwise.
+
+**Design rule for each reclamation:** the native Symmetria surface must be reachable from *every* pane (terminal, agent, FM, editor) with a uniform keybind. If we ship a fuzzy finder that only works when nvim has focus, we've failed — that's nvim-plugin territory, not a reclamation. The whole point is to make these capabilities IDE-wide primitives, not pane-local features. This rule is what makes the eventual topology inversion painless: when the agent pane becomes primary and the editor becomes summoned-on-demand, every reclaimed capability still works because none of them depend on the editor having focus.
+
 ## Own window manager
 
 **Estimated timeline:** ~2 years.

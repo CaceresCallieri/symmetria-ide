@@ -188,6 +188,56 @@ def test_round_trip_swap_preserves_invariant(controller):
 
 
 # ---------------------------------------------------------------------------
+# Toggle slot — Ctrl+Shift+E flips editor↔terminal. Asymmetric: from
+# editor → terminal; from anything else → editor (chord names the editor,
+# so non-editor → editor is the dominant direction).
+# ---------------------------------------------------------------------------
+
+
+def test_toggle_from_terminal_lands_on_editor(controller):
+    """First press of Ctrl+Shift+E from the default terminal surface
+    lands on the editor. Pins the "chord names the editor" semantic."""
+    assert controller.centralSurface == "terminal"
+    emissions = _capture(controller.centralSurfaceChanged)
+
+    controller.toggle_editor_terminal()
+
+    assert controller.centralSurface == "editor"
+    assert controller.editorVisible is True
+    assert controller.terminalVisible is False
+    assert len(emissions) == 1
+
+
+def test_toggle_from_editor_returns_to_terminal(controller):
+    """Pressing the toggle while on the editor returns to terminal.
+    This is the 'flip' half of the toggle's contract."""
+    controller.swap_to_editor()  # precondition: start on editor
+    emissions = _capture(controller.centralSurfaceChanged)
+
+    controller.toggle_editor_terminal()
+
+    assert controller.centralSurface == "terminal"
+    assert controller.terminalVisible is True
+    assert controller.editorVisible is False
+    assert len(emissions) == 1
+
+
+def test_toggle_round_trip_emits_each_time(controller):
+    """Unlike the swap_to_* primitives, toggle is never a no-op from
+    the user's perspective — each press flips state and emits exactly
+    one signal. Catches a regression where the toggle short-circuits
+    after a redundant call into one of the primitives."""
+    emissions = _capture(controller.centralSurfaceChanged)
+
+    controller.toggle_editor_terminal()  # terminal → editor
+    controller.toggle_editor_terminal()  # editor → terminal
+    controller.toggle_editor_terminal()  # terminal → editor
+
+    assert controller.centralSurface == "editor"
+    assert len(emissions) == 3
+
+
+# ---------------------------------------------------------------------------
 # Focus slot — emits focusTerminalRequested for QML's Connections block.
 # ---------------------------------------------------------------------------
 

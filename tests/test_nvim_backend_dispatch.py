@@ -154,6 +154,47 @@ class TestRpcThreadMarshalling:
 
         fake_nvim.async_call.assert_not_called()
 
+    def test_set_current_dir_marshals_through_async_call(self) -> None:
+        """`set_current_dir()` must go through `nvim.async_call`. Direct
+        `nvim.api.set_current_dir(...)` from the GUI thread raises the
+        same cross-thread NvimError as `input` (gotcha #1)."""
+        backend = NvimBackend()
+        fake_nvim = MagicMock()
+        backend._nvim = fake_nvim  # type: ignore[assignment]
+
+        backend.set_current_dir("/tmp/project")
+
+        assert fake_nvim.async_call.called, (
+            "set_current_dir() must marshal via nvim.async_call — direct "
+            "RPC raises cross-thread NvimError (gotcha #1)."
+        )
+        # The RPC itself is invoked inside the async_call closure, not
+        # synchronously from the slot. MagicMock's `api` attribute is
+        # auto-created; assert it was NOT called directly from this
+        # thread (the worker thread would call it via the closure).
+        fake_nvim.api.set_current_dir.assert_not_called()
+
+    def test_set_current_dir_no_ops_when_nvim_is_none(self) -> None:
+        """No nvim handle → silent no-op. Important during startup
+        ordering — `displayedRootChanged` can fire before the backend
+        has spawned (e.g. if the terminal pushes an early OSC 7 cwd
+        before nvim's loop is up). Must not raise."""
+        backend = NvimBackend()
+        assert backend._nvim is None
+        backend.set_current_dir("/tmp/project")  # must not raise
+
+    def test_set_current_dir_no_ops_on_empty_path(self) -> None:
+        """Empty path is skipped before any marshal attempt. Mirrors
+        the `input()` empty-string guard — defense against the slot
+        firing with a transient empty `displayedRoot`."""
+        backend = NvimBackend()
+        fake_nvim = MagicMock()
+        backend._nvim = fake_nvim  # type: ignore[assignment]
+
+        backend.set_current_dir("")
+
+        fake_nvim.async_call.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Gotcha #9 — cmdline / popupmenu arity forward-compat

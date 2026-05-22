@@ -28,32 +28,42 @@ def main_qml() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Application-scope chords — Ctrl+Shift+T / Ctrl+Shift+E
+# Application-scope chord — Ctrl+Shift+E toggles editor↔terminal
 # ---------------------------------------------------------------------------
 
 
-def test_terminal_summon_chord_exists(main_qml: str):
-    """Ctrl+Shift+T must summon the terminal via swap_to_terminal,
-    bound at QApplicationShortcut scope so it wins over NvimView's
-    keyboard capture even in insert mode."""
-    assert "Ctrl+Shift+T" in main_qml
-    assert "controller.swap_to_terminal()" in main_qml
+def test_editor_terminal_toggle_chord_exists(main_qml: str):
+    """Ctrl+Shift+E must toggle editor↔terminal via the
+    `toggle_editor_terminal` slot, bound at QApplicationShortcut scope
+    so it wins over NvimView's keyboard capture even in insert mode.
 
-
-def test_editor_summon_chord_exists(main_qml: str):
-    """Ctrl+Shift+E must summon the editor (symmetric counterpart)."""
+    Earlier iteration had a separate Ctrl+Shift+T chord targeting
+    swap_to_terminal; that was retired in favor of the single toggle.
+    """
     assert "Ctrl+Shift+E" in main_qml
-    assert "controller.swap_to_editor()" in main_qml
+    assert "controller.toggle_editor_terminal()" in main_qml
 
 
-def test_swap_chords_use_application_shortcut_context(main_qml: str):
-    """Both swap chords must use Qt.ApplicationShortcut, not the
-    default Qt.WindowShortcut — without that, NvimView's key handler
-    captures the chord before it can fire."""
-    # We expect THREE Qt.ApplicationShortcut blocks in Main.qml:
-    # anchor (Ctrl+Shift+A), terminal swap (Ctrl+Shift+T), editor
-    # swap (Ctrl+Shift+E). If a future refactor demotes any of them
-    # to WindowShortcut, this assertion catches it.
+def test_old_terminal_summon_chord_retired(main_qml: str):
+    """Ctrl+Shift+T was retired when the editor↔terminal toggle landed.
+    If a future PR resurrects it as a chord, that's likely a regression
+    (the toggle is meant to be the single user-facing entry point);
+    `swap_to_terminal` remains as a Python primitive callable from
+    other slots, so the assertion targets the chord BINDING (i.e. a
+    `sequences: ["Ctrl+Shift+T"]` line, which is what would re-mount
+    the chord) — not the bare substring, which legitimately appears
+    in retirement-history comments throughout the file.
+    """
+    assert 'sequences: ["Ctrl+Shift+T"]' not in main_qml
+    assert "controller.swap_to_terminal()" not in main_qml
+
+
+def test_swap_chord_uses_application_shortcut_context(main_qml: str):
+    """The editor↔terminal toggle chord must use Qt.ApplicationShortcut,
+    not the default Qt.WindowShortcut — without that, NvimView's key
+    handler captures the chord before it can fire. We assert a floor
+    on total ApplicationShortcut blocks (anchor, FM toggle, this toggle,
+    etc.) to catch a regression that silently demotes a chord."""
     assert main_qml.count("Qt.ApplicationShortcut") >= 3
 
 
@@ -163,3 +173,53 @@ def test_three_central_surfaces_distinct(main_qml: str):
     assert "id: editor" in main_qml
     assert "id: terminalView" in main_qml
     assert "id: agentPane" in main_qml
+
+
+# ---------------------------------------------------------------------------
+# Side-panel "where am I" header — surfaces the displayedRoot + anchor
+# state above the git pane + file tree. Operationalizes the dual-mode
+# (navigation vs project) framing in docs/vision.md.
+# ---------------------------------------------------------------------------
+
+
+def test_location_header_present_in_side_panel(main_qml: str):
+    """A `locationHeader` Rectangle must sit at the top of the side
+    panel's ColumnLayout, ABOVE GitStatusPanel. The header is the
+    user's primary visual answer to "which project am I in right
+    now" — losing it silently in a Main.qml refactor would force the
+    user back to inferring project context from the status bar."""
+    assert "id: locationHeader" in main_qml
+    # Header is positioned above GitStatusPanel — the substring order
+    # in the file is a proxy for ColumnLayout child order.
+    header_idx = main_qml.find("id: locationHeader")
+    git_panel_idx = main_qml.find("GitStatusPanel {")
+    assert header_idx >= 0 and git_panel_idx >= 0
+    assert header_idx < git_panel_idx, (
+        "locationHeader must appear before GitStatusPanel in the side "
+        "panel ColumnLayout — order in the file = layout order."
+    )
+
+
+def test_location_header_binds_displayed_root_compact(main_qml: str):
+    """The header must render `controller.displayedRootCompact` (the
+    HOME-collapsed view-layer transform), NOT the raw `displayedRoot`
+    — otherwise paths under $HOME render with the full /home/jc/ prefix
+    and chew up the header's horizontal budget."""
+    assert "controller.displayedRootCompact" in main_qml
+
+
+def test_location_header_reflects_anchor_state(main_qml: str):
+    """The header must read `controller.anchored` so the visual
+    treatment (accent color + anchor dot) flips between the dual
+    modes. Without this binding the header would look identical
+    whether the user has anchored or is drifting, defeating the
+    "modes of inhabiting the IDE" UI thesis."""
+    # Grep the immediate vicinity of the header for `controller.anchored`
+    # so we don't get a false positive from the Ctrl+Shift+A handler
+    # elsewhere in the file.
+    header_idx = main_qml.find("id: locationHeader")
+    assert header_idx >= 0
+    # Header block extends until the next sibling — pick a generous
+    # window that covers the Rectangle + its RowLayout children.
+    header_block = main_qml[header_idx : header_idx + 2000]
+    assert "controller.anchored" in header_block
