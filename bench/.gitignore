@@ -2,4 +2,4 @@
 # repo every time we re-measure. The harness regenerates these on
 # demand; reproducibility comes from re-running `measure_mount.py`,
 # not from frozen result snapshots.
-results-*.json
+results*.json

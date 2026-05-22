@@ -1118,10 +1118,7 @@ class GitController(QObject):
         for chunk in proc.stdout.split(b"\x00"):
             if not chunk:
                 continue
-            try:
-                rel = chunk.decode("utf-8")
-            except UnicodeDecodeError:
-                rel = chunk.decode("utf-8", errors="replace")
+            rel = chunk.decode("utf-8", errors="replace")
             # `--directory` includes a trailing slash on dir entries; the
             # FM's entry.path has no trailing slash, so strip it for
             # consistent membership comparison.

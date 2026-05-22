@@ -1,9 +1,9 @@
 """Benchmark: time-to-interactive for the IDE's side-panel file tree.
 
-Launches the IDE in screenshot mode against a repo, captures the Logger
+Launches the IDE against a repo, captures the Logger
 timestamps emitted by the QML side, and reports the delta between
-"Logger Session started" (QML engine up) and the LAST "FileTreeView
-auto-expand complete" line (both side-panel trees settled).
+"Session started" Logger line (QML engine up) and the LAST
+"tree mount settled" FileTreeView line (both side-panel trees settled).
 
 Usage:
     PYTHONPATH=src python bench/measure_mount.py \\
@@ -22,7 +22,7 @@ Methodology notes:
   * For >=3 runs we drop the fastest + slowest before computing the
     median to absorb cold-cache + GC stutter outliers.
   * The IDE mounts TWO FileTreeViews (Active Changes + main). We take
-    the LAST "auto-expand complete" emission per run — that's the
+    the LAST "tree mount settled" emission per run — that's the
     moment the whole side panel is interactive.
 """
 

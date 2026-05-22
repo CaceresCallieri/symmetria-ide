@@ -840,10 +840,10 @@ def test_publish_suppresses_signal_on_equal_map() -> None:
         received: list[None] = []
         controller.statusChanged.connect(lambda: received.append(None))
         # Publish the SAME map + same stats — should be a no-op.
-        controller._publish({"src/foo.py": status}, "/repo", GitStats())
+        controller._publish({"src/foo.py": status}, "/repo", GitStats(), {})
         assert len(received) == 0, "statusChanged must not fire when map is unchanged"
         # Publish a DIFFERENT map — should fire.
-        controller._publish({}, "", GitStats())
+        controller._publish({}, "", GitStats(), {})
         assert len(received) == 1, "statusChanged must fire when map changes"
     finally:
         controller.stop()
@@ -1424,7 +1424,9 @@ def test_publish_emits_stats_changed_on_stats_change() -> None:
         controller.statusChanged.connect(lambda: status_received.append(None))
         controller.statsChanged.connect(lambda: stats_received.append(None))
         # Same map, NEW stats — statsChanged only.
-        controller._publish({"src/foo.py": status}, "/repo", GitStats(unstaged_add=10))
+        controller._publish(
+            {"src/foo.py": status}, "/repo", GitStats(unstaged_add=10), {}
+        )
         assert len(status_received) == 0
         assert len(stats_received) == 1
     finally:
@@ -1453,12 +1455,136 @@ def test_publish_suppresses_stats_changed_on_equal_stats() -> None:
         controller.statusChanged.connect(lambda: status_received.append(None))
         controller.statsChanged.connect(lambda: stats_received.append(None))
         # Publish the SAME map AND SAME stats — both signals must be suppressed.
-        controller._publish({"src/foo.py": status}, "/repo", GitStats(unstaged_add=5))
+        controller._publish(
+            {"src/foo.py": status}, "/repo", GitStats(unstaged_add=5), {}
+        )
         assert len(status_received) == 0, (
             "statusChanged must not fire when map is unchanged"
         )
         assert len(stats_received) == 0, (
             "statsChanged must not fire when stats are unchanged"
         )
+    finally:
+        controller.stop()
+
+
+# ---------------------------------------------------------------------------
+# _run_ignored_set — parsing + error handling
+# ---------------------------------------------------------------------------
+
+
+def test_run_ignored_set_parses_nul_delimited_output() -> None:
+    """_run_ignored_set maps NUL-delimited paths to absolute membership dict."""
+    from unittest.mock import MagicMock, patch
+
+    # Simulate `git ls-files -z` output: two dir entries + one file.
+    fake_stdout = b"node_modules/\x00.venv/\x00dist/foo.js\x00"
+    proc_mock = MagicMock()
+    proc_mock.returncode = 0
+    proc_mock.stdout = fake_stdout
+    proc_mock.stderr = b""
+
+    controller = GitController()
+    try:
+        with patch("subprocess.run", return_value=proc_mock):
+            result = controller._run_ignored_set("/repo/root")
+
+        # Dir entries: trailing slash stripped, joined with cwd.
+        assert result.get("/repo/root/node_modules") is True
+        assert result.get("/repo/root/.venv") is True
+        # Regular file entry: no trailing slash to strip.
+        assert result.get("/repo/root/dist/foo.js") is True
+        # Membership dict values must all be True.
+        assert all(v is True for v in result.values())
+    finally:
+        controller.stop()
+
+
+def test_run_ignored_set_returns_empty_dict_on_subprocess_failure() -> None:
+    """_run_ignored_set returns {} when the git subprocess exits non-zero."""
+    from unittest.mock import MagicMock, patch
+
+    proc_mock = MagicMock()
+    proc_mock.returncode = 128
+    proc_mock.stdout = b""
+    proc_mock.stderr = b"fatal: not a git repository"
+
+    controller = GitController()
+    try:
+        with patch("subprocess.run", return_value=proc_mock):
+            result = controller._run_ignored_set("/not/a/repo")
+        assert result == {}
+    finally:
+        controller.stop()
+
+
+def test_run_ignored_set_returns_empty_dict_on_timeout() -> None:
+    """_run_ignored_set returns {} when subprocess.run raises TimeoutExpired."""
+    import subprocess
+    from unittest.mock import patch
+
+    controller = GitController()
+    try:
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="git", timeout=10),
+        ):
+            result = controller._run_ignored_set("/repo")
+        assert result == {}
+    finally:
+        controller.stop()
+
+
+# ---------------------------------------------------------------------------
+# ignoredPathSet property — None vs {} contract
+# ---------------------------------------------------------------------------
+
+
+def test_ignored_path_set_returns_none_when_no_resolved_root() -> None:
+    """ignoredPathSet returns None before the first scan completes (no resolved root).
+
+    A falsy None return lets the FM fall back to its per-directory check-ignore
+    path. An empty dict {} would be truthy in JS and would suppress that fallback,
+    causing nothing to be treated as ignored and over-expanding .venv/node_modules.
+    """
+    controller = GitController()
+    try:
+        # Freshly constructed: _resolved_root == "" → must return None.
+        assert controller.ignoredPathSet is None
+    finally:
+        controller.stop()
+
+
+def test_ignored_path_set_returns_dict_after_scan() -> None:
+    """ignoredPathSet returns a copy of _ignored_set once _resolved_root is set."""
+    controller = GitController()
+    try:
+        ignored = {"/repo/node_modules": True, "/repo/.venv": True}
+        with controller._lock:
+            controller._resolved_root = "/repo"
+            controller._ignored_set = ignored
+        result = controller.ignoredPathSet
+        assert result == ignored
+        # Must be a copy, not the internal dict.
+        assert result is not controller._ignored_set
+    finally:
+        controller.stop()
+
+
+def test_ignored_path_set_returns_empty_dict_for_clean_repo() -> None:
+    """ignoredPathSet returns {} (not None) when root is known but nothing is ignored.
+
+    An empty {} is falsy in Python but truthy in JS — the FM should treat it as
+    "scan complete, nothing ignored" and skip nothing, rather than fall back to
+    the slow per-directory check-ignore path.
+    """
+    controller = GitController()
+    try:
+        with controller._lock:
+            controller._resolved_root = "/repo"
+            controller._ignored_set = {}
+        result = controller.ignoredPathSet
+        assert result == {}
+        assert result is not None
     finally:
         controller.stop()
