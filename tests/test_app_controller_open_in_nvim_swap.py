@@ -31,8 +31,8 @@ def controller():
     ctrl.shutdown()
 
 
-def _capture(signal) -> list[object]:
-    emissions: list[object] = []
+def _capture(signal) -> list[None]:
+    emissions: list[None] = []
     signal.connect(lambda: emissions.append(None))
     return emissions
 
@@ -64,8 +64,7 @@ def test_open_in_nvim_idempotent_when_editor_already_central(controller):
     """Opening a file while the editor is already visible must NOT
     re-emit `centralSurfaceChanged`. The dominant case — file tree
     clicked while editing — should never churn QML bindings or trigger
-    spurious focus side-effects. Relies on `swap_to_editor`'s
-    no-op-on-noop guard at app.py:1322."""
+    spurious focus side-effects. Relies on the idempotent guard inside `swap_to_editor`."""
     controller.swap_to_editor()  # transition once: terminal → editor
     emissions = _capture(controller.centralSurfaceChanged)
     controller.open_in_nvim("/some/path.py")
@@ -113,3 +112,14 @@ def test_pick_in_nvim_inherits_swap_via_delegation(controller):
     assert controller._central_surface == "terminal"
     controller.pick_in_nvim("/some/path.py")
     assert controller._central_surface == "editor"
+
+
+def test_pick_in_nvim_empty_path_does_not_swap(controller):
+    """An empty path triggers pick_in_nvim's own early-return guard
+    before it delegates to open_in_nvim, so neither the surface swap
+    nor hide_fm should fire — mirroring test_open_in_nvim_empty_path_does_not_swap
+    for the wrapper path."""
+    emissions = _capture(controller.centralSurfaceChanged)
+    controller.pick_in_nvim("")
+    assert controller._central_surface == "terminal"
+    assert emissions == []
