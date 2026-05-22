@@ -313,10 +313,10 @@ class AppController(QObject):
         "plan",
     )
 
-    # Phase B caps the pool at 5 instances to match the `<C-1>..<C-5>`
-    # focus keybind surface. The cap is policy, not a structural limit
-    # — `_session_hosts` is a sparse dict, so widening to N is just
-    # bumping this constant + adding `<C-N>` keybinds in init.lua.
+    # Pool cap is policy, not a structural limit — `_session_hosts` is
+    # a sparse dict, so widening to N is just bumping this constant.
+    # 5 matches the originally planned `<C-1>..<C-5>` keybind surface;
+    # Track-2 may extend it.
     _MAX_INSTANCES: int = 5
 
     # Focus-chain spatial graph for the <C-h/j/k/l> spillover bridge.
@@ -360,17 +360,15 @@ class AppController(QObject):
         self._completion = CompletionModel(self)
         self._whichkey_state = WhichKeyState(self)
         self._whichkey_model = WhichKeyModel(self)
-        # ----- Per-instance pools (Phase A foundation) -------------------
+        # ----- Per-instance pools (multi-instance foundation) -----------
         #
-        # Phase A replaces the singular `_session_host` / `_session_model`
-        # fields with slot-keyed dicts so Phase B can drop in `<C-1>..<C-5>`
-        # focus + `<leader>aN` multi-spawn without a second refactor.
-        # Phase A holds N=1 — the IDE still spawns exactly one sidecar at
-        # app start and the user-visible behavior is identical to today.
-        # The plumbing just speaks dict-of-slot natively.
+        # Slot-keyed dicts let Track-2 chord wirings drop in multi-spawn
+        # and focus switching without a second plumbing refactor.
+        # Today the pool contains at most one slot (spawned lazily on
+        # first user action or via env-var); the dict shape already
+        # supports slots 1..5 when Track-2 activates them.
         #
-        # Slot numbering matches `<C-N>` keybind semantics: 1..5 are valid
-        # in Phase B; Phase A uses only slot 1. Per-instance scalar state
+        # Slot numbering is 1-based: 1..5 are valid. Per-instance scalar state
         # (awaiting-response, permission-mode) lives in parallel dicts,
         # NOT inside `SessionHost` / `SessionModel`, because those objects
         # are 1:1 with one sidecar/model and shouldn't carry controller
@@ -389,26 +387,25 @@ class AppController(QObject):
         # only the slot number. `_close_instance` removes the entry.
         self._instance_titles: dict[int, str] = {}
         # Slot whose transcript / state the QML pane currently mirrors.
-        # Phase A locks this at 1 (only one instance exists). Phase B
-        # introduces `<C-1>..<C-5>` to reassign it.
+        # Currently locked at 1 (only one instance spawned at a time).
+        # Track-2 chord wirings will call `focus_instance(N)` to reassign.
         self._focused_instance: int = 1
         # request_id -> issuing slot. Populated when a `permission_request`
         # event lands so `respond_to_permission` can route the user's
         # decision back to the right sidecar's `canUseTool` resolver
-        # without trusting `_focused_instance` (the user could have focus-
-        # switched between request and response in Phase B). Cleared on
-        # response or session close. Phase A risk #1 mitigation per the
-        # PRD §4.3 — adding it now keeps Phase B from re-touching
-        # `respond_to_permission`.
+        # without trusting `_focused_instance` (the user could focus-switch
+        # between request and response in a multi-instance scenario). Cleared
+        # on response or session close. Keyed here so `respond_to_permission`
+        # never needs updating when multi-instance activates.
         self._pending_permissions: dict[str, int] = {}
         # NB: pool starts EMPTY. Previously `__init__` auto-allocated
         # slot 1 (so the bubble strip read as "1 active" before the
         # user had asked for any agent), and `start()` pre-warmed its
         # subprocess. Both violated the user's mental model — "no
-        # agents until I press <leader>aN". The first `<leader>aN`
-        # now calls `_spawn_instance(1)` lazily, matching what the
-        # subsequent `<leader>aN` invocations do for slots 2..5. The
-        # env-var startup paths (`SYMMETRIA_IDE_AGENT_PROMPT` /
+        # agents until I spawn one". The first Track-2 chord or
+        # env-var startup path spawns slot 1 lazily via
+        # `_spawn_instance(1)`; subsequent spawns fill slots 2..5.
+        # The env-var startup paths (`SYMMETRIA_IDE_AGENT_PROMPT` /
         # `_VIEW`) handle the spawn themselves in `start()`.
         # ----- Backend signal wiring (unchanged) -------------------------
         self._backend.capsule_updated.connect(self._route_capsule)
@@ -560,9 +557,9 @@ class AppController(QObject):
         Does NOT call `host.start(...)` — caller is responsible for
         cold-start ordering (e.g. `AppController.start()` sequences the
         slot-1 pre-warm AFTER `NvimBackend.start()` so the editor wins
-        the first paint frame). Phase B's `<leader>aN` handler will
-        call this with a fresh slot number and then immediately follow
-        with `host.start("")` to pre-warm the new sidecar.
+        the first paint frame). Track-2 chord wirings will call this
+        with a fresh slot number and then immediately follow with
+        `host.start("")` to pre-warm the new sidecar.
 
         Idempotent on slot reuse (same slot already in pool — log and
         return) so a paranoid caller can't double-allocate.
@@ -595,7 +592,7 @@ class AppController(QObject):
             Qt.ConnectionType.QueuedConnection,
         )
         # queued: stderr worker thread -> AppController. stderr is
-        # diagnostic-only and we don't index it for Phase A — log
+        # diagnostic-only and we don't index it per-slot — log
         # messages can attribute via SessionHost's instance_index in a
         # follow-up if multi-instance traces become noisy.
         host.stderr_line.connect(
@@ -684,8 +681,8 @@ class AppController(QObject):
     def _next_focus_after_close(self, closed_slot: int) -> int | None:
         """Pick which slot to focus after closing `closed_slot`.
 
-        Per PRD §5.3: "the one BELOW the closed one if it exists,
-        otherwise the next ABOVE". Walks down from `closed_slot - 1`
+        Strategy (originally from now-shelved PRD §5.3): "the one BELOW
+        the closed one if it exists, otherwise the next ABOVE". Walks down from `closed_slot - 1`
         toward 1 first, then up from `closed_slot + 1` toward
         `_MAX_INSTANCES`. Returns None on empty pool.
 
@@ -776,10 +773,9 @@ class AppController(QObject):
     def awaitingResponse(self) -> bool:
         """Spinner state for the FOCUSED instance.
 
-        Reads from the per-instance dict. Phase B's focus-switch
-        emits `awaitingResponseChanged` so the QML re-binds against
-        the new slot's value without the property gaining any
-        per-instance machinery on the QML side.
+        Reads from the per-instance dict. Focus-switch emits
+        `awaitingResponseChanged` so QML re-binds against the new
+        slot's value without per-instance machinery on the QML side.
         """
         return self._awaiting_response.get(self._focused_instance, False)
 
@@ -804,8 +800,8 @@ class AppController(QObject):
     def permissionMode(self) -> str:
         """Permission mode for the FOCUSED instance.
 
-        Same focused-slot read as `awaitingResponse`; same Phase B
-        re-emit-on-focus-switch contract.
+        Same focused-slot read as `awaitingResponse`; same
+        re-emit-on-focus-switch contract (emits `permissionModeChanged`).
         """
         return self._permission_mode.get(self._focused_instance, "default")
 
@@ -826,7 +822,7 @@ class AppController(QObject):
         if slot == self._focused_instance:
             self.permissionModeChanged.emit()
 
-    # --- Pool-shape properties (Phase A surface for the QML indicator) ---
+    # --- Pool-shape properties (QML indicator surface) ---
 
     @Property(int, notify=focusedInstanceChanged)
     def focusedInstance(self) -> int:
@@ -842,8 +838,9 @@ class AppController(QObject):
     def instanceCount(self) -> int:
         """Number of live instances in the pool.
 
-        Phase A always reads 1. Phase B's `<leader>aN` increments this
-        as new sidecars spawn; `<C-S-q>` decrements it on close.
+        Currently reads 0 or 1 (lazy spawn, pool is empty until the user
+        triggers a spawn). Track-2 multi-instance will increment this
+        as new sidecars spawn and decrement it on close.
         """
         return len(self._session_hosts)
 
@@ -903,8 +900,9 @@ class AppController(QObject):
         `ListView.model` track the focused instance, QML binds against
         THIS property instead, with `Connections { target: controller;
         onFocusedInstanceChanged: ... }` re-evaluating the binding on
-        every focus switch (PRD §5.1's recommended fallback when
-        layoutChanged-style auto-rebinding is insufficient).
+        every focus switch — `Connections { onFocusedInstanceChanged }`
+        is more reliable than `layoutChanged`-style auto-rebinding
+        for this property.
         """
         return self._session_models.get(self._focused_instance)
 
@@ -912,9 +910,9 @@ class AppController(QObject):
     def focus_instance(self, index: int) -> None:
         """Reassign focus to the given pool slot.
 
-        Phase A: only slot 1 exists, so any other index is a no-op-with-
-        log. Phase B wires this up to `<C-1>..<C-5>`. Emits all three
-        QML-facing signals so the pane re-binds the spinner, the pill,
+        Only slot 1 is populated today (lazy spawn); any other index is
+        a no-op-with-log until Track-2 chord wirings extend the pool.
+        Emits all three QML-facing signals so the pane re-binds the spinner, the pill,
         and the indicator in a single tick.
 
         No-op when the index is already focused — avoids a spurious
@@ -943,7 +941,7 @@ class AppController(QObject):
         accept). Writes the `set_permission_mode` command to that
         slot's host.
 
-        No-op + log on unknown slot — Phase B's keybinds may dispatch
+        No-op + log on unknown slot — Track-2 chord wirings may dispatch
         before the pool entry exists in pathological races; tolerating
         that beats crashing.
         """
@@ -1517,8 +1515,8 @@ class AppController(QObject):
         - `permission_request`: record the issuing slot in
           `_pending_permissions` so `respond_to_permission` can route
           the user's decision back to the right sidecar even if focus
-          changes between request and response (Phase B scenario,
-          Phase A risk #1 mitigation).
+          changes between request and response in a multi-instance
+          scenario.
 
         Pending permission requests do NOT clear the spinner: the
         sidecar's canUseTool callback is awaiting our reply, and the
@@ -1537,15 +1535,13 @@ class AppController(QObject):
     def _on_session_closed_for(self, slot: int) -> None:
         """Indexed close handler — subprocess for `slot` exited.
 
-        Crashes, SIGTERM from `<leader>aN`, or auth failures all reach
-        the GUI through `closed` rather than a `result` envelope.
-        Without this slot the spinner would stay lit indefinitely after
-        a crash.
+        Crashes, SIGTERM, or auth failures all reach the GUI through
+        `closed` rather than a `result` envelope. Without this slot
+        the spinner would stay lit indefinitely after a crash.
 
         Resets the slot's permission mode to `default` so the next
-        session (e.g. after `<leader>aN`) starts with the canonical
-        pill rather than briefly inheriting the stale mode from the
-        dead subprocess. Drops any `_pending_permissions` entries the
+        session starts with the canonical pill rather than briefly
+        inheriting the stale mode from the dead subprocess. Drops any `_pending_permissions` entries the
         dead sidecar issued — they will never be answered now that
         canUseTool's promise has been auto-rejected by SDK abort.
         """
@@ -1607,7 +1603,8 @@ class AppController(QObject):
         - `op="show"` without `action` → just open the pane on the
           currently-focused instance. No spawn.
         - `op="focus"`, `index=N` → switch focus to slot N. No-op if
-          slot N is empty (focus does not spawn).
+          slot N is empty (focus does not spawn; avoids accidental spawn
+          from a held keybind).
         - `op="close"` → close the focused instance. With `index=N`,
           close that specific slot. After close: refocus to the
           next-lowest occupied slot (walk-down-then-up rule), or hide
@@ -1635,7 +1632,7 @@ class AppController(QObject):
             log.debug("unhandled agent op: %r", op)
 
     def _handle_agent_show(self, payload: dict) -> None:
-        """`op=show` dispatch — Phase B's spawn-into-next-free path.
+        """`op=show` dispatch — spawn-into-next-free path.
 
         With `action="new"`, allocate a fresh slot from
         `_next_free_slot()` and focus it. When the pool is saturated
@@ -1671,11 +1668,11 @@ class AppController(QObject):
         self.show_agent()
 
     def _handle_agent_focus(self, payload: dict) -> None:
-        """`op=focus` dispatch — `<C-1>..<C-5>`.
+        """`op=focus` dispatch.
 
-        Per PRD B2, focusing a non-existent slot is a no-op-with-log
-        (decided NOT to auto-spawn — matches orchestrator.nvim and
-        avoids accidental spawn from a held keybind).
+        Focusing a non-existent slot is a no-op-with-log (decided NOT
+        to auto-spawn — matches orchestrator.nvim and avoids accidental
+        spawn from a held keybind).
         """
         index = self._coerce_slot_index(payload.get("index"))
         if index is None:
@@ -1703,12 +1700,12 @@ class AppController(QObject):
         self._handle_agent_close({})
 
     def _handle_agent_close(self, payload: dict) -> None:
-        """`op=close` dispatch — `<C-S-q>` (or future explicit-index variants).
+        """`op=close` dispatch — called from `close_focused_instance` or future explicit-index variants.
 
         Missing index = focused instance. Refocus selection uses
         `_next_focus_after_close` (walk down then up). Empty pool
         after close hides the pane and snaps `_focused_instance` back
-        to 1 so the next `<leader>aN` press lands cleanly at slot 1.
+        to 1 so the next spawn lands cleanly at slot 1.
         """
         raw_index = payload.get("index")
         if raw_index is None:
@@ -1854,8 +1851,8 @@ class AppController(QObject):
 
         The sidecar that issued the `permission_request` is the one
         whose `canUseTool` promise needs to resolve — not necessarily
-        the focused slot (in Phase B, the user could focus-switch
-        between request and response). The lookup is authoritative;
+        the focused slot (in a multi-instance scenario, the user could
+        focus-switch between request and response). The lookup is authoritative;
         falling back to `_focused_instance` would silently route the
         decision to the wrong sidecar.
 
@@ -1888,7 +1885,7 @@ class AppController(QObject):
         except OSError:
             log.exception("terminal backend pre-warm failed — pane will be inert")
         # Pool stays empty unless an env-var path explicitly opts in.
-        # The first interactive `<leader>aN` lazily spawns slot 1 via
+        # Track-2 chord wirings will lazily spawn slot 1 via
         # `_handle_agent_show("new")` → `_next_free_slot()` returns 1
         # → `_spawn_instance(1)`. Permission-mode cycling pre-first-
         # message no longer needs a pre-warm: the sidecar's local
@@ -1899,7 +1896,7 @@ class AppController(QObject):
         # Two env-var startup paths still need a slot to land on:
         #   SYMMETRIA_IDE_AGENT_PROMPT="..." — spawn slot 1 with the
         #     given prompt AND open the agent view. Used by headless
-        #     smoke tests; equivalent to the user pressing <leader>aN
+        #     smoke tests; equivalent to the user spawning a slot
         #     and immediately typing the prompt.
         #   SYMMETRIA_IDE_AGENT_VIEW=1      — spawn slot 1 (empty)
         #     and open the agent view ready for interactive typing.
@@ -2058,11 +2055,11 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     #      (a QObject @Property with notify=focusedInstanceChanged) so it
     #      re-binds on focus switch — context properties are evaluated
     #      ONCE at engine load and would keep pointing at stale slot 1.
-    #   2. The pool is empty at IDE launch (lazy spawn on first
-    #      `<leader>aN`). Dereferencing `_session_hosts[_focused_instance]`
+    #   2. The pool is empty at IDE launch (lazy spawn via Track-2
+    #      chord or env-var). Dereferencing `_session_hosts[_focused_instance]`
     #      here would KeyError before the user has spawned anything.
     # Nothing in QML still binds against the old names — they were
-    # carry-over from Phase A's single-instance topology.
+    # carry-over from the original single-instance topology.
 
     # Resolve the editor font ONCE in Python so every QML overlay binds
     # to the same family the grid (`NvimView._default_font`) chose.

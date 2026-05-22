@@ -1,6 +1,17 @@
 # PRD — Orchestrator replacement
 
-> **Status: shelved (2026-05-21).** The absorption plan was paused at the end of Phase C. orchestrator.nvim is now the active multi-instance agent runtime inside the embedded NeoVim; the IDE no longer intercepts its keymaps. The IDE-side chat infrastructure (AgentPane, SessionHost, sidecar) is preserved and remains driven by `AppController` public methods callable from QML / tests / future Track-2 chord wirings. The chord namespace this PRD assumed (`<leader>a*`, `<C-1..5>`, `<C-S-q>`) is now owned by orchestrator.nvim — any revival of this plan must pick a non-colliding namespace. Read the rest of the document as historical context for the absorption design, not as an active workplan.
+> **Status: shelved (2026-05-21).** The absorption plan was paused at the end of Phase C.
+>
+> orchestrator.nvim is now the active multi-instance agent runtime inside the embedded
+> NeoVim; the IDE no longer intercepts its keymaps. The IDE-side chat infrastructure
+> (AgentPane, SessionHost, sidecar) is preserved and remains driven by `AppController`
+> public methods callable from QML / tests / future Track-2 chord wirings.
+>
+> The chord namespace this PRD assumed (`<leader>a*`, `<C-1..5>`, `<C-S-q>`) is now owned
+> by orchestrator.nvim — any revival of this plan must pick a non-colliding namespace.
+>
+> Read the rest of the document as historical context for the absorption design, not as an
+> active workplan.
 
 A multi-session plan for absorbing `orchestrator.nvim`'s essential workflow into Symmetria IDE and retiring the plugin.
 

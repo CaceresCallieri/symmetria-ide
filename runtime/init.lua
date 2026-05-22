@@ -661,7 +661,7 @@ local function install_nav_keymaps(reason)
   end
 end
 
--- VimEnter timing matches the fm + tree hijack pattern — installs AFTER
+-- VimEnter timing matches the fm hijack pattern — installs AFTER
 -- lazy-loaded plugins (including vim-tmux-navigator) wire their own
 -- <C-h/j/k/l>. vim.schedule defers past the autocmd phase per gotcha #21
 -- (scheduled callbacks may stall during prefix-wait, but VimEnter isn't
