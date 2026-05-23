@@ -947,10 +947,19 @@ Window {
                             // from the larger hit target since they're
                             // transient and one-shot.
                             compactScale: 0.8
-                            // -1 = fully recursive expand at mount; FM caps at
-                            // maxExpandDepth=8 (default) plus internal guardrails
-                            // (.git skip, 200-children fanout, 10k row ceiling).
-                            initialExpandDepth: -1
+                            // Viewport-driven (lazy) auto-expand. Replaces the
+                            // earlier `initialExpandDepth: -1` cascade, which
+                            // eagerly instantiated up to 100 FileSystemModel +
+                            // QFileSystemWatcher pairs at mount (cap-tripping
+                            // on bambin-scale repos for ~30 user-visible
+                            // rows). lazyExpand fills the viewport once at
+                            // mount, then extends one directory at a time as
+                            // the user scrolls toward the bottom of the
+                            // rendered content. The Active Changes panel
+                            // below keeps `initialExpandDepth: -1` because
+                            // pathFilter already narrows it to the
+                            // changeset.
+                            lazyExpand: true
                             // Git status badges. The FM's `statusProvider` is a
                             // duck-typed seam (property var) — it calls our
                             // adapter's `statusForPath(absolutePath)` per visible
