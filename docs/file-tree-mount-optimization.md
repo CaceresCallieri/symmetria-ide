@@ -5,7 +5,14 @@ session that started this captured baseline numbers on bambin (~2200
 files / ~480 dirs), shipped option 1 (IDE-side ignored-set short-circuit)
 plus several supporting fixes, and identified a menu of follow-ups.
 
-Options 1 and 4 are shipped. Next-up: **option 8 — profile nvim spawn** (now the lowest-hanging remaining target — see bench numbers above).
+Options 1, 4, and 8 are complete. Option 8's outcome was **diagnostic-only**: the
+`SYMMETRIA_IDE_TRACE` waterfall shows the post-option-4 cost is dominated by
+~400ms of fixed Qt/Python/QML overhead PLUS a 450-700ms post-`Session-started`
+mount window. Attempted optimizations (defer AgentPane behind a Loader)
+were net-negative on the dominant case (bambin) and reverted. Next-up
+candidates are **option 6** (per-project expanded-state cache, biggest
+felt-win for project re-opens) or **option 7** (earlier GitController
+pre-warm, small standalone win).
 
 ## Status — what's shipped
 
@@ -52,8 +59,69 @@ the bottleneck. The cascade now expands exactly 3 directories to fill
 the side panel viewport (49 visible rows on a 1280x720 launch at
 compactScale 0.8) instead of cap-tripping at 100 directories.
 
-Option 8 in the doc (profile nvim spawn) is now the lowest-hanging
-remaining target if we want to push further.
+### Option 8 trace waterfall (added 2026-05-23)
+
+Run with `--trace` to capture `SYMMETRIA_IDE_TRACE=1`-gated phase
+markers from the IDE's stderr. Median across 15 runs (5 each on
+bambin / symmetria-ide / dotfiles):
+
+| Phase | Cumulative ms | Δ from prior |
+|-------|---------------:|-------------:|
+| `imports_basic_done` | 5 | — |
+| `app_module_imported` (PySide6 + pynvim + all submodules) | 148 | +143 |
+| `qgui_created` | 165 | +17 |
+| `engine_ctx_ready` (Python-side `_build_engine` setup) | 170 | +5 |
+| `engine_loaded` (Main.qml + all eager imports parsed + instantiated) | 270 | +100 |
+| `backend_started` (nvim subprocess up via pynvim worker) | 280 | +10 |
+| `terminal_started` (PTY + pyte ready) | 292 | +12 |
+| `start_done` | 292 | +0 |
+| `exec_entered` (Qt event loop running) | 310 | +18 |
+| `first_capsule` (first nvim capsule seen in Python) | 316 | +6 |
+| `git_ignored_published` (GitController worker emits ignored set) | 325 | +9 |
+| FM Logger "Session started" emit | ~300-310 (overlaps QML eval) | — |
+| FM Logger "tree mount settled" emit (bambin) | ~896 | +571 (= `tree_mount_ms`) |
+
+**Findings:**
+
+- The 148ms Python import cost is dominated by PySide6 itself
+  (QtCore/QtGui/QtQml). Top-of-`app.py` modules are eager because the
+  `@QmlElement`-decorated classes (NvimView, TerminalView, SessionModel,
+  CmdlineState, …) must be class-loaded before `_register_qml_types`
+  fires, otherwise QML can't resolve `Symmetria.Ide 1.0` types. Lazy-
+  importing those breaks the registration contract.
+- The 100ms `engine_loaded` slice is `engine.load(Main.qml)` — actual
+  QML parse + instantiate of every eagerly-referenced type. Qt's QML
+  cache (`~/.cache/Symmetria/Symmetria IDE/qmlcache/*.qmlc`) is already
+  hot on subsequent launches, so this is the *cached* path.
+- The 100ms `controller.start()` → `exec_entered` slice is dominated
+  by `gc.collect()` + `gc.freeze()` (gotcha #10 partner). These are
+  load-bearing for the 3.14 SEGV mitigation; do not delete the
+  `collect` "for speed".
+- The 4-9ms `git_ignored_published` slice means the GitController
+  worker scan completes ~570ms *before* tree_mount settles. Option 7
+  (earlier GitController pre-warm) would help only if the FM cascade
+  ever races the worker — currently it doesn't.
+
+**Attempted but reverted:** wrapping AgentPane in a Loader
+(`active: controller.agentVisible || item !== null`). Saved
+~12-25ms in `engine_loaded` but regressed bambin's `tree_mount_ms`
+by 60-120ms (smaller repos were neutral). Hypothesis: removing
+AgentPane from the eager-evaluation graph reshuffles the QML
+engine's first-frame scheduling in a way that contends with the
+FM's incremental row-fan-out. The `Main.qml` regression note
+documents the experiment so a future agent doesn't repeat it
+without re-bench on bambin.
+
+**What's tractable next:**
+
+- Option 6 (per-project expanded-state cache): persist `_expanded`
+  per repo root, project re-opens become instant on second visit.
+- Option 7 (earlier GitController pre-warm): minor (~50-200ms) win
+  alongside any other change touching `_route_capsule`.
+
+The `--trace` infrastructure is permanent — re-run with
+`SYMMETRIA_IDE_TRACE=1` (or via `bench/measure_mount.py --trace`) any
+time the launch waterfall changes.
 
 ## Status — option 4 SHIPPED
 
@@ -210,15 +278,36 @@ already mid-scan by the time the FileTreeView mounts.
 Low-effort but only ~50-200ms payoff. Worth doing alongside option 4
 since they share the same critical path.
 
-### Option 8 — Profile nvim spawn time
+### Option 8 — Profile nvim spawn time *(SHIPPED as diagnostic-only — see Status section above)*
 
-Untested. `nvim --embed` with the user's full plugin set might be the
-hidden time-to-first-paint floor. If it's ~300ms, optimizing the file
-tree below that wouldn't shorten total launch time.
+Done as a `SYMMETRIA_IDE_TRACE`-gated phase tracer
+(`src/symmetria_ide/trace.py`) wired through `__main__.py`, `app.py`
+(`run()`, `AppController.start()`, `_build_engine`, `_route_capsule`),
+and `git_controller.py` (`_publish`). `bench/measure_mount.py` grew a
+`--trace` flag that captures stderr to a tempfile and parses the trace
+lines into each run's metrics dict alongside the existing
+`tree_mount_ms` measurement.
 
-Easy diagnostic: time from `bench/measure_mount.py` process start to
-the first FM Logger line. If big, we have a separate optimization
-target.
+**Outcome:** there is no big-bang fix here. The 400ms pre-`Session-started`
+window is mostly fixed Qt/Python/PySide6 overhead. `nvim --embed`
+itself is fast — `start_begin → backend_started` is only ~10ms because
+pynvim spawns the subprocess and returns immediately; the user's
+plugin load happens in the background while QML is mid-instantiation.
+The waterfall table in the Status section above is the authoritative
+breakdown. Tried-and-reverted notes for what didn't work are captured
+in `qml/Main.qml` at the AgentPane regression-note comment.
+
+If a future agent wants to push pre-`Session-started` further, the
+remaining options would require:
+- Native QML compilation via `qmlcachegen --resource` instead of
+  Qt's runtime cache (might shave engine_loaded but adds build step).
+- Splitting `app.py` so QML-registered classes are tighter (their
+  imports already dominate `app_module_imported`).
+- Skipping `gc.collect()` before `gc.freeze()` (~15ms) — DANGEROUS,
+  see gotcha #10 partner pattern.
+
+None are worth doing without a specific user-visible launch
+complaint pointing at them.
 
 ## Gotchas learned this session
 
@@ -277,6 +366,27 @@ before touching FileTreeView or GitController:
    commit agent will otherwise stage the whole file's working-tree diff
    including pre-existing unrelated work.
 
+10. **QML typed parameters do NOT support default values in Qt 6.11** —
+    `function _destroyModel(m: var, path: string = ""): void` parses
+    green in tests but fails at engine load with `Type annotations are
+    not supported (yet)` at the column of the `= ""`. The error cascades
+    to "Type FileTreeView unavailable" → "Type FmUi.FileManager
+    unavailable" → "failed to load Main.qml". A 2026-05-23 review
+    landed this regression in FM commit `fc509f2`; the live IDE worked
+    only because the *installed* FM at `/usr/lib/qt6/qml/...` still had
+    the older signature. Use `function _destroyModel(m: var, path: string)`
+    (typed but no default) and let `if (path && path !== "")` guard the
+    `undefined`-passed call sites. The regression note in
+    `FileTreeView.qml` records this in detail.
+
+11. **Bambin's `tree_mount_ms` is noisy: ±100ms run-to-run** — the bench
+    measures from `Session started` (Logger.qml.onCompleted) to last
+    `tree mount settled`. Variance comes from disk-cache state, fsync
+    cadence, system load, and Qt's scene-graph scheduler. Treat any
+    change <50ms as below the noise floor on bambin. Smaller repos
+    (symmetria-ide, dotfiles) have ~30ms variance. Always bench 5+ runs
+    per repo and use the trimmed median (mounts[1:-1]).
+
 ## Bench harness usage
 
 ```
@@ -299,7 +409,16 @@ emit per run unless `--expected-trees 2` is passed.
 ## Resume checklist for next session
 
 1. Read this file end-to-end (especially the gotchas).
-2. Re-run baseline benches to make sure the current state matches what
-   this doc records (bambin should still settle at ~449ms).
-3. Consider option 8 (profile nvim spawn) or option 7 (earlier GitController
-   pre-warm) if further startup speedup is needed.
+2. Re-run baseline benches to confirm current state. Expect bambin
+   `tree_mount_ms` to settle around 500-700ms (high variance, see
+   gotcha #11). Use `--trace` to also capture the pre-`Session-started`
+   waterfall.
+3. Options 1, 4, and 8 are done. Pick from the remaining:
+   - **Option 6** (per-project expanded-state cache) — biggest felt
+     win for "re-open project" workflows. JSON-on-disk, simple.
+   - **Option 7** (earlier GitController pre-warm) — small (~50-200ms)
+     win, low effort.
+   - **Option 2** (BFS-level gitignore batching) — standalone-FM only;
+     the IDE already short-circuits via `ignoredPathSet`.
+   - **Option 3** (shared FileSystemModel cache) — bigger refactor,
+     halves inotify usage. Defer unless watcher exhaustion is real.

@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+# trace MUST be the very first project-internal import so its T0 captures
+# the earliest possible monotonic reading — before PySide6/pynvim get
+# pulled in by `.app`. The tracer is env-gated (SYMMETRIA_IDE_TRACE),
+# so production launches pay no cost beyond one module import.
+from .trace import trace  # noqa: E402 — intentionally first
+
 import faulthandler
 import os
 import sys
 from pathlib import Path
+
+trace("imports_basic_done")
 
 _xdg_state = os.environ.get("XDG_STATE_HOME")
 _state_dir = (
@@ -17,7 +25,11 @@ _crash_log = _crash_log_path.open("a", buffering=1)
 faulthandler.enable(file=_crash_log, all_threads=True)
 sys.stderr.write(f"[symmetria-ide] crash log: {_crash_log_path}\n")
 
+trace("faulthandler_armed")
+
 from .app import run  # noqa: E402 — faulthandler must arm before Qt/pynvim import
+
+trace("app_module_imported")
 
 
 def main() -> int:

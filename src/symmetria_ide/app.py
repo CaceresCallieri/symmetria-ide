@@ -36,6 +36,7 @@ from PySide6.QtGui import QGuiApplication, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine, QmlElement
 
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
+from .trace import trace
 from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registration
     CmdlineState,
     CompletionModel,
@@ -336,6 +337,11 @@ class AppController(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        # Tracer one-shot flags — set true after the first capsule /
+        # first cwd capsule / first ignored set has been observed, so
+        # the trace emits exactly once each per launch.
+        self._first_capsule_seen = False
+        self._first_displayed_root_traced = False
         # These initial dimensions are a seed that gets immediately overridden
         # when NvimView first receives a geometryChange event and calls
         # backend.resize() with the real pixel-derived cell count.
@@ -710,12 +716,18 @@ class AppController(QObject):
         # through to CapsuleModel (would render as a stray status-bar
         # pill). The sidebar's FileTreeView reads `controller.cwd`
         # directly via the @Property binding.
+        if not self._first_capsule_seen:
+            self._first_capsule_seen = True
+            trace("first_capsule")
         cid = str(payload.get("id") or "")
         if cid == "cwd":
             new_cwd = str(payload.get("value") or "")
             if new_cwd != self._cwd:
                 self._cwd = new_cwd
                 self.cwdChanged.emit()
+                if not self._first_displayed_root_traced:
+                    self._first_displayed_root_traced = True
+                    trace("first_cwd_capsule")
                 # The conditional below is the load-bearing line of the
                 # anchor state machine: while anchored, cwd updates still
                 # flow into `_cwd` (so a later release re-syncs cleanly),
@@ -1887,7 +1899,9 @@ class AppController(QObject):
         self.respond_to_permission_for(request_id, decision, slot)
 
     def start(self) -> None:
+        trace("start_begin")
         self._backend.start()
+        trace("backend_started")
         # Seed the GitController with the launch cwd by firing
         # `displayedRootChanged` once at startup. Without this, the very
         # first nvim cwd capsule arrives with a value equal to `_cwd`
@@ -1921,6 +1935,7 @@ class AppController(QObject):
             self._terminal_backend.start(self._cwd)
         except OSError:
             log.exception("terminal backend pre-warm failed — pane will be inert")
+        trace("terminal_started")
         # Pool stays empty unless an env-var path explicitly opts in.
         # Track-2 chord wirings will lazily spawn slot 1 via
         # `_handle_agent_show("new")` → `_next_free_slot()` returns 1
@@ -2141,6 +2156,7 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     _resolved_font = NvimView._default_font()
     _primary_family = (_resolved_font.families() or [_resolved_font.family()])[0]
     ctx.setContextProperty("editorFontFamily", _primary_family)
+    trace("engine_ctx_ready")
 
     qml_root = QML_DIR / "Main.qml"
     # IMPORTANT: always use fromLocalFile here, not a QRC resource URL.
@@ -2156,6 +2172,7 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
 
 
 def run() -> int:
+    trace("run_entered")
     configure_logging()
     # Install the Qt message handler BEFORE QGuiApplication so any QML
     # warnings emitted during engine construction reach Python's logging.
@@ -2179,14 +2196,19 @@ def run() -> int:
     # Sets the Wayland xdg-shell `app_id` — Hyprland sees this as the
     # window class, so window rules can match on `symmetria-ide`.
     app.setDesktopFileName("symmetria-ide")
+    trace("qgui_created")
 
     _register_qml_types()
+    trace("qml_registered")
     controller = AppController()
+    trace("controller_created")
     engine = _build_engine(controller)
     if engine is None:
         return 1
+    trace("engine_loaded")
 
     controller.start()
+    trace("start_done")
     app.aboutToQuit.connect(controller.shutdown)
     # If nvim exits on its own (user typed `:q`), close the window too
     # — otherwise the grid freezes on whatever was last rendered and
@@ -2210,4 +2232,5 @@ def run() -> int:
     gc.collect()
     gc.freeze()
 
+    trace("exec_entered")
     return app.exec()

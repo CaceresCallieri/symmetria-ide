@@ -35,6 +35,7 @@ import re
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +54,10 @@ SESSION_STARTED = "Session started"
 # regardless of whether the BFS finished naturally, hit the model ceiling, or
 # was disabled (initialExpandDepth: 0).
 TREE_MOUNT_SETTLED = re.compile(r"tree mount settled:\s*(\d+)\s+rows visible")
+# `src/symmetria_ide/trace.py` emits one of these lines per phase when
+# `SYMMETRIA_IDE_TRACE=1` is set in the launch env. Format:
+#   `[TRACE] <ms_from_process_start> <phase>`
+TRACE_LINE_RE = re.compile(r"^\[TRACE\]\s+([0-9.]+)\s+(\S+)")
 
 
 def parse_iso(ts: str) -> float:
@@ -62,6 +67,26 @@ def parse_iso(ts: str) -> float:
     if ts.endswith("Z"):
         ts = ts[:-1] + "+00:00"
     return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc).timestamp()
+
+
+def parse_trace(text: str) -> dict[str, float]:
+    """Parse `[TRACE] <ms> <phase>` lines from captured stderr.
+
+    Returns `{phase: first_ms_seen}` — each phase is emitted once at
+    most by design, so a duplicate would be unexpected. We keep the
+    first occurrence to be defensive against future code paths that
+    might re-trigger a phase.
+    """
+    out: dict[str, float] = {}
+    for line in text.splitlines():
+        m = TRACE_LINE_RE.match(line)
+        if not m:
+            continue
+        phase = m.group(2)
+        if phase in out:
+            continue
+        out[phase] = float(m.group(1))
+    return out
 
 
 def parse_log(text: str) -> dict[str, Any]:
@@ -125,6 +150,7 @@ def run_once(
     poll_interval_s: float,
     settle_after_match_s: float,
     timeout: int,
+    trace_enabled: bool,
 ) -> dict[str, Any]:
     """Launch the IDE, poll the log until N "tree mount settled" lines land,
     then SIGTERM. Returns parsed metrics.
@@ -134,13 +160,37 @@ def run_once(
     async ShellRunner flush — the last few log lines get dropped on exit and
     the bench saw stale "pending=3" without ever seeing pending=0. Polling +
     explicit settle window guarantees the terminal lines hit disk.
+
+    When `trace_enabled` is True, sets SYMMETRIA_IDE_TRACE=1 in the
+    subprocess env and redirects stderr to a temporary file. The trace
+    lines (one per startup phase) are parsed back into the result dict
+    so the per-phase breakdown lands alongside the legacy mount_ms
+    measurement.
     """
     env = os.environ.copy()
     env["PYTHONPATH"] = str(IDE_ROOT / "src")
     # Do NOT set SYMMETRIA_IDE_SCREENSHOT — we manage shutdown ourselves.
+    if trace_enabled:
+        env["SYMMETRIA_IDE_TRACE"] = "1"
 
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     LOG_FILE.write_text("")
+
+    stderr_file: Any
+    stderr_path: Path | None = None
+    if trace_enabled:
+        # NamedTemporaryFile with delete=False: we read it after the
+        # subprocess exits, then unlink ourselves. delete=True races
+        # with the subprocess's own file-handle lifecycle on Linux.
+        stderr_tmp = tempfile.NamedTemporaryFile(
+            prefix="symmetria-ide-bench-",
+            suffix=".stderr",
+            delete=False,
+        )
+        stderr_path = Path(stderr_tmp.name)
+        stderr_file = stderr_tmp
+    else:
+        stderr_file = subprocess.DEVNULL
 
     t0 = time.monotonic()
     proc = subprocess.Popen(
@@ -148,7 +198,7 @@ def run_once(
         cwd=str(repo),
         env=env,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=stderr_file,
     )
 
     deadline = t0 + timeout
@@ -190,6 +240,18 @@ def run_once(
         metrics["tree_mount_ms"] = (last - sess) * 1000.0
     else:
         metrics["tree_mount_ms"] = None
+
+    if trace_enabled and stderr_path is not None:
+        try:
+            stderr_text = stderr_path.read_text(errors="replace")
+        except OSError:
+            stderr_text = ""
+        finally:
+            try:
+                stderr_path.unlink()
+            except OSError:
+                pass
+        metrics["trace"] = parse_trace(stderr_text)
     return metrics
 
 
@@ -201,6 +263,7 @@ def run_repo(
     poll_interval_s: float,
     settle_after_match_s: float,
     timeout: int,
+    trace_enabled: bool,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for i in range(runs):
@@ -210,6 +273,7 @@ def run_repo(
             poll_interval_s=poll_interval_s,
             settle_after_match_s=settle_after_match_s,
             timeout=timeout,
+            trace_enabled=trace_enabled,
         )
         wall = r.get("wall_s") or 0.0
         print(
@@ -218,6 +282,40 @@ def run_repo(
             f"  ft_log_lines={r.get('filetree_lines')}"
             f"  via_poll={r.get('matched_via_poll')}  wall={wall:.2f}s"
         )
+        tr = r.get("trace") or {}
+        if tr:
+            # Print the waterfall in the canonical phase order — any phase
+            # not in the canonical list is appended at the end with its
+            # raw timing so future phases auto-surface without bench edits.
+            order = [
+                "imports_basic_done",
+                "faulthandler_armed",
+                "app_module_imported",
+                "run_entered",
+                "qgui_created",
+                "qml_registered",
+                "controller_created",
+                "engine_ctx_ready",
+                "engine_loaded",
+                "start_begin",
+                "backend_started",
+                "terminal_started",
+                "start_done",
+                "exec_entered",
+                "first_capsule",
+                "first_cwd_capsule",
+                "git_ignored_published",
+            ]
+            seen: set[str] = set()
+            parts: list[str] = []
+            for k in order:
+                if k in tr:
+                    parts.append(f"{k}={tr[k]:.0f}ms")
+                    seen.add(k)
+            for k, v in tr.items():
+                if k not in seen:
+                    parts.append(f"{k}={v:.0f}ms")
+            print("    trace: " + " ".join(parts))
         rows.append(r)
 
     mounts = sorted(
@@ -269,6 +367,13 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=60)
     ap.add_argument("--label", default="run")
     ap.add_argument("--out", type=Path, default=IDE_ROOT / "bench" / "results.json")
+    ap.add_argument(
+        "--trace",
+        action="store_true",
+        help="Enable SYMMETRIA_IDE_TRACE=1 and capture per-phase startup "
+        "timings from the subprocess's stderr. Adds a `trace` dict to each "
+        "run's metrics with phase → ms-from-process-start.",
+    )
     args = ap.parse_args()
 
     results: dict[str, dict[str, Any]] = {}
@@ -284,6 +389,7 @@ def main() -> int:
             poll_interval_s=args.poll_interval_ms / 1000.0,
             settle_after_match_s=args.settle_after_match_ms / 1000.0,
             timeout=args.timeout,
+            trace_enabled=args.trace,
         )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

@@ -40,6 +40,8 @@ import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .trace import trace
+
 from PySide6.QtCore import (
     Property,
     QAbstractListModel,
@@ -571,6 +573,10 @@ class GitController(QObject):
         # auto-expand on medium-to-large repos (≥100 directories serialised
         # through one queue at ~30–40ms each).
         self._ignored_set: dict[str, bool] = {}
+        # Tracer one-shot flag — flipped to True the first time `_publish`
+        # emits a non-empty ignored set, so the trace lands on the moment
+        # the FM's option-1 short-circuit data first becomes available.
+        self._first_ignored_publish_traced = False
 
         # Guards `_status_map`, `_stats`, and `_resolved_root` against the
         # worker mutating them while the GUI thread reads via
@@ -1180,6 +1186,10 @@ class GitController(QObject):
                     self.statsChanged.emit()
             finally:
                 gc.enable()
+
+        if not self._first_ignored_publish_traced and new_ignored:
+            self._first_ignored_publish_traced = True
+            trace("git_ignored_published")
 
     # -- GUI-thread slots --------------------------------------------------
 

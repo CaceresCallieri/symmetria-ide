@@ -396,6 +396,21 @@ Window {
                         forceActiveFocus()
                 }
 
+                // REGRESSION NOTE: a 2026-05-23 experiment wrapped AgentPane
+                // in a Loader (`active: controller.agentVisible || item !== null`)
+                // to defer its 800-line parse + Symmetria.Ide import cost
+                // until first-open. The Loader saved ~12-25ms in
+                // `engine_loaded` (measured via SYMMETRIA_IDE_TRACE) but
+                // regressed `tree_mount_settled` by 60-120ms on the
+                // bambin repo (~2200 files / ~480 dirs). Smaller repos
+                // were neutral. Net effect was negative on the dominant
+                // case, so the inline form below is correct. Hypothesis:
+                // without AgentPane in the eager-evaluation graph, the
+                // QML engine's first-frame scheduling lets the file
+                // tree's incremental expansion contend differently with
+                // FM/terminal warmup work. Reproduce with `bench/measure_mount.py
+                // --trace` before attempting another defer pass — and
+                // verify on bambin, not just small repos.
                 AgentPane {
                     id: agentPane
                     anchors.fill: parent
