@@ -62,9 +62,9 @@ across QML traversals, and QML's JS engine may produce a different
 wrapper on different access paths even when the underlying C++ pointer
 is the same. The path-keyed map sidesteps this entirely.
 
-**Cost paid.** Two `Object.assign({}, _modelHandlers)` allocations per
-mount per directory (create + delete on collapse) — utterly negligible
-vs. the IO cost of the actual scan. The map's lifetime tracks
+**Cost paid.** Two plain property operations per mount per directory
+(`_modelHandlers[path] = fn` on expand, `delete _modelHandlers[path]`
+on collapse) — utterly negligible vs. the IO cost of the actual scan. The map's lifetime tracks
 `_models` exactly: cleared in `_resetTreeState`, mutated in lockstep
 with `_expand` / `_destroyModel`.
 

@@ -5,8 +5,7 @@ session that started this captured baseline numbers on bambin (~2200
 files / ~480 dirs), shipped option 1 (IDE-side ignored-set short-circuit)
 plus several supporting fixes, and identified a menu of follow-ups.
 
-Next-up: **option 4 — viewport-driven auto-expand** (highest-impact-per-
-effort of the remaining options).
+Options 1 and 4 are shipped. Next-up: **option 8 — profile nvim spawn** (now the lowest-hanging remaining target — see bench numbers above).
 
 ## Status — what's shipped
 
@@ -301,18 +300,6 @@ emit per run unless `--expected-trees 2` is passed.
 
 1. Read this file end-to-end (especially the gotchas).
 2. Re-run baseline benches to make sure the current state matches what
-   this doc records (bambin should still settle at ~2300ms).
-3. Begin option 4 in the FM repo first — add the `lazyExpand` prop
-   to `FileTreeView.qml`. Keep `initialExpandDepth` working as a
-   fallback for existing callers (standalone FM, the IDE Active Changes
-   panel).
-4. Wire it from `Main.qml` (IDE-side) only on the main FileTreeView,
-   not the Active Changes panel.
-5. Bench against bambin. Expect 300-500ms.
-6. Bench against symmetria-ide and `~/.dotfiles`. Expect modest
-   improvement (those weren't cap-tripping in the first place).
-7. Verify visually: open bambin, scroll the tree, confirm subdirs
-   expand smoothly on demand without flicker.
-8. Seal each repo's changes through `/seal`. Stage carefully — the FM
-   repo and dotfiles repo both have pre-existing in-flight diffs from
-   prior work that must NOT be swept in.
+   this doc records (bambin should still settle at ~449ms).
+3. Consider option 8 (profile nvim spawn) or option 7 (earlier GitController
+   pre-warm) if further startup speedup is needed.
