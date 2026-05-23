@@ -16,7 +16,7 @@ existing Logger-based bench can see.
 The traced phases form a coarse waterfall:
 
     process_start (T0=0)
-    -> imports_done
+    -> imports_basic_done
     -> qgui_created
     -> qml_registered
     -> controller_created
@@ -61,8 +61,8 @@ def trace(name: str) -> None:
     """
     if not _ENABLED:
         return
-    elapsed_ms = (time.monotonic() - T0) * 1000.0
-    sys.stderr.write(f"[TRACE] {elapsed_ms:8.1f} {name}\n")
+    _elapsed = (time.monotonic() - T0) * 1000.0
+    sys.stderr.write(f"[TRACE] {_elapsed:8.1f} {name}\n")
     sys.stderr.flush()
 
 

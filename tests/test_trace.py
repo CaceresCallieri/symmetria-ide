@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 import io
+import re
 import sys
 from contextlib import redirect_stderr
 
@@ -74,6 +75,9 @@ def test_trace_enabled_emits_to_stderr(monkeypatch):
     # the exact ms-formatting width chosen in trace.py.
     assert out.startswith("[TRACE]")
     assert " hello\n" in out
+    # Verify the middle token is a valid float (catches format regressions
+    # where the ms value could become None/NaN/empty).
+    assert re.search(r"[0-9]+\.[0-9]+", out), f"no numeric ms token in: {out!r}"
 
 
 def test_elapsed_ms_is_monotonic_positive(monkeypatch):

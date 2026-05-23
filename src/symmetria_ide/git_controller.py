@@ -40,8 +40,6 @@ import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .trace import trace
-
 from PySide6.QtCore import (
     Property,
     QAbstractListModel,
@@ -53,6 +51,8 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
+
+from .trace import trace
 
 log = logging.getLogger(__name__)
 
