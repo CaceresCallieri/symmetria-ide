@@ -107,15 +107,34 @@ def test_load_handles_corrupted_json(state_dir, tmp_path):
 
 
 def test_load_rejects_unknown_schema_version(state_dir, tmp_path):
-    """Future schema version → `[]` (downgrade safety)."""
+    """Out-of-range schema version → `[]` (downgrade and invalid-version safety).
+
+    Covers both the forward case (version > KNOWN_VERSION) and the
+    backward/invalid case (version < 1, e.g. 0 from a truncated write).
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
     target = tsc._cache_path(str(repo))
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    # Forward version (future writer, downgraded IDE).
     target.write_text(
         json.dumps(
             {
                 "version": tsc.KNOWN_VERSION + 99,
+                "repo_root": str(repo),
+                "expanded_paths": [str(repo)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert tsc.load_expanded(str(repo)) == []
+
+    # Version 0 — could result from a truncated or corrupt write.
+    target.write_text(
+        json.dumps(
+            {
+                "version": 0,
                 "repo_root": str(repo),
                 "expanded_paths": [str(repo)],
             }

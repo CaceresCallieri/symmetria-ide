@@ -50,10 +50,10 @@ from .session_models import (  # noqa: F401 — side-effect: @QmlElement registr
     SessionModel,
 )
 from .terminal_backend import TerminalBackend
-from .tree_state_cache import load_expanded, save_expanded
 from .terminal_view import (  # noqa: F401 — side-effect: @QmlElement registration
     TerminalView,
 )
+from .tree_state_cache import load_expanded, save_expanded
 from .whichkey_models import (  # noqa: F401 — side-effect: @QmlElement registration
     WhichKeyModel,
     WhichKeyState,

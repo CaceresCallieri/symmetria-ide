@@ -322,11 +322,11 @@ day before — same scroll-to-find behavior, same mental model.
 **Gotchas internalized (added to the section at the bottom).**
 
 - QML `Array.isArray(qVariantList)` returns false in Qt 6.11 — use
-  duck-typed `cache != null && cache.length > 0` (gotcha #12).
+  duck-typed `cache != null && cache.length > 0` (gotcha #11).
 - Cache must be pre-populated in `AppController.__init__` (NOT only
   via the `displayedRootChanged` slot) because the FM mounts at
   `engine.load(Main.qml)`, BEFORE `start()`'s synthetic
-  `displayedRootChanged` emit (gotcha #13).
+  `displayedRootChanged` emit (gotcha #12).
 
 **v2 follow-ups (not in v1).**
 
@@ -521,7 +521,7 @@ emit per run unless `--expected-trees 2` is passed.
 1. Read this file end-to-end (especially the gotchas).
 2. Re-run baseline benches to confirm current state. Expect bambin
    `tree_mount_ms` to settle around 500-700ms (high variance, see
-   gotcha #11). Use `--trace` to also capture the pre-`Session-started`
+   gotcha #13). Use `--trace` to also capture the pre-`Session-started`
    waterfall.
 3. Options 1, 4, 6, and 8 are done. Pick from the remaining:
    - **Option 7** (earlier GitController pre-warm) — small (~50-200ms)
