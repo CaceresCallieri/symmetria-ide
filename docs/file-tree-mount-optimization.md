@@ -5,14 +5,16 @@ session that started this captured baseline numbers on bambin (~2200
 files / ~480 dirs), shipped option 1 (IDE-side ignored-set short-circuit)
 plus several supporting fixes, and identified a menu of follow-ups.
 
-Options 1, 4, and 8 are complete. Option 8's outcome was **diagnostic-only**: the
+Options 1, 4, 6, and 8 are complete. Option 8's outcome was **diagnostic-only**: the
 `SYMMETRIA_IDE_TRACE` waterfall shows the post-option-4 cost is dominated by
 ~400ms of fixed Qt/Python/QML overhead PLUS a 450-700ms post-`Session-started`
 mount window. Attempted optimizations (defer AgentPane behind a Loader)
-were net-negative on the dominant case (bambin) and reverted. Next-up
-candidates are **option 6** (per-project expanded-state cache, biggest
-felt-win for project re-opens) or **option 7** (earlier GitController
-pre-warm, small standalone win).
+were net-negative on the dominant case (bambin) and reverted. Option 6 ships
+a working per-project expanded-state cache — the wall-clock differential vs
+lazyExpand is within noise for matched sets, but the **felt UX win is
+preserving the user's manually-expanded tree state across sessions**, which
+the benchmark cannot synthesize. Next-up candidate is **option 7** (earlier
+GitController pre-warm, small standalone win).
 
 ## Status — what's shipped
 
@@ -256,14 +258,88 @@ party Qt addon.
 Real benefit only when hitting `fs.inotify.max_user_watches` (8192
 default). Bambin doesn't hit this; large monorepos might.
 
-### Option 6 — Per-project expanded-state cache
+### Option 6 — Per-project expanded-state cache *(SHIPPED 2026-05-25)*
 
-Persist `_expanded` per repo root to `~/.local/state/symmetria-ide/<hash>.json`.
-Project re-opens become instant on second visit. JSON-on-disk; minimal
-serialization complexity.
+Persist the set of expanded directories per repo root to
+`$XDG_STATE_HOME/symmetria-ide/projects/<hash>.json`. Cache is consulted
+synchronously at AppController `__init__`-time (BEFORE QML loads, so the
+FM's `restoreExpandedPaths` prop holds the right list on first
+`onRootPathChanged`), then refreshed on every subsequent
+`displayedRootChanged` via `_sync_expanded_paths_cache`. Persistence
+fires on every user-driven expand/collapse via
+`FileTreeView.expandedStateChanged → controller.saveExpandedPaths`.
 
-Wins big for users who bounce between projects. Doesn't help first-time
-mounts.
+**Files shipped:**
+
+| Repo | File | What |
+|------|------|------|
+| `symmetria-ide` | `src/symmetria_ide/tree_state_cache.py` | New module: `load_expanded`, `save_expanded`, atomic-write via `os.replace`, stat-prune on load, schema-version gated. |
+| `symmetria-ide` | `src/symmetria_ide/app.py` | New `expandedPathsCache` property + `expandedPathsCacheChanged` signal + `_sync_expanded_paths_cache` slot (wired BEFORE `_sync_git_repo_root` in connect order) + `saveExpandedPaths(list)` slot + pre-populate call at end of `__init__`. |
+| `symmetria-ide` | `qml/Main.qml` | Main FileTreeView gets `restoreExpandedPaths: controller.expandedPathsCache` + `onExpandedStateChanged: controller.saveExpandedPaths(paths)`. |
+| `symmetria-ide` | `tests/test_tree_state_cache.py` | 15 tests: missing→empty, round-trip, dup-coalesce, stale-path prune, corrupted-JSON, schema-version safety, atomic-write tmp-cleanup, XDG path resolution, empty-input writes a file. |
+| `symmetria-file-manager` | `qml/Symmetria/FileManager/UI/modules/filemanager/FileTreeView.qml` | New `restoreExpandedPaths: var` prop (priority over `lazyExpand`/`initialExpandDepth`), `expandedStateChanged(var paths)` signal, internal `_restorePending`/`_restoreActive` state, `_advanceRestoreFor(expandedPath)` driver chains restore through the existing `_expand` finish callback. |
+
+**Restore semantics.** When `restoreExpandedPaths` is a non-empty list:
+1. `onRootPathChanged` skips the lazyExpand/BFS cascade.
+2. Paths filtered to those under `rootPath` and sorted shortest-first.
+3. `_expand(rootPath)` runs first; its finish callback dispatches
+   `_advanceRestoreFor(rootPath)` which scans the queue for any
+   direct children and expands them.
+4. Each child's finish callback recurses — natural depth-first
+   replay driven by the existing async machinery, no new chain
+   layer. `_generation` invalidates in-flight steps if rootPath
+   changes mid-restore, same as model creation.
+5. `_restoreActive` clears when the queue drains; the mount-settled
+   emit fires on the next `pendingEmpty` cycle, log line reads
+   `tree mount settled: N rows visible (lazy: 0 dirs)`.
+6. `expandedStateChanged` is suppressed during restore to avoid
+   churning the consumer's disk-write path while replaying the
+   already-saved set.
+
+**Bench results (symmetria-ide, 5 runs each):**
+
+| Scenario | tree_mount_ms (median) | Notes |
+|----------|-----------------------:|-------|
+| No cache (lazyExpand) | 608ms | 42 rows, 5 dirs |
+| Warm cache, same set as lazy would produce | 615ms | 42 rows, restore replaces lazyExpand |
+| Warm cache, deep set (14 dirs) | 949ms | 117 rows, restore replays user's exploration |
+
+The flat wall-clock numbers (608/615) confirm: when the cache contains
+exactly the set lazyExpand would produce, the two paths are
+equivalent-cost. The deep-set timing (949ms) is purely additive — more
+work because more dirs are expanded. That additional cost IS the win:
+it's the tree shape the user actually wants back, not the viewport-fill
+default.
+
+**Felt-UX value (not bench-visible).** The benchmark synthesizes a cold
+mount on a clean repo. The real user workflow is: open project →
+explore (expand 5-15 dirs across the tree) → close IDE → re-open
+project the next day. Without option 6, day 2 starts with lazyExpand's
+default viewport-fill (typically only 5-6 dirs of root-level children).
+With option 6, day 2 restores exactly the set the user built up the
+day before — same scroll-to-find behavior, same mental model.
+
+**Gotchas internalized (added to the section at the bottom).**
+
+- QML `Array.isArray(qVariantList)` returns false in Qt 6.11 — use
+  duck-typed `cache != null && cache.length > 0` (gotcha #12).
+- Cache must be pre-populated in `AppController.__init__` (NOT only
+  via the `displayedRootChanged` slot) because the FM mounts at
+  `engine.load(Main.qml)`, BEFORE `start()`'s synthetic
+  `displayedRootChanged` emit (gotcha #13).
+
+**v2 follow-ups (not in v1).**
+
+- Multi-window race on the cache file: today "last write wins"; if
+  two IDE instances open the same repo, the second's first save
+  clobbers the first's saved state. Atomic-write protects against
+  corruption but not lost updates. Fix would be a `fcntl.flock`
+  on write — overkill for v1's expected usage.
+- Restore-path display order: the chain is depth-first by
+  `_advanceRestoreFor`, but row-visibility comes through
+  `_rebuildRows` which is breadth-first by `_rows` traversal. A
+  user watching a slow restore would see rows pop in a non-obvious
+  order. Not visible at usual speeds.
 
 ### Option 7 — Earlier GitController pre-warm
 
@@ -379,7 +455,41 @@ before touching FileTreeView or GitController:
     `undefined`-passed call sites. The regression note in
     `FileTreeView.qml` records this in detail.
 
-11. **Bambin's `tree_mount_ms` is noisy: ±100ms run-to-run** — the bench
+11. **`Array.isArray(qVariantList)` returns false in QML (Qt 6.11)** —
+    PySide6 marshals a Python `list` (e.g. an `@Property(list, ...)`)
+    into QML as a `QVariantList`, which is array-LIKE (has `length`,
+    integer indexing, iteration) but does NOT satisfy
+    `Array.isArray()`. A check of the shape
+    `if (Array.isArray(prop) && prop.length > 0)` silently fails
+    every time on QVariantList-backed props, regardless of what the
+    Python side actually contains. The duck-typed form
+    `if (prop != null && prop.length > 0)` works for both true JS
+    Arrays and QVariantList. Burned us on option 6's
+    `restoreExpandedPaths` initial implementation — the property
+    was correctly populated Python-side, the QML cast was fine, but
+    the entry gate rejected every restore. Diagnosed by adding a
+    log line inside the FileTreeView and seeing the rejected
+    candidate. Code that combines a JS Array literal AND a
+    QVariantList from Python through the same prop must use the
+    duck-typed gate.
+
+12. **AppController must pre-populate state-loaded-on-displayedRootChanged
+    in `__init__`** — anything keyed on `displayedRootChanged` (like
+    the option-6 expanded-paths cache) needs an initial load BEFORE
+    QML instantiates the consumer component, OR the consumer reads
+    a stale initial value once and the later signal-driven update
+    doesn't retrigger the consumer's own onPropChanged handler if
+    its parent state (`rootPath`) hasn't visibly changed. The
+    fixed order is: (1) connect the slot to `displayedRootChanged`;
+    (2) call the slot manually once. Then QML's first read sees
+    the loaded state, and subsequent project switches go through
+    the normal signal path. Same class of bug as gotcha #1
+    (`displayedRootChanged` not firing at start because `_cwd`
+    matches `os.getcwd()`) but at a different layer — even with
+    the synthetic emit in `start()`, the timing is wrong if QML
+    has already mounted at `engine.load()` time.
+
+13. **Bambin's `tree_mount_ms` is noisy: ±100ms run-to-run** — the bench
     measures from `Session started` (Logger.qml.onCompleted) to last
     `tree mount settled`. Variance comes from disk-cache state, fsync
     cadence, system load, and Qt's scene-graph scheduler. Treat any
@@ -413,9 +523,7 @@ emit per run unless `--expected-trees 2` is passed.
    `tree_mount_ms` to settle around 500-700ms (high variance, see
    gotcha #11). Use `--trace` to also capture the pre-`Session-started`
    waterfall.
-3. Options 1, 4, and 8 are done. Pick from the remaining:
-   - **Option 6** (per-project expanded-state cache) — biggest felt
-     win for "re-open project" workflows. JSON-on-disk, simple.
+3. Options 1, 4, 6, and 8 are done. Pick from the remaining:
    - **Option 7** (earlier GitController pre-warm) — small (~50-200ms)
      win, low effort.
    - **Option 2** (BFS-level gitignore batching) — standalone-FM only;

@@ -50,6 +50,7 @@ from .session_models import (  # noqa: F401 — side-effect: @QmlElement registr
     SessionModel,
 )
 from .terminal_backend import TerminalBackend
+from .tree_state_cache import load_expanded, save_expanded
 from .terminal_view import (  # noqa: F401 — side-effect: @QmlElement registration
     TerminalView,
 )
@@ -275,6 +276,12 @@ class AppController(QObject):
     anchoredChanged = Signal()
     displayedRootChanged = Signal()
     treeVisibleChanged = Signal()
+    # Per-project expanded-state cache. `expandedPathsCacheChanged` fires
+    # right after a project switch (in `_sync_expanded_paths_cache`) so
+    # QML can re-feed the FM's `restoreExpandedPaths` prop. The cache
+    # itself is a list[str] of absolute paths; the FM treats null/empty
+    # as "no restore, use lazyExpand cascade".
+    expandedPathsCacheChanged = Signal()
     # QML-bound focus pull. Main.qml's Connections block listens for this
     # signal and calls `fileTreeView.forceActiveFocus()`. Emitted by the
     # `focus_tree()` Slot, which the Ctrl+J ApplicationShortcut in
@@ -505,6 +512,22 @@ class AppController(QObject):
         # NOT a nvim `<leader>` binding (it has to fire from any pane).
         self._anchored: bool = False
         self._anchored_root: str = ""
+        # Per-project expanded-state cache (option 6). Populated synchronously
+        # from disk in `_sync_expanded_paths_cache` whenever displayedRoot
+        # changes — happens BEFORE `_sync_git_repo_root` because the QML
+        # binding `restoreExpandedPaths: controller.expandedPathsCache`
+        # must already hold the new list by the time the FM's
+        # `onRootPathChanged` fires its mount cascade. Empty list = "no
+        # cache for this project yet" (FM falls back to lazyExpand
+        # cascade). The disk file lives at
+        # `$XDG_STATE_HOME/symmetria-ide/projects/<hash>.json`; see
+        # `tree_state_cache.py` for the format + atomic-write semantics.
+        self._expanded_paths_cache: list[str] = []
+        # Tracks the repo root that `_expanded_paths_cache` was loaded
+        # for, so `saveExpandedPaths` writes back to the right file even
+        # if `displayedRoot` is about to change. Loading is keyed off
+        # `displayedRoot`; saving is keyed off this captured root.
+        self._expanded_paths_cache_root: str = ""
         # Always-on by default per the "visualization-first" decision —
         # toggle keybind deferred (no `<leader>tt` in v1). Property
         # exists so QML's `visible: controller.treeVisible` binding has
@@ -535,6 +558,35 @@ class AppController(QObject):
         # transitions, so the provider rebuilds at exactly the right
         # moments. Same-thread connection (anchor and capsule routing
         # both run on the GUI thread), no QueuedConnection needed.
+        # Load the per-project expanded-paths cache FIRST so the QML
+        # binding `restoreExpandedPaths: controller.expandedPathsCache`
+        # holds the new list before the FM's `onRootPathChanged`
+        # cascade runs. Connect order is load-bearing: Qt fires slots
+        # in registration order, and the FM's binding update is driven
+        # synchronously by `expandedPathsCacheChanged`, which fires
+        # inside `_sync_expanded_paths_cache`. If we registered this
+        # AFTER `_sync_git_repo_root`, the FM would see a stale cache
+        # on project switch and run the empty-cache lazyExpand cascade.
+        # Same-thread: `displayedRootChanged` fires on the GUI thread;
+        # `load_expanded` is a synchronous file read with no Qt deps.
+        self.displayedRootChanged.connect(self._sync_expanded_paths_cache)
+
+        # CRITICAL: also populate the cache RIGHT NOW so the QML
+        # binding `restoreExpandedPaths: controller.expandedPathsCache`
+        # holds the saved list on its FIRST evaluation. The FM mounts
+        # during `engine.load(Main.qml)`, which runs in `_build_engine`
+        # — BEFORE `start()`'s synthetic `displayedRootChanged` emit.
+        # Without this pre-population, the FM's `onRootPathChanged`
+        # fires once at QML instantiation with `restoreExpandedPaths`
+        # still at its initial empty value, the lazyExpand cascade
+        # runs, and the later `_sync_expanded_paths_cache` slot fires
+        # too late (rootPath has not changed, so the FM doesn't
+        # remount). Reading `self.displayedRoot` here works because
+        # `_anchored=False` at this point, so it equals `self._cwd`,
+        # which was set from `os.getcwd()` just above — the same
+        # value the FM will read when it mounts.
+        self._sync_expanded_paths_cache()
+
         # same-thread: displayedRootChanged fires on the GUI thread; GitController.set_repo_root is GUI-only
         self.displayedRootChanged.connect(self._sync_git_repo_root)
 
@@ -1237,6 +1289,66 @@ class AppController(QObject):
         but the object itself is created once at startup.
         """
         return self._git_status_list
+
+    @Property(list, notify=expandedPathsCacheChanged)
+    def expandedPathsCache(self) -> list[str]:
+        """Saved expanded-paths list for the current displayed root.
+
+        QML binds the FM's `restoreExpandedPaths` to this property.
+        Empty list means "no cache yet" — the FM treats that as a
+        signal to use its `lazyExpand` cascade, identical to current
+        behaviour for first-time mounts. The list is refreshed by
+        `_sync_expanded_paths_cache` on every `displayedRootChanged`.
+        """
+        return self._expanded_paths_cache
+
+    @Slot()
+    def _sync_expanded_paths_cache(self) -> None:
+        """Reload the cache for the new displayed root.
+
+        Connected to `displayedRootChanged` (BEFORE `_sync_git_repo_root`
+        in connect order, intentionally — see the connect site). The
+        load is synchronous file I/O, typically <2ms even on cold disk:
+        one open + one JSON parse + N stat calls (N = saved paths,
+        capped by realistic UI use to a few hundred). If we ever see
+        load latency become a launch concern, this slot is the right
+        place to add a background-thread variant — emit
+        `expandedPathsCacheChanged` from the GUI thread once the worker
+        finishes. The disk file's atomic-write contract guarantees we
+        never observe a partial-write here.
+        """
+        root = self.displayedRoot
+        # Stash the root the cache was loaded for. `saveExpandedPaths`
+        # writes back to this — keeps save paths correct even if the
+        # user is rapidly switching projects.
+        self._expanded_paths_cache_root = root
+        self._expanded_paths_cache = load_expanded(root) if root else []
+        self.expandedPathsCacheChanged.emit()
+
+    @Slot(list)
+    def saveExpandedPaths(self, paths: list[str]) -> None:
+        """Persist the FM's current expanded-paths set.
+
+        Wired from QML as
+        `onExpandedStateChanged: controller.saveExpandedPaths(paths)`.
+        Writes synchronously to `_expanded_paths_cache_root` (NOT the
+        live displayedRoot — those can differ briefly during project
+        switches; we want to attribute the save to the project the
+        paths actually came from). Atomic via `os.replace`, so a
+        crash mid-write never corrupts the existing cache.
+
+        The QML `paths` arrives as a JavaScript Array; PySide6's
+        list-typed Slot converts it to a Python list before dispatch.
+        Non-string entries are filtered out inside `save_expanded`.
+        """
+        if not self._expanded_paths_cache_root:
+            return
+        save_expanded(self._expanded_paths_cache_root, paths)
+        # Mirror the saved set into the in-memory cache so a
+        # subsequent property read reflects what's on disk. Don't
+        # emit `expandedPathsCacheChanged` — we'd ping-pong with the
+        # FM's binding update.
+        self._expanded_paths_cache = sorted(set(p for p in paths if isinstance(p, str)))
 
     @Slot()
     def _sync_git_repo_root(self) -> None:

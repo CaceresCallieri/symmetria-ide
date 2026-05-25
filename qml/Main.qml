@@ -975,6 +975,29 @@ Window {
                             // pathFilter already narrows it to the
                             // changeset.
                             lazyExpand: true
+                            // Per-project expanded-state cache (option 6). The
+                            // controller loads the saved set from disk
+                            // synchronously on every `displayedRootChanged` —
+                            // BEFORE the FM's `onRootPathChanged` cascade
+                            // runs — so this binding holds the right list
+                            // by the time the FM decides which expansion
+                            // mode to use. Empty list (no cache yet) =>
+                            // falls through to `lazyExpand`. Non-empty =>
+                            // restores the saved tree shape, bypassing the
+                            // lazy cascade for this mount. See
+                            // `tree_state_cache.py` + AppController's
+                            // `_sync_expanded_paths_cache` for the
+                            // load/save contract.
+                            restoreExpandedPaths: controller.expandedPathsCache
+                            // Persist every user-driven expand/collapse so
+                            // the next session restores the same shape.
+                            // The signal is SUPPRESSED during a restore
+                            // cycle (FileTreeView's `_emitExpandedState`
+                            // guards on `_restoreActive`) so a replay
+                            // doesn't churn the disk-write path.
+                            onExpandedStateChanged: function (paths) {
+                                controller.saveExpandedPaths(paths);
+                            }
                             // Git status badges. The FM's `statusProvider` is a
                             // duck-typed seam (property var) — it calls our
                             // adapter's `statusForPath(absolutePath)` per visible
