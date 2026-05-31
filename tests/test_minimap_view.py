@@ -575,3 +575,123 @@ def test_main_qml_binds_model_property():
         "Main.qml's MinimapView must bind `model: minimapModel` — "
         "Phase 2 painter reads indent_level / line_count via the model"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — viewport indicator painter + Theme drift
+# ---------------------------------------------------------------------------
+
+
+def test_viewport_palette_constants_present():
+    """The viewport indicator palette must exist as module-level
+    constants AND memoized QColors, parallel to the indent palette."""
+    from symmetria_ide.minimap_view import (
+        _VIEWPORT_FILL_RGBA,
+        _VIEWPORT_FRAME_RGBA,
+        _viewport_fill_color,
+        _viewport_frame_color,
+    )
+
+    assert len(_VIEWPORT_FILL_RGBA) == 4
+    assert len(_VIEWPORT_FRAME_RGBA) == 4
+    assert isinstance(_viewport_fill_color, QColor)
+    assert isinstance(_viewport_frame_color, QColor)
+    # Alpha channels must survive — fill is ~10%, frame ~40%.
+    assert _viewport_fill_color.alpha() == _VIEWPORT_FILL_RGBA[3]
+    assert _viewport_frame_color.alpha() == _VIEWPORT_FRAME_RGBA[3]
+
+
+def test_viewport_palette_matches_theme_qml():
+    """Drift detection: viewport hex values in `_VIEWPORT_*_RGBA` MUST
+    appear inside Theme.qml's `Theme.color.minimap.viewportFill /
+    viewportFrame` declarations. Same dual-source-of-truth pattern as
+    the indent palette test."""
+    from symmetria_ide.minimap_view import (
+        _VIEWPORT_FILL_RGBA,
+        _VIEWPORT_FRAME_RGBA,
+    )
+
+    theme_src = _read_theme_qml()
+    for label, rgba in [
+        ("viewportFill", _VIEWPORT_FILL_RGBA),
+        ("viewportFrame", _VIEWPORT_FRAME_RGBA),
+    ]:
+        r, g, b, a = rgba
+        expected_hex = f"#{a:02X}{r:02X}{g:02X}{b:02X}"
+        assert expected_hex.upper() in theme_src.upper(), (
+            f"Theme.qml is missing the hex {expected_hex} for {label} — "
+            "drift between Python mirror and the Theme token"
+        )
+
+
+def test_paint_draws_viewport_when_count_positive():
+    """Source-inspect the paint() body for the viewport drawing
+    sequence: read viewport_count, skip if <= 0, otherwise read
+    viewport_first and emit 3 fill_rect calls (fill + top + bottom)."""
+    src = inspect.getsource(MinimapView.paint)
+    body = src.split('"""', 2)[-1] if src.count('"""') >= 2 else src
+    assert "viewport_count" in body, (
+        "paint() must read model.viewport_count() to know whether to draw the indicator"
+    )
+    assert "viewport_first" in body, (
+        "paint() must read model.viewport_first() to position the indicator"
+    )
+    assert "_viewport_fill_color" in body, (
+        "paint() must paint the fill overlay using the memoized _viewport_fill_color"
+    )
+    assert "_viewport_frame_color" in body, (
+        "paint() must paint the top/bottom hairlines using the memoized "
+        "_viewport_frame_color"
+    )
+
+
+def test_paint_skips_viewport_when_count_zero():
+    """The painter must SKIP the viewport pass when viewport_count <= 0
+    (terminal-first startup before any apply_viewport). Verify via
+    early-return check after the read."""
+    src = inspect.getsource(MinimapView.paint)
+    # The skip should appear as a guard right after reading viewport_count.
+    assert "viewport_count <= 0" in src or "viewport_count == 0" in src, (
+        "paint() must guard the viewport draw step on viewport_count > 0"
+    )
+
+
+def test_paint_pool_still_one_rect_after_phase_3():
+    """Phase 3 reuses the same single _paint_rect for the viewport
+    fill + both frame hairlines (3 fill_rect calls, all mutating the
+    same pool entry). The pool MUST NOT have grown."""
+    init_src = inspect.getsource(MinimapView.__init__)
+    n = init_src.count("QRectF()")
+    assert n == 1, (
+        f"MinimapView.__init__ allocates {n} QRectFs — Phase 3 contract "
+        "preserves the single-pool discipline; viewport drawing reuses "
+        "the same `_paint_rect` mutated via setRect()"
+    )
+
+
+def test_model_setter_also_wires_viewport_changed():
+    """The MinimapView.model setter must connect viewportChanged on the
+    new model so the painter repaints when bounds shift. Missing this
+    connection leaves the indicator frozen at its initial position."""
+    setter_src = inspect.getsource(MinimapView._set_model)
+    assert "viewportChanged.connect" in setter_src
+    assert "viewportChanged.disconnect" in setter_src, (
+        "disconnect on handover for symmetry with linesChanged"
+    )
+
+
+def test_main_qml_has_scrubber_mouse_area():
+    """Main.qml's MinimapView block must include a MouseArea sibling
+    routing onPressed / onPositionChanged / onReleased to
+    controller.seek_to_row via a throttled Timer."""
+    main_src = _read_main_qml()
+    minimap_match = re.search(r"MinimapView\s*\{(.*?)\n\s{16}\}", main_src, re.DOTALL)
+    assert minimap_match is not None
+    block = minimap_match.group(1)
+    assert "MouseArea" in block, (
+        "Main.qml MinimapView must include a MouseArea scrubber"
+    )
+    assert "controller.seek_to_row" in block, (
+        "Scrubber must call controller.seek_to_row(...)"
+    )
+    assert "Timer" in block, "Scrubber must throttle via a Timer (PRD §7.3 R3.2)"

@@ -487,6 +487,96 @@ Window {
                     // mainContentFocusBorder (z: 50) so the focus
                     // hairline still wraps the whole mainContent slot.
                     z: 10
+
+                    // Phase 3 click + drag scrubber. Routes mouse position
+                    // to a buffer row and calls controller.seek_to_row,
+                    // which marshals through nvim.async_call to the
+                    // pynvim worker thread (gotcha #1 — pynvim isn't
+                    // thread-safe; the @Slot side handles the marshalling).
+                    //
+                    // Throttled at ~16 ms via _seekTimer so a held-drag
+                    // doesn't pin the GUI thread emitting one seek per
+                    // mousemove event (PRD §7.3 R3.2). The timer
+                    // re-targets each tick rather than queuing — the
+                    // most recent position is what the user wants.
+                    //
+                    // anchors.fill on the parent MinimapView captures
+                    // the entire ribbon (background + indent silhouette
+                    // + viewport indicator) as the scrubbing surface.
+                    MouseArea {
+                        id: scrubber
+                        anchors.fill: parent
+                        // Throttle target: the pending row to seek to,
+                        // -1 means "no pending seek." Set by the
+                        // mouse handlers; consumed (and cleared) by
+                        // the timer's tick.
+                        property int _pendingRow: -1
+
+                        function _rowFromY(y) {
+                            // Map a pixel y inside the minimap to a buffer
+                            // row index. The minimap renders rows at
+                            // `i * row_h` where row_h = max(_MIN_ROW_HEIGHT_PX,
+                            // view_h / line_count) — so the inverse mapping
+                            // is `floor(y / row_h)`. We replicate the
+                            // row_h formula here rather than exposing it
+                            // from the painter: a QML-side re-derivation
+                            // keeps the click target consistent with the
+                            // visible block layout without a round-trip.
+                            const lineCount = minimapModel.lineCount;
+                            if (lineCount <= 0)
+                                return 0;
+                            const naturalH = height / lineCount;
+                            // _MIN_ROW_HEIGHT_PX = 2.0 on the Python side;
+                            // duplicate here so the QML side computes the
+                            // same row index Python would. If either side
+                            // tunes the floor, the other must follow —
+                            // a drift-detection test pins it.
+                            const minRowH = 2.0;
+                            const rowH = naturalH < minRowH ? minRowH : naturalH;
+                            const idx = Math.floor(y / rowH);
+                            if (idx < 0)
+                                return 0;
+                            if (idx >= lineCount)
+                                return lineCount - 1;
+                            return idx;
+                        }
+
+                        onPressed: function (mouse) {
+                            scrubber._pendingRow = scrubber._rowFromY(mouse.y);
+                            _seekTimer.restart();
+                        }
+                        onPositionChanged: function (mouse) {
+                            if (!pressed)
+                                return;
+                            scrubber._pendingRow = scrubber._rowFromY(mouse.y);
+                            if (!_seekTimer.running)
+                                _seekTimer.restart();
+                        }
+                        onReleased: function (mouse) {
+                            // Fire any pending row immediately on release
+                            // so a quick click doesn't get throttled out.
+                            if (scrubber._pendingRow >= 0) {
+                                controller.seek_to_row(scrubber._pendingRow);
+                                scrubber._pendingRow = -1;
+                            }
+                            _seekTimer.stop();
+                        }
+
+                        Timer {
+                            id: _seekTimer
+                            interval: 16  // ~60 Hz cap
+                            repeat: false
+                            onTriggered: {
+                                if (scrubber._pendingRow >= 0) {
+                                    controller.seek_to_row(scrubber._pendingRow);
+                                    scrubber._pendingRow = -1;
+                                    // If the user is still dragging, the
+                                    // next onPositionChanged restarts the
+                                    // timer. No need to chain ticks here.
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Active-pane focus border. Renders a 1px accent hairline

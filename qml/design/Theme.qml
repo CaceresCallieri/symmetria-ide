@@ -345,6 +345,34 @@ QtObject {
                 readonly property color level2: "#6e6055"    // dimmer still, conditional / loop body
                 readonly property color level3: "#52483f"    // deep nesting — barely there
             }
+
+            // Viewport indicator — Phase 3 of docs/minimap-prd.md.
+            // The "spotlight" overlay covering the rows currently
+            // visible in the editor. Two tokens:
+            //
+            //   - viewportFill: translucent overlay painted across
+            //     the visible-row range. Aliases the existing
+            //     `accent.focus` semantic ("focus / where attention
+            //     is") at ~10% alpha — bright enough to perceive
+            //     the boundary, dim enough that indent silhouette
+            //     reads through it. The matte-pill border at 12%
+            //     alpha is the upper bound; viewport fill goes
+            //     just under so frame + fill don't fight.
+            //
+            //   - viewportFrame: 1-px hairline drawn at the top
+            //     AND bottom edges of the spotlight, ~40% white.
+            //     Visual cue: where the viewport "starts" and
+            //     "ends" — the eye reliably finds horizontal
+            //     edges in a vertical silhouette. Aliasing
+            //     `accent.focus` (40% white) ties this to the
+            //     existing focus-indicator vocabulary.
+            //
+            // Mirrored on the Python side as
+            // `minimap_view.py::_VIEWPORT_FILL_RGBA` /
+            // `_VIEWPORT_FRAME_RGBA`. Drift detection in
+            // `tests/test_minimap_view.py::test_viewport_palette_matches_theme_qml`.
+            readonly property color viewportFill: "#1affffff"    // white @ ~10% alpha
+            readonly property color viewportFrame: "#66ffffff"   // white @ ~40% alpha (== accent.focus)
         }
 
         readonly property QtObject terminal: QtObject {

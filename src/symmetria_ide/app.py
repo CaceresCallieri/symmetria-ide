@@ -444,6 +444,11 @@ class AppController(QObject):
         self._backend.minimap_event.connect(
             self._minimap_model.apply, Qt.ConnectionType.QueuedConnection
         )
+        # queued: minimap_viewport_event also originates on the pynvim
+        # worker thread (§4 P2). Drives the Phase 3 viewport indicator.
+        self._backend.minimap_viewport_event.connect(
+            self._minimap_model.apply_viewport, Qt.ConnectionType.QueuedConnection
+        )
         # Agent-pane visibility lives on the IDE side only — the Lua-driven
         # `agent_event` rpcnotify channel was stripped when orchestrator.nvim
         # took back ownership of `<leader>aN` / `<C-1..5>` / `<C-S-q>`. The
@@ -1039,6 +1044,43 @@ class AppController(QObject):
             "cycle_permission_mode_for slot=%d: %s -> %s", index, current, next_mode
         )
         self._session_hosts[index].send_set_permission_mode(next_mode)
+
+    @Slot(int)
+    def seek_to_row(self, row: int) -> None:
+        """Scroll the editor to put 1-indexed buffer line `row+1` at the
+        cursor. Phase 3 of docs/minimap-prd.md — drives click-to-scroll
+        and drag-scrubbing on the minimap.
+
+        `row` is 0-indexed (Python convention; matches MinimapModel and
+        the wire format from runtime/lua/orchestrator/minimap.lua). We
+        translate to 1-indexed at the nvim boundary because `:goto`
+        and `normal! NG` count from 1.
+
+        gotcha #1 — pynvim isn't thread-safe; this slot runs on the
+        GUI thread (QML signal) so we MUST marshal to the loop thread
+        via `nvim.async_call`. Direct `nvim.command(...)` from QML's
+        click handler would raise "request from non-main thread".
+
+        No-op when the backend's nvim handle isn't ready yet (early
+        boot, post-shutdown). The user's click is silently dropped
+        rather than crashing — matches the pattern other QML-driven
+        nvim commands use (e.g. agent-pane chord wirings).
+        """
+        if row < 0:
+            row = 0
+        target_line = row + 1  # 1-indexed for nvim's :goto
+
+        def _do_goto() -> None:
+            try:
+                # `normal! NG` jumps the cursor to line N. The bang
+                # suppresses user-defined remappings of G — important
+                # because some users remap G to a different motion.
+                self._backend._nvim.command(f"normal! {target_line}G")
+            except Exception:  # noqa: BLE001
+                log.exception("seek_to_row: nvim.command failed for row=%d", row)
+
+        if self._backend._nvim is not None:
+            self._backend._nvim.async_call(_do_goto)
 
     @Slot()
     def cycle_permission_mode(self) -> None:

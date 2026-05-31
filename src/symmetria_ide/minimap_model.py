@@ -129,6 +129,13 @@ class MinimapModel(QObject):
     # binding layer).
     lineCountChanged = Signal()
 
+    # Viewport range change — Phase 3. Listeners (MinimapView's painter)
+    # repaint to move the viewport indicator. Decoupled from linesChanged
+    # so a scroll without an edit doesn't trigger a full silhouette
+    # re-render; the painter still does one update() either way, but the
+    # signal cardinality lets future phases optimise.
+    viewportChanged = Signal()
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         # Backing store. Always a list — never None — so callers don't
@@ -156,6 +163,15 @@ class MinimapModel(QObject):
         # `line_at()` uses, so transient stale-bookkeeping windows
         # in the painter's iteration don't crash.
         self._indent_levels: list[int] = []
+        # Viewport range — Phase 3. `_viewport_first` is the 0-indexed
+        # buffer line at the top of the editor's visible region;
+        # `_viewport_count` is the number of visible lines. (0, 0)
+        # means "no viewport info yet" — the painter draws no
+        # indicator until the first apply_viewport arrives, which
+        # NvimBackend force-requests at subscribe time so the first
+        # paint after editor focus already has bounds.
+        self._viewport_first: int = 0
+        self._viewport_count: int = 0
 
     # --- QML-visible properties ---------------------------------------
     #
@@ -191,6 +207,19 @@ class MinimapModel(QObject):
             return self._lines[index]
         return ""
 
+    def viewport_first(self) -> int:
+        """0-indexed buffer line at the top of the editor's visible region.
+        Phase 3 painter reads this + `viewport_count()` to draw the
+        viewport indicator. Returns 0 when no apply_viewport has
+        arrived yet — the painter then skips drawing the indicator."""
+        return self._viewport_first
+
+    def viewport_count(self) -> int:
+        """Number of buffer lines currently visible in the editor.
+        Returns 0 before the first apply_viewport — the painter
+        treats zero-count as 'no indicator yet' and skips drawing."""
+        return self._viewport_count
+
     def indent_level(self, index: int) -> int:
         """Cached indent level (0..`_MAX_INDENT_LEVEL`) for line `index`.
 
@@ -206,6 +235,39 @@ class MinimapModel(QObject):
         return 0
 
     # --- Backend → model ----------------------------------------------
+
+    @Slot(dict)
+    def apply_viewport(self, payload: dict[str, Any]) -> None:
+        """Ingest one `"minimap_viewport"` envelope `{first, count}`.
+
+        Phase 3 of docs/minimap-prd.md — drives the viewport indicator.
+        Routed via `Qt.QueuedConnection` from
+        `NvimBackend.minimap_viewport_event` (set up in
+        AppController). Same defensive try/except contract as
+        `apply()` — a malformed envelope must not crash the GUI
+        thread.
+
+        Equality-short-circuit: only emit viewportChanged when the
+        bounds actually changed. Rapid cursor motion inside the
+        viewport (j/k within visible region) fires CursorMoved
+        repeatedly without changing the viewport range; the Lua
+        coalesce flag already drops most of these, but the Python
+        side dedups for extra hygiene.
+        """
+        try:
+            first = int(payload.get("first", 0))
+            count = int(payload.get("count", 0))
+            if first < 0:
+                first = 0
+            if count < 0:
+                count = 0
+            if first == self._viewport_first and count == self._viewport_count:
+                return
+            self._viewport_first = first
+            self._viewport_count = count
+            self.viewportChanged.emit()
+        except Exception:  # noqa: BLE001 — defensive cross-thread boundary
+            log.exception("minimap: apply_viewport() failed on payload %r", payload)
 
     @Slot(dict)
     def apply(self, payload: dict[str, Any]) -> None:

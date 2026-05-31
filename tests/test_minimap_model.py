@@ -720,3 +720,146 @@ def test_snapshot_replaces_indent_cache(qt_app):
     assert [m.indent_level(i) for i in range(2)] == [0, 0]
     # Past-end must be 0, not 3 (would indicate stale cache).
     assert m.indent_level(2) == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — viewport channel (apply_viewport ingest + signal)
+# ---------------------------------------------------------------------------
+
+
+def test_viewport_initial_state_is_zero(qt_app):
+    """Empty model: viewport_first() and viewport_count() both return 0
+    so the painter knows there's no indicator to draw yet."""
+    del qt_app
+    m = MinimapModel()
+    assert m.viewport_first() == 0
+    assert m.viewport_count() == 0
+
+
+def test_apply_viewport_updates_state(qt_app):
+    """A `{first, count}` envelope updates both accessors."""
+    del qt_app
+    m = MinimapModel()
+    m.apply_viewport({"first": 10, "count": 30})
+    assert m.viewport_first() == 10
+    assert m.viewport_count() == 30
+
+
+def test_apply_viewport_emits_signal(qt_app):
+    """viewportChanged must fire when the bounds actually change."""
+    del qt_app
+    m = MinimapModel()
+    calls: list[tuple[int, int]] = []
+    m.viewportChanged.connect(
+        lambda: calls.append((m.viewport_first(), m.viewport_count()))
+    )
+    m.apply_viewport({"first": 5, "count": 20})
+    assert calls == [(5, 20)]
+
+
+def test_apply_viewport_short_circuits_on_equality(qt_app):
+    """Equality short-circuit: a no-op apply (same first + count) must
+    NOT re-emit viewportChanged. Rapid cursor motion inside the
+    viewport fires Lua-side CursorMoved repeatedly; the Python dedup
+    keeps QML bindings stable."""
+    del qt_app
+    m = MinimapModel()
+    m.apply_viewport({"first": 5, "count": 20})
+    calls: list[int] = []
+    m.viewportChanged.connect(lambda: calls.append(1))
+    m.apply_viewport({"first": 5, "count": 20})  # same — no emit
+    assert calls == []
+    m.apply_viewport({"first": 6, "count": 20})  # first changed — emit
+    assert calls == [1]
+
+
+def test_apply_viewport_clamps_negative_values(qt_app):
+    """Negative first/count are coerced to 0 — defensive against a
+    future Lua-side bug emitting weird values."""
+    del qt_app
+    m = MinimapModel()
+    m.apply_viewport({"first": -5, "count": -10})
+    assert m.viewport_first() == 0
+    assert m.viewport_count() == 0
+
+
+def test_apply_viewport_malformed_payload_does_not_crash(qt_app):
+    """The defensive try/except contract — same as apply() — must
+    cover the cross-thread boundary."""
+    del qt_app
+    m = MinimapModel()
+    # Total garbage — apply_viewport.get() would raise AttributeError.
+    m.apply_viewport(None)  # type: ignore[arg-type]
+    m.apply_viewport("not a dict")  # type: ignore[arg-type]
+    # State unchanged — bad envelopes logged + dropped.
+    assert m.viewport_first() == 0
+
+
+def test_app_connects_minimap_viewport_event_with_queued_connection():
+    """The cross-thread connection from pynvim worker → MinimapModel.apply_viewport
+    must be explicit Qt.QueuedConnection per §4 P2. Mirrors the
+    minimap_event connection's contract."""
+    import inspect
+    from symmetria_ide import app
+
+    src = inspect.getsource(app)
+    assert "minimap_viewport_event.connect" in src
+    idx = src.find("minimap_viewport_event.connect")
+    nearby = src[idx : idx + 400]
+    assert "QueuedConnection" in nearby, (
+        "minimap_viewport_event.connect must specify Qt.QueuedConnection "
+        "explicitly (§4 P2)"
+    )
+
+
+def test_nvim_backend_subscribes_to_minimap_viewport_channel():
+    """pynvim subscribe must include 'minimap_viewport' — without it,
+    notifications on that channel are silently dropped."""
+    import inspect
+    from symmetria_ide import nvim_backend
+
+    src = inspect.getsource(nvim_backend)
+    assert 'subscribe("minimap_viewport")' in src
+
+
+def test_nvim_backend_force_pushes_minimap_viewport():
+    """Subscribe-race fix for the viewport channel — Lua-side helper
+    is _G.symmetria_minimap_push_viewport."""
+    import inspect
+    from symmetria_ide import nvim_backend
+
+    src = inspect.getsource(nvim_backend)
+    assert "symmetria_minimap_push_viewport" in src
+
+
+def test_dispatch_routes_minimap_viewport_envelope():
+    """nvim_events._dispatch_notification must have a 'minimap_viewport'
+    branch that emits minimap_viewport_event."""
+    import inspect
+    from symmetria_ide import nvim_events
+
+    src = inspect.getsource(nvim_events._dispatch_notification)
+    assert 'name == "minimap_viewport"' in src
+    assert "minimap_viewport_event.emit" in src
+
+
+def test_seek_to_row_uses_async_call_and_1_indexed_goto():
+    """AppController.seek_to_row must (a) marshal through nvim.async_call
+    (gotcha #1 — pynvim isn't thread-safe and QML calls this on GUI
+    thread) and (b) issue a 1-indexed `normal! NG` jump (nvim's :goto
+    counts from 1; the @Slot signature counts from 0)."""
+    import inspect
+    from symmetria_ide.app import AppController
+
+    src = inspect.getsource(AppController.seek_to_row)
+    assert "async_call" in src, (
+        "seek_to_row must marshal to the loop thread via nvim.async_call "
+        "(gotcha #1) — direct nvim.command from the GUI thread raises"
+    )
+    assert "row + 1" in src, (
+        "seek_to_row must convert 0-indexed row to 1-indexed nvim line "
+        "before the :normal! NG jump"
+    )
+    assert "normal!" in src, (
+        "seek_to_row must use `normal!` (bang) to suppress remaps of G"
+    )

@@ -159,6 +159,72 @@ function _G.symmetria_minimap_push_snapshot()
   emit_snapshot(bufnr)
 end
 
+-- ----- Viewport channel (Phase 3) -----------------------------------
+--
+-- Pushes `{ first, count }` over the `"minimap_viewport"` rpcnotify
+-- channel so MinimapView's viewport indicator (the "spotlight" rect
+-- showing which buffer rows are visible in the editor) can move in
+-- step with editor scrolls. Fires on:
+--
+--   - CursorMoved / CursorMovedI: scroll-tracking-cursor motions
+--     (Ctrl-d / Ctrl-u / j / k off the edge of the window).
+--   - WinScrolled: scroll-without-cursor-motion (mouse wheel,
+--     scrollkeeper plugins, programmatic :normal Ctrl-e/y).
+--
+-- Coalesced via its OWN pending flag — content snapshots and
+-- viewport pushes are independent cadences (viewport changes far
+-- more often than content), so reusing the content `pending` flag
+-- would let a rapid scroll suppress a pending edit's snapshot.
+--
+-- `first` is 0-indexed (Python convention; matches MinimapModel's
+-- _lines indexing). `line('w0')` is 1-indexed (vim convention), so
+-- we subtract 1 at the wire boundary — one place to remember the
+-- off-by-one, not scattered across consumers.
+
+local viewport_pending = false
+
+---Emit one `{first, count}` viewport envelope.
+local function emit_viewport()
+  -- line('w0') = first visible buffer line (1-indexed); line('w$') = last visible.
+  -- `vim.fn.line(...)` is the safe pynvim-marshallable form.
+  local w0 = vim.fn.line("w0")
+  local wlast = vim.fn.line("w$")
+  local first = w0 - 1
+  local count = wlast - w0 + 1
+  if count < 0 then
+    count = 0
+  end
+  pcall(vim.rpcnotify, 0, "minimap_viewport", {
+    first = first,
+    count = count,
+  })
+end
+
+---Schedule a coalesced viewport emit. Same single-tick coalescing as
+---`schedule_snapshot`, with its own flag so rapid scrolls don't
+---suppress pending content snapshots.
+local function schedule_viewport()
+  if vim.g.symmetria_minimap_emit == 0 then
+    return
+  end
+  if viewport_pending then
+    return
+  end
+  viewport_pending = true
+  vim.schedule(function()
+    viewport_pending = false
+    emit_viewport()
+  end)
+end
+
+---Public re-push hook for the Python subscribe-race fix (gotcha #2).
+---Called from NvimBackend right after subscribing to "minimap_viewport"
+---so the first viewport state isn't lost to the timing window.
+-- selene: allow(global_usage)  -- IPC boundary; gotcha #2
+function _G.symmetria_minimap_push_viewport()
+  emit_viewport()
+end
+
 ---Install autocmds. Idempotent — re-running setup() clears the prior
 ---group and re-installs, so a hot-reload during dev doesn't stack
 ---duplicate handlers.
@@ -203,8 +269,37 @@ function M.setup()
       -- last push).
       last_snapshot_bufnr = -1
       schedule_snapshot(args.buf)
+      -- Edits can shift the viewport too (typing past the bottom of
+      -- the window scrolls); push a viewport update alongside.
+      schedule_viewport()
     end,
     desc = "Symmetria minimap: snapshot on text change",
+  })
+
+  -- CursorMoved / CursorMovedI / WinScrolled: viewport range may have
+  -- changed. Per-tick coalescing keeps rapid scroll keys (Ctrl-d /
+  -- Ctrl-u held down) from firing one envelope per intermediate
+  -- redraw. WinScrolled covers mouse-wheel + plugin-driven scrolls
+  -- where the cursor doesn't move.
+  vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI", "WinScrolled" }, {
+    group = grp,
+    callback = function()
+      schedule_viewport()
+    end,
+    desc = "Symmetria minimap: viewport on cursor / scroll",
+  })
+
+  -- BufEnter also changes the viewport (a different buffer has its
+  -- own w0/w$). Piggyback on the existing BufEnter handler would
+  -- couple two cadences; a separate autocmd is cheaper to reason
+  -- about and the coalesce flag keeps both emits inside one tick
+  -- anyway.
+  vim.api.nvim_create_autocmd("BufEnter", {
+    group = grp,
+    callback = function()
+      schedule_viewport()
+    end,
+    desc = "Symmetria minimap: viewport on buffer enter",
   })
 end
 

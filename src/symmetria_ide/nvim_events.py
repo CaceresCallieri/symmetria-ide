@@ -401,4 +401,17 @@ def _dispatch_notification(self: NvimBackend, name: str, args: list[Any]) -> Non
             return
         self.minimap_event.emit(args[0])
         return
+    if name == "minimap_viewport":
+        # Editor minimap viewport channel (Phase 3). Lua emits
+        # `{first, count}` on cursor/scroll motion; AppController
+        # routes the signal to MinimapModel.apply_viewport via
+        # Qt.QueuedConnection. Payload shape documented in
+        # MinimapModel.apply_viewport's docstring.
+        if not args or not isinstance(args[0], dict):
+            log.warning(
+                "minimap_viewport notification with unexpected payload: %r", args
+            )
+            return
+        self.minimap_viewport_event.emit(args[0])
+        return
     log.debug("unhandled notification: %s (args=%r)", name, args)

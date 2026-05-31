@@ -98,6 +98,32 @@ _indent_colors: tuple[QColor, ...] = tuple(
 )
 
 
+# Viewport indicator palette — Phase 3 mirror of
+# `Theme.color.minimap.viewportFill` / `viewportFrame`. Stored as
+# 4-tuples (R, G, B, A) so the alpha survives the round-trip and the
+# drift-detection test can compare the AARRGGBB hex strings in Theme.qml
+# against the same numeric channels.
+#
+# Fill ≈ 10% white over the indent silhouette — perceptible spotlight
+# without obscuring the underlying indent colour. Frame ≈ 40% white,
+# painted as 1-px hairlines at the top and bottom of the visible range
+# (aliases `Theme.accent.focus`, the existing focus-indicator vocabulary).
+_VIEWPORT_FILL_RGBA: tuple[int, int, int, int] = (0xFF, 0xFF, 0xFF, 0x1A)
+_VIEWPORT_FRAME_RGBA: tuple[int, int, int, int] = (0xFF, 0xFF, 0xFF, 0x66)
+
+# Memoized — same gotcha #10 discipline as the indent palette.
+_viewport_fill_color: QColor = QColor(*_VIEWPORT_FILL_RGBA)
+_viewport_frame_color: QColor = QColor(*_VIEWPORT_FRAME_RGBA)
+
+
+# Viewport frame hairline thickness. 1 px is the visual sweet spot —
+# thicker than that competes with the silhouette underneath, thinner
+# than that vanishes at HiDPI scaling. The Top + Bottom 1-px edges
+# form a brackets-style indicator rather than a full outlined box;
+# vertical sides would over-frame the already-narrow ribbon.
+_VIEWPORT_FRAME_THICKNESS_PX = 1.0
+
+
 # Layout constants for the block-mode painter.
 
 # Minimum pixel height per rendered minimap row. At 1 px the silhouette
@@ -270,6 +296,10 @@ class MinimapView(QQuickPaintedItem):
                 self._model.linesChanged.disconnect(self._on_lines_changed)
             except (RuntimeError, TypeError):
                 pass
+            try:
+                self._model.viewportChanged.disconnect(self._on_viewport_changed)
+            except (RuntimeError, TypeError):
+                pass
         self._model = value
         if value is not None:
             # Direct connection — MinimapModel.apply already runs on
@@ -277,6 +307,11 @@ class MinimapView(QQuickPaintedItem):
             # AppController), so linesChanged is GUI-thread by the
             # time it reaches us. No QueuedConnection needed here.
             value.linesChanged.connect(self._on_lines_changed)
+            # Same GUI-thread guarantee for viewportChanged — the
+            # queued connection at NvimBackend.minimap_viewport_event
+            # marshals to the GUI thread; viewportChanged emits from
+            # apply_viewport, which already runs there.
+            value.viewportChanged.connect(self._on_viewport_changed)
             # Immediate repaint so the first model that arrives (often
             # carrying the initial snapshot already) shows content
             # without waiting for a subsequent edit to trip linesChanged.
@@ -286,6 +321,15 @@ class MinimapView(QQuickPaintedItem):
     model = Property(QObject, _get_model, _set_model, notify=modelChanged)
 
     # --- Model → view --------------------------------------------------
+
+    @Slot()
+    def _on_viewport_changed(self) -> None:
+        """Repaint when the editor's viewport range changes. Phase 3
+        viewport indicator chases the new bounds; the silhouette
+        below is unchanged but a single update() repaints both the
+        blocks and the overlay (cheap; the block loop is O(line_count)
+        but the constant is tiny — see PRD §6 R2.1)."""
+        self.update()
 
     @Slot(int, int)
     def _on_lines_changed(self, first: int, last: int) -> None:
@@ -397,3 +441,45 @@ class MinimapView(QQuickPaintedItem):
             y = row_idx * row_h
             rect.setRect(x_offset, y, block_w, block_h)
             fill_rect(rect, _indent_colors[level])
+
+        # Step 5 — viewport indicator overlay. Skip cleanly when the
+        # editor hasn't reported any viewport bounds yet (e.g. terminal-
+        # first startup: no apply_viewport has fired). The fill +
+        # top/bottom frame composite over the indent silhouette
+        # painted above.
+        viewport_count = self._model.viewport_count()
+        if viewport_count <= 0:
+            return
+        viewport_first = self._model.viewport_first()
+        # Clamp the visible range to actual buffer extent — a viewport
+        # that extends past the buffer's end (because the buffer
+        # shrank and the viewport bookkeeping is one tick behind) just
+        # truncates rather than running off into negative-height land.
+        viewport_end_row = viewport_first + viewport_count
+        if viewport_end_row > line_count:
+            viewport_end_row = line_count
+        if viewport_first >= viewport_end_row:
+            return
+        # Convert buffer-row range to pixel y-range using the same
+        # `row_h` already established for the silhouette. The indicator
+        # tracks the silhouette exactly because they share the formula.
+        vp_y_top = viewport_first * row_h
+        vp_y_bot = viewport_end_row * row_h
+        vp_height = vp_y_bot - vp_y_top
+        # 5a — translucent fill covering the visible band.
+        rect.setRect(0.0, vp_y_top, view_w, vp_height)
+        fill_rect(rect, _viewport_fill_color)
+        # 5b — 1-px hairline at top edge. Painted AT vp_y_top, so it
+        # sits on the inner boundary of the fill (the eye reads the
+        # frame as the start of the viewport, not just above it).
+        rect.setRect(0.0, vp_y_top, view_w, _VIEWPORT_FRAME_THICKNESS_PX)
+        fill_rect(rect, _viewport_frame_color)
+        # 5c — 1-px hairline at bottom edge. Positioned so its bottom
+        # aligns with vp_y_bot (the inner edge).
+        rect.setRect(
+            0.0,
+            vp_y_bot - _VIEWPORT_FRAME_THICKNESS_PX,
+            view_w,
+            _VIEWPORT_FRAME_THICKNESS_PX,
+        )
+        fill_rect(rect, _viewport_frame_color)

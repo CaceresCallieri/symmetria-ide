@@ -117,6 +117,13 @@ class NvimBackend(QObject):
     # MinimapModel.apply via explicit Qt.QueuedConnection (§4 P2 — the
     # signal originates on the pynvim worker thread).
     minimap_event = Signal(dict)
+    # Editor minimap viewport channel — Phase 3 of docs/minimap-prd.md.
+    # Lua emits `{first, count}` on CursorMoved/WinScrolled so the
+    # minimap's viewport indicator (the spotlight rect showing which
+    # buffer rows the editor is currently displaying) can move in step
+    # with editor scrolls. Routed to MinimapModel.apply_viewport via
+    # Qt.QueuedConnection in AppController.
+    minimap_viewport_event = Signal(dict)
     closed = Signal()
 
     # --- Dispatch bindings --------------------------------------------
@@ -325,9 +332,10 @@ class NvimBackend(QObject):
             self._nvim.subscribe("scroll")
             self._nvim.subscribe("whichkey")
             self._nvim.subscribe("minimap")
+            self._nvim.subscribe("minimap_viewport")
             log.info(
                 "subscribed to 'capsule' + 'completions' + 'scroll' + 'whichkey' "
-                "+ 'minimap' notifications"
+                "+ 'minimap' + 'minimap_viewport' notifications"
             )
         except Exception:  # noqa: BLE001
             log.exception("subscribe(capsule/completions) failed")
@@ -345,6 +353,19 @@ class NvimBackend(QObject):
             log.info("requested initial minimap snapshot")
         except Exception:  # noqa: BLE001
             log.exception("initial minimap push request failed")
+        # Same subscribe-race mitigation for the viewport channel —
+        # WinScrolled/CursorMoved on the initial buffer fired during
+        # nvim startup, before we subscribed. Without this re-push the
+        # minimap's viewport indicator stays at (0, 0) until the user
+        # touches the cursor.
+        try:
+            self._nvim.exec_lua(
+                "if _G.symmetria_minimap_push_viewport then "
+                "_G.symmetria_minimap_push_viewport() end"
+            )
+            log.info("requested initial minimap viewport")
+        except Exception:  # noqa: BLE001
+            log.exception("initial minimap viewport push request failed")
         try:
             self._nvim.exec_lua(
                 "if _G.symmetria_push_state then _G.symmetria_push_state() end"
