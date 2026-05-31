@@ -550,3 +550,171 @@ def test_patch_updates_bufnr(qt_app):
     )
     # bufnr comes from the patch envelope, not the prior snapshot.
     assert m.bufnr() == 7
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — indent-level cache (PRD §6 R2.2)
+# ---------------------------------------------------------------------------
+
+
+def test_indent_level_pure_function_spaces():
+    """The pure helper `_compute_indent_level` is the canonical mapping
+    from a line to its 0..3 rung. Two spaces == one level."""
+    from symmetria_ide.minimap_model import _compute_indent_level
+
+    assert _compute_indent_level("") == 0
+    assert _compute_indent_level("top") == 0
+    assert _compute_indent_level("  foo") == 1
+    assert _compute_indent_level("    foo") == 2
+    assert _compute_indent_level("      foo") == 3
+
+
+def test_indent_level_clamps_to_max(qt_app):
+    """Very deeply nested code clamps to the palette's max rung rather
+    than overflowing the indent palette index."""
+    del qt_app
+    from symmetria_ide.minimap_model import _compute_indent_level, _MAX_INDENT_LEVEL
+
+    assert _MAX_INDENT_LEVEL == 3
+    # Far-past-max indent still returns the max rung.
+    assert _compute_indent_level("                deep") == _MAX_INDENT_LEVEL
+    assert _compute_indent_level("\t\t\t\t\t\t\t\t" + "deep") == _MAX_INDENT_LEVEL
+
+
+def test_indent_level_tab_counts_as_one_level():
+    """Tabs are one level each regardless of effective tab width — the
+    minimap doesn't know about `tabstop` and at minimap scale the
+    visual difference between 4-/8-space tabs is invisible."""
+    from symmetria_ide.minimap_model import _compute_indent_level
+
+    assert _compute_indent_level("\tfoo") == 1
+    assert _compute_indent_level("\t\tfoo") == 2
+    assert _compute_indent_level("\t\t\tfoo") == 3
+
+
+def test_indent_level_mixed_tabs_and_spaces():
+    """Tabs + spaces together count cumulatively. Tab=2 columns, two
+    spaces=2 columns, two columns per level."""
+    from symmetria_ide.minimap_model import _compute_indent_level
+
+    # 2 spaces + 1 tab = 2 + 2 = 4 columns = level 2
+    assert _compute_indent_level("  \tfoo") == 2
+    # 1 tab + 2 spaces = 2 + 2 = 4 columns = level 2
+    assert _compute_indent_level("\t  foo") == 2
+
+
+def test_snapshot_populates_indent_cache(qt_app):
+    """After a snapshot, indent_level(i) for every row must match
+    `_compute_indent_level(line_at(i))`. The cache and the lines must
+    stay parallel — a drift here would cause the painter to colour
+    blocks with the wrong indent rung."""
+    del qt_app
+    from symmetria_ide.minimap_model import _compute_indent_level
+
+    m = MinimapModel()
+    lines = ["top", "  func():", "    if x:", "      pass", "    return"]
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": len(lines), "lines": lines})
+    for i, line in enumerate(lines):
+        assert m.indent_level(i) == _compute_indent_level(line), (
+            f"indent_level({i}) drift from cached vs computed for {line!r}"
+        )
+
+
+def test_indent_level_out_of_range_returns_zero(qt_app):
+    """Same bounds-clamping contract as line_at(). Phase 2 painter's
+    iteration may briefly overshoot during stale-bookkeeping — the
+    accessor must not crash."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 2, "lines": ["a", "  b"]})
+    assert m.indent_level(-1) == 0
+    assert m.indent_level(100) == 0
+
+
+def test_patch_updates_indent_cache_only_for_affected_range(qt_app):
+    """A patch must splice `_indent_levels[first:last] = new_levels`
+    just like it splices `_lines`. Touching the whole cache would be
+    O(N) per patch and defeat the patch's reason to exist."""
+    del qt_app
+    m = MinimapModel()
+    m.apply(
+        {
+            "op": "snapshot",
+            "bufnr": 1,
+            "line_count": 5,
+            "lines": ["A", "  B", "    C", "      D", "        E"],
+        }
+    )
+    # Before patch: indent levels are [0, 1, 2, 3, 3] (3 = max-clamp).
+    assert [m.indent_level(i) for i in range(5)] == [0, 1, 2, 3, 3]
+    # Patch row 2 (was indent 2, "    C") with a level-0 line.
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 5,
+            "first": 2,
+            "last": 3,
+            "lines": ["FLAT"],
+        }
+    )
+    # Cache must reflect: row 2 → indent 0, rest unchanged.
+    assert [m.indent_level(i) for i in range(5)] == [0, 1, 0, 3, 3]
+
+
+def test_patch_pure_insertion_extends_indent_cache(qt_app):
+    """Inserting N new lines must grow the indent cache by N entries."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 2, "lines": ["A", "B"]})
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 4,
+            "first": 1,
+            "last": 1,
+            "lines": ["  X", "    Y"],
+        }
+    )
+    assert m.line_count() == 4
+    assert [m.indent_level(i) for i in range(4)] == [0, 1, 2, 0]
+
+
+def test_patch_pure_deletion_shrinks_indent_cache(qt_app):
+    """Deleting lines must shrink the indent cache to match."""
+    del qt_app
+    m = MinimapModel()
+    m.apply(
+        {
+            "op": "snapshot",
+            "bufnr": 1,
+            "line_count": 4,
+            "lines": ["A", "  B", "    C", "      D"],
+        }
+    )
+    m.apply(
+        {"op": "patch", "bufnr": 1, "line_count": 2, "first": 1, "last": 3, "lines": []}
+    )
+    assert m.line_count() == 2
+    assert [m.indent_level(i) for i in range(2)] == [0, 3]
+
+
+def test_snapshot_replaces_indent_cache(qt_app):
+    """A second snapshot must wipe the prior indent cache, not append.
+    Otherwise the old buffer's indents would bleed into the new one."""
+    del qt_app
+    m = MinimapModel()
+    m.apply(
+        {
+            "op": "snapshot",
+            "bufnr": 1,
+            "line_count": 3,
+            "lines": ["      deep", "      deep", "      deep"],
+        }
+    )
+    assert [m.indent_level(i) for i in range(3)] == [3, 3, 3]
+    m.apply({"op": "snapshot", "bufnr": 2, "line_count": 2, "lines": ["flat", "flat"]})
+    assert [m.indent_level(i) for i in range(2)] == [0, 0]
+    # Past-end must be 0, not 3 (would indicate stale cache).
+    assert m.indent_level(2) == 0

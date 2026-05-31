@@ -312,6 +312,39 @@ QtObject {
         // removes the duplication).
         readonly property QtObject minimap: QtObject {
             readonly property color background: "#33000000"   // black @ 20% alpha
+
+            // Indent block palette — Phase 2 of docs/minimap-prd.md.
+            // Each buffer line renders as a horizontal bar whose color
+            // encodes its leading-whitespace indent depth (0..3,
+            // clamped). The four-rung scale is intentionally narrow:
+            // four levels covers the dominant code-shape signal
+            // (top-level, function body, conditional body, deeply
+            // nested) without the painter having to disambiguate
+            // finer steps that would not read at 1-2 px row height.
+            //
+            // Tone gradient is brightest-at-shallow → dimmest-at-deep
+            // (visual cue: deeper nesting = quieter), inverting how
+            // many block-mode minimaps colour by indent depth. Reason:
+            // when you glance at the minimap you want top-level
+            // structure to pop (function boundaries, top-level
+            // sections), not deep nesting noise. The dim-deep
+            // gradient makes the silhouette read as "shape of the
+            // file's outline" rather than "where the nesting is."
+            //
+            // Levels derived from text.normal (strongest) → text.dim
+            // (faintest) family so the minimap stays inside the
+            // existing chrome palette without introducing a new
+            // colour identity.
+            //
+            // Mirrored on the Python side as
+            // `minimap_view.py::_INDENT_RGBA`. Drift detection in
+            // `tests/test_minimap_view.py::test_indent_palette_matches_theme_qml`.
+            readonly property QtObject indent: QtObject {
+                readonly property color level0: "#c8a37a"    // accent.primary — top-level, brightest
+                readonly property color level1: "#9a8568"    // dimmer warm, function-body level
+                readonly property color level2: "#6e6055"    // dimmer still, conditional / loop body
+                readonly property color level3: "#52483f"    // deep nesting — barely there
+            }
         }
 
         readonly property QtObject terminal: QtObject {

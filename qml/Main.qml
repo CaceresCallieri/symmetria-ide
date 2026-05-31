@@ -473,6 +473,15 @@ Window {
                     // we get a snapshot even if the initial autocmd
                     // fired before Python subscribed.
                     bufferRowCount: minimapModel.lineCount
+                    // Phase 2: inject the model itself so MinimapView.paint
+                    // can read indent_level() / line_count() directly,
+                    // without going through QML property marshalling.
+                    // The setter wires linesChanged → update() so any
+                    // content mutation repaints the silhouette. Mirrors
+                    // the NvimView.backend / TerminalView.backend
+                    // injection pattern — keeps the chrome consistent
+                    // across panes.
+                    model: minimapModel
                     // Above the central panes so the ribbon visibly sits
                     // on top of NvimView's right edge; below
                     // mainContentFocusBorder (z: 50) so the focus

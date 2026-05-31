@@ -30,7 +30,11 @@ from PySide6.QtGui import QColor
 
 from symmetria_ide.minimap_view import (
     _BACKGROUND_RGBA,
+    _INDENT_RGBA,
+    _INDENT_STEP_PX,
+    _MIN_ROW_HEIGHT_PX,
     _background_color,
+    _indent_colors,
     MinimapView,
 )
 
@@ -406,4 +410,164 @@ def test_main_qml_minimap_width_uses_theme_token():
     assert "Theme.size.minimapWidth" in minimap_block, (
         "Main.qml's MinimapView must bind `width: Theme.size.minimapWidth` "
         "— no literal pixel values per §3.3"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — block-mode painter, indent palette + memoization, model wiring
+# ---------------------------------------------------------------------------
+
+
+def test_indent_rgba_has_four_levels():
+    """The four-rung indent scale is the canonical contract — Theme.qml
+    defines level0..level3 and the painter indexes the tuple directly
+    with `_indent_colors[level]`. Diverging here would either
+    out-of-bounds the index (palette shrank) or leave a dead colour
+    (palette grew without a matching Theme.qml change)."""
+    assert len(_INDENT_RGBA) == 4
+    for rgb in _INDENT_RGBA:
+        assert len(rgb) == 3, "indent palette entries are 3-tuple RGB"
+        for channel in rgb:
+            assert 0 <= channel <= 255
+
+
+def test_indent_colors_memoized_at_module_load():
+    """Per gotcha #10 — the indent QColors must exist at module import
+    time so paint() never allocates fresh ones per row. A regression
+    that lazily constructs them inside paint() would blow the GC budget
+    immediately on any non-tiny buffer."""
+    assert len(_indent_colors) == 4
+    for color in _indent_colors:
+        assert isinstance(color, QColor)
+
+
+def test_indent_palette_matches_theme_qml():
+    """Drift detection: every hex in `_INDENT_RGBA` MUST appear inside
+    Theme.qml's `Theme.color.minimap.indent` block. Same dual-source-of-truth
+    pattern `test_background_matches_theme_qml` uses — until Theme is
+    piped through Python via a context property, this is how we keep
+    the two sides aligned.
+    """
+    theme_src = _read_theme_qml()
+    for level, rgb in enumerate(_INDENT_RGBA):
+        r, g, b = rgb
+        expected_hex = f"#{r:02X}{g:02X}{b:02X}"
+        assert expected_hex.upper() in theme_src.upper(), (
+            f"Theme.qml is missing the hex value {expected_hex} for "
+            f"`Theme.color.minimap.indent.level{level}` — either the Theme "
+            "token was nudged out of sync, or _INDENT_RGBA drifted away"
+        )
+    # The QtObject block must exist — protects against a refactor that
+    # renames the token nesting (e.g. `indent` → `depth`) but leaves
+    # the hex values incidentally appearing elsewhere.
+    assert re.search(r"indent\s*:\s*QtObject\s*\{", theme_src), (
+        "Theme.qml is missing the `indent: QtObject {` block under "
+        "`Theme.color.minimap` — the level tokens have no home"
+    )
+
+
+def test_layout_constants_within_sane_bounds():
+    """The min-row-height floor and indent-step affect every paint;
+    pin them so a future tune doesn't silently land outside the
+    legibility range documented in the module header."""
+    # _MIN_ROW_HEIGHT_PX below 2 makes the silhouette mush; above 4
+    # defeats the "zoom out" purpose.
+    assert 2.0 <= _MIN_ROW_HEIGHT_PX <= 4.0
+    # _INDENT_STEP_PX below 3 makes deep indents indistinguishable;
+    # above 6 leaves too little room for the bar on an 80-px minimap.
+    assert 3.0 <= _INDENT_STEP_PX <= 6.0
+
+
+def test_paint_indent_palette_lookup_does_not_construct_qcolor():
+    """The Phase 2 paint loop must index `_indent_colors[level]` — a
+    fresh `QColor(...)` per row would defeat gotcha #10 just as much
+    as the background fill would."""
+    src = inspect.getsource(MinimapView.paint)
+    # Already covered by test_paint_does_not_construct_qcolor above,
+    # but pin the positive assertion too — the tuple lookup must
+    # actually be there.
+    assert "_indent_colors[" in src, (
+        "paint() must index _indent_colors[level] — without it, the "
+        "indent palette is unused and every row paints in default"
+    )
+
+
+def test_paint_reads_indent_level_from_model_not_lstrip():
+    """PRD §6 R2.2 — paint() MUST read pre-cached indent levels via
+    `model.indent_level(i)`. A regression that calls `str.lstrip()`
+    or `str.startswith()` per row inside paint() would allocate a
+    fresh str per row — at 50k+ lines that's a gotcha #10 disaster.
+
+    Strip the docstring before inspecting so the assertion sees only
+    executable code — otherwise comments / module-header references
+    to `.lstrip()` (e.g. "PRD §6 R2.2 says no str.lstrip per row")
+    trip the substring check.
+    """
+    src = inspect.getsource(MinimapView.paint)
+    # Strip the function's docstring — paint() opens with a triple-quoted
+    # docstring, so split on the closing `"""` of that docstring and
+    # examine only the body.
+    body = src.split('"""', 2)[-1] if src.count('"""') >= 2 else src
+    assert "indent_level" in body, (
+        "paint() must call model.indent_level(i) — the cached array "
+        "is the only str-allocation-free way to know indent depth"
+    )
+    assert ".lstrip(" not in body, (
+        "paint() must NOT call str.lstrip — that allocates a fresh "
+        "str per row, blowing the gotcha #10 budget on large buffers"
+    )
+    assert ".startswith(" not in body, (
+        "paint() must NOT call str.startswith inside the loop — "
+        "use the cached indent_level array instead"
+    )
+
+
+def test_paint_pool_stayed_at_one_rect():
+    """Phase 2's painter reuses Phase 0's single _paint_rect for the
+    background fill AND every per-line block. The pool size MUST NOT
+    have grown — if Phase 3+ legitimately needs another rect (e.g.
+    for the viewport indicator overlaid on top of blocks), the test
+    needs to be updated AND the new rect must be allocated in __init__,
+    never inside paint."""
+    init_src = inspect.getsource(MinimapView.__init__)
+    # Count QRectF constructions in __init__. Should be exactly one.
+    n = init_src.count("QRectF()")
+    assert n == 1, (
+        f"MinimapView.__init__ allocates {n} QRectFs — Phase 2 contract "
+        "requires exactly one (`_paint_rect`); adding more without "
+        "updating this test is a hygiene regression waiting to happen"
+    )
+
+
+def test_model_property_uses_setter_pattern():
+    """The MinimapView.model setter must (a) disconnect from any prior
+    model's linesChanged, (b) connect the new model's linesChanged →
+    _on_lines_changed, (c) emit modelChanged, (d) trigger update().
+    Mirrors NvimView.backend / TerminalView.backend lifecycle."""
+    setter_src = inspect.getsource(MinimapView._set_model)
+    assert "linesChanged.disconnect" in setter_src, (
+        "setter must disconnect prior model's linesChanged signal"
+    )
+    assert "linesChanged.connect" in setter_src, (
+        "setter must connect new model's linesChanged → _on_lines_changed"
+    )
+    assert "modelChanged.emit" in setter_src, (
+        "setter must emit modelChanged for QML binding"
+    )
+    assert "self.update()" in setter_src, (
+        "setter must trigger an immediate repaint when a model arrives"
+    )
+
+
+def test_main_qml_binds_model_property():
+    """Main.qml MinimapView must include `model: minimapModel` —
+    without it the painter never gets a content reference and stays
+    in the Phase 0 background-only fallback path."""
+    main_src = _read_main_qml()
+    minimap_match = re.search(r"MinimapView\s*\{(.*?)\n\s{16}\}", main_src, re.DOTALL)
+    assert minimap_match is not None
+    minimap_block = minimap_match.group(1)
+    assert re.search(r"model\s*:\s*minimapModel", minimap_block), (
+        "Main.qml's MinimapView must bind `model: minimapModel` — "
+        "Phase 2 painter reads indent_level / line_count via the model"
     )
