@@ -1,6 +1,6 @@
 # PRD — Editor minimap
 
-> **Status: draft (2026-05-28).** Not started. No code landed. This document is the planning anchor — written so a future session, including one running on a freshly-compacted context, can pick up at any phase without re-deriving prior decisions.
+> **Status: Phase 0 shipped (2026-05-31).** Phase 0 surface skeleton landed in commit 142384c — empty `MinimapView` painted, QML slot + scroll wiring in place. Phase 1 (full-buffer content channel) is the next phase. This document is the planning anchor — written so a future session, including one running on a freshly-compacted context, can pick up at any phase without re-deriving prior decisions.
 
 A phased plan for adding a VS Code / Zed-style minimap to the embedded NeoVim editor surface — a narrow right-side column that shows a zoomed-out view of the entire buffer (not just the visible viewport), with a viewport-indicator rectangle the user can click/drag to scroll.
 

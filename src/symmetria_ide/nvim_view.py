@@ -667,16 +667,16 @@ class NvimView(QQuickPaintedItem):
 
     backendChanged = Signal()
     cellMetricsChanged = Signal()
-    # Emitted from `_on_frame_swapped` whenever the scroll spring
-    # produces a new `_scroll_anim.position`, AND on settle (so the
-    # final settled position propagates). Consumed by MinimapView via
+    # Emitted from `_on_frame_swapped` whenever the scroll spring is
+    # active, so each frame's new `_scroll_anim.position` reaches
+    # MinimapView. Consumed via
     # `MinimapView.scrollPosition: editor.scrollAnimationPosition` in
     # Main.qml — Phase 0 of the editor minimap (see docs/minimap-prd.md).
     # The minimap's viewport indicator (Phase 3) maps this display-row
-    # value onto its own y-coords. Emit-per-frame cost is one notify
-    # signal during active scroll — settled state stops re-emitting
-    # because `_set_scroll_animation_position` short-circuits on
-    # equality (see definition below).
+    # value onto its own y-coords. Emit stops automatically when the
+    # frame driver disconnects on `_stop_frame_driver()` — which fires
+    # as soon as `_animation_is_active()` returns False (scroll spring
+    # settled, cursor spring settled, blink inactive).
     scrollAnimationPositionChanged = Signal()
 
     def __init__(self, parent=None) -> None:
@@ -1367,15 +1367,14 @@ class NvimView(QQuickPaintedItem):
             # Finally the cursor spring ticks toward the new target with
             # velocity preserved across the reseed.
             self._scroll_anim.tick(dt)
-            # Notify QML bindings (MinimapView.scrollPosition) that the
-            # spring produced a new display-row position this frame.
-            # Emit unconditionally per frame while ticking — the spring
-            # may have decayed by sub-epsilon amounts that still want
-            # to reflect in the minimap's viewport indicator. The notify
-            # is cheap (one QObject signal hop) and QML batches binding
-            # re-eval to the next vsync. Phase 0 of the editor minimap
-            # (see docs/minimap-prd.md) introduced this signal.
-            self.scrollAnimationPositionChanged.emit()
+            # Notify QML bindings (MinimapView.scrollPosition) only when
+            # the scroll spring is active — cursor-only or blink-only
+            # frames carry no scroll position change and need not trigger
+            # minimap viewport-indicator recalculation. Phase 0 of the
+            # editor minimap (see docs/minimap-prd.md) introduced this
+            # signal; Phase 3 reads it to reposition the indicator rect.
+            if self._scroll_anim.active:
+                self.scrollAnimationPositionChanged.emit()
             self._update_cursor_destination()
             self._cursor_anim.tick(dt)
             self.update()
