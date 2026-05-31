@@ -43,6 +43,7 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
     PopupmenuModel,
 )
 from .git_controller import GitController, GitStatusListModel
+from .minimap_view import MinimapView  # noqa: F401 — side-effect: @QmlElement registration
 from .nvim_backend import NvimBackend
 from .nvim_view import NvimView  # noqa: F401 — side-effect: @QmlElement registration
 from .session_host import SessionHost
@@ -2169,6 +2170,7 @@ def _register_qml_types() -> None:
     # registration. See CLAUDE.md gotcha #7 and project-standards §2 P1.
     _ = NvimView
     _ = TerminalView
+    _ = MinimapView
     _ = CmdlineState
     _ = CompletionModel
     _ = PopupmenuModel

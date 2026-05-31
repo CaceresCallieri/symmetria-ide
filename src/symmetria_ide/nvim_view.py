@@ -667,6 +667,17 @@ class NvimView(QQuickPaintedItem):
 
     backendChanged = Signal()
     cellMetricsChanged = Signal()
+    # Emitted from `_on_frame_swapped` whenever the scroll spring
+    # produces a new `_scroll_anim.position`, AND on settle (so the
+    # final settled position propagates). Consumed by MinimapView via
+    # `MinimapView.scrollPosition: editor.scrollAnimationPosition` in
+    # Main.qml — Phase 0 of the editor minimap (see docs/minimap-prd.md).
+    # The minimap's viewport indicator (Phase 3) maps this display-row
+    # value onto its own y-coords. Emit-per-frame cost is one notify
+    # signal during active scroll — settled state stops re-emitting
+    # because `_set_scroll_animation_position` short-circuits on
+    # equality (see definition below).
+    scrollAnimationPositionChanged = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -949,6 +960,25 @@ class NvimView(QQuickPaintedItem):
     @Property(float, notify=cellMetricsChanged)
     def cellHeight(self) -> float:
         return self._cell_h
+
+    @Property(float, notify=scrollAnimationPositionChanged)
+    def scrollAnimationPosition(self) -> float:
+        """Current scroll spring position in DISPLAY ROWS (gotcha #22).
+
+        Read-only from QML's perspective — produced by the spring inside
+        `_on_frame_swapped` and consumed by `MinimapView` (Phase 0 of
+        the editor minimap; see docs/minimap-prd.md). The value is in
+        the same display-row unit the paint loop uses, NOT logical
+        lines — Phase 3 of the minimap PRD relies on this so its
+        viewport-indicator math doesn't need to redo the
+        `display_rows_between` conversion gotcha #22 mandates.
+
+        Notify fires once per frame while the spring is active, plus
+        once on settle. Bindings on the QML side re-evaluate at QML
+        binding cadence (next vsync), so per-frame emit is cost-neutral
+        with the existing repaint trigger.
+        """
+        return self._scroll_anim.position
 
     # --- Backend → view ------------------------------------------------
 
@@ -1337,6 +1367,15 @@ class NvimView(QQuickPaintedItem):
             # Finally the cursor spring ticks toward the new target with
             # velocity preserved across the reseed.
             self._scroll_anim.tick(dt)
+            # Notify QML bindings (MinimapView.scrollPosition) that the
+            # spring produced a new display-row position this frame.
+            # Emit unconditionally per frame while ticking — the spring
+            # may have decayed by sub-epsilon amounts that still want
+            # to reflect in the minimap's viewport indicator. The notify
+            # is cheap (one QObject signal hop) and QML batches binding
+            # re-eval to the next vsync. Phase 0 of the editor minimap
+            # (see docs/minimap-prd.md) introduced this signal.
+            self.scrollAnimationPositionChanged.emit()
             self._update_cursor_destination()
             self._cursor_anim.tick(dt)
             self.update()

@@ -317,6 +317,19 @@ Window {
                 NvimView {
                     id: editor
                     anchors.fill: parent
+                    // Phase 0 (editor minimap, docs/minimap-prd.md): the
+                    // minimap (declared as a sibling below) occupies a
+                    // fixed-width ribbon on mainContent's right edge when
+                    // it is visible. Reserving that strip via rightMargin
+                    // keeps NvimView's grid_resize boundary correct — the
+                    // grid shrinks by minimap.width when the minimap is on,
+                    // expands back to the full slot when the minimap hides
+                    // (e.g. when a future per-buffer toggle disables it).
+                    // TerminalView and AgentPane do NOT carry this margin
+                    // because the minimap is gated on `editorVisible` — it
+                    // is hidden whenever those panes are active, so they
+                    // legitimately fill the full slot.
+                    anchors.rightMargin: minimap.visible ? minimap.width : 0
                     // Phase 2.5: editor is now ONE of two central surfaces
                     // (the other is the terminal pane below). Visibility
                     // requires BOTH "agent is not full-window overlaid"
@@ -415,6 +428,53 @@ Window {
                     id: agentPane
                     anchors.fill: parent
                     visible: controller.agentVisible && !controller.fmVisible
+                }
+
+                // Phase 0 editor minimap (docs/minimap-prd.md). Narrow
+                // ribbon anchored to mainContent's right edge, only
+                // visible when the editor is the active central surface
+                // — same visibility gate as NvimView, so the minimap and
+                // its host pane appear/disappear as one. Width comes from
+                // `Theme.size.minimapWidth` (Phase 0 default = 80 px).
+                //
+                // Phase 0 paints a single solid background; Phase 2 adds
+                // block-mode line rendering, Phase 3 the click-drag
+                // viewport scrubber, Phase 4 the diagnostic/git gutter,
+                // and Phase 5 the glyph sprite atlas. The Python class
+                // already has the pooled QRectF + memoized QColor in
+                // place so each phase can extend `paint()` without
+                // re-establishing gotcha #10 hygiene.
+                //
+                // `scrollPosition` binds to NvimView's
+                // `scrollAnimationPosition` Q_PROPERTY — Phase 3 reads
+                // it to position the viewport indicator. Phase 0
+                // accepts the value but does nothing visible with it
+                // yet; the binding is wired now so the next phase can
+                // land without restructuring this site.
+                //
+                // No focus participation: MinimapView.setActiveFocusOnTab(False)
+                // on the Python side, so Tab cycling skips it. Keyboard
+                // focus always lands on the editor or sidebar.
+                MinimapView {
+                    id: minimap
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.right: parent.right
+                    width: Theme.size.minimapWidth
+                    visible: !controller.agentVisible
+                        && !controller.fmVisible
+                        && controller.editorVisible
+                    scrollPosition: editor.scrollAnimationPosition
+                    // bufferRowCount is Phase 1 — wired here (defaults to
+                    // 0) so the binding site exists; Phase 1 connects it
+                    // to a future MinimapModel populated by the Lua
+                    // content channel.
+                    bufferRowCount: 0
+                    // Above the central panes so the ribbon visibly sits
+                    // on top of NvimView's right edge; below
+                    // mainContentFocusBorder (z: 50) so the focus
+                    // hairline still wraps the whole mainContent slot.
+                    z: 10
                 }
 
                 // Active-pane focus border. Renders a 1px accent hairline

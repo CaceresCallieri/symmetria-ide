@@ -293,6 +293,27 @@ QtObject {
         // in `terminal_view.py`'s memoized color resolver, NOT
         // exposed here — it's a derived xterm-256 lookup, not a
         // design token.
+        // Minimap pane (Phase 0 — editor minimap, see docs/minimap-prd.md).
+        // Background: a subtle dim over the wallpaper-blend base, deeper
+        // than the editor's ambient tint so the minimap reads as a
+        // distinct right-edge ribbon without needing a hairline border.
+        // The terminal/editor panes use ~60% black ambient over the
+        // wallpaper-blend (see terminal_view.py::_ambient_tint_color);
+        // the minimap adds an additional ~20% black overlay so it sits
+        // perceptibly darker than the editor while staying in the same
+        // wallpaper-blend family — no hard edge between the two surfaces.
+        //
+        // Mirrored on the Python side as
+        // `minimap_view.py::_BACKGROUND_RGBA` (memoized QColor at module
+        // load — gotcha #10). Drift between the two sources is detected
+        // by `tests/test_minimap_view.py::test_background_matches_theme_qml`,
+        // same dual-source-of-truth pattern the ANSI palette uses (a v2
+        // refactor that wires Theme through Python via context property
+        // removes the duplication).
+        readonly property QtObject minimap: QtObject {
+            readonly property color background: "#33000000"   // black @ 20% alpha
+        }
+
         readonly property QtObject terminal: QtObject {
             // Background: transparent so the wallpaper ambient tint
             // shows through, mirroring NvimView's wallpaper-blend
@@ -359,5 +380,14 @@ QtObject {
         readonly property int popupRowHeight: 20      // was 24
         readonly property int whichKeyRowHeight: 18   // was 22
         readonly property int whichKeyFooterHeight: 24 // was 28
+
+        // Minimap right-edge ribbon width (Phase 0 — editor minimap, see
+        // docs/minimap-prd.md). 80px is wide enough for the Phase 2 indent
+        // silhouette to read distinctly without crowding the editor grid;
+        // Phase 5's 2×4 px glyph atlas will fit ~40 columns at this width
+        // which matches typical line-length-at-a-glance. Tune-up to 100
+        // for wider source files; tune-down to 60 once Phase 5 ships if
+        // the 2x4 cell footprint reads as overkill.
+        readonly property int minimapWidth: 80
     }
 }
