@@ -1,0 +1,513 @@
+"""Tests for MinimapModel — Phase 1 of the editor minimap.
+
+The model is a plain QObject (no QML registration via QmlElement, no
+QQuickItem dependency), so unlike `tests/test_minimap_view.py` we can
+exercise it at runtime — instantiate, call apply(), assert state and
+signal emissions. The QGuiApplication-free `qt_app` fixture is enough.
+
+Coverage targets the PRD §5.4 risk list:
+  - R1.2 — invalid payload / wrong types must not crash the GUI thread
+  - R1.3 — rapid successive patches keep the splice range correct
+
+Plus the obvious shape contract: snapshot replaces; patch splices;
+linesChanged emits with the right range; lineCountChanged emits only
+when the count actually changes.
+"""
+
+from __future__ import annotations
+
+from symmetria_ide.minimap_model import MinimapModel
+
+
+# ---------------------------------------------------------------------------
+# Empty-state contract
+# ---------------------------------------------------------------------------
+
+
+def test_empty_model_has_zero_count(qt_app):
+    """Freshly constructed: zero lines, line_at clamps to ""."""
+    del qt_app
+    m = MinimapModel()
+    assert m.line_count() == 0
+    assert m.lineCount == 0
+    # Defensive out-of-range — painter loop must not crash if it reads
+    # past the count during a transient stale-bookkeeping window.
+    assert m.line_at(0) == ""
+    assert m.line_at(-1) == ""
+    assert m.line_at(100) == ""
+
+
+# ---------------------------------------------------------------------------
+# Snapshot ingest — replaces the buffer
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_replaces_all_lines(qt_app):
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 3, "lines": ["a", "b", "c"]})
+    assert m.line_count() == 3
+    assert m.lineCount == 3
+    assert m.line_at(0) == "a"
+    assert m.line_at(1) == "b"
+    assert m.line_at(2) == "c"
+    # Past-end still clamps.
+    assert m.line_at(3) == ""
+
+
+def test_snapshot_handles_empty_buffer(qt_app):
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 0, "lines": []})
+    assert m.line_count() == 0
+
+
+def test_snapshot_overwrites_prior_content(qt_app):
+    """A second snapshot wipes the first — minimap should reflect the
+    LATEST buffer state, never the residue of an earlier one."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 5, "lines": list("abcde")})
+    m.apply({"op": "snapshot", "bufnr": 2, "line_count": 2, "lines": ["X", "Y"]})
+    assert m.line_count() == 2
+    assert m.line_at(0) == "X"
+    assert m.line_at(1) == "Y"
+    # The 'c'/'d'/'e' from the prior buffer must NOT bleed through.
+    assert m.line_at(2) == ""
+
+
+def test_snapshot_decodes_bytes_defensively(qt_app):
+    """pynvim returns str by default but a buffer with non-UTF-8 bytes
+    could in theory leak bytes through. The painter's str ops (lstrip,
+    indexing) would crash on bytes; the apply path must decode."""
+    del qt_app
+    m = MinimapModel()
+    m.apply(
+        {
+            "op": "snapshot",
+            "bufnr": 1,
+            "line_count": 2,
+            "lines": [b"hello", b"\xff\xfeinvalid"],
+        }
+    )
+    assert m.line_count() == 2
+    assert m.line_at(0) == "hello"
+    # Invalid UTF-8 falls through `errors="replace"` to a U+FFFD-bearing
+    # str — not bytes, not a crash, not an exception.
+    assert isinstance(m.line_at(1), str)
+
+
+# ---------------------------------------------------------------------------
+# Signal emission — linesChanged + lineCountChanged
+# ---------------------------------------------------------------------------
+
+
+def _collect_lines_changed(model: MinimapModel) -> list[tuple[int, int]]:
+    """Helper: install a connection that records every (first, last)
+    range emitted by linesChanged. Direct connection so the recording
+    is synchronous with the emit — no event-loop spin needed.
+    pytest-qt's qtbot is not installed in this project; this list-based
+    helper covers the assertions we need."""
+    captured: list[tuple[int, int]] = []
+    model.linesChanged.connect(lambda first, last: captured.append((first, last)))
+    return captured
+
+
+def _collect_count_changed(model: MinimapModel) -> list[int]:
+    """Helper: record the lineCount value at every notify emission."""
+    captured: list[int] = []
+    model.lineCountChanged.connect(lambda: captured.append(model.lineCount))
+    return captured
+
+
+def test_snapshot_emits_full_range(qt_app):
+    """Snapshot must emit linesChanged covering the entire post-snapshot
+    range (0, N) so painters know to repaint every row."""
+    del qt_app
+    m = MinimapModel()
+    captured = _collect_lines_changed(m)
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 4, "lines": list("WXYZ")})
+    assert captured == [(0, 4)]
+
+
+def test_snapshot_to_empty_emits_zero_zero(qt_app):
+    """An empty snapshot still emits (0, 0) so listeners can distinguish
+    'no event' (no signal at all) from 'now empty' (signal fires with
+    a zero range)."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 3, "lines": ["a", "b", "c"]})
+    captured = _collect_lines_changed(m)  # connect AFTER initial snapshot
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 0, "lines": []})
+    assert captured == [(0, 0)]
+
+
+def test_line_count_changed_fires_only_on_count_change(qt_app):
+    """If two consecutive snapshots have the same line count, only the
+    first is a real change on the `lineCount` property — the notify
+    signal should fire once for the initial change and NOT for the
+    second same-count snapshot.
+
+    Spurious lineCountChanged emissions would force QML's binding
+    system to re-evaluate every binding that depends on lineCount even
+    when nothing actually changed — measurable cost on rapid typing
+    where TextChangedI fires per keystroke.
+    """
+    del qt_app
+    m = MinimapModel()
+    # First snapshot — count goes 0 → 3, one notify expected.
+    initial_counts = _collect_count_changed(m)
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 3, "lines": list("abc")})
+    assert initial_counts == [3]
+    # Second snapshot — same count, different content, NO notify expected.
+    initial_counts.clear()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 3, "lines": list("xyz")})
+    assert initial_counts == [], (
+        "lineCountChanged emitted spuriously when count was unchanged "
+        "across snapshots — would cause needless QML binding re-eval"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Patch ingest — splices into existing buffer
+# ---------------------------------------------------------------------------
+
+
+def test_patch_replaces_range(qt_app):
+    """A patch must splice _lines[first:last] = new_lines."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 5, "lines": list("abcde")})
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 5,
+            "first": 1,
+            "last": 4,
+            "lines": ["B", "C", "D"],
+        }
+    )
+    # _lines[1:4] = ["B","C","D"] → ["a","B","C","D","e"]
+    assert [m.line_at(i) for i in range(5)] == ["a", "B", "C", "D", "e"]
+
+
+def test_patch_pure_insertion(qt_app):
+    """first == last with non-empty lines is a pure insertion."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 3, "lines": list("abc")})
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 5,
+            "first": 1,
+            "last": 1,
+            "lines": ["X", "Y"],
+        }
+    )
+    assert m.line_count() == 5
+    assert [m.line_at(i) for i in range(5)] == ["a", "X", "Y", "b", "c"]
+
+
+def test_patch_pure_deletion(qt_app):
+    """Empty lines with first < last is a pure deletion."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 5, "lines": list("abcde")})
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 3,
+            "first": 1,
+            "last": 3,
+            "lines": [],
+        }
+    )
+    assert m.line_count() == 3
+    assert [m.line_at(i) for i in range(3)] == ["a", "d", "e"]
+
+
+def test_patch_at_row_zero(qt_app):
+    """Patch at the first row — common edge case."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 3, "lines": list("abc")})
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 3,
+            "first": 0,
+            "last": 1,
+            "lines": ["A"],
+        }
+    )
+    assert m.line_at(0) == "A"
+    assert m.line_at(1) == "b"
+
+
+def test_patch_at_last_row(qt_app):
+    """Patch at the last row — another common edge case (append-style)."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 3, "lines": list("abc")})
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 4,
+            "first": 3,
+            "last": 3,
+            "lines": ["d"],
+        }
+    )
+    assert m.line_count() == 4
+    assert m.line_at(3) == "d"
+
+
+def test_rapid_successive_patches_preserve_range(qt_app):
+    """R1.3 — rapid TextChangedI events that each splice a different
+    range must not drop or corrupt any of them. The model has no
+    debouncing of its own; each apply call is independent. This pins
+    the contract."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 5, "lines": list("abcde")})
+    # Three back-to-back patches simulating rapid typing:
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 5,
+            "first": 0,
+            "last": 1,
+            "lines": ["A"],
+        }
+    )
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 5,
+            "first": 2,
+            "last": 3,
+            "lines": ["C"],
+        }
+    )
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 5,
+            "first": 4,
+            "last": 5,
+            "lines": ["E"],
+        }
+    )
+    assert [m.line_at(i) for i in range(5)] == ["A", "b", "C", "d", "E"]
+
+
+def test_patch_emits_affected_range(qt_app):
+    """linesChanged from a patch should cover the affected region —
+    including past `last` if the splice extends the buffer."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 3, "lines": list("abc")})
+    # Insert 3 lines at position 1 — splice extends to row 4.
+    captured = _collect_lines_changed(m)  # connect AFTER snapshot
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 6,
+            "first": 1,
+            "last": 1,
+            "lines": ["X", "Y", "Z"],
+        }
+    )
+    # affected_end = first + len(new) = 1 + 3 = 4; emit max(last=1, 4) = 4.
+    assert captured == [(1, 4)]
+
+
+# ---------------------------------------------------------------------------
+# Resilience — bad payloads don't crash the GUI thread (R1.2)
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_op_logged_not_crashed(qt_app):
+    """An envelope with op not in {snapshot, patch} must log + drop, not
+    propagate. Future nvim versions might introduce new ops; the model
+    should ignore them rather than crash."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 1, "lines": ["a"]})
+    m.apply({"op": "ufo-landing", "bufnr": 1})  # nonsense op
+    # State unchanged — the bad envelope was dropped, not applied.
+    assert m.line_count() == 1
+    assert m.line_at(0) == "a"
+
+
+def test_missing_lines_field_does_not_crash(qt_app):
+    """A malformed snapshot missing `lines` should log+drop, not crash."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 3})  # no `lines`
+    # Default of [] inside apply means empty buffer state — acceptable;
+    # the alternative was crash, which we DO NOT want.
+    assert m.line_count() == 0
+
+
+def test_lines_not_a_list_logged_not_crashed(qt_app):
+    """If `lines` is somehow a str (e.g. msgpack decode glitch), apply
+    should reject + log, not iterate the string char-by-char."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 1, "lines": "not a list"})
+    assert m.line_count() == 0
+
+
+def test_patch_out_of_bounds_logged_not_applied(qt_app):
+    """A patch range that exceeds the current buffer must be dropped,
+    not silently corrupted into a partial-splice."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 3, "lines": list("abc")})
+    # last > current count — out of bounds.
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 3,
+            "first": 0,
+            "last": 99,
+            "lines": ["X"],
+        }
+    )
+    # State unchanged.
+    assert [m.line_at(i) for i in range(3)] == ["a", "b", "c"]
+
+
+def test_patch_negative_first_logged_not_applied(qt_app):
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 3, "lines": list("abc")})
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 3,
+            "first": -1,
+            "last": 1,
+            "lines": ["X"],
+        }
+    )
+    assert m.line_at(0) == "a"
+
+
+def test_apply_with_completely_invalid_payload_does_not_crash(qt_app):
+    """The cross-thread defensive wrap means even total garbage doesn't
+    crash. Logs + drops."""
+    del qt_app
+    m = MinimapModel()
+    # Not even a dict — apply().get() would raise AttributeError; the
+    # outer try/except swallows it.
+    m.apply(None)  # type: ignore[arg-type]
+    m.apply("not a dict")  # type: ignore[arg-type]
+    assert m.line_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# QML registration / context property naming
+# ---------------------------------------------------------------------------
+
+
+def test_app_exposes_minimap_model_context_property():
+    """app.py's _build_engine must call setContextProperty("minimapModel",
+    controller.minimap_model). Without this, Main.qml's
+    `minimapModel.lineCount` binding is undefined-reference and the
+    MinimapView's bufferRowCount stays 0."""
+    import inspect
+
+    from symmetria_ide import app
+
+    src = inspect.getsource(app)
+    assert 'setContextProperty("minimapModel"' in src, (
+        "app.py's _build_engine must expose minimapModel as a context property"
+    )
+
+
+def test_app_imports_minimap_model():
+    """AppController instantiates MinimapModel — the import must be
+    present at module level."""
+    import inspect
+
+    from symmetria_ide import app
+
+    src = inspect.getsource(app)
+    assert "from .minimap_model import MinimapModel" in src
+
+
+def test_app_connects_minimap_event_with_queued_connection():
+    """The cross-thread connection from the pynvim worker thread to
+    the GUI-thread MinimapModel.apply MUST be explicit
+    Qt.QueuedConnection per §4 P2. An auto-typed connection would still
+    work today (Qt auto-selects Queued when sender/receiver are on
+    different threads), but project standards require explicit so the
+    intent is visible at the connect site."""
+    import inspect
+
+    from symmetria_ide import app
+
+    src = inspect.getsource(app)
+    assert "minimap_event.connect" in src
+    # The Qt.ConnectionType.QueuedConnection arg must appear within ~200
+    # chars of the minimap_event.connect call (same scope).
+    idx = src.find("minimap_event.connect")
+    nearby = src[idx : idx + 400]
+    assert "QueuedConnection" in nearby, (
+        "minimap_event.connect must specify Qt.QueuedConnection explicitly (§4 P2)"
+    )
+
+
+def test_nvim_backend_subscribes_to_minimap_channel():
+    """The pynvim subscribe call must include 'minimap' — without it,
+    notifications on that channel are silently dropped by pynvim."""
+    import inspect
+
+    from symmetria_ide import nvim_backend
+
+    src = inspect.getsource(nvim_backend)
+    assert 'subscribe("minimap")' in src, (
+        "NvimBackend.subscribe_to_capsule (or equivalent) must "
+        'call self._nvim.subscribe("minimap") alongside the other channels'
+    )
+
+
+def test_nvim_backend_force_pushes_minimap_snapshot_on_subscribe():
+    """The subscribe-race fix (gotcha #2 mitigation): right after
+    subscribing, force a Lua-side re-push so the initial BufEnter
+    snapshot — which fired BEFORE we subscribed — gets re-emitted."""
+    import inspect
+
+    from symmetria_ide import nvim_backend
+
+    src = inspect.getsource(nvim_backend)
+    assert "symmetria_minimap_push_snapshot" in src, (
+        "NvimBackend must force-push an initial minimap snapshot after "
+        "subscribing — the Lua-side helper is _G.symmetria_minimap_push_snapshot"
+    )
+
+
+def test_dispatch_routes_minimap_envelope():
+    """nvim_events._dispatch_notification must have a branch for the
+    'minimap' channel that emits minimap_event with the payload."""
+    import inspect
+
+    from symmetria_ide import nvim_events
+
+    src = inspect.getsource(nvim_events._dispatch_notification)
+    assert 'name == "minimap"' in src
+    assert "minimap_event.emit" in src

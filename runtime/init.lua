@@ -561,6 +561,22 @@ pcall(function()
   require("orchestrator.whichkey").setup()
 end)
 
+-- --- Editor minimap content channel ---------------------------------
+--
+-- Phase 1 of the editor minimap (docs/minimap-prd.md). Installs
+-- BufEnter / BufWritePost / TextChanged{,I} autocmds that push the
+-- buffer's full line content over the `"minimap"` rpcnotify channel.
+-- Python's `MinimapModel` ingests the stream; the view consumes it
+-- starting in Phase 2 (block-mode render). Wire shape + cadence are
+-- documented inside the module's header.
+--
+-- pcall isolates the setup from a botched module load — same defensive
+-- pattern as the which-key setup above. If the require() fails, the
+-- minimap silently stays empty rather than crashing nvim startup.
+pcall(function()
+  require("orchestrator.minimap").setup()
+end)
+
 -- --- Agent-pane keymap hijacks: REMOVED ------------------------------
 --
 -- The `<leader>aN` / `<leader>an` / `<C-1>..<C-5>` / `<C-S-q>` slots

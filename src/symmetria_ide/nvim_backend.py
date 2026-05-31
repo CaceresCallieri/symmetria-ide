@@ -109,6 +109,14 @@ class NvimBackend(QObject):
     # is a Qt application-scope shortcut that calls those Slots directly
     # — this RPC channel is the secondary (scripted) surface.
     anchor_event = Signal(dict)
+    # Editor minimap content channel — Phase 1 of docs/minimap-prd.md.
+    # Lua emitter at runtime/lua/orchestrator/minimap.lua pushes full
+    # buffer snapshots (and, post-Phase 1.5, patches) over the "minimap"
+    # rpcnotify channel; the payload is the dict envelope documented in
+    # `MinimapModel.apply`'s docstring. AppController connects this to
+    # MinimapModel.apply via explicit Qt.QueuedConnection (§4 P2 — the
+    # signal originates on the pynvim worker thread).
+    minimap_event = Signal(dict)
     closed = Signal()
 
     # --- Dispatch bindings --------------------------------------------
@@ -316,11 +324,27 @@ class NvimBackend(QObject):
             self._nvim.subscribe("completions")
             self._nvim.subscribe("scroll")
             self._nvim.subscribe("whichkey")
+            self._nvim.subscribe("minimap")
             log.info(
-                "subscribed to 'capsule' + 'completions' + 'scroll' + 'whichkey' notifications"
+                "subscribed to 'capsule' + 'completions' + 'scroll' + 'whichkey' "
+                "+ 'minimap' notifications"
             )
         except Exception:  # noqa: BLE001
             log.exception("subscribe(capsule/completions) failed")
+        # Force a minimap snapshot re-push to plug the subscribe race
+        # (CLAUDE.md gotcha #2). The Lua side fires its first BufEnter
+        # snapshot during nvim startup — before this subscribe call —
+        # so without the explicit re-request the minimap stays empty
+        # until the user's first edit. Same mitigation the capsule
+        # channel uses below.
+        try:
+            self._nvim.exec_lua(
+                "if _G.symmetria_minimap_push_snapshot then "
+                "_G.symmetria_minimap_push_snapshot() end"
+            )
+            log.info("requested initial minimap snapshot")
+        except Exception:  # noqa: BLE001
+            log.exception("initial minimap push request failed")
         try:
             self._nvim.exec_lua(
                 "if _G.symmetria_push_state then _G.symmetria_push_state() end"

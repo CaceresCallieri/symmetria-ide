@@ -390,4 +390,15 @@ def _dispatch_notification(self: NvimBackend, name: str, args: list[Any]) -> Non
             return
         self.anchor_event.emit(args[0])
         return
+    if name == "minimap":
+        # Editor minimap content channel (Phase 1 of docs/minimap-prd.md).
+        # Lua emits full-buffer snapshots; AppController routes the
+        # signal to MinimapModel.apply via Qt.QueuedConnection. Payload
+        # is the dict envelope documented in MinimapModel.apply's
+        # docstring; defensive shape check matches the other branches.
+        if not args or not isinstance(args[0], dict):
+            log.warning("minimap notification with unexpected payload: %r", args)
+            return
+        self.minimap_event.emit(args[0])
+        return
     log.debug("unhandled notification: %s (args=%r)", name, args)

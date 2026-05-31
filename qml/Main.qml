@@ -465,11 +465,14 @@ Window {
                         && !controller.fmVisible
                         && controller.editorVisible
                     scrollPosition: editor.scrollAnimationPosition
-                    // bufferRowCount is Phase 1 — wired here (defaults to
-                    // 0) so the binding site exists; Phase 1 connects it
-                    // to a future MinimapModel populated by the Lua
-                    // content channel.
-                    bufferRowCount: 0
+                    // Phase 1: live binding to the minimap content model
+                    // populated by runtime/lua/orchestrator/minimap.lua.
+                    // Stays at 0 until the Lua side emits its first
+                    // snapshot (BufEnter → schedule_snapshot_immediate);
+                    // the subscribe-race re-push in NvimBackend ensures
+                    // we get a snapshot even if the initial autocmd
+                    // fired before Python subscribed.
+                    bufferRowCount: minimapModel.lineCount
                     // Above the central panes so the ribbon visibly sits
                     // on top of NvimView's right edge; below
                     // mainContentFocusBorder (z: 50) so the focus

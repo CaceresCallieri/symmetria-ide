@@ -43,6 +43,7 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
     PopupmenuModel,
 )
 from .git_controller import GitController, GitStatusListModel
+from .minimap_model import MinimapModel
 from .minimap_view import MinimapView  # noqa: F401 — side-effect: @QmlElement registration
 from .nvim_backend import NvimBackend
 from .nvim_view import NvimView  # noqa: F401 — side-effect: @QmlElement registration
@@ -374,6 +375,12 @@ class AppController(QObject):
         self._completion = CompletionModel(self)
         self._whichkey_state = WhichKeyState(self)
         self._whichkey_model = WhichKeyModel(self)
+        # Editor minimap content model — Phase 1 of docs/minimap-prd.md.
+        # Receives full-buffer snapshots from the Lua emitter
+        # (runtime/lua/orchestrator/minimap.lua) via `NvimBackend.minimap_event`.
+        # Exposed to QML as `minimapModel` context property in _build_engine
+        # so MinimapView's bufferRowCount can bind to its lineCount.
+        self._minimap_model = MinimapModel(self)
         # ----- Per-instance pools (multi-instance foundation) -----------
         #
         # Slot-keyed dicts let Track-2 chord wirings drop in multi-spawn
@@ -430,6 +437,13 @@ class AppController(QObject):
         # handles visibility/trail, model handles the items list.
         self._backend.whichkey_event.connect(self._whichkey_state.apply)
         self._backend.whichkey_event.connect(self._whichkey_model.apply)
+        # queued: minimap_event originates on the pynvim worker thread;
+        # MinimapModel mutates list state read by the GUI-thread painter,
+        # so the connection must marshal to the GUI thread explicitly
+        # (§4 P2 — same rule as session_host's event hop).
+        self._backend.minimap_event.connect(
+            self._minimap_model.apply, Qt.ConnectionType.QueuedConnection
+        )
         # Agent-pane visibility lives on the IDE side only — the Lua-driven
         # `agent_event` rpcnotify channel was stripped when orchestrator.nvim
         # took back ownership of `<leader>aN` / `<C-1..5>` / `<C-S-q>`. The
@@ -2149,6 +2163,10 @@ class AppController(QObject):
     def whichkey_model(self) -> WhichKeyModel:
         return self._whichkey_model
 
+    @property
+    def minimap_model(self) -> MinimapModel:
+        return self._minimap_model
+
 
 def _register_qml_types() -> None:
     """Named audit point for QML type registration.
@@ -2230,6 +2248,9 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     ctx.setContextProperty("completionModel", controller.completion)
     ctx.setContextProperty("whichKeyState", controller.whichkey_state)
     ctx.setContextProperty("whichKeyModel", controller.whichkey_model)
+    # Editor minimap model — Phase 1 of docs/minimap-prd.md. Main.qml
+    # binds `MinimapView.bufferRowCount: minimapModel.lineCount`.
+    ctx.setContextProperty("minimapModel", controller.minimap_model)
     # Git status provider — exposed as its own context property so QML can
     # bind both the file tree's `statusProvider` and the (forthcoming)
     # Active Changes panel to the same object. Equivalent to
