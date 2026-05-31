@@ -511,3 +511,42 @@ def test_dispatch_routes_minimap_envelope():
     src = inspect.getsource(nvim_events._dispatch_notification)
     assert 'name == "minimap"' in src
     assert "minimap_event.emit" in src
+
+
+# ---------------------------------------------------------------------------
+# bufnr accessor — Phase 2 painters use this to invalidate per-buffer caches
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_updates_bufnr(qt_app):
+    """bufnr() must reflect the buffer number from the most recent snapshot.
+    Phase 2 painters compare this to their cached bufnr to decide whether
+    to invalidate indent-level arrays and other per-buffer state."""
+    del qt_app
+    m = MinimapModel()
+    assert m.bufnr() == -1  # initial state: no snapshot applied
+    m.apply({"op": "snapshot", "bufnr": 5, "line_count": 2, "lines": ["a", "b"]})
+    assert m.bufnr() == 5
+    # Switching to a different buffer updates bufnr.
+    m.apply({"op": "snapshot", "bufnr": 12, "line_count": 1, "lines": ["x"]})
+    assert m.bufnr() == 12
+
+
+def test_patch_updates_bufnr(qt_app):
+    """A patch envelope must also update the tracked bufnr."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 3, "line_count": 3, "lines": list("abc")})
+    assert m.bufnr() == 3
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 7,
+            "line_count": 3,
+            "first": 0,
+            "last": 1,
+            "lines": ["A"],
+        }
+    )
+    # bufnr comes from the patch envelope, not the prior snapshot.
+    assert m.bufnr() == 7

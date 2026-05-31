@@ -91,8 +91,11 @@ local function read_buffer(bufnr)
     return nil, nil
   end
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-  local line_count = vim.api.nvim_buf_line_count(bufnr)
-  return lines, line_count
+  -- Use #lines instead of nvim_buf_line_count to avoid a redundant API
+  -- call — nvim_buf_get_lines already has the authoritative content and
+  -- length. Python's MinimapModel also recomputes from len(lines) and
+  -- never trusts the wire `line_count` field.
+  return lines, #lines
 end
 
 ---Send a snapshot envelope. pcall'd so a disconnected Python client

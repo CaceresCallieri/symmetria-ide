@@ -91,8 +91,8 @@ class MinimapModel(QObject):
         self._line_count: int = 0
         # Tracks the buffer we last applied an envelope for. Phase 2+
         # may want to invalidate per-buffer caches (e.g. indent-level
-        # arrays) when the underlying buffer changes — exposed here so
-        # the painter can compare without us needing a separate signal.
+        # arrays) when the underlying buffer changes — readable via the
+        # `bufnr()` accessor without needing a separate signal.
         self._bufnr: int = -1
 
     # --- QML-visible properties ---------------------------------------
@@ -111,6 +111,12 @@ class MinimapModel(QObject):
         """Plain accessor for the painter — same value as the
         `lineCount` property without the QML marshalling overhead."""
         return self._line_count
+
+    def bufnr(self) -> int:
+        """Current buffer number. -1 when no snapshot has been applied.
+        Phase 2+ painters compare this to invalidate per-buffer caches
+        (e.g. indent-level arrays) when the user switches buffers."""
+        return self._bufnr
 
     def line_at(self, index: int) -> str:
         """Bounded line accessor. Out-of-range returns "" so the
@@ -167,15 +173,14 @@ class MinimapModel(QObject):
         # Coerce each entry to str. pynvim usually returns str already,
         # but a buffer with non-UTF-8 bytes could in theory yield bytes.
         # The decode keeps the painter from crashing on .lstrip() etc.
-        new_lines: list[str] = []
-        for line in lines_raw:
-            if isinstance(line, bytes):
-                try:
-                    new_lines.append(line.decode("utf-8", errors="replace"))
-                except Exception:  # noqa: BLE001
-                    new_lines.append("")
-            else:
-                new_lines.append(str(line))
+        # bytes.decode("utf-8", errors="replace") never raises (errors= absorbs
+        # all invalid sequences) so no try/except is needed here.
+        new_lines = [
+            line.decode("utf-8", errors="replace")
+            if isinstance(line, bytes)
+            else str(line)
+            for line in lines_raw
+        ]
         prev_count = self._line_count
         self._lines = new_lines
         self._line_count = len(new_lines)
