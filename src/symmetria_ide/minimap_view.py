@@ -236,10 +236,11 @@ class MinimapView(QQuickPaintedItem):
         if value == self._scroll_position:
             return
         self._scroll_position = value
-        # Phase 2 ignores the value beyond storing it; Phase 3 will
-        # add `self.update()` here so the viewport indicator
-        # repaints. The emit is required now so QML bindings on the
-        # Main.qml wrapper side actually fire — without the notify
+        # Phase 3 uses the model-signal path (viewportChanged →
+        # _on_viewport_changed → update()) rather than repaint-on-
+        # scroll-position, so this setter intentionally does NOT call
+        # self.update(). The emit is still required so QML bindings on
+        # the Main.qml wrapper side actually fire — without the notify
         # signal, QML's binding system caches the initial read and
         # ignores subsequent writes from the NvimView side (cf.
         # CLAUDE.md gotcha #3 — function-call bindings don't

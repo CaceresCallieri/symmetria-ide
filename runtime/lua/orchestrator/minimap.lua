@@ -194,6 +194,8 @@ local function emit_viewport()
   if count < 0 then
     count = 0
   end
+  -- pcall intentional: rpcnotify fails if the Python client is not yet
+  -- connected or has disconnected (same pattern as emit_snapshot above).
   pcall(vim.rpcnotify, 0, "minimap_viewport", {
     first = first,
     count = count,
