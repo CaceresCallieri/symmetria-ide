@@ -1,4 +1,4 @@
-"""Tests for MinimapModel — Phase 1 of the editor minimap.
+"""Tests for MinimapModel — Phase 1 / Phase 2 of the editor minimap.
 
 The model is a plain QObject (no QML registration via QmlElement, no
 QQuickItem dependency), so unlike `tests/test_minimap_view.py` we can
@@ -8,10 +8,13 @@ signal emissions. The QGuiApplication-free `qt_app` fixture is enough.
 Coverage targets the PRD §5.4 risk list:
   - R1.2 — invalid payload / wrong types must not crash the GUI thread
   - R1.3 — rapid successive patches keep the splice range correct
+  - R2.2 — indent levels are precomputed in apply(), never recomputed
+            inside paint() (no str.lstrip per row in the hot path)
 
 Plus the obvious shape contract: snapshot replaces; patch splices;
 linesChanged emits with the right range; lineCountChanged emits only
-when the count actually changes.
+when the count actually changes; indent_level() cache stays parallel
+to _lines across both snapshots and patches.
 """
 
 from __future__ import annotations
@@ -569,10 +572,9 @@ def test_indent_level_pure_function_spaces():
     assert _compute_indent_level("      foo") == 3
 
 
-def test_indent_level_clamps_to_max(qt_app):
+def test_indent_level_clamps_to_max():
     """Very deeply nested code clamps to the palette's max rung rather
     than overflowing the indent palette index."""
-    del qt_app
     from symmetria_ide.minimap_model import _compute_indent_level, _MAX_INDENT_LEVEL
 
     assert _MAX_INDENT_LEVEL == 3

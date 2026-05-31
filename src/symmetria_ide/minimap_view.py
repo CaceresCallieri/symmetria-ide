@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Property, QObject, QRectF, Qt, Signal
+from PySide6.QtCore import Property, QObject, QRectF, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtQml import QmlElement
 from PySide6.QtQuick import QQuickPaintedItem
@@ -287,6 +287,7 @@ class MinimapView(QQuickPaintedItem):
 
     # --- Model → view --------------------------------------------------
 
+    @Slot(int, int)
     def _on_lines_changed(self, first: int, last: int) -> None:
         """Request a repaint when the model's content mutates.
 
@@ -372,11 +373,10 @@ class MinimapView(QQuickPaintedItem):
         )
         # `row_h - 1` leaves a 1-px gap between rows — visually
         # separates adjacent blocks so the silhouette reads as
-        # discrete lines, not a solid mass. Clamp to a non-negative
-        # height in case `_MIN_ROW_HEIGHT_PX` is ever tuned below 1.
+        # discrete lines, not a solid mass. `_MIN_ROW_HEIGHT_PX` >= 2.0
+        # (enforced by test_layout_constants_within_sane_bounds) guarantees
+        # block_h = row_h - 1.0 >= 1.0, so the gap is always achievable.
         block_h = row_h - 1.0
-        if block_h < 0.5:
-            block_h = row_h
         # Per-iteration locals lifted out of the loop. Even though
         # the loop body is shape-stable, hoisting attribute lookups
         # is the same hot-path discipline NvimView's _paint_row uses.

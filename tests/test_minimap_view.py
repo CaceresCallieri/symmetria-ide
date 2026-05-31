@@ -1,4 +1,4 @@
-"""Structural tests for the MinimapView QQuickPaintedItem (Phase 0).
+"""Structural tests for the MinimapView QQuickPaintedItem (Phase 2).
 
 Instantiating a `QQuickPaintedItem` subclass requires a `QGuiApplication`
 (QQuickItem + QFontDatabase), which the session-scoped `qt_app` fixture
@@ -11,13 +11,17 @@ paint test would, at lower fixture cost and zero flakiness.
 Disciplines pinned here (correspond 1:1 with the gotchas + project
 standards referenced from `minimap_view.py`'s module docstring):
 
-- gotcha #10  — paint() allocates no fresh QColor / QRectF
+- gotcha #10  — paint() allocates no fresh QColor / QRectF; indent
+                palette memoized at module load (_indent_colors tuple)
 - gotcha #7   — QML registration constants + decoration intact
 - §3.3        — Theme tokens are the single source of truth for chrome
                 colour, drift between Theme.qml and the Python mirror
                 is detected here (mirrors the ANSI palette test pattern)
 - focus rule  — minimap is not a focus target (ItemIsFocusScope is NOT
                 set; setActiveFocusOnTab(False) keeps Tab cycling away)
+- model wiring — MinimapView.model setter connects linesChanged → update()
+                following the NvimView.backend / TerminalView.backend pattern
+- PRD §6 R2.2 — paint() reads cached indent_level(), never str.lstrip()
 """
 
 from __future__ import annotations
