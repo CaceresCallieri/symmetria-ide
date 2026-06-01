@@ -99,34 +99,61 @@ _DIAGNOSTIC_RANK: dict[str, int] = {
 _GIT_KINDS: frozenset[str] = frozenset({"added", "modified", "deleted"})
 
 
-def _compute_indent_level(line: str) -> int:
-    """Map a buffer line to its 0..`_MAX_INDENT_LEVEL` indent rung.
+def _compute_line_metrics(line: str) -> tuple[int, int]:
+    """Map a buffer line to (indent_level, content_length) in one walk.
 
-    Empty lines are level 0 (no indent, painter renders them at the
-    leftmost rung — visually blends into a gap in the silhouette).
-    Mixed-leading-whitespace lines count each tab as one level and
-    every `_INDENT_COLUMNS_PER_LEVEL` spaces as one level; pathological
-    leading-whitespace patterns clamp to the max rung rather than
-    overflowing the palette.
+    Phase 4.5 — the minimap painter now clips each block's width to
+    the actual content length (chars after leading whitespace), so
+    short lines and blank rows render as short bars / gaps and the
+    silhouette reflects real document shape. Computing both metrics
+    here saves a second per-line walk on every apply.
 
-    Pure-function so tests can exercise it without standing up a model.
-    Hot path — called once per line per apply(), never inside paint();
-    keeps allocations to one int per call (str.lstrip would allocate a
-    fresh str per call, which is why this loop walks chars instead).
+    - `indent_level`: 0..`_MAX_INDENT_LEVEL` rung (clamped); empty
+      lines and pure-whitespace lines are level 0 (no content to
+      indent under). Same semantics as the pre-4.5 function.
+    - `content_length`: number of characters after leading whitespace.
+      Empty lines, pure-whitespace lines, and unindented blank rows
+      all return 0 — the painter renders them as a gap. UTF-8
+      multi-byte characters count as 1 (Python's `len` over str
+      counts codepoints, which is the right unit at minimap scale).
+
+    Pure-function — tests exercise it without standing up a model.
+    Hot path — called once per line per apply(), never inside paint().
+    Single str walk; no str allocations (str.lstrip would allocate a
+    fresh str per call, which we deliberately avoid).
     """
     columns = 0
+    leading = 0
     for ch in line:
         if ch == " ":
             columns += 1
+            leading += 1
         elif ch == "\t":
             # Tab counts as a full level boundary regardless of tab
             # width — see module-level comment for the rationale.
             columns += _INDENT_COLUMNS_PER_LEVEL
+            leading += 1
         else:
             break
     level = columns // _INDENT_COLUMNS_PER_LEVEL
     if level > _MAX_INDENT_LEVEL:
-        return _MAX_INDENT_LEVEL
+        level = _MAX_INDENT_LEVEL
+    content_length = len(line) - leading
+    if content_length < 0:
+        # Defensive: can only happen if `line` is empty AND `leading`
+        # somehow positive, which the loop prevents. Belt-and-braces
+        # so the painter never receives a negative width.
+        content_length = 0
+    return level, content_length
+
+
+def _compute_indent_level(line: str) -> int:
+    """Back-compat alias for the indent-only consumer (tests).
+    Phase 4.5 replaced the dedicated indent walk with `_compute_line_metrics`
+    above; this thin wrapper preserves the older entry point so existing
+    tests that exercise the pure-function indent semantics keep working.
+    """
+    level, _ = _compute_line_metrics(line)
     return level
 
 
@@ -198,6 +225,15 @@ class MinimapModel(QObject):
         # `line_at()` uses, so transient stale-bookkeeping windows
         # in the painter's iteration don't crash.
         self._indent_levels: list[int] = []
+        # Parallel cache of content-after-leading-whitespace lengths
+        # per line — Phase 4.5. The painter clips each row's block
+        # width to `content_length * _CHAR_WIDTH_PX` so short lines
+        # render short and blanks render as gaps; without this the
+        # silhouette was a wall of full-width bars regardless of
+        # actual line content. Recomputed inside apply() alongside
+        # `_indent_levels` from a single `_compute_line_metrics`
+        # call (one walk per line for both metrics).
+        self._content_lengths: list[int] = []
         # Viewport range — Phase 3. `_viewport_first` is the 0-indexed
         # buffer line at the top of the editor's visible region;
         # `_viewport_count` is the number of visible lines. (0, 0)
@@ -297,6 +333,15 @@ class MinimapModel(QObject):
         """
         if 0 <= index < len(self._indent_levels):
             return self._indent_levels[index]
+        return 0
+
+    def content_length(self, index: int) -> int:
+        """Cached content length (chars after leading whitespace) for
+        line `index`. Phase 4.5 — painter uses this to clip block
+        width so short lines render as short bars. Same bounds-clamping
+        contract as `indent_level()` — out-of-range returns 0 (gap)."""
+        if 0 <= index < len(self._content_lengths):
+            return self._content_lengths[index]
         return 0
 
     # --- Backend → model ----------------------------------------------
@@ -475,12 +520,16 @@ class MinimapModel(QObject):
         self._lines = new_lines
         self._line_count = len(new_lines)
         self._bufnr = bufnr
-        # Recompute the full indent cache — snapshot replaces every
-        # line, so every cached level is stale. Done here (in apply,
-        # GUI-thread, before the linesChanged emit) so painters
-        # connected to that signal can safely read `indent_level()`
-        # without races.
-        self._indent_levels = [_compute_indent_level(line) for line in new_lines]
+        # Recompute the full indent + content-length caches via the
+        # unified metrics walk — snapshot replaces every line, so
+        # every cached value is stale. Building both arrays in a
+        # single comprehension means one walk per line, not two.
+        # Done here (in apply, GUI-thread, before linesChanged emit)
+        # so painters connected to that signal can safely read
+        # `indent_level()` / `content_length()` without races.
+        metrics = [_compute_line_metrics(line) for line in new_lines]
+        self._indent_levels = [m[0] for m in metrics]
+        self._content_lengths = [m[1] for m in metrics]
         # Snapshot replaces the entire buffer — emit a full-range
         # change so connected painters repaint every row.
         self.linesChanged.emit(0, self._line_count)
@@ -521,14 +570,18 @@ class MinimapModel(QObject):
         self._lines[first:last] = new_lines
         self._line_count = len(self._lines)
         self._bufnr = bufnr
-        # Recompute the indent cache for the affected slice only —
-        # patches mutate `_lines[first:last]`, so only those indent
-        # levels can have changed. Touching the whole array would be
-        # O(N) per patch and defeat the patch's reason to exist;
-        # splicing in just the new levels is O(len(new_lines)) and
-        # keeps long-buffer edit cadence cheap.
-        new_levels = [_compute_indent_level(line) for line in new_lines]
+        # Recompute the indent + content-length caches for the affected
+        # slice only — patches mutate `_lines[first:last]`, so only
+        # those metrics can have changed. Touching the whole arrays
+        # would be O(N) per patch and defeat the patch's reason to
+        # exist; splicing in just the new values is O(len(new_lines))
+        # and keeps long-buffer edit cadence cheap. One unified walk
+        # per line yields both metrics.
+        metrics = [_compute_line_metrics(line) for line in new_lines]
+        new_levels = [m[0] for m in metrics]
+        new_content = [m[1] for m in metrics]
         self._indent_levels[first:last] = new_levels
+        self._content_lengths[first:last] = new_content
         # Emit a range covering the SPLICED region — for an insert
         # that range may extend past `last`. Painters connected via
         # `linesChanged` re-render that range; for a snapshot-style

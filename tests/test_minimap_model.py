@@ -1122,3 +1122,127 @@ def test_dispatch_routes_phase4_envelopes():
     assert "minimap_diagnostics_event.emit" in src
     assert 'name == "minimap_git"' in src
     assert "minimap_git_event.emit" in src
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.5 — content-length cache (line-width fidelity)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_line_metrics_returns_indent_and_length(qt_app):
+    """The unified pure-fn must return (indent_level, content_length)
+    in a single walk — saves a second per-line walk on apply paths."""
+    del qt_app
+    from symmetria_ide.minimap_model import _compute_line_metrics
+
+    assert _compute_line_metrics("") == (0, 0)
+    assert _compute_line_metrics("foo") == (0, 3)
+    assert _compute_line_metrics("  foo") == (1, 3)
+    assert _compute_line_metrics("    foo") == (2, 3)
+    assert _compute_line_metrics("      foo") == (3, 3)
+
+
+def test_content_length_excludes_leading_whitespace(qt_app):
+    """Content length must count chars AFTER leading whitespace —
+    the indent offset already represents that whitespace visually."""
+    del qt_app
+    from symmetria_ide.minimap_model import _compute_line_metrics
+
+    _, content = _compute_line_metrics("    hello world")
+    assert content == len("hello world")
+
+
+def test_content_length_zero_for_blank_and_pure_whitespace(qt_app):
+    """Empty / pure-space / pure-tab lines all return content_length=0
+    so the painter skips them as gaps in the silhouette."""
+    del qt_app
+    from symmetria_ide.minimap_model import _compute_line_metrics
+
+    assert _compute_line_metrics("")[1] == 0
+    assert _compute_line_metrics("    ")[1] == 0
+    assert _compute_line_metrics("\t\t")[1] == 0
+
+
+def test_content_length_counts_utf8_codepoints_not_bytes(qt_app):
+    """`len(str)` returns codepoint count which is the right unit at
+    minimap scale — multi-byte UTF-8 chars count as 1, not 2 or 3."""
+    del qt_app
+    from symmetria_ide.minimap_model import _compute_line_metrics
+
+    # Emoji is 1 codepoint but multiple UTF-8 bytes.
+    assert _compute_line_metrics("hi 😀")[1] == 4
+    # Accented chars: 1 codepoint each.
+    assert _compute_line_metrics("café")[1] == 4
+
+
+def test_snapshot_populates_content_length_cache(qt_app):
+    """apply_snapshot must build _content_lengths parallel to
+    _indent_levels and _lines."""
+    del qt_app
+    m = MinimapModel()
+    m.apply(
+        {
+            "op": "snapshot",
+            "bufnr": 1,
+            "line_count": 4,
+            "lines": ["abc", "  def", "    g", ""],
+        }
+    )
+    assert m.content_length(0) == 3
+    assert m.content_length(1) == 3
+    assert m.content_length(2) == 1
+    assert m.content_length(3) == 0
+
+
+def test_content_length_oob_clamps_to_zero(qt_app):
+    """Same bounds-clamping contract as indent_level()."""
+    del qt_app
+    m = MinimapModel()
+    m.apply({"op": "snapshot", "bufnr": 1, "line_count": 2, "lines": ["a", "b"]})
+    assert m.content_length(-1) == 0
+    assert m.content_length(100) == 0
+
+
+def test_patch_updates_content_length_cache(qt_app):
+    """A patch must splice _content_lengths over the affected range —
+    same range the _indent_levels splice touches."""
+    del qt_app
+    m = MinimapModel()
+    m.apply(
+        {"op": "snapshot", "bufnr": 1, "line_count": 3, "lines": ["abc", "def", "ghi"]}
+    )
+    assert [m.content_length(i) for i in range(3)] == [3, 3, 3]
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 3,
+            "first": 1,
+            "last": 2,
+            "lines": ["XXXXXXXX"],
+        }
+    )
+    assert m.content_length(1) == 8
+    # Other rows untouched.
+    assert m.content_length(0) == 3
+    assert m.content_length(2) == 3
+
+
+def test_snapshot_replaces_full_content_length_cache(qt_app):
+    """A fresh snapshot must wipe the prior content_length cache —
+    no bleed-through from a longer prior buffer."""
+    del qt_app
+    m = MinimapModel()
+    m.apply(
+        {
+            "op": "snapshot",
+            "bufnr": 1,
+            "line_count": 3,
+            "lines": ["x" * 50, "y" * 50, "z" * 50],
+        }
+    )
+    m.apply({"op": "snapshot", "bufnr": 2, "line_count": 1, "lines": ["short"]})
+    assert m.content_length(0) == 5
+    # Past-end clamp — prior 50s must not bleed through.
+    assert m.content_length(1) == 0
+    assert m.content_length(2) == 0

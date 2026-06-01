@@ -84,10 +84,16 @@ _background_color: QColor = QColor(*_BACKGROUND_RGBA)
 # channel needed. See Theme.qml's `minimap.indent` block for the
 # tone-gradient rationale.
 _INDENT_RGBA: tuple[tuple[int, int, int], ...] = (
-    (0xC8, 0xA3, 0x7A),  # level 0 — accent.primary, top-level (brightest)
-    (0x9A, 0x85, 0x68),  # level 1 — function-body level
-    (0x6E, 0x60, 0x55),  # level 2 — conditional / loop body
-    (0x52, 0x48, 0x3F),  # level 3 — deep nesting (faintest, still legible)
+    # Neutral gray ramp tracking Theme.text.* family. See Theme.qml
+    # `minimap.indent` block for the rationale on shifting from the
+    # warm-amber palette to neutrals (the silhouette reads as text,
+    # not chrome). Phase 6's off-viewport syntax-highlight pipeline
+    # will eventually replace this fixed ramp with per-row colors
+    # from the editor's actual treesitter highlights.
+    (0xE8, 0xE8, 0xE8),  # level 0 — text.emphasis (brightest)
+    (0xB0, 0xB0, 0xB0),  # level 1 — text.normal
+    (0x88, 0x88, 0x88),  # level 2 — mid-tone
+    (0x5A, 0x5A, 0x5A),  # level 3 — deep nesting (quietest)
 )
 
 # Memoized indent QColors. Module-level construction so the paint loop
@@ -203,6 +209,19 @@ _MIN_ROW_HEIGHT_PX = 2.0
 # minimap width shrinks under 70 px; tune-up to 5/6 if the silhouette
 # reads too flat on shallow-indent codebases.
 _INDENT_STEP_PX = 4.0
+
+# Pixels per character in the minimap silhouette — Phase 4.5.
+# Painter clips each row's block width to `content_length * _CHAR_WIDTH_PX`
+# (clamped to the available width). 0.7 px/char means a 100-char line
+# occupies ~70 px (most of the 80 px minimap minus gutter); shorter
+# lines render as proportionally shorter bars and blanks render as
+# gaps. This gives the silhouette real document-shape fidelity
+# instead of a wall of full-width bars.
+#
+# Tune-up to 0.9 if your project mostly uses ≤80-char lines and you
+# want the bars to fill more; tune-down to 0.55 if you regularly
+# exceed 130-char lines and want every line to fit without clipping.
+_CHAR_WIDTH_PX = 0.7
 
 
 @QmlElement
@@ -516,8 +535,10 @@ class MinimapView(QQuickPaintedItem):
         # is the same hot-path discipline NvimView's _paint_row uses.
         rect = self._paint_rect
         indent_level = self._model.indent_level
+        content_length = self._model.content_length
         fill_rect = painter.fillRect
         indent_step = _INDENT_STEP_PX
+        char_width = _CHAR_WIDTH_PX
         # Silhouette inset — Phase 4 reserves `_GUTTER_WIDTH_PX` on the
         # left for the diagnostic + git column. Without this offset the
         # gutter pass would overpaint the silhouette's leftmost pixels
@@ -527,9 +548,23 @@ class MinimapView(QQuickPaintedItem):
         # painter order becomes irrelevant for correctness.
         gutter_inset = _GUTTER_WIDTH_PX
         for row_idx in range(rows_to_draw):
+            # Phase 4.5: blank / pure-whitespace lines have
+            # content_length == 0 and render as gaps. Skipping early
+            # avoids a 0-width fillRect that costs the Qt round-trip.
+            content_len = content_length(row_idx)
+            if content_len <= 0:
+                continue
             level = indent_level(row_idx)
             x_offset = gutter_inset + level * indent_step
-            block_w = view_w - x_offset
+            # Phase 4.5: clip the block width to the actual content
+            # length so short lines render short. The min() clamps
+            # to remaining-after-indent so very long lines don't
+            # overflow the minimap; min-with-view_w-x_offset is the
+            # belt for the gutter-inset clamp.
+            block_w = content_len * char_width
+            max_w = view_w - x_offset
+            if block_w > max_w:
+                block_w = max_w
             if block_w <= 0.0:
                 # Defensive: if the minimap is narrower than the deepest
                 # indent's offset, skip the row rather than emit a

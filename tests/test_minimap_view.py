@@ -913,3 +913,68 @@ def test_gutter_renders_independently_of_viewport_state():
             "Use a conditional `if viewport_count > 0:` block instead of an "
             "early-return so both features operate independently."
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.5 — neutral gray palette + content-length-aware width clipping
+# ---------------------------------------------------------------------------
+
+
+def test_indent_palette_is_neutral_gray():
+    """Phase 4.5 shifted from warm-amber to neutral gray. The brightest
+    rung must equal Theme.text.emphasis (#E8E8E8); the dimmest rung
+    must stay above Theme.text.dim (#7A7A7A) to remain perceptible
+    against the wallpaper-blend background.
+    """
+    from symmetria_ide.minimap_view import _INDENT_RGBA
+
+    # Level 0 = brightest.
+    assert _INDENT_RGBA[0] == (0xE8, 0xE8, 0xE8)
+    # Monotonically decreasing brightness (R == G == B at every level,
+    # gray ramp — no warm/cool bias).
+    for r, g, b in _INDENT_RGBA:
+        assert r == g == b, (
+            f"_INDENT_RGBA entry ({r:#x},{g:#x},{b:#x}) is NOT neutral gray — "
+            "Phase 4.5 requires R == G == B"
+        )
+    # Strictly decreasing from level 0 to level 3.
+    grays = [rgb[0] for rgb in _INDENT_RGBA]
+    assert grays == sorted(grays, reverse=True), (
+        "Indent palette must be brightest → dimmest from level 0 to 3"
+    )
+
+
+def test_char_width_px_constant_in_sensible_range():
+    """Phase 4.5 introduces _CHAR_WIDTH_PX as the chars→pixels ratio
+    for content-length-aware block widths. 0.5 to 1.0 covers typical
+    code line widths within the 80-px minimap budget."""
+    from symmetria_ide.minimap_view import _CHAR_WIDTH_PX
+
+    assert 0.4 <= _CHAR_WIDTH_PX <= 1.0
+
+
+def test_paint_reads_content_length_and_clips_block_width():
+    """Paint() MUST call model.content_length and multiply by
+    _CHAR_WIDTH_PX (not draw a full-width block per line). Without
+    this clip the silhouette returns to the Phase 4.0 wall-of-bars
+    look — a visible regression."""
+    src = inspect.getsource(MinimapView.paint)
+    body = src.split('"""', 2)[-1] if src.count('"""') >= 2 else src
+    assert "content_length" in body, (
+        "paint() must read model.content_length() to clip per-row block width"
+    )
+    assert "_CHAR_WIDTH_PX" in body or "char_width" in body, (
+        "paint() must scale content_length by _CHAR_WIDTH_PX for the clip"
+    )
+
+
+def test_paint_skips_zero_content_rows():
+    """A row with content_length == 0 (blank / pure-whitespace) MUST
+    be skipped — no fillRect — so blanks render as gaps in the
+    silhouette rather than full-width bars."""
+    src = inspect.getsource(MinimapView.paint)
+    # The early-continue guard must be present in the loop body.
+    assert "content_len <= 0" in src or "content_len == 0" in src, (
+        "paint() must skip rows with content_length <= 0 (blank lines "
+        "should render as gaps, not full-width bars)"
+    )

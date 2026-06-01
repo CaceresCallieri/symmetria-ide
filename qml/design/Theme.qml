@@ -340,10 +340,32 @@ QtObject {
             // `minimap_view.py::_INDENT_RGBA`. Drift detection in
             // `tests/test_minimap_view.py::test_indent_palette_matches_theme_qml`.
             readonly property QtObject indent: QtObject {
-                readonly property color level0: "#c8a37a"    // accent.primary — top-level, brightest
-                readonly property color level1: "#9a8568"    // dimmer warm, function-body level
-                readonly property color level2: "#6e6055"    // dimmer still, conditional / loop body
-                readonly property color level3: "#52483f"    // deep nesting — barely there
+                // Neutral gray palette tracking the editor's text ramp
+                // (Theme.text.emphasis → text.normal → text.dim) so the
+                // silhouette reads as "this is text" rather than warm
+                // chrome decoration. Earlier amber→brown palette
+                // overstated the minimap as its own visual layer; the
+                // gray palette lets the surface fade into the editor
+                // and only the viewport indicator / gutter markers
+                // assert presence.
+                //
+                // The four rungs still encode indent depth (brightest
+                // at top-level so document outline pops), but now they
+                // step within Theme's neutral text family rather than
+                // wine_theme's amber accent family. Phase 6 (off-
+                // viewport tree-sitter highlights) is when the
+                // minimap will actually take per-character color from
+                // the editor's syntax — until then the gray palette
+                // is the closest "respect editor text color" rendering
+                // we can land without the highlight pipeline.
+                //
+                // Mirrored on the Python side as
+                // `minimap_view.py::_INDENT_RGBA`. Drift detection in
+                // `tests/test_minimap_view.py::test_indent_palette_matches_theme_qml`.
+                readonly property color level0: "#e8e8e8"    // text.emphasis — top-level, brightest
+                readonly property color level1: "#b0b0b0"    // text.normal   — function-body level
+                readonly property color level2: "#888888"    // mid-tone between normal and dim
+                readonly property color level3: "#5a5a5a"    // deep nesting — quietest, slightly above text.dim
             }
 
             // Viewport indicator — Phase 3 of docs/minimap-prd.md.
