@@ -227,6 +227,219 @@ function _G.symmetria_minimap_push_viewport()
   emit_viewport()
 end
 
+-- ----- Diagnostic channel (Phase 4) ---------------------------------
+--
+-- Pushes a list of `{lnum, severity}` entries over the
+-- `"minimap_diagnostics"` rpcnotify channel so MinimapView's
+-- left-edge gutter can paint coloured dots at problem rows. Fires on
+-- DiagnosticChanged (the canonical autocmd for LSP / nvim-lint /
+-- treesitter diagnostic deltas).
+--
+-- severity uses `vim.diagnostic.severity` enum (1=ERROR, 2=WARN,
+-- 3=INFO, 4=HINT) — we translate to a string at the wire boundary
+-- so the Python side reads {"error","warn","info","hint"} and never
+-- has to track the int->name mapping. Keeps the painter's palette
+-- lookup a dict key, not a magic-number switch.
+--
+-- `lnum` from vim.diagnostic is 0-indexed already (unlike line('w0'));
+-- no off-by-one translation needed at this boundary.
+
+local diag_pending = false
+
+local SEVERITY_TO_STRING = {
+  [1] = "error",
+  [2] = "warn",
+  [3] = "info",
+  [4] = "hint",
+}
+
+---Emit one batch of diagnostic entries for the current buffer.
+local function emit_diagnostics()
+  local bufnr = vim.api.nvim_get_current_buf()
+  -- vim.diagnostic.get(bufnr) returns the full active diagnostic list
+  -- for the buffer — already filtered by namespace, deduped against
+  -- LSP server churn. We map each one to its minimum-cost wire shape
+  -- (lnum + severity string) and drop everything else.
+  local raw = vim.diagnostic.get(bufnr)
+  local entries = {}
+  for i = 1, #raw do
+    local d = raw[i]
+    local sev = SEVERITY_TO_STRING[d.severity] or "info"
+    -- Multiple diagnostics on the same line collapse at the painter
+    -- (minimap scale can't differentiate them); send all of them and
+    -- let the model dedupe by max-severity-wins.
+    entries[#entries + 1] = { lnum = d.lnum, severity = sev }
+  end
+  -- pcall intentional: rpcnotify fails if the Python client isn't yet
+  -- connected. Same pattern as emit_snapshot / emit_viewport.
+  pcall(vim.rpcnotify, 0, "minimap_diagnostics", {
+    bufnr = bufnr,
+    entries = entries,
+  })
+end
+
+---Schedule a coalesced diagnostic emit. Own pending flag so a flurry
+---of DiagnosticChanged events (LSP server initial sync, treesitter
+---incremental parse) collapses into one wire envelope per tick.
+local function schedule_diagnostics()
+  if vim.g.symmetria_minimap_emit == 0 then
+    return
+  end
+  if diag_pending then
+    return
+  end
+  diag_pending = true
+  vim.schedule(function()
+    diag_pending = false
+    emit_diagnostics()
+  end)
+end
+
+---Public re-push hook for the Python subscribe-race fix.
+-- selene: allow(global_usage)  -- IPC boundary; gotcha #2
+function _G.symmetria_minimap_push_diagnostics()
+  emit_diagnostics()
+end
+
+-- ----- Git-diff channel (Phase 4) -----------------------------------
+--
+-- Pushes a list of `{lnum, kind}` entries over the `"minimap_git"`
+-- channel so MinimapView's gutter can paint a coloured bar at each
+-- row that differs from HEAD. Reads from `gitsigns.nvim`'s public Lua
+-- API — confirmed present in the user's nvim config during Phase 0
+-- investigation (~/.dotfiles/.config/nvim/lua/jc/plugins/gitsigns.lua).
+--
+-- `kind` is the wire-format hunk type: "added" / "modified" / "deleted".
+-- gitsigns reports hunks as `{type, start, count, head, ...}` where
+-- `type` is one of `"add"`, `"change"`, `"delete"`; we expand the
+-- `start..start+count-1` range into per-lnum entries here so the
+-- painter doesn't have to walk hunks during its hot path.
+--
+-- Cadence per PRD §8.3 R4.1:
+--   - BufWritePost: save just changed the working tree — re-read
+--   - FocusGained:  user switched windows (external edit possible)
+--   - TextChanged{,I}: debounced ~2s via a timer, so rapid typing
+--     doesn't bombard gitsigns
+--
+-- gitsigns may not be loaded yet at first call (lazy-load); we
+-- pcall-guard the require and skip cleanly if it isn't there. Each
+-- subsequent call retries the require so once gitsigns finishes
+-- loading the bars start appearing.
+
+local git_debounce_timer = nil
+local GIT_DEBOUNCE_MS = 2000
+
+---Read git hunks for the current buffer via gitsigns. Returns nil if
+---gitsigns isn't available; caller skips the emit silently.
+local function read_git_hunks(bufnr)
+  local ok, gitsigns = pcall(require, "gitsigns")
+  if not ok or gitsigns == nil then
+    return nil
+  end
+  -- gitsigns.get_hunks(bufnr) is the public read API. Returns
+  -- `{ {type, start, count, head, ...}, ... }` or nil if the
+  -- buffer isn't tracked / git repo isn't initialised.
+  local raw = gitsigns.get_hunks(bufnr)
+  if raw == nil then
+    return {}
+  end
+  return raw
+end
+
+---Map gitsigns hunk types to the wire-format `kind`. gitsigns uses
+---short forms; we normalise to the longer "added"/"modified"/"deleted"
+---per the wire contract documented above.
+local function gitsigns_kind_to_wire(t)
+  if t == "add" then
+    return "added"
+  elseif t == "change" then
+    return "modified"
+  elseif t == "delete" then
+    return "deleted"
+  end
+  return "modified"
+end
+
+---Emit one batch of git-hunk entries for the current buffer.
+local function emit_git()
+  local bufnr = vim.api.nvim_get_current_buf()
+  local hunks = read_git_hunks(bufnr)
+  if hunks == nil then
+    -- gitsigns not loaded yet — silently drop. Next BufWritePost /
+    -- FocusGained / debounced TextChanged will retry the require.
+    return
+  end
+  local entries = {}
+  for i = 1, #hunks do
+    local h = hunks[i]
+    local kind = gitsigns_kind_to_wire(h.type)
+    local count = h.count or 1
+    if count < 1 then
+      count = 1
+    end
+    -- gitsigns `start` is 1-indexed. We expand to 0-indexed lnums to
+    -- match the diagnostic channel's convention and the Python model.
+    local first_lnum = (h.start or 1) - 1
+    for j = 0, count - 1 do
+      entries[#entries + 1] = { lnum = first_lnum + j, kind = kind }
+    end
+  end
+  -- pcall intentional: rpcnotify fails if the Python client isn't yet
+  -- connected. Same pattern as emit_snapshot / emit_viewport.
+  pcall(vim.rpcnotify, 0, "minimap_git", {
+    bufnr = bufnr,
+    entries = entries,
+  })
+end
+
+---Cancel any in-flight debounce timer and emit immediately. Used for
+---BufWritePost and FocusGained where the user expects current state.
+local function emit_git_immediate()
+  if vim.g.symmetria_minimap_emit == 0 then
+    return
+  end
+  if git_debounce_timer ~= nil then
+    git_debounce_timer:stop()
+    git_debounce_timer:close()
+    git_debounce_timer = nil
+  end
+  vim.schedule(emit_git)
+end
+
+---Schedule a debounced git emit (~2s). Used for TextChanged events
+---where the user is actively typing — a real `git diff` is expensive
+---enough that running it per keystroke would jank the editor.
+---vim.uv is nvim 0.10+'s rename of vim.loop; both alias the libuv
+---wrapper so falling back covers older builds.
+local function schedule_git_debounced()
+  if vim.g.symmetria_minimap_emit == 0 then
+    return
+  end
+  local uv = vim.uv or vim.loop
+  if git_debounce_timer ~= nil then
+    git_debounce_timer:stop()
+    git_debounce_timer:close()
+  end
+  git_debounce_timer = uv.new_timer()
+  git_debounce_timer:start(
+    GIT_DEBOUNCE_MS,
+    0,
+    vim.schedule_wrap(function()
+      if git_debounce_timer ~= nil then
+        git_debounce_timer:close()
+        git_debounce_timer = nil
+      end
+      emit_git()
+    end)
+  )
+end
+
+---Public re-push hook for the Python subscribe-race fix.
+-- selene: allow(global_usage)  -- IPC boundary; gotcha #2
+function _G.symmetria_minimap_push_git()
+  emit_git()
+end
+
 ---Install autocmds. Idempotent — re-running setup() clears the prior
 ---group and re-installs, so a hot-reload during dev doesn't stack
 ---duplicate handlers.
@@ -300,8 +513,50 @@ function M.setup()
     group = grp,
     callback = function()
       schedule_viewport()
+      -- Re-emit diagnostics + git for the new buffer too — the new
+      -- buffer has its own diagnostic set and git-hunks list.
+      schedule_diagnostics()
+      emit_git_immediate()
     end,
-    desc = "Symmetria minimap: viewport on buffer enter",
+    desc = "Symmetria minimap: viewport + diagnostics + git on buffer enter",
+  })
+
+  -- DiagnosticChanged: LSP / linter delivered a fresh batch. Always
+  -- emit — content's already settled in the diagnostic namespace,
+  -- and this is the only signal we get for diagnostic-only updates
+  -- (LSP can re-publish without TextChanged firing).
+  vim.api.nvim_create_autocmd("DiagnosticChanged", {
+    group = grp,
+    callback = function()
+      schedule_diagnostics()
+    end,
+    desc = "Symmetria minimap: diagnostics on LSP delta",
+  })
+
+  -- Git emits — three trigger sources per PRD §8.3 R4.1:
+  --   - BufWritePost: explicit save just changed the working tree
+  --   - FocusGained:  external editor may have changed files
+  --   - TextChanged{,I}: debounced ~2s while user types
+  vim.api.nvim_create_autocmd("BufWritePost", {
+    group = grp,
+    callback = function()
+      emit_git_immediate()
+    end,
+    desc = "Symmetria minimap: git diff on save",
+  })
+  vim.api.nvim_create_autocmd("FocusGained", {
+    group = grp,
+    callback = function()
+      emit_git_immediate()
+    end,
+    desc = "Symmetria minimap: git diff on focus regain",
+  })
+  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+    group = grp,
+    callback = function()
+      schedule_git_debounced()
+    end,
+    desc = "Symmetria minimap: git diff on text change (debounced)",
   })
 end
 

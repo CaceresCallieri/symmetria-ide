@@ -414,4 +414,25 @@ def _dispatch_notification(self: NvimBackend, name: str, args: list[Any]) -> Non
             return
         self.minimap_viewport_event.emit(args[0])
         return
+    if name == "minimap_diagnostics":
+        # Editor minimap diagnostic channel (Phase 4). Lua emits a
+        # list of `{lnum, severity}` entries on DiagnosticChanged.
+        # Routed to MinimapModel.apply_diagnostics.
+        if not args or not isinstance(args[0], dict):
+            log.warning(
+                "minimap_diagnostics notification with unexpected payload: %r",
+                args,
+            )
+            return
+        self.minimap_diagnostics_event.emit(args[0])
+        return
+    if name == "minimap_git":
+        # Editor minimap git-diff channel (Phase 4). Lua reads from
+        # gitsigns.nvim and emits per-lnum hunk entries; routed to
+        # MinimapModel.apply_git.
+        if not args or not isinstance(args[0], dict):
+            log.warning("minimap_git notification with unexpected payload: %r", args)
+            return
+        self.minimap_git_event.emit(args[0])
+        return
     log.debug("unhandled notification: %s (args=%r)", name, args)

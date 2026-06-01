@@ -124,6 +124,15 @@ class NvimBackend(QObject):
     # with editor scrolls. Routed to MinimapModel.apply_viewport via
     # Qt.QueuedConnection in AppController.
     minimap_viewport_event = Signal(dict)
+    # Editor minimap diagnostic channel — Phase 4. Lua emits a list of
+    # `{lnum, severity}` entries on DiagnosticChanged so the minimap's
+    # left-edge gutter can paint coloured dots at problem rows. Routed
+    # to MinimapModel.apply_diagnostics via Qt.QueuedConnection.
+    minimap_diagnostics_event = Signal(dict)
+    # Editor minimap git-diff channel — Phase 4. Lua emits a list of
+    # `{lnum, kind}` entries on BufWritePost / FocusGained / debounced
+    # TextChanged, reading from gitsigns.nvim's public Lua API.
+    minimap_git_event = Signal(dict)
     closed = Signal()
 
     # --- Dispatch bindings --------------------------------------------
@@ -333,9 +342,12 @@ class NvimBackend(QObject):
             self._nvim.subscribe("whichkey")
             self._nvim.subscribe("minimap")
             self._nvim.subscribe("minimap_viewport")
+            self._nvim.subscribe("minimap_diagnostics")
+            self._nvim.subscribe("minimap_git")
             log.info(
                 "subscribed to 'capsule' + 'completions' + 'scroll' + 'whichkey' "
-                "+ 'minimap' + 'minimap_viewport' notifications"
+                "+ 'minimap' + 'minimap_viewport' + 'minimap_diagnostics' "
+                "+ 'minimap_git' notifications"
             )
         except Exception:  # noqa: BLE001
             log.exception("subscribe(capsule/completions) failed")
@@ -366,6 +378,26 @@ class NvimBackend(QObject):
             log.info("requested initial minimap viewport")
         except Exception:  # noqa: BLE001
             log.exception("initial minimap viewport push request failed")
+        # Diagnostic + git initial push — same subscribe-race rationale.
+        # DiagnosticChanged / BufWritePost may have fired before we
+        # subscribed; without the re-push the gutter would stay empty
+        # until the next user-driven event.
+        try:
+            self._nvim.exec_lua(
+                "if _G.symmetria_minimap_push_diagnostics then "
+                "_G.symmetria_minimap_push_diagnostics() end"
+            )
+            log.info("requested initial minimap diagnostics")
+        except Exception:  # noqa: BLE001
+            log.exception("initial minimap diagnostics push request failed")
+        try:
+            self._nvim.exec_lua(
+                "if _G.symmetria_minimap_push_git then "
+                "_G.symmetria_minimap_push_git() end"
+            )
+            log.info("requested initial minimap git")
+        except Exception:  # noqa: BLE001
+            log.exception("initial minimap git push request failed")
         try:
             self._nvim.exec_lua(
                 "if _G.symmetria_push_state then _G.symmetria_push_state() end"

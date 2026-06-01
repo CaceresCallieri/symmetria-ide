@@ -373,6 +373,67 @@ QtObject {
             // `tests/test_minimap_view.py::test_viewport_palette_matches_theme_qml`.
             readonly property color viewportFill: "#1affffff"    // white @ ~10% alpha
             readonly property color viewportFrame: "#66ffffff"   // white @ ~40% alpha (== accent.focus)
+
+            // Diagnostic gutter (Phase 4 of docs/minimap-prd.md).
+            // 4-px left-edge column shows LSP diagnostic severity per line:
+            // error rows pop red, warn rows pop amber, info+hint are
+            // dimmer cues. Severity palette deliberately ALIASES editor
+            // mode colors so the minimap's "this row has a problem"
+            // semantic reads continuous with the editor's "this is a
+            // stop / your-turn" semantic — wine_theme-derived state
+            // grammar across both surfaces.
+            //
+            //   error  — mode.replace (wine_theme.error_red): "stop"
+            //            red, also the diff.removedBg parent — same
+            //            "something is wrong" cue
+            //   warn   — mode.normal  (wine_theme.keyword): warm
+            //            amber, "your turn" tone reused here for
+            //            "your attention needed"
+            //   info   — mode.command (wine_theme.accent_blue): cmdline
+            //            blue, the "this is informational" cue family
+            //   hint   — text.dim: the quietest neutral rung — hints
+            //            are the lowest-urgency diagnostic level and
+            //            should barely register at minimap scale
+            //
+            // Mirrored on the Python side as
+            // `minimap_view.py::_DIAGNOSTIC_RGBA`. Drift detection in
+            // `test_minimap_view.py::test_diagnostic_palette_matches_theme_qml`.
+            readonly property QtObject diagnostic: QtObject {
+                readonly property color error: theme.color.mode.replace
+                readonly property color warn: theme.color.mode.normal
+                readonly property color info: theme.color.mode.command
+                readonly property color hint: theme.color.text.dim
+            }
+
+            // Git-diff gutter (Phase 4). Same 4-px column shows
+            // gitsigns.nvim hunk status per line, BEHIND the diagnostic
+            // dot when both are present (a row with both a diag and a
+            // hunk shows the diag dot — more urgent — over the git
+            // bar). Palette aliases the editor's diff.*Bg family so the
+            // minimap's "this line changed since HEAD" semantic reads
+            // continuous with the agent pane's "this line was added/
+            // removed by the assistant" semantic.
+            //
+            //   added    — wine_theme.string (green, aliases mode.insert
+            //              and diff.addedBg-family) — "new content"
+            //   modified — accent.primary (warm amber, aliases the
+            //              cmdline firstchar / branch glyph tone) —
+            //              "changed content"
+            //   deleted  — wine_theme.error_red (aliases mode.replace
+            //              and diff.removedBg-family) — "removed content"
+            //
+            // Note: gitsigns reports a deleted hunk at the line WHERE
+            // the deletion happened (the line that USED to follow the
+            // gone block), so the bar reads as "this line marks a
+            // deletion above" — same convention the editor's signs
+            // column uses.
+            //
+            // Mirrored as `minimap_view.py::_GITDIFF_RGBA`.
+            readonly property QtObject gitDiff: QtObject {
+                readonly property color added: theme.color.mode.insert
+                readonly property color modified: theme.color.accent.primary
+                readonly property color deleted: theme.color.mode.replace
+            }
         }
 
         readonly property QtObject terminal: QtObject {

@@ -73,6 +73,32 @@ _MAX_INDENT_LEVEL = 3
 _INDENT_COLUMNS_PER_LEVEL = 2
 
 
+# Diagnostic severity ranking — when multiple diagnostics land on the
+# same line, the painter shows ONE dot (gutter is 4 px wide; stacking
+# isn't legible at minimap scale). We pick the highest-severity one,
+# with this rank order: error > warn > info > hint > unknown.
+#
+# The wire format is already a string (translated from the
+# `vim.diagnostic.severity` enum on the Lua side) so the model
+# doesn't need to know the enum values; it just resolves a string-to-
+# string max-by-rank. Phase 4 (PRD §8) calls out R4.2 — "diagnostic
+# clustering at minimap scale acceptable" — this dict is what
+# implements the clustering deterministically.
+_DIAGNOSTIC_RANK: dict[str, int] = {
+    "error": 4,
+    "warn": 3,
+    "info": 2,
+    "hint": 1,
+}
+
+
+# Valid git-diff hunk kinds. Anything else from a future gitsigns
+# version is dropped at the apply boundary (logged, no crash). The
+# Lua side normalises gitsigns' short forms (add/change/delete) to
+# the wire format below; keep both sides in sync if extended.
+_GIT_KINDS: frozenset[str] = frozenset({"added", "modified", "deleted"})
+
+
 def _compute_indent_level(line: str) -> int:
     """Map a buffer line to its 0..`_MAX_INDENT_LEVEL` indent rung.
 
@@ -136,6 +162,15 @@ class MinimapModel(QObject):
     # signal cardinality lets future phases optimise.
     viewportChanged = Signal()
 
+    # Diagnostic / git gutter state changed — Phase 4. The two are
+    # distinct cadences (DiagnosticChanged fires from LSP/lint deltas;
+    # git hunks update on save/focus/debounced edit) but converge on
+    # the same painter step (left-edge gutter). Separate signals so
+    # listeners that care about only one source don't get re-evaluated
+    # on the other.
+    diagnosticsChanged = Signal()
+    gitChanged = Signal()
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         # Backing store. Always a list — never None — so callers don't
@@ -172,6 +207,13 @@ class MinimapModel(QObject):
         # paint after editor focus already has bounds.
         self._viewport_first: int = 0
         self._viewport_count: int = 0
+        # Phase 4 gutter state. Both are sparse — only rows with an
+        # active diagnostic / hunk appear as keys, so empty lookups
+        # are O(1) and the painter pays no per-line cost on clean
+        # files. Maps are wiped on each apply (the wire format is
+        # always a complete fresh list per buffer).
+        self._diagnostics: dict[int, str] = {}
+        self._git_hunks: dict[int, str] = {}
 
     # --- QML-visible properties ---------------------------------------
     #
@@ -220,6 +262,29 @@ class MinimapModel(QObject):
         treats zero-count as 'no indicator yet' and skips drawing."""
         return self._viewport_count
 
+    def diagnostic_at(self, lnum: int) -> str:
+        """Highest-severity diagnostic at 0-indexed buffer line `lnum`,
+        or "" if no diagnostic is active there. Phase 4 painter looks
+        up each visible row's severity to colour the gutter dot."""
+        return self._diagnostics.get(lnum, "")
+
+    def git_at(self, lnum: int) -> str:
+        """Git-diff hunk kind at 0-indexed buffer line `lnum`, or ""
+        when the line matches HEAD. Phase 4 painter draws the gutter
+        bar with the matching colour."""
+        return self._git_hunks.get(lnum, "")
+
+    def diagnostic_count(self) -> int:
+        """Total number of rows carrying an active diagnostic. Useful
+        for tests and for painter early-exit (skip the gutter pass if
+        zero — no dots to draw)."""
+        return len(self._diagnostics)
+
+    def git_count(self) -> int:
+        """Total number of rows in a git hunk. Same early-exit utility
+        as `diagnostic_count`."""
+        return len(self._git_hunks)
+
     def indent_level(self, index: int) -> int:
         """Cached indent level (0..`_MAX_INDENT_LEVEL`) for line `index`.
 
@@ -235,6 +300,93 @@ class MinimapModel(QObject):
         return 0
 
     # --- Backend → model ----------------------------------------------
+
+    @Slot(dict)
+    def apply_diagnostics(self, payload: dict[str, Any]) -> None:
+        """Ingest one `"minimap_diagnostics"` envelope.
+
+        Phase 4. Payload shape:
+            { bufnr: int, entries: [{lnum: int, severity: str}, ...] }
+
+        We collapse multiple diagnostics on the same line to a single
+        max-severity dot (PRD §8.3 R4.2) using `_DIAGNOSTIC_RANK`.
+        The wire format is always a full fresh list per buffer, so
+        the model wipes `_diagnostics` and rebuilds — no delta logic
+        needed.
+
+        Equality short-circuit: if the rebuilt dict equals the prior
+        state, skip the diagnosticsChanged emit. LSP servers
+        re-publish identical sets fairly often (per-keystroke for
+        some configs); the dedup keeps QML bindings stable.
+        """
+        try:
+            entries = payload.get("entries", [])
+            if not isinstance(entries, list):
+                log.warning(
+                    "minimap: diagnostics.entries not a list: %r", type(entries)
+                )
+                return
+            new_diag: dict[int, str] = {}
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                lnum_raw = entry.get("lnum")
+                sev_raw = entry.get("severity")
+                if not isinstance(lnum_raw, int) or not isinstance(sev_raw, str):
+                    continue
+                if lnum_raw < 0:
+                    continue
+                # Max-severity-wins on collision.
+                existing = new_diag.get(lnum_raw)
+                if existing is None or _DIAGNOSTIC_RANK.get(
+                    sev_raw, 0
+                ) > _DIAGNOSTIC_RANK.get(existing, 0):
+                    new_diag[lnum_raw] = sev_raw
+            if new_diag == self._diagnostics:
+                return
+            self._diagnostics = new_diag
+            self.diagnosticsChanged.emit()
+        except Exception:  # noqa: BLE001 — defensive cross-thread boundary
+            log.exception("minimap: apply_diagnostics() failed on payload %r", payload)
+
+    @Slot(dict)
+    def apply_git(self, payload: dict[str, Any]) -> None:
+        """Ingest one `"minimap_git"` envelope.
+
+        Phase 4. Payload shape:
+            { bufnr: int, entries: [{lnum: int, kind: str}, ...] }
+
+        Each gitsigns hunk has already been expanded to per-lnum
+        entries on the Lua side, so this method just rebuilds the
+        dict — no range expansion needed. Last entry for a given lnum
+        wins on collision (the rare overlap case from gitsigns
+        emitting both a deletion-marker and a change on the same
+        line; either kind is a valid surface).
+
+        Equality short-circuit matches apply_diagnostics's pattern.
+        """
+        try:
+            entries = payload.get("entries", [])
+            if not isinstance(entries, list):
+                log.warning("minimap: git.entries not a list: %r", type(entries))
+                return
+            new_git: dict[int, str] = {}
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                lnum_raw = entry.get("lnum")
+                kind_raw = entry.get("kind")
+                if not isinstance(lnum_raw, int) or not isinstance(kind_raw, str):
+                    continue
+                if lnum_raw < 0 or kind_raw not in _GIT_KINDS:
+                    continue
+                new_git[lnum_raw] = kind_raw
+            if new_git == self._git_hunks:
+                return
+            self._git_hunks = new_git
+            self.gitChanged.emit()
+        except Exception:  # noqa: BLE001 — defensive cross-thread boundary
+            log.exception("minimap: apply_git() failed on payload %r", payload)
 
     @Slot(dict)
     def apply_viewport(self, payload: dict[str, Any]) -> None:

@@ -863,3 +863,262 @@ def test_seek_to_row_uses_async_call_and_1_indexed_goto():
     assert "normal!" in src, (
         "seek_to_row must use `normal!` (bang) to suppress remaps of G"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — diagnostic + git-diff ingest
+# ---------------------------------------------------------------------------
+
+
+def test_diagnostic_initial_state_is_empty(qt_app):
+    """Empty model: diagnostic_at always returns "" and diagnostic_count is 0."""
+    del qt_app
+    m = MinimapModel()
+    assert m.diagnostic_at(0) == ""
+    assert m.diagnostic_at(100) == ""
+    assert m.diagnostic_count() == 0
+
+
+def test_git_initial_state_is_empty(qt_app):
+    """Empty model: git_at always returns "" and git_count is 0."""
+    del qt_app
+    m = MinimapModel()
+    assert m.git_at(0) == ""
+    assert m.git_at(100) == ""
+    assert m.git_count() == 0
+
+
+def test_apply_diagnostics_populates_dict(qt_app):
+    """A list of entries becomes the lnum→severity map."""
+    del qt_app
+    m = MinimapModel()
+    m.apply_diagnostics(
+        {
+            "bufnr": 1,
+            "entries": [
+                {"lnum": 3, "severity": "error"},
+                {"lnum": 7, "severity": "warn"},
+                {"lnum": 12, "severity": "info"},
+                {"lnum": 20, "severity": "hint"},
+            ],
+        }
+    )
+    assert m.diagnostic_at(3) == "error"
+    assert m.diagnostic_at(7) == "warn"
+    assert m.diagnostic_at(12) == "info"
+    assert m.diagnostic_at(20) == "hint"
+    assert m.diagnostic_count() == 4
+
+
+def test_apply_diagnostics_max_severity_wins_on_collision(qt_app):
+    """Multiple entries on the same line collapse to the highest-rank one
+    per PRD §8.3 R4.2 — minimap dot scale can't show multiple severities."""
+    del qt_app
+    m = MinimapModel()
+    m.apply_diagnostics(
+        {
+            "bufnr": 1,
+            "entries": [
+                {"lnum": 5, "severity": "warn"},
+                {"lnum": 5, "severity": "error"},  # error > warn → wins
+                {"lnum": 5, "severity": "hint"},
+            ],
+        }
+    )
+    assert m.diagnostic_at(5) == "error"
+
+
+def test_apply_diagnostics_short_circuits_on_equal_state(qt_app):
+    """Equivalent payloads (different entry order) must NOT re-emit
+    diagnosticsChanged. LSP servers republish identical sets often."""
+    del qt_app
+    m = MinimapModel()
+    m.apply_diagnostics(
+        {
+            "bufnr": 1,
+            "entries": [
+                {"lnum": 3, "severity": "error"},
+                {"lnum": 7, "severity": "warn"},
+            ],
+        }
+    )
+    calls: list[int] = []
+    m.diagnosticsChanged.connect(lambda: calls.append(1))
+    # Same final dict, different entry order — should be a no-op.
+    m.apply_diagnostics(
+        {
+            "bufnr": 1,
+            "entries": [
+                {"lnum": 7, "severity": "warn"},
+                {"lnum": 3, "severity": "error"},
+            ],
+        }
+    )
+    assert calls == []
+    # Adding a new entry triggers the emit.
+    m.apply_diagnostics(
+        {
+            "bufnr": 1,
+            "entries": [
+                {"lnum": 3, "severity": "error"},
+                {"lnum": 7, "severity": "warn"},
+                {"lnum": 11, "severity": "hint"},
+            ],
+        }
+    )
+    assert calls == [1]
+
+
+def test_apply_diagnostics_drops_invalid_entries(qt_app):
+    """Malformed entries (non-dict, missing fields, wrong types,
+    negative lnums) are silently dropped — defensive."""
+    del qt_app
+    m = MinimapModel()
+    m.apply_diagnostics(
+        {
+            "bufnr": 1,
+            "entries": [
+                {"lnum": 3, "severity": "error"},  # OK
+                "not a dict",  # dropped
+                {"lnum": 7},  # missing severity — dropped
+                {"severity": "warn"},  # missing lnum — dropped
+                {"lnum": "five", "severity": "hint"},  # wrong type — dropped
+                {"lnum": -2, "severity": "warn"},  # negative — dropped
+            ],
+        }
+    )
+    assert m.diagnostic_at(3) == "error"
+    assert m.diagnostic_count() == 1
+
+
+def test_apply_diagnostics_malformed_payload_does_not_crash(qt_app):
+    """Same cross-thread defensive contract as apply() / apply_viewport."""
+    del qt_app
+    m = MinimapModel()
+    m.apply_diagnostics(None)  # type: ignore[arg-type]
+    m.apply_diagnostics("not a dict")  # type: ignore[arg-type]
+    assert m.diagnostic_count() == 0
+
+
+def test_apply_git_populates_dict(qt_app):
+    """A list of entries becomes the lnum→kind map."""
+    del qt_app
+    m = MinimapModel()
+    m.apply_git(
+        {
+            "bufnr": 1,
+            "entries": [
+                {"lnum": 3, "kind": "added"},
+                {"lnum": 7, "kind": "modified"},
+                {"lnum": 11, "kind": "deleted"},
+            ],
+        }
+    )
+    assert m.git_at(3) == "added"
+    assert m.git_at(7) == "modified"
+    assert m.git_at(11) == "deleted"
+    assert m.git_count() == 3
+
+
+def test_apply_git_drops_invalid_kinds(qt_app):
+    """Unknown `kind` strings are dropped — protects against future
+    gitsigns versions emitting kinds we don't have a colour for."""
+    del qt_app
+    m = MinimapModel()
+    m.apply_git(
+        {
+            "bufnr": 1,
+            "entries": [
+                {"lnum": 3, "kind": "added"},
+                {"lnum": 5, "kind": "renamed"},  # not in _GIT_KINDS → dropped
+            ],
+        }
+    )
+    assert m.git_count() == 1
+    assert m.git_at(3) == "added"
+    assert m.git_at(5) == ""
+
+
+def test_apply_git_short_circuits_on_equal_state(qt_app):
+    """Equivalent payloads don't re-emit gitChanged."""
+    del qt_app
+    m = MinimapModel()
+    m.apply_git(
+        {
+            "bufnr": 1,
+            "entries": [
+                {"lnum": 3, "kind": "added"},
+            ],
+        }
+    )
+    calls: list[int] = []
+    m.gitChanged.connect(lambda: calls.append(1))
+    m.apply_git(
+        {
+            "bufnr": 1,
+            "entries": [
+                {"lnum": 3, "kind": "added"},
+            ],
+        }
+    )
+    assert calls == []
+
+
+def test_apply_git_malformed_payload_does_not_crash(qt_app):
+    del qt_app
+    m = MinimapModel()
+    m.apply_git(None)  # type: ignore[arg-type]
+    m.apply_git("garbage")  # type: ignore[arg-type]
+    assert m.git_count() == 0
+
+
+def test_app_connects_phase4_signals_with_queued_connection():
+    """Both minimap_diagnostics_event and minimap_git_event must use
+    explicit Qt.QueuedConnection per §4 P2 — they originate on the
+    pynvim worker thread."""
+    import inspect
+    from symmetria_ide import app
+
+    src = inspect.getsource(app)
+    for sig in ("minimap_diagnostics_event.connect", "minimap_git_event.connect"):
+        assert sig in src, f"{sig} missing from app.py wiring"
+        idx = src.find(sig)
+        nearby = src[idx : idx + 400]
+        assert "QueuedConnection" in nearby, (
+            f"{sig} must specify Qt.QueuedConnection explicitly (§4 P2)"
+        )
+
+
+def test_nvim_backend_subscribes_to_phase4_channels():
+    """The pynvim subscribe block must include both new channels —
+    otherwise notifications are silently dropped."""
+    import inspect
+    from symmetria_ide import nvim_backend
+
+    src = inspect.getsource(nvim_backend)
+    assert 'subscribe("minimap_diagnostics")' in src
+    assert 'subscribe("minimap_git")' in src
+
+
+def test_nvim_backend_force_pushes_phase4_helpers():
+    """Subscribe-race fixes — the Lua helpers must be invoked
+    immediately after subscribing."""
+    import inspect
+    from symmetria_ide import nvim_backend
+
+    src = inspect.getsource(nvim_backend)
+    assert "symmetria_minimap_push_diagnostics" in src
+    assert "symmetria_minimap_push_git" in src
+
+
+def test_dispatch_routes_phase4_envelopes():
+    """nvim_events._dispatch_notification must have branches for both
+    new channels that emit the corresponding signals."""
+    import inspect
+    from symmetria_ide import nvim_events
+
+    src = inspect.getsource(nvim_events._dispatch_notification)
+    assert 'name == "minimap_diagnostics"' in src
+    assert "minimap_diagnostics_event.emit" in src
+    assert 'name == "minimap_git"' in src
+    assert "minimap_git_event.emit" in src

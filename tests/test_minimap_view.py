@@ -695,3 +695,162 @@ def test_main_qml_has_scrubber_mouse_area():
         "Scrubber must call controller.seek_to_row(...)"
     )
     assert "Timer" in block, "Scrubber must throttle via a Timer (PRD §7.3 R3.2)"
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — gutter painter + diagnostic/git Theme drift
+# ---------------------------------------------------------------------------
+
+
+def test_diagnostic_palette_constants_present():
+    """4-rung diagnostic palette + memoized QColors + key→index map."""
+    from symmetria_ide.minimap_view import (
+        _DIAGNOSTIC_RGBA,
+        _DIAGNOSTIC_KEY_TO_COLOR_INDEX,
+        _diagnostic_colors,
+    )
+
+    assert len(_DIAGNOSTIC_RGBA) == 4
+    assert len(_diagnostic_colors) == 4
+    for c in _diagnostic_colors:
+        assert isinstance(c, QColor)
+    assert _DIAGNOSTIC_KEY_TO_COLOR_INDEX == {
+        "error": 0,
+        "warn": 1,
+        "info": 2,
+        "hint": 3,
+    }
+
+
+def test_gitdiff_palette_constants_present():
+    """3-rung git-diff palette + memoized QColors + key→index map."""
+    from symmetria_ide.minimap_view import (
+        _GITDIFF_RGBA,
+        _GITDIFF_KEY_TO_COLOR_INDEX,
+        _gitdiff_colors,
+    )
+
+    assert len(_GITDIFF_RGBA) == 3
+    assert len(_gitdiff_colors) == 3
+    for c in _gitdiff_colors:
+        assert isinstance(c, QColor)
+    assert _GITDIFF_KEY_TO_COLOR_INDEX == {
+        "added": 0,
+        "modified": 1,
+        "deleted": 2,
+    }
+
+
+def test_gutter_width_constant():
+    """4 px is the floor that's perceptible as a coloured stripe at
+    minimap scale. Pin the value."""
+    from symmetria_ide.minimap_view import _GUTTER_WIDTH_PX
+
+    assert _GUTTER_WIDTH_PX == 4.0
+
+
+def test_diagnostic_palette_matches_theme_qml():
+    """Drift detection: every hex in _DIAGNOSTIC_RGBA MUST appear in
+    Theme.qml (either directly as the minimap.diagnostic.* aliases'
+    target tokens, since those alias mode.*/text.* values)."""
+    from symmetria_ide.minimap_view import _DIAGNOSTIC_RGBA
+
+    theme_src = _read_theme_qml()
+    for level, rgb in enumerate(_DIAGNOSTIC_RGBA):
+        r, g, b = rgb
+        expected = f"#{r:02X}{g:02X}{b:02X}"
+        assert expected.upper() in theme_src.upper(), (
+            f"Theme.qml missing hex {expected} for diagnostic level {level} — "
+            "alias target drifted"
+        )
+
+
+def test_gitdiff_palette_matches_theme_qml():
+    """Same drift detection for git-diff palette."""
+    from symmetria_ide.minimap_view import _GITDIFF_RGBA
+
+    theme_src = _read_theme_qml()
+    for level, rgb in enumerate(_GITDIFF_RGBA):
+        r, g, b = rgb
+        expected = f"#{r:02X}{g:02X}{b:02X}"
+        assert expected.upper() in theme_src.upper(), (
+            f"Theme.qml missing hex {expected} for gitDiff level {level}"
+        )
+
+
+def test_theme_qml_has_diagnostic_and_gitdiff_blocks():
+    """The QtObject sub-blocks must exist under minimap — protects
+    against renames that leave the hex coincidentally elsewhere."""
+    theme_src = _read_theme_qml()
+    assert re.search(r"diagnostic\s*:\s*QtObject\s*\{", theme_src), (
+        "Theme.qml missing diagnostic: QtObject { block under minimap"
+    )
+    assert re.search(r"gitDiff\s*:\s*QtObject\s*\{", theme_src), (
+        "Theme.qml missing gitDiff: QtObject { block under minimap"
+    )
+
+
+def test_paint_reads_diagnostic_and_git_accessors():
+    """Source-inspect paint() for the Phase 4 gutter pass — it must
+    read both model.diagnostic_at and model.git_at and use the
+    memoized palette tuples."""
+    src = inspect.getsource(MinimapView.paint)
+    assert "diagnostic_at" in src, (
+        "paint() must call model.diagnostic_at for the gutter dot"
+    )
+    assert "git_at" in src, "paint() must call model.git_at for the gutter bar"
+    assert "_diagnostic_colors[" in src
+    assert "_gitdiff_colors[" in src
+
+
+def test_paint_skips_gutter_when_both_counts_zero():
+    """If diagnostic_count() and git_count() are both zero, the gutter
+    pass should early-return — paint zero gutter rects rather than
+    iterate the loop."""
+    src = inspect.getsource(MinimapView.paint)
+    assert "diagnostic_count" in src
+    assert "git_count" in src
+    # The early-return after the both-zero check.
+    assert "diag_count == 0 and git_count == 0" in src, (
+        "paint() must early-return on both-zero gutter state"
+    )
+
+
+def test_silhouette_inset_by_gutter_width():
+    """The block-mode painter MUST inset its x_offset by _GUTTER_WIDTH_PX
+    so the silhouette doesn't overlap the gutter column."""
+    src = inspect.getsource(MinimapView.paint)
+    assert "gutter_inset" in src or "_GUTTER_WIDTH_PX +" in src, (
+        "paint() must inset the silhouette by _GUTTER_WIDTH_PX so the "
+        "gutter column has room to draw"
+    )
+
+
+def test_paint_pool_still_one_rect_after_phase_4():
+    """Phase 4's gutter pass reuses the same single _paint_rect."""
+    init_src = inspect.getsource(MinimapView.__init__)
+    n = init_src.count("QRectF()")
+    assert n == 1, (
+        f"MinimapView.__init__ allocates {n} QRectFs — Phase 4 must "
+        "preserve the single-pool discipline (gutter draws reuse _paint_rect)"
+    )
+
+
+def test_model_setter_wires_diagnostics_and_git_signals():
+    """The Phase 4 setter additions: diagnosticsChanged + gitChanged
+    must be connected on attach and disconnected on detach."""
+    setter_src = inspect.getsource(MinimapView._set_model)
+    assert "diagnosticsChanged.connect" in setter_src
+    assert "diagnosticsChanged.disconnect" in setter_src
+    assert "gitChanged.connect" in setter_src
+    assert "gitChanged.disconnect" in setter_src
+
+
+def test_on_diagnostics_changed_has_slot_decorator():
+    """§4 P1 — signal receivers go through Qt's metaobject dispatch."""
+    src = inspect.getsource(MinimapView._on_diagnostics_changed)
+    # @Slot() decoration is detected via the line just above the def.
+    module_src = inspect.getsource(inspect.getmodule(MinimapView))
+    assert "@Slot()\n    def _on_diagnostics_changed" in module_src
+    assert "@Slot()\n    def _on_git_changed" in module_src
+    assert "self.update()" in src

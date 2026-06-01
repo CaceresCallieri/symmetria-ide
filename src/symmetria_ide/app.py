@@ -449,6 +449,17 @@ class AppController(QObject):
         self._backend.minimap_viewport_event.connect(
             self._minimap_model.apply_viewport, Qt.ConnectionType.QueuedConnection
         )
+        # queued: minimap_diagnostics_event + minimap_git_event likewise
+        # cross from the pynvim worker thread (§4 P2). Both drive the
+        # Phase 4 left-edge gutter; separated so listeners that only
+        # care about one of them don't re-evaluate on the other.
+        self._backend.minimap_diagnostics_event.connect(
+            self._minimap_model.apply_diagnostics,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._backend.minimap_git_event.connect(
+            self._minimap_model.apply_git, Qt.ConnectionType.QueuedConnection
+        )
         # Agent-pane visibility lives on the IDE side only — the Lua-driven
         # `agent_event` rpcnotify channel was stripped when orchestrator.nvim
         # took back ownership of `<leader>aN` / `<C-1..5>` / `<C-S-q>`. The

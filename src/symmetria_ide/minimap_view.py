@@ -124,6 +124,67 @@ _viewport_frame_color: QColor = QColor(*_VIEWPORT_FRAME_RGBA)
 _VIEWPORT_FRAME_THICKNESS_PX = 1.0
 
 
+# Diagnostic gutter palette — Phase 4 mirror of
+# `Theme.color.minimap.diagnostic.{error, warn, info, hint}`. Stored
+# as 3-tuples (R, G, B) — fully opaque markers so the gutter dot
+# stands out even when the indent silhouette underneath is in a
+# similar tone family. Order matters: severity rank should map to
+# index, with `error` brightest / most urgent at index 0. The
+# `_DIAGNOSTIC_KEY_TO_COLOR_INDEX` dict ties wire-format severity
+# strings to the tuple position so a future palette extension just
+# adds an entry.
+_DIAGNOSTIC_RGBA: tuple[tuple[int, int, int], ...] = (
+    (0xD2, 0x60, 0x2D),  # error — Theme.mode.replace (wine_theme.error_red)
+    (0xC2, 0x8B, 0x12),  # warn  — Theme.mode.normal  (wine_theme.keyword)
+    (0x6D, 0x94, 0xE9),  # info  — Theme.mode.command (wine_theme.accent_blue)
+    (0x7A, 0x7A, 0x7A),  # hint  — Theme.text.dim
+)
+
+# Map wire-format severity string to its index in `_DIAGNOSTIC_RGBA`.
+# A diagnostic_at() lookup that returns a string not in this dict
+# is silently skipped at paint time — keeps the painter loop crash-
+# free if a future severity is added to vim.diagnostic before we
+# update the palette.
+_DIAGNOSTIC_KEY_TO_COLOR_INDEX: dict[str, int] = {
+    "error": 0,
+    "warn": 1,
+    "info": 2,
+    "hint": 3,
+}
+
+_diagnostic_colors: tuple[QColor, ...] = tuple(
+    QColor(r, g, b) for (r, g, b) in _DIAGNOSTIC_RGBA
+)
+
+
+# Git-diff gutter palette — Phase 4 mirror of
+# `Theme.color.minimap.gitDiff.{added, modified, deleted}`. Same
+# opaque-3-tuple shape as the diagnostic palette.
+_GITDIFF_RGBA: tuple[tuple[int, int, int], ...] = (
+    (0x62, 0xBA, 0x46),  # added    — Theme.mode.insert  (wine_theme.string)
+    (0xC8, 0xA3, 0x7A),  # modified — Theme.accent.primary
+    (0xD2, 0x60, 0x2D),  # deleted  — Theme.mode.replace (wine_theme.error_red)
+)
+
+_GITDIFF_KEY_TO_COLOR_INDEX: dict[str, int] = {
+    "added": 0,
+    "modified": 1,
+    "deleted": 2,
+}
+
+_gitdiff_colors: tuple[QColor, ...] = tuple(
+    QColor(r, g, b) for (r, g, b) in _GITDIFF_RGBA
+)
+
+
+# Gutter column width — Phase 4. 4 px is the floor that's still
+# perceptible as a coloured stripe at minimap scale; below that the
+# bar reads as noise rather than signal. Sits at x=0 to
+# _GUTTER_WIDTH_PX; the indent silhouette starts at x=_GUTTER_WIDTH_PX
+# so the two regions don't overlap.
+_GUTTER_WIDTH_PX = 4.0
+
+
 # Layout constants for the block-mode painter.
 
 # Minimum pixel height per rendered minimap row. At 1 px the silhouette
@@ -301,6 +362,14 @@ class MinimapView(QQuickPaintedItem):
                 self._model.viewportChanged.disconnect(self._on_viewport_changed)
             except (RuntimeError, TypeError):
                 pass
+            try:
+                self._model.diagnosticsChanged.disconnect(self._on_diagnostics_changed)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                self._model.gitChanged.disconnect(self._on_git_changed)
+            except (RuntimeError, TypeError):
+                pass
         self._model = value
         if value is not None:
             # Direct connection — MinimapModel.apply already runs on
@@ -313,6 +382,11 @@ class MinimapView(QQuickPaintedItem):
             # marshals to the GUI thread; viewportChanged emits from
             # apply_viewport, which already runs there.
             value.viewportChanged.connect(self._on_viewport_changed)
+            # Phase 4 — gutter signals. Both apply_diagnostics and
+            # apply_git run on the GUI thread (via the queued connections
+            # in AppController), so direct connections are correct.
+            value.diagnosticsChanged.connect(self._on_diagnostics_changed)
+            value.gitChanged.connect(self._on_git_changed)
             # Immediate repaint so the first model that arrives (often
             # carrying the initial snapshot already) shows content
             # without waiting for a subsequent edit to trip linesChanged.
@@ -330,6 +404,21 @@ class MinimapView(QQuickPaintedItem):
         below is unchanged but a single update() repaints both the
         blocks and the overlay (cheap; the block loop is O(line_count)
         but the constant is tiny — see PRD §6 R2.1)."""
+        self.update()
+
+    @Slot()
+    def _on_diagnostics_changed(self) -> None:
+        """Repaint when the model's diagnostic set changes (Phase 4).
+        Same single-update strategy as the viewport handler — the
+        gutter pass at the end of paint() picks up the new state."""
+        self.update()
+
+    @Slot()
+    def _on_git_changed(self) -> None:
+        """Repaint when git-hunk state changes (Phase 4). Cadence
+        constrained at the Lua side to BufWritePost / FocusGained /
+        debounced ~2s TextChanged per PRD §8.3 R4.1; the painter
+        responds whenever new state arrives."""
         self.update()
 
     @Slot(int, int)
@@ -429,9 +518,17 @@ class MinimapView(QQuickPaintedItem):
         indent_level = self._model.indent_level
         fill_rect = painter.fillRect
         indent_step = _INDENT_STEP_PX
+        # Silhouette inset — Phase 4 reserves `_GUTTER_WIDTH_PX` on the
+        # left for the diagnostic + git column. Without this offset the
+        # gutter pass would overpaint the silhouette's leftmost pixels
+        # for every indent-level-0 row (and the gutter pass runs
+        # AFTER the silhouette, so the silhouette would lose visually).
+        # By inset-ing here, the two regions never overlap and the
+        # painter order becomes irrelevant for correctness.
+        gutter_inset = _GUTTER_WIDTH_PX
         for row_idx in range(rows_to_draw):
             level = indent_level(row_idx)
-            x_offset = level * indent_step
+            x_offset = gutter_inset + level * indent_step
             block_w = view_w - x_offset
             if block_w <= 0.0:
                 # Defensive: if the minimap is narrower than the deepest
@@ -484,3 +581,39 @@ class MinimapView(QQuickPaintedItem):
             _VIEWPORT_FRAME_THICKNESS_PX,
         )
         fill_rect(rect, _viewport_frame_color)
+
+        # Step 6 — gutter pass (Phase 4). Paints diagnostic + git-diff
+        # markers in the leftmost `_GUTTER_WIDTH_PX` column. The
+        # silhouette has already been inset by `gutter_inset` so the
+        # two regions don't overlap. Painted AFTER the viewport
+        # overlay so a row with a diagnostic INSIDE the viewport
+        # still shows the diagnostic dot (the viewport tint composites
+        # under the gutter marker, not over it).
+        #
+        # Order within a single row: git bar drawn first (low z),
+        # diagnostic dot drawn over it (high z) — when both are present
+        # the diagnostic dominates per PRD §8 design. Rows with neither
+        # are skipped entirely (no fill, gutter shows through as the
+        # background colour painted in step 1).
+        diag_count = self._model.diagnostic_count()
+        git_count = self._model.git_count()
+        if diag_count == 0 and git_count == 0:
+            return
+        diagnostic_at = self._model.diagnostic_at
+        git_at = self._model.git_at
+        diag_idx_map = _DIAGNOSTIC_KEY_TO_COLOR_INDEX
+        git_idx_map = _GITDIFF_KEY_TO_COLOR_INDEX
+        for row_idx in range(rows_to_draw):
+            y = row_idx * row_h
+            git_kind = git_at(row_idx)
+            if git_kind:
+                git_color_idx = git_idx_map.get(git_kind)
+                if git_color_idx is not None:
+                    rect.setRect(0.0, y, _GUTTER_WIDTH_PX, block_h)
+                    fill_rect(rect, _gitdiff_colors[git_color_idx])
+            diag_sev = diagnostic_at(row_idx)
+            if diag_sev:
+                diag_color_idx = diag_idx_map.get(diag_sev)
+                if diag_color_idx is not None:
+                    rect.setRect(0.0, y, _GUTTER_WIDTH_PX, block_h)
+                    fill_rect(rect, _diagnostic_colors[diag_color_idx])
