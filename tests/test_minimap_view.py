@@ -922,9 +922,9 @@ def test_gutter_renders_independently_of_viewport_state():
 
 def test_indent_palette_is_neutral_gray():
     """Phase 4.5 shifted from warm-amber to neutral gray. The brightest
-    rung must equal Theme.text.emphasis (#E8E8E8); the dimmest rung
-    must stay above Theme.text.dim (#7A7A7A) to remain perceptible
-    against the wallpaper-blend background.
+    rung must equal Theme.text.emphasis (#E8E8E8); the dimmest rung (#5A5A5A) steps slightly
+    below text.dim (#7A7A7A) intentionally — it remains perceptible
+    against the semi-transparent minimap background.
     """
     from symmetria_ide.minimap_view import _INDENT_RGBA
 

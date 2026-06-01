@@ -140,9 +140,11 @@ def _compute_line_metrics(line: str) -> tuple[int, int]:
         level = _MAX_INDENT_LEVEL
     content_length = len(line) - leading
     if content_length < 0:
-        # Defensive: can only happen if `line` is empty AND `leading`
-        # somehow positive, which the loop prevents. Belt-and-braces
-        # so the painter never receives a negative width.
+        # Structurally unreachable — the loop's break guarantees
+        # leading <= len(line) (we only increment leading while
+        # consuming whitespace, then break on the first non-whitespace
+        # char). Belt-and-braces guard so the painter never receives
+        # a negative width if this logic ever changes.
         content_length = 0
     return level, content_length
 

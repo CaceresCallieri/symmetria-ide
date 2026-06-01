@@ -336,9 +336,6 @@ QtObject {
             // existing chrome palette without introducing a new
             // colour identity.
             //
-            // Mirrored on the Python side as
-            // `minimap_view.py::_INDENT_RGBA`. Drift detection in
-            // `tests/test_minimap_view.py::test_indent_palette_matches_theme_qml`.
             readonly property QtObject indent: QtObject {
                 // Neutral gray palette tracking the editor's text ramp
                 // (Theme.text.emphasis → text.normal → text.dim) so the
@@ -365,7 +362,7 @@ QtObject {
                 readonly property color level0: "#e8e8e8"    // text.emphasis — top-level, brightest
                 readonly property color level1: "#b0b0b0"    // text.normal   — function-body level
                 readonly property color level2: "#888888"    // mid-tone between normal and dim
-                readonly property color level3: "#5a5a5a"    // deep nesting — quietest, slightly above text.dim
+                readonly property color level3: "#5a5a5a"    // deep nesting — quietest, slightly darker than text.dim (#7a7a7a)
             }
 
             // Viewport indicator — Phase 3 of docs/minimap-prd.md.

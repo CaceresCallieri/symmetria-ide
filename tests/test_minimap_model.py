@@ -1246,3 +1246,56 @@ def test_snapshot_replaces_full_content_length_cache(qt_app):
     # Past-end clamp — prior 50s must not bleed through.
     assert m.content_length(1) == 0
     assert m.content_length(2) == 0
+
+
+def test_patch_pure_insertion_extends_content_length_cache(qt_app):
+    """Inserting N new lines must grow _content_lengths by N entries,
+    keeping it parallel with _indent_levels and _lines."""
+    del qt_app
+    m = MinimapModel()
+    m.apply(
+        {"op": "snapshot", "bufnr": 1, "line_count": 3, "lines": ["ab", "cde", "f"]}
+    )
+    assert [m.content_length(i) for i in range(3)] == [2, 3, 1]
+    # Pure insertion at line 1 (first == last == 1)
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 5,
+            "first": 1,
+            "last": 1,
+            "lines": ["XXXX", "YYYYY"],
+        }
+    )
+    assert m.line_count() == 5
+    assert [m.content_length(i) for i in range(5)] == [2, 4, 5, 3, 1]
+
+
+def test_patch_pure_deletion_shrinks_content_length_cache(qt_app):
+    """Deleting lines must shrink _content_lengths to match, keeping
+    it parallel with _indent_levels and _lines."""
+    del qt_app
+    m = MinimapModel()
+    m.apply(
+        {
+            "op": "snapshot",
+            "bufnr": 1,
+            "line_count": 4,
+            "lines": ["a", "bb", "ccc", "dddd"],
+        }
+    )
+    assert [m.content_length(i) for i in range(4)] == [1, 2, 3, 4]
+    # Pure deletion of lines 1 and 2
+    m.apply(
+        {
+            "op": "patch",
+            "bufnr": 1,
+            "line_count": 2,
+            "first": 1,
+            "last": 3,
+            "lines": [],
+        }
+    )
+    assert m.line_count() == 2
+    assert [m.content_length(i) for i in range(2)] == [1, 4]
