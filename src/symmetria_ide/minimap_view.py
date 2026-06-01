@@ -545,42 +545,45 @@ class MinimapView(QQuickPaintedItem):
         # first startup: no apply_viewport has fired). The fill +
         # top/bottom frame composite over the indent silhouette
         # painted above.
+        #
+        # NOTE: Step 6 (gutter) must run regardless of whether viewport
+        # data has arrived — diagnostics and git markers are independent
+        # of viewport state. The viewport guard is therefore a conditional
+        # block rather than an early return.
         viewport_count = self._model.viewport_count()
-        if viewport_count <= 0:
-            return
-        viewport_first = self._model.viewport_first()
-        # Clamp the visible range to actual buffer extent — a viewport
-        # that extends past the buffer's end (because the buffer
-        # shrank and the viewport bookkeeping is one tick behind) just
-        # truncates rather than running off into negative-height land.
-        viewport_end_row = viewport_first + viewport_count
-        if viewport_end_row > line_count:
-            viewport_end_row = line_count
-        if viewport_first >= viewport_end_row:
-            return
-        # Convert buffer-row range to pixel y-range using the same
-        # `row_h` already established for the silhouette. The indicator
-        # tracks the silhouette exactly because they share the formula.
-        vp_y_top = viewport_first * row_h
-        vp_y_bot = viewport_end_row * row_h
-        vp_height = vp_y_bot - vp_y_top
-        # 5a — translucent fill covering the visible band.
-        rect.setRect(0.0, vp_y_top, view_w, vp_height)
-        fill_rect(rect, _viewport_fill_color)
-        # 5b — 1-px hairline at top edge. Painted AT vp_y_top, so it
-        # sits on the inner boundary of the fill (the eye reads the
-        # frame as the start of the viewport, not just above it).
-        rect.setRect(0.0, vp_y_top, view_w, _VIEWPORT_FRAME_THICKNESS_PX)
-        fill_rect(rect, _viewport_frame_color)
-        # 5c — 1-px hairline at bottom edge. Positioned so its bottom
-        # aligns with vp_y_bot (the inner edge).
-        rect.setRect(
-            0.0,
-            vp_y_bot - _VIEWPORT_FRAME_THICKNESS_PX,
-            view_w,
-            _VIEWPORT_FRAME_THICKNESS_PX,
-        )
-        fill_rect(rect, _viewport_frame_color)
+        if viewport_count > 0:
+            viewport_first = self._model.viewport_first()
+            # Clamp the visible range to actual buffer extent — a viewport
+            # that extends past the buffer's end (because the buffer
+            # shrank and the viewport bookkeeping is one tick behind) just
+            # truncates rather than running off into negative-height land.
+            viewport_end_row = viewport_first + viewport_count
+            if viewport_end_row > line_count:
+                viewport_end_row = line_count
+            if viewport_first < viewport_end_row:
+                # Convert buffer-row range to pixel y-range using the same
+                # `row_h` already established for the silhouette. The indicator
+                # tracks the silhouette exactly because they share the formula.
+                vp_y_top = viewport_first * row_h
+                vp_y_bot = viewport_end_row * row_h
+                vp_height = vp_y_bot - vp_y_top
+                # 5a — translucent fill covering the visible band.
+                rect.setRect(0.0, vp_y_top, view_w, vp_height)
+                fill_rect(rect, _viewport_fill_color)
+                # 5b — 1-px hairline at top edge. Painted AT vp_y_top, so it
+                # sits on the inner boundary of the fill (the eye reads the
+                # frame as the start of the viewport, not just above it).
+                rect.setRect(0.0, vp_y_top, view_w, _VIEWPORT_FRAME_THICKNESS_PX)
+                fill_rect(rect, _viewport_frame_color)
+                # 5c — 1-px hairline at bottom edge. Positioned so its bottom
+                # aligns with vp_y_bot (the inner edge).
+                rect.setRect(
+                    0.0,
+                    vp_y_bot - _VIEWPORT_FRAME_THICKNESS_PX,
+                    view_w,
+                    _VIEWPORT_FRAME_THICKNESS_PX,
+                )
+                fill_rect(rect, _viewport_frame_color)
 
         # Step 6 — gutter pass (Phase 4). Paints diagnostic + git-diff
         # markers in the leftmost `_GUTTER_WIDTH_PX` column. The
@@ -594,7 +597,9 @@ class MinimapView(QQuickPaintedItem):
         # diagnostic dot drawn over it (high z) — when both are present
         # the diagnostic dominates per PRD §8 design. Rows with neither
         # are skipped entirely (no fill, gutter shows through as the
-        # background colour painted in step 1).
+        # background colour painted in step 1). Runs independently of
+        # step 5 — gutter markers render even before the first
+        # apply_viewport has fired (terminal-first startup).
         diag_count = self._model.diagnostic_count()
         git_count = self._model.git_count()
         if diag_count == 0 and git_count == 0:
@@ -607,12 +612,17 @@ class MinimapView(QQuickPaintedItem):
             y = row_idx * row_h
             git_kind = git_at(row_idx)
             if git_kind:
+                # _GIT_KINDS filtering in apply_git() guarantees git_kind is always in
+                # git_idx_map; the None guard is defense-in-depth only.
                 git_color_idx = git_idx_map.get(git_kind)
                 if git_color_idx is not None:
                     rect.setRect(0.0, y, _GUTTER_WIDTH_PX, block_h)
                     fill_rect(rect, _gitdiff_colors[git_color_idx])
             diag_sev = diagnostic_at(row_idx)
             if diag_sev:
+                # Unknown future severity strings (e.g. a new vim.diagnostic level)
+                # pass through apply_diagnostics unchanged; the None guard here keeps
+                # the painter crash-free if the palette hasn't been updated yet.
                 diag_color_idx = diag_idx_map.get(diag_sev)
                 if diag_color_idx is not None:
                     rect.setRect(0.0, y, _GUTTER_WIDTH_PX, block_h)

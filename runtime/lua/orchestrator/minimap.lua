@@ -373,13 +373,24 @@ local function emit_git()
   for i = 1, #hunks do
     local h = hunks[i]
     local kind = gitsigns_kind_to_wire(h.type)
-    local count = h.count or 1
+    -- gitsigns.get_hunks() returns Hunk_Public: {type, head, lines, added={start,count,lines},
+    -- removed={start,count,lines}}. The top-level h.start / h.count fields do NOT exist on
+    -- the public type — they live under h.added.* and h.removed.*.
+    --
+    -- For "add" and "change": the new/modified lines span h.added.start..h.added.start+count-1
+    -- (1-indexed). For "delete": h.added.count == 0 (no new content); we mark one line at
+    -- h.added.start — the line that now immediately follows the removed block, matching the
+    -- convention gitsigns' own sign column uses for deletion markers.
+    local node = h.added
+    local count = node.count
     if count < 1 then
+      -- Pure deletion: h.added.count == 0. Show a 1-line marker at h.added.start
+      -- (the line after the deletion) — same as the editor gutter convention.
       count = 1
     end
-    -- gitsigns `start` is 1-indexed. We expand to 0-indexed lnums to
-    -- match the diagnostic channel's convention and the Python model.
-    local first_lnum = (h.start or 1) - 1
+    -- node.start is 1-indexed. Convert to 0-indexed to match the diagnostic
+    -- channel's convention and the Python model (vim.diagnostic.get lnums are 0-indexed).
+    local first_lnum = (node.start or 1) - 1
     for j = 0, count - 1 do
       entries[#entries + 1] = { lnum = first_lnum + j, kind = kind }
     end
@@ -537,6 +548,11 @@ function M.setup()
   --   - BufWritePost: explicit save just changed the working tree
   --   - FocusGained:  external editor may have changed files
   --   - TextChanged{,I}: debounced ~2s while user types
+  -- Second BufWritePost handler — git channel. The first one above
+  -- handles the snapshot channel; this one handles git-diff. Both must
+  -- fire on save (a format-on-save pass can change both buffer content
+  -- and diff state). Two separate autocmds keeps each channel's cadence
+  -- independent of the other.
   vim.api.nvim_create_autocmd("BufWritePost", {
     group = grp,
     callback = function()
@@ -551,6 +567,10 @@ function M.setup()
     end,
     desc = "Symmetria minimap: git diff on focus regain",
   })
+  -- Second TextChanged/TextChangedI handler — git channel. The first
+  -- one above handles the snapshot channel (per-tick coalescing).
+  -- This one handles the git channel (2s timer debounce — gitsigns is
+  -- more expensive to query than a buffer line read).
   vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
     group = grp,
     callback = function()

@@ -647,13 +647,46 @@ def test_paint_draws_viewport_when_count_positive():
 
 def test_paint_skips_viewport_when_count_zero():
     """The painter must SKIP the viewport pass when viewport_count <= 0
-    (terminal-first startup before any apply_viewport). Verify via
-    early-return check after the read."""
+    (terminal-first startup before any apply_viewport). The guard may be
+    an early-return OR a conditional block — the gutter step (Phase 4)
+    must remain reachable regardless, so the conditional-block form is
+    preferred."""
     src = inspect.getsource(MinimapView.paint)
-    # The skip should appear as a guard right after reading viewport_count.
-    assert "viewport_count <= 0" in src or "viewport_count == 0" in src, (
-        "paint() must guard the viewport draw step on viewport_count > 0"
-    )
+    # Guard must be present — either inverted ("if count > 0:") or direct
+    # ("if count <= 0: return / skip").
+    assert (
+        "viewport_count > 0" in src
+        or "viewport_count <= 0" in src
+        or "viewport_count == 0" in src
+    ), "paint() must guard the viewport draw step on viewport_count > 0"
+    # The gutter pass must NOT be nested inside the viewport guard — it
+    # must run independently so diagnostics/git display at terminal-first
+    # startup before apply_viewport has fired.
+    # Verify by checking that "diagnostic_count" appears AFTER "viewport_count"
+    # in the source but is NOT indented inside the viewport conditional.
+    assert src.index("diag_count = self._model.diagnostic_count()") > src.index(
+        "viewport_count = self._model.viewport_count()"
+    ), "gutter pass must appear after the viewport block in paint()"
+    # The gutter block must be reachable without the viewport guard having
+    # a path to skip it — the "diag_count == 0" check is the ONLY gutter
+    # early-exit that's acceptable.
+    gutter_start = src.index("diag_count = self._model.diagnostic_count()")
+    viewport_block = src[
+        src.index("viewport_count = self._model.viewport_count()") : gutter_start
+    ]
+    # The viewport block must NOT contain a bare "return" that would skip
+    # the gutter entirely — any return must be INSIDE a "if viewport_count > 0:"
+    # or similar conditional sub-block, not at the top level of paint().
+    # Structural check: if "return" appears before the gutter, it must be
+    # after an "if" that bounds it (i.e. the line count before gutter_start
+    # that has a top-level "        return" must be 0).
+    for line in viewport_block.split("\n"):
+        # A top-level return in paint() has 8 spaces of indent (2 levels: class + def)
+        assert line != "        return", (
+            "paint() must not have a top-level early-return between the "
+            "viewport block and the gutter pass — use a conditional block "
+            "so the gutter renders even when viewport_count == 0"
+        )
 
 
 def test_paint_pool_still_one_rect_after_phase_3():
@@ -854,3 +887,29 @@ def test_on_diagnostics_changed_has_slot_decorator():
     assert "@Slot()\n    def _on_diagnostics_changed" in module_src
     assert "@Slot()\n    def _on_git_changed" in module_src
     assert "self.update()" in src
+
+
+def test_gutter_renders_independently_of_viewport_state():
+    """Phase 4 structural regression: the gutter pass (Step 6) in paint()
+    must NOT be nested inside the Step 5 viewport conditional block.
+    A viewport_count == 0 guard that uses an early return would silently
+    suppress all diagnostic + git gutter markers at terminal-first startup
+    (before any apply_viewport fires).
+
+    Verified by confirming there is no bare top-level `return` between the
+    viewport_count read and the diag_count read in paint() source — any
+    returns that skip the viewport drawing must be inside a conditional."""
+    src = inspect.getsource(MinimapView.paint)
+    # Locate the viewport block and the gutter block.
+    vp_idx = src.index("viewport_count = self._model.viewport_count()")
+    gutter_idx = src.index("diag_count = self._model.diagnostic_count()")
+    assert gutter_idx > vp_idx, "gutter block must come after viewport block in paint()"
+    between = src[vp_idx:gutter_idx]
+    # No top-level (8-space-indent) return should appear between the two blocks.
+    for line in between.split("\n"):
+        assert line != "        return", (
+            "A top-level `return` between the viewport block and the gutter pass "
+            "causes the gutter to be silently suppressed when viewport_count == 0. "
+            "Use a conditional `if viewport_count > 0:` block instead of an "
+            "early-return so both features operate independently."
+        )
