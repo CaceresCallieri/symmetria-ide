@@ -123,6 +123,6 @@ Each phase ends with a go/no-go checkpoint. If a phase's deliverable does not fe
 ## Far future
 
 - **Own window manager** — fork Hyprland (~2 years out, dependent on LLM advancement). May reopen the federation architecture question.
-- **gpui migration** — rewrite in Rust once gpui is stable, informed by everything learned in Phases 0–4.
-- **Own editor core** — replace NeoVim's editing buffer itself. Only if the gpui migration motivates it.
+- **gpui migration** — *(superseded — Tauri 2 is now the chosen rewrite target; see `docs/future.md` "gpui migration — SUPERSEDED" and `docs/framework-pivot.md`).*
+- **Own editor core** — *(promoted to a declared long-arc end-state — no longer gpui-conditional; see `docs/future.md` "Own editor core — PROMOTED" and `docs/framework-pivot.md` §8).*
 - **Custom agent harness** — Phase 2's frontend is agent-agnostic at the IPC layer. Any prompt/response protocol (OpenCode, PyAgent, custom) can plug in.

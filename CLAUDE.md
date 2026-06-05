@@ -2,7 +2,7 @@
 
 A custom IDE wrapper built on NeoVim, in the Symmetria ecosystem.
 
-> **⚠ FRAMEWORK PIVOT DECIDED (2026-06-05) — read `docs/framework-pivot.md` before planning non-trivial work.** The wrapper is moving from PySide6/QML to **Tauri 2 (Rust + React/TS)**. NeoVim will run in an **xterm.js terminal** (no custom grid renderer / animations) with an `nvim --listen` side channel feeding native web chrome; which-key becomes an **IDE-level command gate**; the long arc strips NeoVim down and replaces it with an own web editor. **Everything below this banner describes the *shipped QML implementation* (Phases 0–2.5) — accurate as a record and as the behavior the new stack must re-deliver, but no longer the target architecture.** Execution of the pivot has not started; first steps are RAM baseline → WebKitGTK spike → Tauri file manager.
+> **⚠ FRAMEWORK PIVOT DECIDED (2026-06-05) — read `docs/framework-pivot.md` before planning non-trivial work.** The wrapper is moving from PySide6/QML to **Tauri 2 (Rust + React/TS)**. NeoVim will run in an **xterm.js terminal** (no custom grid renderer / animations) with an `nvim --listen` side channel feeding native web chrome; which-key moves from a QML overlay to an IDE-level keybinding layer (rendered in native web chrome, no longer in the NeoVim grid); the long arc strips NeoVim down and replaces it with an own web editor. **Everything below this banner describes the *shipped QML implementation* (Phases 0–2.5) — accurate as a record and as the behavior the new stack must re-deliver, but no longer the target architecture.** Execution of the pivot has not started; next step is the file manager as a standalone Tauri/React app (RAM baseline and WebKitGTK spike both done — see `docs/framework-pivot.md` §12).
 
 **Phase 0 spine complete. Phase 1 deferred. Phase 2 (IDE-native chat surface) parked — AgentPane, SessionHost, and the Node SDK sidecar all stay live, driven by `AppController` public methods; orchestrator.nvim is the active multi-instance agent runtime inside the embedded NeoVim; no in-IDE activation chord yet (deferred). Phase 2.5 (terminal pane + project anchor) shipped — anchor + terminal pane + OSC 7 shell-driven cwd sync + nvim cwd sync + side-panel location header all in. Long-term direction: see `docs/vision.md` "Surface hierarchy" + `docs/future.md` "Topology inversion".**
 
@@ -12,7 +12,7 @@ A custom IDE wrapper built on NeoVim, in the Symmetria ecosystem.
 - **Core embed:** NeoVim via `--embed` + msgpack-RPC through `pynvim`. User's real `~/.config/nvim` loads by default (plugins, colorscheme, keymaps all work).
 - **Status bar:** native QML with mode badge, project, branch, file path, cursor position. Lualine is hidden from the viewport (laststatus=0 re-asserted on VimEnter).
 - **Which-key overlay:** native QML panel driven by our own state machine + trie built from `nvim_get_keymap()` (plus which-key.nvim's preset catalog for built-in motion descriptions). Which-key.nvim itself is neutralized on VimEnter.
-- **Constraints:** keyboard-first, Symmetria aesthetic, NeoVim motions preserved.
+- **Constraints:** keyboard-first, Symmetria aesthetic, Vim-style navigation preserved.
 - **Runtime deps on Arch:** `sudo pacman -S --needed pyside6 python-pynvim`.
 - **Run:** `PYTHONPATH=src python -m symmetria_ide`.
 - **Dev workflow doc:** `docs/dev-workflow.md` — env vars for headless smoke testing, Hyprland workspace-6 rule, notification-system quirks.
@@ -263,12 +263,12 @@ Cross-cutting design rules that still hold for the parked AgentPane surface:
 
 1. **Keyboard-first** — no mouse-required interactions.
 2. **Symmetria aesthetic** — minimal, calm, consistent with Shell & File Manager (recreated in CSS post-pivot; the *look* is preserved).
-3. **Vim-style navigation preserved** — real NeoVim through the transition, a vim-navigation layer (flash-like) in the end-state web editor. The navigation *feel* is sacred; the engine under it is swappable (softened from "NeoVim motions sacred" by the pivot, see `docs/framework-pivot.md` §8).
+3. **Vim-style navigation preserved** — real NeoVim through the transition, a vim-navigation layer (flash-like) in the end-state web editor. The navigation *feel* is sacred; the engine under it is swappable (softened from "NeoVim motions sacred" by the pivot, see `docs/framework-pivot.md` §8 "Long-term arc + identity shift").
 4. **Compose, don't reimplement** — orchestrate existing tools (NeoVim, the web platform, Claude Code) rather than replace them. *Reinforced* by the pivot: NeoVim-in-a-terminal is more "compose" than the custom grid painter was.
 
 ## Related projects in the Symmetria ecosystem
 
 - Symmetria Shell (QuickShell-based desktop shell)
-- Symmetria File Manager (QML, to be integrated in Phase 1)
+- Symmetria File Manager (currently a standalone QuickShell/QML app — under the framework pivot it is the first Tauri/React build and the source of the IDE's file tree + git status; see `docs/framework-pivot.md` §7)
 - Symmetria WhatsApp (standalone, not integrated)
 - `orchestrator.nvim` (NeoVim plugin driving the Claude Code workflow — **active agent runtime**; the IDE no longer intercepts its `<leader>a*` / `<C-1..5>` keymaps. The IDE-side chat pane is preserved but currently has no in-IDE activation chord — deferred, no chord assigned yet)

@@ -13,7 +13,7 @@ metadata:
 
 - **NeoVim renderer is DROPPED, not ported.** No custom `ext_linegrid` grid painter, no scroll/cursor animations. NeoVim runs as a TUI inside **xterm.js** (same terminal tech as shell terminals). The user explicitly accepted losing the animations. Porting Neovide-grade animation to web canvas is the one no-living-precedent task — we decline it on purpose.
 - **Chrome survives via `nvim --listen`.** A second RPC connection (alongside the PTY) keeps the capsule emitter / OSC-7 / git integration driving native web side panels. nvim supports concurrent connections.
-- **which-key is elevated to an IDE-level command gate** (see [[ide_owns_keybind_layer]] for the full precedence contract). Key point: it owns the keymap and delegates unclaimed keys to nvim; `<leader>` is "born in B" (merges nvim's leader subtree day one) or nvim's leader namespace goes dead. The custom Lua which-key (CLAUDE.md #15–#21) is *deleted*, not ported.
+- **which-key is elevated to an IDE-level command gate** (see [ide_owns_keybind_layer](../meta/ide_owns_keybind_layer.md) for the full precedence contract). Key point: it owns the keymap and delegates unclaimed keys to nvim; `<leader>` is "born in B" (merges nvim's leader subtree day one) or nvim's leader namespace goes dead. The custom Lua which-key (CLAUDE.md #15–#21) is *deleted*, not ported.
 - **Backend: Python sidecar now → Rust later.** Keep the Python backend as a sidecar the Tauri shell talks to (fastest to a running IDE); collapse to a Rust core (nvim-rs + portable-pty, lift Terax's PTY layer) once proven. The Node agent SDK sidecar is already TS and carries over unchanged.
 - **Long arc = identity shift.** Progressively strip nvim (file tree → file searcher → lazygit → orchestrator) until it's "just a buffer," then replace with an own web editor (Monaco/CodeMirror) + vim-nav (flash). Non-negotiable #3 softens from "NeoVim motions sacred" to "vim-style navigation preserved."
 
@@ -25,6 +25,7 @@ metadata:
 
 **Roadmap:** file manager (file tree + git status derive from it) → agent panel + browser → git system → which-key gate → web editor pane (last).
 
-**Immediate next steps (agreed order):** (1) RAM baseline of current IDE + Terax (already installed), (2) WebKitGTK/transparency spike on this machine, (3) begin the Tauri file manager.
+**Immediate next steps (agreed order):** (1) RAM baseline — DONE (2026-06-05); (2) WebKitGTK spike — DONE, PASSED (2026-06-05); (3) begin the Tauri file manager ← NEXT.
 
 **How to apply:** When asked to build or plan IDE features, target the Tauri/web architecture, not QML. Treat the shipped QML code (Phases 0–2.5) as the behavior spec to re-deliver, not the implementation to extend. The CLAUDE.md gotchas about QML/PySide/the grid renderer/which-key Lua describe the *retired* stack — relevant as history, not as current constraints.
+

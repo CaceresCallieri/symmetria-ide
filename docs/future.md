@@ -24,11 +24,11 @@ Things that are years out but influence today's decisions.
 - The agent pane's current "full-window swap over the editor" pattern (`agentVisible` toggle) will eventually feel backwards. When inversion happens, the agent pane becomes the persistent surface and the editor becomes the visibility-toggled one. Plan for that refactor; don't entrench the current shape.
 - The pre-anchor / post-anchor distinction (introduced by the anchor state machine in Phase 2.5) is the architectural seam where this inversion will eventually land. Pre-anchor: terminal-primary, no editor focus. Post-anchor: editor accessible but not default. Long-term post-anchor: agent-primary, editor summoned.
 
-**What this is NOT:** a plan to remove NeoVim. NeoVim remains the editor core forever (or until the gpui rewrite, per the "Own editor core" section below). The change is in *prominence and default visibility*, not in *which tool does the editing*. When the user needs to hand-edit, NeoVim is the tool. The question is only how often that need arises and how it's surfaced.
+**What this is NOT:** a plan to remove NeoVim. NeoVim remains the editor core through the transition (see the updated "Own editor core — PROMOTED" section below for the declared end-state). The change in *this section* is in *prominence and default visibility*, not in *which tool does the editing* during the transition. When the user needs to hand-edit, NeoVim is the tool. The question is only how often that need arises and how it's surfaced.
 
 ## NeoVim reclamation roadmap
 
-A direct consequence of the topology inversion above: capabilities historically routed through NeoVim plugins (because a terminal couldn't host anything else) progressively migrate into native Symmetria UI. This is **not a hostile takeover** — NeoVim remains the text-editing core indefinitely. It's a redistribution of *responsibilities* that no longer have to live inside the editor surface now that the IDE owns a real GUI.
+A direct consequence of the topology inversion above: capabilities historically routed through NeoVim plugins (because a terminal couldn't host anything else) progressively migrate into native Symmetria UI. This is **not a hostile takeover** during the transition — NeoVim remains the text-editing core until the web editor end-state is reached (see "Own editor core — PROMOTED" below). It's a redistribution of *responsibilities* that no longer have to live inside the editor surface now that the IDE owns a real GUI.
 
 **Reclaimed (already shipped):**
 
@@ -41,11 +41,11 @@ A direct consequence of the topology inversion above: capabilities historically 
 **Queued (near-term):**
 
 - **Fuzzy file finder.** Currently `fff.nvim` inside NeoVim. The File Manager already has a basic fuzzy match primitive that needs hardening and broadening. Plan: a single native fuzzy finder reachable from the FM pane, from the terminal (as a callable), and eventually from nvim (replacing the leader binding). The point is **one search index, one ranking algorithm, one keyboard model** — invocable from any surface. The current per-pane patchwork is exactly the kind of nvim dependency the reclamation thesis targets.
-- **Git operations surface.** Currently a mix of leader bindings, fugitive-style commands, and the existing git status capsule. Long-term direction: a native QML git pane with stage / unstage / diff / commit inline, reducing the `:G` surface area to "git operations from outside the editor."
+- **Git operations surface.** Currently a mix of leader bindings, fugitive-style commands, and the existing git status capsule. Long-term direction: a native web (React) git pane with stage / unstage / diff / commit inline, reducing the `:G` surface area to "git operations from outside the editor."
 
-**Far future (post-gpui or post-WM):**
+**Far future (post-WM):**
 
-- **Edit buffer itself.** Only if gpui produces meaningfully better text-editing primitives AND a specific NeoVim limitation justifies it. See "Own editor core" below. NeoVim remains the editing core indefinitely otherwise.
+- **Edit buffer itself.** *(Superseded — see "Own editor core — PROMOTED" section below. The pivot makes this the declared end-state, not a gpui-conditional. This bullet is kept as the historical trigger that was replaced.)* NeoVim remains the editing core through the full transition.
 
 **Design rule for each reclamation:** the native Symmetria surface must be reachable from *every* pane (terminal, agent, FM, editor) with a uniform keybind. If we ship a fuzzy finder that only works when nvim has focus, we've failed — that's nvim-plugin territory, not a reclamation. The whole point is to make these capabilities IDE-wide primitives, not pane-local features. This rule is what makes the eventual topology inversion painless: when the agent pane becomes primary and the editor becomes summoned-on-demand, every reclaimed capability still works because none of them depend on the editor having focus.
 

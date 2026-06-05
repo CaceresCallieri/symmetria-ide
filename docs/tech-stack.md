@@ -55,7 +55,7 @@ The long-term target is gpui (Rust). Until gpui is stable with a public API, wai
 ### Tauri (Rust + Web frontend) — **VERDICT REVERSED (2026-06)**
 - **For:** lightweight bundle (~7-10 MB vs Electron's 150+), aligned with long-term Rust direction, *far* better AI-codegen + library ecosystem than QML, native embedded browser, agent-frontend ecosystem to lean on (Terax + web Claude UIs).
 - **Original against (now reconsidered):** "WebKitGTK on Linux has input-latency, IME, and keyboard-grab issues — fatal for a keyboard-first editor." That verdict assumed a *custom web editor* carrying the full keyboard-first burden on WebKitGTK. The new architecture runs **NeoVim in xterm.js** (the same input path VS Code uses for its terminal), which de-risks latency/grab substantially; IME is a non-issue for Spanish/English. The File-Manager-rewrite cost is now *accepted on purpose* (QML→React is where the codegen velocity is won).
-- **Residual risks (real, to validate):** WebKitGTK runtime RAM is not lighter than Qt; Wayland/Hyprland rendering on this NVIDIA-hybrid laptop needs an empirical spike. See `docs/framework-pivot.md` §9.
+- **Residual risks (validated):** WebKitGTK runtime RAM is NOT lighter than Qt (measured: Terax 213 MB ≈ Symmetria IDE 217 MB — a wash); Wayland/Hyprland rendering on this NVIDIA-Optimus laptop — **spiked 2026-06-05, PASSED** (transparency + blur + 60fps, no black box; DMABUF kill-switch harmful). See `docs/framework-pivot.md` §9.
 - **Current verdict: ADOPTED** for the wrapper. Replaces this whole "rejected" section in spirit.
 
 ### Electron
