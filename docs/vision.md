@@ -1,5 +1,7 @@
 # Vision
 
+> **Framework pivot (2026-06):** the *what* and *why* of this vision are unchanged; the *how* is moving from PySide6/QML to **Tauri 2 (Rust + React/TS)**, with NeoVim running in xterm.js and a long arc toward an own web editor. Sections below are updated where they named the QML implementation. Authoritative detail: `docs/framework-pivot.md`.
+
 ## The long horizon
 
 A unified environment — *your own Emacs* — in which the daily developer workflow happens: editing, agent conversations, git, file navigation, browser-based agentic work, diagram rendering, image viewing.
@@ -20,9 +22,10 @@ Specific limitations that drive this project:
 
 ## What this IS
 
-- A wrapper that embeds NeoVim, hosts an agent frontend, and integrates the File Manager.
-- A progressively extracted UI: NeoVim's chrome moves into native QML panels over time.
-- Keyboard-first, Symmetria-aesthetic, opinionated.
+- A **wrapper** that embeds a swappable editor (NeoVim today, an own web editor long-term), hosts an agent frontend, and integrates the File Manager.
+- Built on **Tauri 2 (Rust + React/TS)**; NeoVim runs in an xterm.js terminal with an `nvim --listen` side channel feeding the native web chrome.
+- A progressively extracted UI: NeoVim's responsibilities (chrome, file tree, which-key, git) move into native **web** surfaces over time, until NeoVim is "just a buffer" and is replaced.
+- Keyboard-first, Symmetria-aesthetic (recreated in CSS), opinionated.
 
 ## Modes of inhabiting the IDE
 
@@ -57,15 +60,15 @@ The IDE houses four distinct surfaces with different roles. Their relative promi
 | **Agent**     | *Action* — how the user directs work  | Summoned over the editor via `<leader>aN`             | Always-on, default-visible primary surface       |
 | **Observation** | File tree + git status + (later) file manager — how the user *sees* project state | Always-on sidebar to the editor's right             | Unchanged — always-on, expands to also include diff views, build status, etc. |
 | **Navigation** | Terminal — how the user moves between projects and contexts | Not yet built (Phase 2.5)                          | Persistent home surface; cwd drives the observation pane until anchored |
-| **Edit & view** | NeoVim — opening buffers to read or hand-edit | Central pane on launch; default focus              | Summoned on demand for specific buffers; not the launch state |
+| **Edit & view** | NeoVim (in xterm.js) → own web editor — opening buffers to read or hand-edit | Central pane on launch; default focus              | Summoned on demand; eventually an own web editor, not the launch state |
 
-The **direction of travel** is from an editor-centric IDE (NeoVim as the hub, agent/file-tree as satellites) toward an *agent-and-navigation-centric* IDE (terminal as the launch state, agent as the primary action surface, file tree + git as always-on observation, NeoVim as a summoned viewer/editor for specific buffers).
+The chrome surfaces (agent, observation, navigation) are **native web (React) panels**; the editor is **NeoVim rendered in an xterm.js terminal**, with its data-side chrome (status/branch/cwd) fed over an `nvim --listen` RPC channel. The **direction of travel** is from an editor-centric IDE (NeoVim as the hub, agent/file-tree as satellites) toward an *agent-and-navigation-centric* IDE (terminal as the launch state, agent as the primary action surface, file tree + git as always-on observation, the editor summoned on demand).
 
 This is a multi-year direction, not a near-term refactor. Each Phase 2+ deliverable should be evaluated against whether it composes cleanly with the long-term topology — not whether it implements it. See `docs/future.md` for the longer-form discussion.
 
 ## What this is NOT
 
-- Not a replacement for NeoVim (NeoVim is the editor core, forever or until a gpui rewrite).
+- Not a replacement for NeoVim *during the transition* — NeoVim remains the real editing core (the user's actual config) until the IDE is hollowed it out enough that an own web editor with vim-style navigation can take over. The long-term plan *does* eventually retire NeoVim (a shift from the old "NeoVim forever or until gpui" framing — see `docs/framework-pivot.md` §8).
 - Not a general-purpose IDE for others. Personal tooling.
 - Not a monolith that swallows the whole Symmetria ecosystem. WhatsApp stays standalone. Future messaging apps stay standalone.
 

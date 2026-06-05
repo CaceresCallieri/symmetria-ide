@@ -1,5 +1,7 @@
 # Phases
 
+> **Framework pivot (2026-06) — read first.** Phases 0, 2, and 2.5 below shipped on the **PySide6/QML** stack and are an accurate record of *what was built there*. The project is now pivoting the wrapper to **Tauri 2 (Rust + React/TS)**, with NeoVim running in xterm.js instead of the custom grid renderer. The **live, post-pivot roadmap** (file manager → agent panel → git system → which-key IDE gate → web editor) is in `docs/framework-pivot.md` §7, not here. The phases below remain useful as (a) the shipped-feature record and (b) the spec for *what behavior the new stack must re-deliver* (anchor model, capsule chrome, OSC-7 sync, permission UI). Phases 3–4 below are reframed by the pivot — treat them as requirements, not as QML implementation plans.
+
 Each phase ends with a go/no-go checkpoint. If a phase's deliverable does not feel right, reconsider before continuing.
 
 ## Phase 0 — Spine  *(complete)*

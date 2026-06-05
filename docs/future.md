@@ -2,6 +2,8 @@
 
 Things that are years out but influence today's decisions.
 
+> **Framework pivot (2026-06):** the topology-inversion and NeoVim-reclamation arcs below are *unchanged in spirit* and in fact accelerated by the pivot to **Tauri 2 (Rust + React/TS)**. Two sections are materially updated: **gpui migration** (superseded — Tauri is now the chosen rewrite, not gpui) and **own editor core** (promoted from "far future, post-gpui" to an active long-arc deliverable). Where the text below says "native QML," read "native web (React)." See `docs/framework-pivot.md`.
+
 ## Topology inversion: agent-primary, editor-on-demand
 
 **Timeline:** progressive, over Phases 2.5 through 5+. No single "flip the switch" moment.
@@ -32,8 +34,8 @@ A direct consequence of the topology inversion above: capabilities historically 
 
 - **Agent / Claude Code surface.** Previously `orchestrator.nvim` driving a NeoVim-floated TUI; now the native QML agent pane backed by the Node SDK sidecar (Phase 2). The Lua orchestrator is slated for deprecation once the IDE meets the gates in `docs/agent-dashboard-integration.md`.
 - **Status line.** Previously `lualine`; now native QML status bar driven by the capsule protocol (Phase 0).
-- **Which-key overlay.** Previously `which-key.nvim`'s own floating window; now native QML overlay driven by our trie + state machine (Phase 0; see CLAUDE.md gotchas #15–#21 for the burned-in lessons).
-- **Cmdline + completion popup.** Previously NeoVim's built-in cmdline (or `noice.nvim` overlay); now native QML cmdline with our own `getcompletion()`-driven pipeline (Phase 0).
+- **Which-key overlay.** *(QML era, being retired by the pivot.)* Was a native QML overlay driven by our own trie + state machine (gotchas #15–#21). The pivot re-conceives this as an **IDE-level command gate** in web (React) that owns the keymap and delegates unclaimed keys to NeoVim; nvim-level discovery returns to the real `which-key.nvim` in-terminal. See `docs/framework-pivot.md` §4. The custom Lua which-key (#15–#21) is *deleted*, not ported.
+- **Cmdline + completion popup.** *(QML era, retired by the pivot.)* The custom `getcompletion()` pipeline + QML cmdline existed because extracted `ext_cmdline` made plugin popups render in the wrong place (gotcha #8). With NeoVim in a terminal, it draws its own cmdline/popups correctly — so this whole subsystem is dropped, not rebuilt.
 - **File manager pane.** Symmetria File Manager hosted as a central pane (Phase 1 partial). Replaces ad-hoc nvim file pickers for project-tree browsing.
 
 **Queued (near-term):**
@@ -57,13 +59,13 @@ A direct consequence of the topology inversion above: capabilities historically 
 
 This is why today's monolith decision is **current, not permanent**.
 
-## gpui migration
+## gpui migration — SUPERSEDED by the Tauri pivot (2026-06)
 
-**Target:** rewrite the IDE in Rust on top of `gpui` (Zed's engine) once gpui has a stable public API.
+**Original target:** rewrite the IDE in Rust on top of `gpui` (Zed's engine) once gpui had a stable public API.
 
-**Why wait:** gpui is pre-1.0 in 2026 with frequent breaking changes. Rewriting now would mean chasing a moving target.
+**Why it's superseded:** the framework pivot chose **Tauri 2 (Rust + React/TS)** as the rewrite target instead of gpui. Tauri is the pragmatic middle ground — a mature ecosystem, the best AI-codegen target (React/TS ≫ QML *and* ≫ a from-scratch gpui UI), an embedded browser for free, and Rust on the backend — without gpui's pre-1.0 churn or the months-before-first-pixel cost of a from-scratch native UI. gpui remains an interesting *far*-future option only if Tauri's WebKitGTK substrate proves untenable on Linux/Wayland (see `docs/framework-pivot.md` §9 for that risk). The Rust core arrives via Tauri's backend (Path-2 in the pivot doc), not via gpui.
 
-**What the wait buys:** Phases 0–4 in PySide6 teach us exactly what widgets, layouts, and event flows we want. The gpui rewrite begins from a working reference, not a blank page.
+**What Phases 0–2.5 in PySide6 bought:** they taught us exactly what surfaces, layouts, and event flows we want — so the Tauri rewrite begins from a working reference, not a blank page. (That value transfers regardless of which Rust path we took.)
 
 ## Additional Symmetria apps
 
@@ -75,14 +77,13 @@ Possible, all **standalone** (not absorbed into the IDE):
 
 These share the aesthetic and the Symmetria identity but do not share a process with the IDE.
 
-## Own editor core
+## Own editor core — PROMOTED to an active long-arc (2026-06)
 
-Far future. Replace NeoVim's editing buffer itself, motivated only by:
+The framework pivot turns this from "far future, post-gpui" into the **declared end-state** of the editor arc. The plan: progressively strip capabilities out of NeoVim (file tree → shared file searcher → lazygit → orchestrator/agent logic) until NeoVim is "just a buffer visualization," then **replace it with an own web editor** (Monaco / CodeMirror 6) carrying vim-style navigation (flash-like motions) and a few ergonomic plugins.
 
-1. gpui migration producing superior text-editing primitives, *and*
-2. A specific NeoVim limitation biting hard enough to justify reimplementation.
+**Why this is now the plan, not a contingency:** the user explicitly wants to move off the terminal-based editing core over time, the web editor is web-native (no dead-precedent grid renderer to maintain), and the AI-codegen + library ecosystem makes building it tractable. This is the concrete meaning of identity principle #5 ("progressive extraction toward an own editor").
 
-**Current posture:** NeoVim stays forever unless both of those become true.
+**Posture:** NeoVim stays as the *real* editing core through the whole transition; it is retired only once the web editor genuinely matches the stripped-down editing role. See `docs/framework-pivot.md` §8 — and note this is a deliberate change from the old "NeoVim forever" posture.
 
 ## Custom coding-agent harness
 

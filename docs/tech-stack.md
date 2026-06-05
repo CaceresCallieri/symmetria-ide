@@ -1,9 +1,12 @@
 # Tech Stack
 
+> **Superseded by the framework pivot (2026-06).** The decision below reflects the *original* PySide6 choice and the historical alternatives analysis. The IDE is now pivoting to **Tauri 2 (Rust + React/TS)** for the wrapper, with NeoVim running in xterm.js instead of a custom grid renderer. The "Tauri rejected" and "gpui long-term" verdicts are reconsidered (see the updated notes inline and the authoritative `docs/framework-pivot.md`). This file is kept for the rationale history — it is no longer the current decision.
+
 ## Decision
 
-- **Primary:** PySide6 (Qt 6 + Python + QML).
-- **Long-term migration target:** gpui (Zed's engine), once it has a stable public API — likely 2027+.
+- **Original primary:** PySide6 (Qt 6 + Python + QML). *(What shipped Phases 0–2.5.)*
+- **Current direction:** Tauri 2 (Rust core + React/TypeScript frontend). Python backend kept as a sidecar during transition, collapsed to Rust later. See `docs/framework-pivot.md`.
+- **gpui** is no longer the long-term target — Tauri is the chosen middle ground (better ecosystem + AI-codegen than a from-scratch gpui rewrite, lighter than the from-scratch native path).
 
 ## Primary libraries
 
@@ -49,10 +52,11 @@ The long-term target is gpui (Rust). Until gpui is stable with a public API, wai
 - **Against:** slower iteration during exploration; compile step taxes Phase 0 discovery.
 - **Verdict:** start in Python. Port hot paths to C++ later, inside the same Qt app.
 
-### Tauri (Rust + Web frontend)
-- **For:** lightweight, aligned with long-term Rust direction (~10 MB vs Electron's 150+).
-- **Against:** WebKitGTK on Linux has input-latency, IME, and keyboard-grab issues — **fatal** for a keyboard-first editor. QML File Manager would require full rewrite in HTML/CSS.
-- **Verdict:** rejected.
+### Tauri (Rust + Web frontend) — **VERDICT REVERSED (2026-06)**
+- **For:** lightweight bundle (~7-10 MB vs Electron's 150+), aligned with long-term Rust direction, *far* better AI-codegen + library ecosystem than QML, native embedded browser, agent-frontend ecosystem to lean on (Terax + web Claude UIs).
+- **Original against (now reconsidered):** "WebKitGTK on Linux has input-latency, IME, and keyboard-grab issues — fatal for a keyboard-first editor." That verdict assumed a *custom web editor* carrying the full keyboard-first burden on WebKitGTK. The new architecture runs **NeoVim in xterm.js** (the same input path VS Code uses for its terminal), which de-risks latency/grab substantially; IME is a non-issue for Spanish/English. The File-Manager-rewrite cost is now *accepted on purpose* (QML→React is where the codegen velocity is won).
+- **Residual risks (real, to validate):** WebKitGTK runtime RAM is not lighter than Qt; Wayland/Hyprland rendering on this NVIDIA-hybrid laptop needs an empirical spike. See `docs/framework-pivot.md` §9.
+- **Current verdict: ADOPTED** for the wrapper. Replaces this whole "rejected" section in spirit.
 
 ### Electron
 - **For:** huge ecosystem, easy browser embed.
