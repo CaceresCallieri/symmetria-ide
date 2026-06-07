@@ -1,31 +1,18 @@
 ---
 name: framework-pivot-pyside6-qml-tauri-2-rust-react-ts
-description: Decided 2026-06-05. The wrapper moves to Tauri/web; NeoVim runs in xterm.js (no custom grid renderer); which-key becomes an IDE-level gate; long arc replaces nvim with an own web editor. Full detail in docs/framework-pivot.md.
+description: REVERSED 2026-06-07. The Tauri/web pivot was decided 2026-06-05, partly executed, then abandoned. The IDE stays native PySide6/QML. Plan QML work, not web. Detail in CLAUDE.md banner + docs/framework-pivot.md (superseded record).
 metadata: 
   node_type: memory
   type: project
   originSessionId: 24d3d78f-ecfb-4678-b251-3411e2a2621a
 ---
 
-**Decision (2026-06-05):** Symmetria IDE's *wrapper* pivots from PySide6 (Qt6 + Python + QML) to **Tauri 2 (Rust core + React/TS frontend)**, modeled on Terax (`crynta/terax-ai`, Apache-2.0). **Authoritative doc: `docs/framework-pivot.md`** — read it before any pivot work; this memory is just the index pointer + the load-bearing decisions.
+**DECISION REVERSED (2026-06-07): the IDE stays on PySide6 (Qt6 + Python + QML).** A Tauri 2 (Rust + React/TS) pivot was decided 2026-06-05 and partly executed (themed shell + PTY terminal + nvim-in-xterm.js editor on branch `tauri-pivot`), then abandoned. **Do NOT plan or build Tauri/web work.** Target the live QML stack.
 
-**The non-obvious decisions (so future sessions don't re-litigate or mis-build):**
+**Why reversed (the load-bearing reason):** the file-tree + git-status systems are **modularized and reused across Symmetria Shell + File Manager + IDE**. The FM exposes them as the `Symmetria.FileManager.UI` QML module (imported as `import Symmetria.FileManager.UI as FmUi`; its `Theme` singleton renamed `FmTheme` to avoid collision). Reuse requires **one shared toolkit**; the FM — after its own deep evaluation (GPUI ruled out on Hyprland: window-map failure #37918 + compositor-CPU defect; Slint viable & embeddable but QML still felt smoother; FM already feature-complete) — stayed native Qt/QML. A web IDE could not embed the QML module without reimplementing it (a DRY violation the user explicitly rejected: "we should modularize and reuse these systems"). **Secondary factor:** the WebKitGTK scroll/animation perf regret the FM measured live. The §9 caveats (RAM wash, favorable WebKitGTK spike on this Optimus laptop) remain factually true — they just no longer outweigh the reuse coupling.
 
-- **NeoVim renderer is DROPPED, not ported.** No custom `ext_linegrid` grid painter, no scroll/cursor animations. NeoVim runs as a TUI inside **xterm.js** (same terminal tech as shell terminals). The user explicitly accepted losing the animations. Porting Neovide-grade animation to web canvas is the one no-living-precedent task — we decline it on purpose.
-- **Chrome survives via `nvim --listen`.** A second RPC connection (alongside the PTY) keeps the capsule emitter / OSC-7 / git integration driving native web side panels. nvim supports concurrent connections.
-- **which-key is elevated to an IDE-level command gate** (see [ide_owns_keybind_layer](../meta/ide_owns_keybind_layer.md) for the full precedence contract). Key point: it owns the keymap and delegates unclaimed keys to nvim; `<leader>` is "born in B" (merges nvim's leader subtree day one) or nvim's leader namespace goes dead. The custom Lua which-key (CLAUDE.md #15–#21) is *deleted*, not ported.
-- **Backend: Python sidecar now → Rust later.** Keep the Python backend as a sidecar the Tauri shell talks to (fastest to a running IDE); collapse to a Rust core (nvim-rs + portable-pty, lift Terax's PTY layer) once proven. The Node agent SDK sidecar is already TS and carries over unchanged.
-- **Long arc = identity shift.** Progressively strip nvim (file tree → file searcher → lazygit → orchestrator) until it's "just a buffer," then replace with an own web editor (Monaco/CodeMirror) + vim-nav (flash). Non-negotiable #3 softens from "NeoVim motions sacred" to "vim-style navigation preserved."
+**Where the abandoned work lives:** `git tag archive/tauri-pivot` (tip `414f8d7`). Recover with `git switch -c tauri-pivot archive/tauri-pivot`. NOT in the working tree (the 5.4 GB `app-tauri/` build artifacts were removed; `main` never tracked any Tauri source).
 
-**Why (drivers):** dev velocity + AI codegen (TS/React ≫ QML — Qt itself admits QML is a weak codegen target); agent-frontend ecosystem to lean on; **native embedded browser** for agent web work (free in Tauri, heavy QtWebEngine in Qt); web library ecosystem + Terax to lean on.
+**Salvaged to main (the one pivot-independent win):** `src/symmetria_ide/jsonl_transport.py` — consolidated JSONL framing extracted from `session_host.py` + `term_repl.py` (commit `11645c0`, behavior-preserving, 932 tests green).
 
-**Honest caveats (don't bank on the wrong premise):**
-- **RAM is NOT a pivot driver — MEASURED 2026-06-05:** Terax core 213 MB PSS ≈ Symmetria IDE idle 217 MB PSS (within 2%; IDE understated, its sidecar didn't pre-warm). The "we're much heavier than Terax" premise is false. Each stack has a fat baseline (WebKitGTK WebView 161 MB vs Qt+Python 178 MB); the pivot is RAM-neutral-to-slightly-worse. Only real lever = drop Python → Rust core, and WebKitGTK's ~160 MB WebView still stays. Justify the pivot on dev-velocity/AI-codegen/agent-ecosystem/embedded-browser/bundle-size, NOT RAM.
-- WebKitGTK on this **NVIDIA-Optimus hybrid** Hyprland laptop — **SPIKED 2026-06-05, PASSED.** Default rendering: transparency + backdrop-blur + 60fps canvas + crisp fonts all work (no black-box failure). The `WEBKIT_DISABLE_DMABUF_RENDERER`/`COMPOSITING_MODE` workaround is unnecessary AND harmful here (breaks blur → opaque panels) — do NOT use it. Toolchain was already installed (system cargo + webkit2gtk 2.52). Unverified: PRIME-offload / external-monitor-on-NVIDIA; remote-iframe load (data: URL rendered; external load inconclusive — configure Tauri CSP frame-src/remote-domain allowlist for the browser pane).
-
-**Roadmap:** file manager (file tree + git status derive from it) → agent panel + browser → git system → which-key gate → web editor pane (last).
-
-**Immediate next steps (agreed order):** (1) RAM baseline — DONE (2026-06-05); (2) WebKitGTK spike — DONE, PASSED (2026-06-05); (3) begin the Tauri file manager ← NEXT.
-
-**How to apply:** When asked to build or plan IDE features, target the Tauri/web architecture, not QML. Treat the shipped QML code (Phases 0–2.5) as the behavior spec to re-deliver, not the implementation to extend. The CLAUDE.md gotchas about QML/PySide/the grid renderer/which-key Lua describe the *retired* stack — relevant as history, not as current constraints.
-
+**How to apply:** Build/plan IDE features on the **live QML/PySide6 architecture** — the shipped code (Phases 0–2.5) is the implementation to extend, not a spec to re-deliver in web. The CLAUDE.md gotchas about QML/PySide/the grid renderer/which-key Lua are **current constraints again**, not retired history. For file-tree/git-status, reuse the FM's `Symmetria.FileManager.UI` QML module rather than reimplementing (user says FM reuse is "already in place"). See [ide_owns_keybind_layer](../meta/ide_owns_keybind_layer.md) — the which-key precedence contract still holds, now as a QML overlay (not an IDE-level web gate). Decision brief: `/home/jc/.claude/relay/20260607-183500-symmetria-ide-framework-decision.md`.
