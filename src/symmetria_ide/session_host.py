@@ -67,7 +67,6 @@ synthesized envelopes:
 from __future__ import annotations
 
 import gc
-import json
 import logging
 import shlex
 import subprocess
@@ -75,6 +74,13 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
+
+# `parse_jsonl_line` is re-exported (imported-and-used here) so existing
+# callers/tests that do `from symmetria_ide.session_host import parse_jsonl_line`
+# keep working after the line-framing primitives moved to jsonl_transport.
+from .jsonl_transport import encode_jsonl_line, parse_jsonl_line
+
+__all__ = ["SessionHost", "parse_jsonl_line"]
 
 log = logging.getLogger(__name__)
 
@@ -96,32 +102,6 @@ def _sidecar_dist_path() -> Path:
 # hasn't exited within this window the process is unresponsive and we
 # force termination so the GUI shutdown path doesn't block on it.
 _SHUTDOWN_GRACE_SECONDS = 2.0
-
-
-def parse_jsonl_line(line: str) -> dict | None:
-    """Parse one stdout line into a wire-protocol event dict.
-
-    Returns ``None`` for blank / whitespace-only lines and for lines
-    that aren't valid JSON — the worker loop logs and continues in
-    both cases rather than crashing. Extracted as a free function so
-    tests exercise it without spawning a subprocess.
-
-    BOM-tolerance: the sidecar never prepends a BOM in practice, but
-    we strip one defensively so a future change doesn't silently
-    wedge the parser. Same defence carried over from the prior claude CLI implementation.
-    """
-    stripped = line.strip().lstrip("\ufeff")
-    if not stripped:
-        return None
-    try:
-        parsed = json.loads(stripped)
-    except json.JSONDecodeError:
-        log.exception("malformed sidecar JSONL line: %r", line[:200])
-        return None
-    if not isinstance(parsed, dict):
-        log.warning("sidecar JSONL line is not an object: %r", parsed)
-        return None
-    return parsed
 
 
 class SessionHost(QObject):
@@ -447,7 +427,7 @@ class SessionHost(QObject):
             log.debug("_write_command with no running subprocess — dropped")
             return
         stdin = proc.stdin  # local alias keeps pyright's Optional narrowing
-        line = json.dumps(payload) + "\n"
+        line = encode_jsonl_line(payload)
         with self._stdin_lock:
             try:
                 stdin.write(line)

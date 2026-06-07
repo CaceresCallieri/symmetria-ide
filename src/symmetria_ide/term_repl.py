@@ -71,6 +71,7 @@ from PySide6.QtCore import (
     Slot,
 )
 
+from .jsonl_transport import encode_jsonl_line
 from .terminal_backend import TerminalBackend
 
 
@@ -369,9 +370,9 @@ class TermRepl(QObject):
         # concurrent with the main thread writing acks and snapshots.
         # Both threads share the same sys.stdout file object; the lock
         # prevents interleaved JSON lines.
-        line = json.dumps(event, ensure_ascii=False)
+        line = encode_jsonl_line(event, ensure_ascii=False)
         with self._stdout_lock:
-            sys.stdout.write(line + "\n")
+            sys.stdout.write(line)
             sys.stdout.flush()
 
 
