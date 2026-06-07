@@ -1,8 +1,9 @@
 # Framework pivot: PySide6/QML → Tauri 2 (Rust + React/TS)
 
-**Status:** Decided (direction), 2026-06-05. Execution not yet started.
-**Supersedes:** the "PySide6 primary / gpui long-term" decision in `docs/tech-stack.md` and the "renders in QML" framing throughout the docs.
-**This file is the north star for the pivot.** Other docs point here; where they conflict, this wins.
+> **⚠ REVERSED 2026-06-07 — this pivot was decided, partly executed, then abandoned. The IDE stays on PySide6/QML.** This document is kept ONLY as the historical reasoning record of a considered-and-rejected direction — it is **no longer the north star; do not plan work from it.** Reason for reversal: the file-tree + git-status systems are modularized and reused across Symmetria Shell + File Manager + IDE; the FM (after its own deep evaluation: GPUI ruled out on Hyprland, Slint viable but QML still smoother, FM already feature-complete) stayed native Qt/QML and exposes them as the `Symmetria.FileManager.UI` QML module — so the IDE stays QML to **reuse** that module rather than reimplement it (DRY). Secondary factor: the WebKitGTK scroll/animation perf regret the FM measured live. Executed Tauri work (themed shell + PTY terminal + nvim-in-xterm.js editor) is archived at `git tag archive/tauri-pivot`. Decision brief: `/home/jc/.claude/relay/20260607-183500-symmetria-ide-framework-decision.md`. Note the caveats in §9 (RAM wash, favorable WebKitGTK spike) remain factually true — they just no longer outweigh the reuse coupling.
+
+**Status:** Decided 2026-06-05 → partly executed on `tauri-pivot` → **Reversed 2026-06-07** (historical record below).
+**Superseded by:** the reversal above. The original "supersedes tech-stack.md / renders-in-QML" claims no longer apply — QML rendering stands.
 
 ---
 
