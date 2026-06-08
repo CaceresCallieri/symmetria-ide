@@ -43,13 +43,13 @@ Window {
     // Ctrl+L would silently bind focus to a hidden item).
     property int activeTreeSubPane: 0
 
-    // Editor minimap feature flag. Temporarily OFF (2026-06-08) to give
-    // the nvim-in-terminal editor a minimal, base-usable state. The whole
-    // minimap pipeline still runs (runtime/lua/orchestrator/minimap.lua →
-    // MinimapModel → MinimapView); only the QML surface is hidden, and the
-    // editor reclaims the reserved 80px strip automatically because its
-    // `anchors.rightMargin` keys off `minimap.visible`. Flip to `true` to
-    // restore the minimap — no other change needed. See docs/minimap-prd.md.
+    // Editor minimap feature flag.
+    // HACK: disabled pending nvim-in-terminal minimap integration — the
+    // original MinimapView painted a silhouette driven by the nvim grid
+    // renderer, which is gone now that nvim runs inside a pyte terminal.
+    // Remove once MinimapView reconnects to the terminal viewport (see
+    // docs/minimap-prd.md). The pipeline still runs; only the QML surface
+    // is gated off. Flip to `true` to restore — no other change needed.
     readonly property bool minimapEnabled: false
 
     // ---------------- IDE-wide application shortcuts ----------------

@@ -1054,6 +1054,7 @@ class TerminalBackend(QObject):
                         # so TerminalView.paint() never reads a half-shifted
                         # buffer mid-scroll (the up-scroll tearing). See the
                         # lock's definition in __init__.
+                        dirty_rows: frozenset | None = None
                         with self._screen_lock:
                             stream.feed(cleaned)
                             # Mirror DECCKM after feed (the child may have just
@@ -1078,7 +1079,16 @@ class TerminalBackend(QObject):
                                     rows.add(cur[1])
                                     self._last_cursor_pos = cur
                                 screen.dirty.clear()
-                                self.screen_dirty.emit(frozenset(rows))
+                                dirty_rows = frozenset(rows)
+                        # Emit OUTSIDE the lock: Qt's QueuedConnection copies
+                        # the frozenset arg on this thread, which is an
+                        # allocation. Holding _screen_lock across the emit
+                        # blocks paint() for the full duration of Qt's internal
+                        # signal delivery — wider than necessary. The pyte state
+                        # is fully snapshotted and cleared above; the lock is no
+                        # longer needed at the emit site.
+                        if dirty_rows is not None:
+                            self.screen_dirty.emit(dirty_rows)
                     finally:
                         if gc_was_enabled:
                             gc.enable()

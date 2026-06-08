@@ -666,7 +666,11 @@ vim.api.nvim_create_autocmd("FileType", {
     -- closing a window it hasn't finished registering can error. pcall
     -- guards the case where the command isn't available yet.
     vim.schedule(function()
-      pcall(vim.cmd, "Neotree close")
+      -- Log on failure: project-standards §6 P0 forbids silent pcall drops.
+      local ok, err = pcall(vim.cmd, "Neotree close")
+      if not ok then
+        vim.notify("[SymmetriaIDE] Neotree close failed: " .. tostring(err), vim.log.levels.WARN)
+      end
     end)
   end,
 })
