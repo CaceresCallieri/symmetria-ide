@@ -592,6 +592,17 @@ class TerminalBackend(QObject):
         # don't interleave bytes mid-escape-sequence. Same shape as
         # `SessionHost`'s `_stdin_lock`.
         self._stdin_lock = threading.Lock()
+        # Lock guarding the pyte screen (buffer + cursor + dims). The reader
+        # thread MUTATES it in `stream.feed()`; the GUI/render thread READS it
+        # in `TerminalView.paint()`; `resize()` mutates it from the GUI thread.
+        # pyte's scroll (`reverse_index`/`index`) shifts rows by reassigning
+        # `buffer[y] = buffer[y-1]` in a loop — mid-loop the buffer transiently
+        # aliases two rows, so a `paint()` that reads concurrently sees torn /
+        # duplicated rows (visible as a misaligned band when scrolling up). This
+        # lock makes feed/paint/resize mutually exclusive so paint only ever
+        # sees a consistent frame. Pre-allocated (no GC-hazard alloc in paint —
+        # gotcha #10); held only for the screen-touching span on each side.
+        self._screen_lock = threading.Lock()
         # Populated by `start()` — kept as instance attrs so
         # `stop()` / `write()` / `resize()` can find them, and so
         # tests can assert on lifecycle state.
@@ -923,7 +934,14 @@ class TerminalBackend(QObject):
         if cols <= 0 or rows <= 0:
             return
 
-        self._screen.resize(rows, cols)  # pyte takes (lines, columns)
+        # Hold _screen_lock: resize mutates the buffer/dims from the GUI thread
+        # while the reader thread may be mid-feed and paint() mid-read.
+        with self._screen_lock:
+            self._screen.resize(rows, cols)  # pyte takes (lines, columns)
+            # Force a full repaint — pyte's dirty set may have been empty
+            # before resize, but every cell's screen coordinates just
+            # changed semantically.
+            self._screen.dirty.update(range(rows))
 
         try:
             fcntl.ioctl(
@@ -933,11 +951,6 @@ class TerminalBackend(QObject):
             )
         except OSError:
             log.exception("TIOCSWINSZ failed")
-
-        # Force a full repaint — pyte's dirty set may have been empty
-        # before resize, but every cell's screen coordinates just
-        # changed semantically.
-        self._screen.dirty.update(range(rows))
 
         self.screen_resized.emit(cols, rows)
 
@@ -1037,26 +1050,35 @@ class TerminalBackend(QObject):
                     try:
                         for path in paths:
                             self.osc7_received.emit(path)
-                        stream.feed(cleaned)
-                        # Mirror DECCKM after feed (the child may have just
-                        # toggled it) so the GUI key translator picks up
-                        # application-cursor-key mode on the next keystroke.
-                        self._app_cursor_keys = _DECCKM_MODE in screen.mode
-                        # A pure cursor move (nvim `CUP`, no text change) leaves
-                        # `screen.dirty` empty, so without this the on-screen
-                        # cursor freezes while nvim's real cursor moves. Force a
-                        # repaint of the old + new cursor rows on any cursor
-                        # change. See `_last_cursor_pos`.
-                        cur = (screen.cursor.x, screen.cursor.y, screen.cursor.hidden)
-                        cursor_moved = cur != self._last_cursor_pos
-                        if screen.dirty or cursor_moved:
-                            rows = set(screen.dirty)
-                            if cursor_moved:
-                                rows.add(self._last_cursor_pos[1])
-                                rows.add(cur[1])
-                                self._last_cursor_pos = cur
-                            screen.dirty.clear()
-                            self.screen_dirty.emit(frozenset(rows))
+                        # Hold _screen_lock across the feed + dirty/cursor read
+                        # so TerminalView.paint() never reads a half-shifted
+                        # buffer mid-scroll (the up-scroll tearing). See the
+                        # lock's definition in __init__.
+                        with self._screen_lock:
+                            stream.feed(cleaned)
+                            # Mirror DECCKM after feed (the child may have just
+                            # toggled it) so the GUI key translator picks up
+                            # application-cursor-key mode on the next keystroke.
+                            self._app_cursor_keys = _DECCKM_MODE in screen.mode
+                            # A pure cursor move (nvim `CUP`, no text change)
+                            # leaves `screen.dirty` empty, so without this the
+                            # on-screen cursor freezes while nvim's real cursor
+                            # moves. Force a repaint of the old + new cursor rows
+                            # on any cursor change. See `_last_cursor_pos`.
+                            cur = (
+                                screen.cursor.x,
+                                screen.cursor.y,
+                                screen.cursor.hidden,
+                            )
+                            cursor_moved = cur != self._last_cursor_pos
+                            if screen.dirty or cursor_moved:
+                                rows = set(screen.dirty)
+                                if cursor_moved:
+                                    rows.add(self._last_cursor_pos[1])
+                                    rows.add(cur[1])
+                                    self._last_cursor_pos = cur
+                                screen.dirty.clear()
+                                self.screen_dirty.emit(frozenset(rows))
                     finally:
                         if gc_was_enabled:
                             gc.enable()

@@ -404,8 +404,6 @@ class TerminalView(QQuickPaintedItem):
         screen = self._backend._screen
         cw = self._cell_w
         ch = self._cell_h
-        cols = screen.columns
-        rows = screen.lines
 
         painter.setFont(self._font)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
@@ -425,25 +423,35 @@ class TerminalView(QQuickPaintedItem):
         painter.save()
         painter.translate(_PADDING_PX, _PADDING_PX)
 
-        # Grid-exact clip (gotcha #11). QML's float-sized boundingRect
-        # can extend marginally past the cell grid; clipping to the
-        # exact (cols*cw, rows*ch) prevents stale-content leaks at the
-        # edges. Pooled _clip_rect — no fresh QRectF allocation.
-        # In translated coords this clip projects to
-        # (pad, pad, pad+cols*cw, pad+rows*ch) in widget space.
-        self._clip_rect.setRect(0, 0, cols * cw, rows * ch)
-        painter.setClipRect(self._clip_rect)
+        # Hold the backend's screen lock for the entire screen-read span so we
+        # never paint a half-shifted buffer mid-scroll: pyte's reverse_index
+        # aliases two rows mid-loop, and an unsynchronized read shows that as a
+        # torn/duplicated band (the up-scroll tearing). Dims are read INSIDE the
+        # lock so clip + loop bounds stay consistent if a resize lands. The lock
+        # acquire allocates nothing (gotcha #10); it's released before restore().
+        with self._backend._screen_lock:
+            cols = screen.columns
+            rows = screen.lines
 
-        buf = screen.buffer
-        for row_idx in range(rows):
-            self._paint_row(painter, buf[row_idx], row_idx, cw, ch, cols)
+            # Grid-exact clip (gotcha #11). QML's float-sized boundingRect
+            # can extend marginally past the cell grid; clipping to the
+            # exact (cols*cw, rows*ch) prevents stale-content leaks at the
+            # edges. Pooled _clip_rect — no fresh QRectF allocation.
+            # In translated coords this clip projects to
+            # (pad, pad, pad+cols*cw, pad+rows*ch) in widget space.
+            self._clip_rect.setRect(0, 0, cols * cw, rows * ch)
+            painter.setClipRect(self._clip_rect)
 
-        # Cursor painted last so it overlays the row content. v1 is a
-        # solid block with no blink and no shape-modes — terminals
-        # canonically use steady block; vim's mode-aware cursor lives
-        # inside the shell, not in our chrome.
-        if not screen.cursor.hidden:
-            self._paint_cursor(painter, screen, cw, ch)
+            buf = screen.buffer
+            for row_idx in range(rows):
+                self._paint_row(painter, buf[row_idx], row_idx, cw, ch, cols)
+
+            # Cursor painted last so it overlays the row content. v1 is a
+            # solid block with no blink and no shape-modes — terminals
+            # canonically use steady block; vim's mode-aware cursor lives
+            # inside the shell, not in our chrome.
+            if not screen.cursor.hidden:
+                self._paint_cursor(painter, screen, cw, ch)
 
         painter.restore()
 

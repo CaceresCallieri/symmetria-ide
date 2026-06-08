@@ -400,6 +400,34 @@ def test_last_cursor_pos_pre_allocated(backend):
     assert backend._last_cursor_pos == (0, 0, False)
 
 
+def test_screen_lock_pre_allocated(backend):
+    """`_screen_lock` guards the pyte screen against the reader/paint/resize
+    race (up-scroll tearing). Must exist as a Lock from __init__ so the
+    reader's first feed and the first paint can both acquire it."""
+    assert isinstance(backend._screen_lock, type(threading.Lock()))
+
+
+def test_reader_loop_feeds_under_screen_lock():
+    """`stream.feed` (the buffer mutation) MUST run while holding
+    `_screen_lock` so paint() can't read a half-shifted buffer mid-scroll.
+    Asserts the lock is acquired before feed in the reader source."""
+    src = inspect.getsource(TerminalBackend._run_reader_loop)
+    lock_idx = src.find("with self._screen_lock:")
+    feed_idx = src.find("stream.feed(")
+    assert lock_idx >= 0, "reader loop must acquire _screen_lock"
+    assert lock_idx < feed_idx, "stream.feed must run INSIDE the _screen_lock"
+
+
+def test_resize_mutates_under_screen_lock():
+    """`resize()` mutates the pyte buffer/dims from the GUI thread while the
+    reader may be feeding — it MUST hold `_screen_lock` around the mutation."""
+    src = inspect.getsource(TerminalBackend.resize)
+    lock_idx = src.find("with self._screen_lock:")
+    resize_idx = src.find("self._screen.resize(")
+    assert lock_idx >= 0, "resize must acquire _screen_lock"
+    assert lock_idx < resize_idx, "screen.resize must run INSIDE the _screen_lock"
+
+
 def test_reader_loop_repaints_on_cursor_move():
     """A pure cursor move (nvim `CUP`, no text change) leaves
     `screen.dirty` empty, so the reader MUST also compare the cursor

@@ -192,6 +192,20 @@ def test_backend_signals_use_queued_connection():
     )
 
 
+def test_paint_holds_screen_lock():
+    """paint() reads the pyte buffer concurrently with the reader thread's
+    feed. It MUST acquire the backend's `_screen_lock` around the buffer
+    read, or a scroll-in-progress (pyte reverse_index aliasing rows mid-loop)
+    paints a torn/duplicated band — the up-scroll tearing artifact."""
+    src = inspect.getsource(TerminalView.paint)
+    lock_idx = src.find("self._backend._screen_lock")
+    buf_idx = src.find("screen.buffer")
+    assert lock_idx >= 0, "paint() must acquire the backend's _screen_lock"
+    assert lock_idx < buf_idx, (
+        "paint() must hold _screen_lock BEFORE reading screen.buffer"
+    )
+
+
 def test_screen_dirty_slot_accepts_frozenset():
     """The slot type must match the backend's `Signal(frozenset)` contract.
     PySide6 raises at emit-time if the types mismatch — catching it here
