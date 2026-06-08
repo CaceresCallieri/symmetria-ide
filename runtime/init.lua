@@ -636,6 +636,41 @@ end)
 -- claims on `<leader>t*`. Removed alongside the agent-pane hijack to
 -- keep nvim's keymap layer entirely under the user's plugins' control.
 
+-- ============================================================================
+-- Suppress nvim's own file-tree sidebar (neo-tree) inside the IDE
+-- ============================================================================
+--
+-- The IDE renders its OWN file tree (FileTreeView, right sidebar), so nvim's
+-- neo-tree would visually double up. The user's neo-tree config already gates
+-- its *startup* auto-open behind `vim.g.symmetria_ide == 1`, but that only
+-- covers the VimEnter path — other openers slip through:
+--   * auto-session's `post_restore_cmds` runs `Neotree show filesystem`
+--     UNGATED, so a session restore re-opens the tree.
+--   * any manual / plugin-driven `:Neotree show`.
+--
+-- This is the IDE-side catch-all: whenever a neo-tree buffer's filetype is
+-- set (i.e. a tree window is coming up, by ANY path), close the sidebar. It
+-- fires only for neo-tree buffers, so the overhead is nil on normal editing.
+-- It lives here (runtime is on rtp only via the IDE's `set rtp^=` spawn), so
+-- terminal nvim keeps neo-tree fully functional — only the IDE strips it.
+--
+-- Long arc: nvim's tree is being removed from the editing surface entirely
+-- (file navigation moves to the IDE's own tree), so full suppression — not a
+-- one-shot startup skip — is the right semantics for the IDE context.
+local notree_grp = vim.api.nvim_create_augroup("SymmetriaIdeNoNeoTree", { clear = true })
+vim.api.nvim_create_autocmd("FileType", {
+  group = notree_grp,
+  pattern = "neo-tree",
+  callback = function()
+    -- Schedule the close: neo-tree is mid-open when FileType fires, and
+    -- closing a window it hasn't finished registering can error. pcall
+    -- guards the case where the command isn't available yet.
+    vim.schedule(function()
+      pcall(vim.cmd, "Neotree close")
+    end)
+  end,
+})
+
 -- ---------------------------------------------------------------------------
 -- Window navigation bridge: <C-h/j/k/l> spillover to IDE outer panes
 -- ---------------------------------------------------------------------------

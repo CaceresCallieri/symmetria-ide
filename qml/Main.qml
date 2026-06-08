@@ -43,6 +43,15 @@ Window {
     // Ctrl+L would silently bind focus to a hidden item).
     property int activeTreeSubPane: 0
 
+    // Editor minimap feature flag. Temporarily OFF (2026-06-08) to give
+    // the nvim-in-terminal editor a minimal, base-usable state. The whole
+    // minimap pipeline still runs (runtime/lua/orchestrator/minimap.lua →
+    // MinimapModel → MinimapView); only the QML surface is hidden, and the
+    // editor reclaims the reserved 80px strip automatically because its
+    // `anchors.rightMargin` keys off `minimap.visible`. Flip to `true` to
+    // restore the minimap — no other change needed. See docs/minimap-prd.md.
+    readonly property bool minimapEnabled: false
+
     // ---------------- IDE-wide application shortcuts ----------------
     //
     // Anchor toggle. `Qt.ApplicationShortcut` makes this fire regardless
@@ -463,7 +472,13 @@ Window {
                     anchors.bottom: parent.bottom
                     anchors.right: parent.right
                     width: Theme.size.minimapWidth
-                    visible: !controller.agentVisible
+                    // `root.minimapEnabled` is the temporary off-switch (see
+                    // the property declaration on the Window root). The three
+                    // controller terms preserve the Phase 0 contract: even
+                    // when re-enabled, the minimap only shows while the editor
+                    // is the active central surface.
+                    visible: root.minimapEnabled
+                        && !controller.agentVisible
                         && !controller.fmVisible
                         && controller.editorVisible
                     // The grid renderer's pixel scroll-spring is gone (nvim
