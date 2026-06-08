@@ -499,15 +499,11 @@ class AppController(QObject):
         # `os.getcwd()` rather than `~`: the launch cwd is what the user
         # implicitly chose by running `cd <project> && python -m
         # symmetria_ide`, and matches what nvim's VimEnter capsule will
-        # report (nvim inherits Python's cwd). Using the launch dir as
-        # the initial `_cwd` is what makes the terminal pre-warm at
-        # `start()` below land in the right project — `_terminal_backend
-        # .start(self._cwd)` fires synchronously during AppController.start()
-        # (not __init__), BEFORE nvim's VimEnter can update `_cwd` via a
-        # capsule, so any placeholder set here is what the shell process
-        # inherits. A `~` placeholder was the pre-Phase-2.5 default when
-        # there was no terminal pane to inherit it. Falls back to `~` if
-        # `getcwd()` raises (deleted cwd — extreme edge case).
+        # report (nvim inherits Python's cwd). It also seeds
+        # `controller.displayedRoot`, which the QMLTermSessions bind as their
+        # `initialWorkingDirectory` — so both the editor nvim and the shell
+        # spawn in the launch project before any capsule arrives. Falls back
+        # to `~` if `getcwd()` raises (deleted cwd — extreme edge case).
         try:
             self._cwd: str = os.getcwd()
         except OSError:
@@ -1425,7 +1421,8 @@ class AppController(QObject):
         Same `displayedRootChanged` source as `_sync_git_repo_root`,
         same anchored-pins-the-target semantic: anchored → pwd stays on
         the anchored root; unanchored → pwd follows the terminal's cwd
-        via the OSC 7 capsule routing. Empty / missing path is a no-op
+        via the `on_shell_cwd` routing (Timer-polled `KSession.currentDir`).
+        Empty / missing path is a no-op
         (covers the initialization edge case where `displayedRoot` is
         briefly the empty string before the first cwd capsule lands).
 
@@ -1494,7 +1491,9 @@ class AppController(QObject):
         """Make the terminal pane the visible central surface.
 
         Idempotent: if terminal is already visible, no signal fires.
-        Bound to the IDE-wide `Ctrl+Shift+T` Shortcut in Main.qml (PR 5).
+        Internal primitive called by `toggle_editor_terminal`; the
+        user-facing chord is `Ctrl+Shift+E` (the earlier `Ctrl+Shift+T`
+        was retired when the toggle landed).
         """
         if self._central_surface == "terminal":
             return
@@ -1645,8 +1644,8 @@ class AppController(QObject):
         from any pane (Ctrl+E is an IDE-wide ApplicationShortcut, with
         no "current buffer" notion in the agent / terminal panes). The
         anchored-root path is kept fresh by the unified capsule routing
-        (nvim's :cd and the terminal's OSC 7 both flow through
-        `_route_capsule` with the synthetic `cwd` id).
+        (nvim's :cd and the shell's `currentDir` via `on_shell_cwd` both
+        flow through `_route_capsule` with the synthetic `cwd` id).
 
         Falls back to $HOME when neither the anchor nor the cached cwd
         resolves to a real path — defense-in-depth against an empty
@@ -2263,10 +2262,17 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # engine + renderer as a QML item). We add its build-output dir to the
     # import path so `import QMLTermWidget 2.0` resolves to OUR build (with the
     # background-transparency fix + Symmetria colorscheme) rather than the stock
-    # Arch package. addImportPath puts it ahead of the system path for this
-    # module. Env-overridable so a future PKGBUILD that installs the fork to
-    # /usr/lib/qt6/qml can drop the override and ship with the var unset.
+    # Arch package. `addImportPath` PREPENDS (verified: fork lands at index 0,
+    # /usr/lib/qt6/qml at index 4), so the fork reliably wins even though the
+    # stock `qmltermwidget` package is installed at the standard path.
     # See /home/jc/projects/symmetria-qmltermwidget/MODIFICATIONS.md.
+    #
+    # WORKAROUND: the default points at a machine-specific absolute build dir
+    # because the fork is not yet packaged. Env-overridable via
+    # SYMMETRIA_IDE_QMLTERMWIDGET_PATH so it works on other checkouts. Remove
+    # the hardcoded default once a PKGBUILD installs the fork to
+    # /usr/lib/qt6/qml/QMLTermWidget/ (provides/conflicts the stock package) —
+    # then the import resolves with no override and the var ships unset.
     _qtw_path = os.environ.get(
         "SYMMETRIA_IDE_QMLTERMWIDGET_PATH",
         "/home/jc/projects/symmetria-qmltermwidget",
@@ -2343,7 +2349,8 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     #   - editorProgram: argv[0]
     #   - editorArgs:    argv[1:] (QMLTermSession.shellProgramArgs excludes the
     #                    program name)
-    #   - editorCwd:     the launch directory (nvim's initial cwd)
+    # nvim's initial cwd is set in QML via `initialWorkingDirectory:
+    # controller.displayedRoot` (a live binding), not a context property.
     ctx.setContextProperty("editorProgram", "nvim")
     ctx.setContextProperty(
         "editorArgs",

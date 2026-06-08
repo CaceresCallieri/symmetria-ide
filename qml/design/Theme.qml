@@ -262,16 +262,18 @@ QtObject {
             readonly property color contextFg: "#b0b0b0"     // text.normal
         }
 
-        // Terminal pane palette — pyte cell rendering for the native
-        // PTY terminal (Phase 2.5 deliverable 2). The 16-slot ANSI
-        // palette deliberately aliases editor `mode.*` and `text.*`
-        // tokens where they line up tonally, so the terminal surface
-        // reads continuous with the editor — both panes are
-        // wine_theme-derived chrome on the same wallpaper-blend
-        // backdrop. Background is "transparent" (alpha=0) per the
-        // Q2-d topology decision: the terminal is the persistent home
-        // surface and shares the editor's ambient wallpaper tint
-        // instead of standing out as its own opaque pane.
+        // Terminal pane palette — the canonical source mirrored by the
+        // forked qmltermwidget's `Symmetria.colorscheme` (see
+        // /home/jc/projects/symmetria-qmltermwidget/lib/color-schemes/). The
+        // 16-slot ANSI palette deliberately aliases editor `mode.*` and
+        // `text.*` tokens where they line up tonally, so the terminal surface
+        // reads continuous with the editor — both panes are wine_theme-derived
+        // chrome on the same wallpaper-blend backdrop. Background is
+        // "transparent" (alpha=0) per the Q2-d topology decision: the terminal
+        // is the persistent home surface and shares the editor's ambient
+        // wallpaper tint instead of standing out as its own opaque pane.
+        // (Drift between this and the fork scheme is a manual sync until the
+        // palette is wired through to the fork at build time.)
         //
         // ANSI slot mapping (xterm/VT100 convention):
         //   0 black           — mode.badgeLabel (wine_theme.bg_primary)
@@ -289,10 +291,9 @@ QtObject {
         //                       entries in a follow-up.
         //  15 bright white    — text.selected (brightest neutral rung)
         //
-        // The 256-color cube (slots 16–255) is computed at runtime
-        // in `terminal_view.py`'s memoized color resolver, NOT
-        // exposed here — it's a derived xterm-256 lookup, not a
-        // design token.
+        // The 256-color cube (slots 16–255) is handled inside the
+        // qmltermwidget engine (Konsole's color table), NOT exposed
+        // here — it's a derived xterm-256 lookup, not a design token.
         // Minimap pane (Phase 0 — editor minimap, see docs/minimap-prd.md).
         // Background: a subtle dim over the wallpaper-blend base, deeper
         // than the editor's ambient tint so the minimap reads as a

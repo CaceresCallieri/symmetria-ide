@@ -48,7 +48,7 @@ Window {
     // Editor minimap feature flag.
     // HACK: disabled pending nvim-in-terminal minimap integration — the
     // original MinimapView painted a silhouette driven by the nvim grid
-    // renderer, which is gone now that nvim runs inside a pyte terminal.
+    // renderer, which is gone now that nvim runs inside a QMLTermWidget.
     // Remove once MinimapView reconnects to the terminal viewport (see
     // docs/minimap-prd.md). The pipeline still runs; only the QML surface
     // is gated off. Flip to `true` to restore — no other change needed.
@@ -459,12 +459,16 @@ Window {
                     // signal, so we sample on a 600ms cadence and forward only
                     // on change — the coalesced replacement for per-keystroke
                     // OSC 7. 600ms is imperceptible for a file-tree follow and
-                    // cheap (one /proc read).
+                    // cheap (one /proc read). Gated on `terminalView.visible`:
+                    // the shell only changes cwd when focused (the user types
+                    // `cd`), so there's nothing to poll while the editor/agent
+                    // is the active surface. `_lastShellDir` persists across the
+                    // pause, so the first `cd` after re-entry still syncs.
                     property string _lastShellDir: ""
                     Timer {
                         interval: 600
                         repeat: true
-                        running: true
+                        running: terminalView.visible
                         onTriggered: {
                             var d = shellSession.currentDir
                             if (d && d !== terminalView._lastShellDir) {
@@ -672,11 +676,10 @@ Window {
                 // never gains visual weight in the idle state.
                 //
                 // Why a sibling Rectangle (not Rectangle.border on each
-                // pane): NvimView and TerminalView are Python-side
-                // QQuickPaintedItem subclasses that don't expose a
-                // `border` property; AgentPane is a QML composite that
-                // already has its own internal Rectangle chrome we
-                // don't want to wrap. A sibling overlay with
+                // pane): the editor + shell are QMLTermWidget items (no
+                // `border` grouped property) and AgentPane is a QML
+                // composite that already has its own internal Rectangle
+                // chrome we don't want to wrap. A sibling overlay with
                 // `anchors.fill: parent` covers all three panes
                 // uniformly via the parent Item's geometry — one
                 // binding, one place to tune.
