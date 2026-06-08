@@ -1,8 +1,8 @@
 """NeoVim backend: attach to an `nvim --listen` socket, relay chrome rpcnotify.
 
-NeoVim runs as a TUI **inside the terminal editor surface** — AppController
-launches it via a second `TerminalBackend` with `nvim --listen <socket>`, and
-nvim draws its own grid in that terminal. This module attaches a SECOND RPC
+NeoVim runs as a TUI **inside the QMLTermWidget editor surface** — the
+QMLTermSession in Main.qml spawns it with `nvim --listen <socket>`, and nvim
+draws its own grid in that terminal widget. This module attaches an RPC
 connection to that socket purely for:
 
   * CONTROL — `input`, `edit_file`, `set_current_dir` (the IDE driving nvim;
@@ -23,7 +23,7 @@ attach (with a retry budget, since the editor nvim may not have bound the
 socket the instant we start) also happens on that worker so the GUI thread
 never blocks. Notifications cross into the GUI thread via Qt signals (queued
 connections handle the hop). GC is suspended around the notification handler
-(gotcha #10) — the same recipe `TerminalBackend`/`SessionHost` use.
+(gotcha #10) — the same recipe `SessionHost` uses.
 """
 
 from __future__ import annotations
@@ -48,10 +48,11 @@ log = logging.getLogger(__name__)
 # location since this module owns the nvim integration contract.
 _RUNTIME_DIR = Path(__file__).resolve().parent.parent.parent / "runtime"
 
-# Socket-attach retry budget. The editor `TerminalBackend` spawns
-# `nvim --listen <sock>` slightly before we attach; the socket file appears
-# once nvim's startup reaches the `--listen` bind. We poll on the worker
-# thread (NOT the GUI thread) so the UI never freezes waiting.
+# Socket-attach retry budget. The editor QMLTermSession spawns
+# `nvim --listen <sock>` at QML engine-load time (before AppController.start),
+# so the socket usually exists by the time we attach — but the file only
+# appears once nvim's startup reaches the `--listen` bind, so we still poll on
+# the worker thread (NOT the GUI thread) so the UI never freezes waiting.
 _SOCKET_WAIT_TIMEOUT_S = 5.0
 _SOCKET_POLL_INTERVAL_S = 0.05
 
@@ -161,8 +162,9 @@ class NvimBackend(QObject):
 
         `_stop_event` is set FIRST so a concurrent socket-wait aborts and
         observers see shutdown-in-progress before any RPC round-trip. The
-        editor `TerminalBackend.stop()` killpg is the backstop if `qa!`
-        doesn't land (e.g. socket already gone), so this stays best-effort.
+        editor QMLTermSession (KSession) reaps the nvim child when the QML
+        engine tears down on app quit, so it is the backstop if `qa!` doesn't
+        land (e.g. socket already gone); this stays best-effort.
         """
         self._stop_event.set()
         nvim = self._nvim
@@ -271,7 +273,7 @@ class NvimBackend(QObject):
         # GC suspended for the whole handler (gotcha #10): Python 3.14's
         # incremental cyclic GC can fire from any allocation on this worker
         # thread (incl. pynvim's msgpack/logging internals) and race the
-        # QSGRenderThread. Same recipe as TerminalBackend/SessionHost.
+        # QSGRenderThread. Same recipe as SessionHost.
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
             gc.disable()

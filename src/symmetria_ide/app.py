@@ -1,8 +1,11 @@
-"""QApplication wiring: spawns NvimBackend + TerminalBackends, loads the QML scene.
+"""QApplication wiring: spawns the NvimBackend RPC client, loads the QML scene.
 
-This is the boundary between Python backend code and the QML UI. The
-QML import module `Symmetria.Ide` is registered so that QML files can
-`import Symmetria.Ide 1.0` and instantiate `TerminalView`, `MinimapView`, etc.
+This is the boundary between Python backend code and the QML UI. The editor
+nvim + shell run inside QMLTermWidget panes (the forked qmltermwidget) spawned
+by QMLTermSessions in Main.qml; `NvimBackend` is the RPC-only client that
+attaches to the editor nvim's --listen socket for the chrome relays. The QML
+import module `Symmetria.Ide` is registered so that QML files can
+`import Symmetria.Ide 1.0` and instantiate `MinimapView`, etc.
 
 `CapsuleModel` is a thin ListModel-like wrapper around a Python list
 that the StatusBar QML repeats over. Keeping it in Python (not QML)
@@ -51,10 +54,6 @@ from .nvim_backend import _RUNTIME_DIR, NvimBackend
 from .session_host import SessionHost
 from .session_models import (  # noqa: F401 — side-effect: @QmlElement registration
     SessionModel,
-)
-from .terminal_backend import TerminalBackend
-from .terminal_view import (  # noqa: F401 — side-effect: @QmlElement registration
-    TerminalView,
 )
 from .tree_state_cache import load_expanded, save_expanded
 from .whichkey_models import (  # noqa: F401 — side-effect: @QmlElement registration
@@ -352,23 +351,19 @@ class AppController(QObject):
         # the trace emits exactly once each per launch.
         self._first_capsule_seen = False
         self._first_displayed_root_traced = False
-        # NeoVim runs as a TUI inside a dedicated terminal surface
-        # (`_editor_backend`, launched with `nvim --listen <sock>` in
-        # start()). `_backend` is a SECOND, RPC-only connection to that
-        # socket: control (input/edit_file/set_current_dir) + the chrome
-        # rpcnotify relays (capsule/cmdline/whichkey/minimap/...). It does
-        # NOT render — nvim draws its grid in the terminal; the IDE renders
-        # the chrome overlays from the relayed channels.
+        # NeoVim runs as a TUI inside a QMLTermWidget editor surface (spawned
+        # by the QMLTermSession in Main.qml with `nvim --listen <sock>`).
+        # `_backend` is an RPC-only connection to that socket: control
+        # (input/edit_file/set_current_dir) + the chrome rpcnotify relays
+        # (capsule/cmdline/whichkey/minimap/...). It does NOT render — the
+        # terminal widget draws nvim's grid; the IDE renders the chrome
+        # overlays from the relayed channels. The shell pane is a second
+        # QMLTermWidget, also QML-spawned. No Python TerminalBackend exists for
+        # either pane after the qmltermwidget migration.
         self._nvim_socket = os.path.join(
             tempfile.mkdtemp(prefix="symmetria-nvim-"), "nvim.sock"
         )
-        self._editor_backend = TerminalBackend(self)
         self._backend = NvimBackend(self._nvim_socket)
-        # Phase 2.5 terminal pane (the plain shell). Coexists with the
-        # editor + agent surfaces under Main.qml's `mainContent` Item —
-        # `_central_surface` toggles which is visible. The closed signal is
-        # connected below so a shell that exits on its own surfaces in the log.
-        self._terminal_backend = TerminalBackend(self)
         # Per Q2-d topology decision: terminal is the persistent home
         # surface, the editor is summoned over it. First-launch = terminal.
         self._central_surface: str = "terminal"
@@ -488,27 +483,11 @@ class AppController(QObject):
         # scope shortcut in Main.qml). Lua's `:SymmetriaAnchor` /
         # `:SymmetriaUnanchor` user commands emit through this channel.
         self._backend.anchor_event.connect(self._on_anchor_event)
-        # Terminal lifecycle event. `closed` fires when the shell process
-        # exits (EOF on master fd, user typed `exit`, or `stop()` killed
-        # it). Used only for logging in v1 — the user's next swap-to-
-        # editor presents a working editor; the dead terminal pane stays
-        # visible until then. A v2 enhancement could auto-swap to editor
-        # on close. queued: terminal reader thread → AppController GUI.
-        self._terminal_backend.closed.connect(
-            self._on_terminal_closed, Qt.ConnectionType.QueuedConnection
-        )
-        # Phase 2.5 deliverable 3: shell-driven cwd updates. The terminal
-        # reader thread extracts OSC 7 sequences (emitted by the
-        # chpwd hook in runtime/symmetria-shell/) and emits osc7_received
-        # with the parsed path. We route through `_route_capsule` with
-        # the synthetic {id:"cwd", value:path} dict shape, so the
-        # downstream consumers (anchor state machine, file tree,
-        # git controller) see the update through their existing
-        # connections — identical code path to nvim's `:cd`. queued:
-        # terminal reader thread → AppController GUI.
-        self._terminal_backend.osc7_received.connect(
-            self._on_terminal_osc7, Qt.ConnectionType.QueuedConnection
-        )
+        # Shell-driven cwd updates now arrive via the QMLTermSession's native
+        # `currentDir` (polled by a Timer in Main.qml → `on_shell_cwd`), not a
+        # terminal reader thread / OSC 7 signal. The shell's exit is handled in
+        # QML (log-only `onFinished`); there is no Python terminal backend to
+        # connect lifecycle signals from anymore.
         # Seed `cwd` with $HOME so QML's `rootPath: controller.cwd` has
         # a valid path during the brief window between QML construction
         # and the first capsule push from runtime/init.lua's VimEnter +
@@ -1569,54 +1548,13 @@ class AppController(QObject):
         """
         self.focusTerminalRequested.emit()
 
-    @Slot()
-    def _on_terminal_closed(self) -> None:
-        """Log when the shell process exits.
-
-        v1 behavior is just to log — the user's next swap-to-editor
-        gives them a working editor; the dead terminal pane stays
-        visible (last frame frozen) until then. A v2 enhancement could
-        auto-swap to editor here.
-        """
-        log.info("terminal shell process exited")
-
-    @Slot(str)
-    def _on_terminal_osc7(self, path: str) -> None:
-        """Route an OSC 7 cwd announcement from the terminal pane into
-        the same `cwd` capsule machinery nvim's `:cd` uses.
-
-        Phase 2.5 deliverable 3 — the final piece of terminal-driven
-        cwd sync. The terminal reader thread parses OSC 7 sequences
-        emitted by the chpwd hook (zsh) or PROMPT_COMMAND hook (bash)
-        installed by `runtime/symmetria-shell/`. Each parsed path
-        arrives here as the `osc7_received` signal payload.
-
-        Synthesizing the `{id:"cwd", value:path}` capsule dict and
-        dispatching through `_route_capsule` is the load-bearing
-        design choice: it means every downstream consumer (the anchor
-        state machine in `_route_capsule`'s cwd branch, the file
-        tree's `displayedRoot` binding, the git controller's repo-root
-        rebind) sees terminal-driven cwd updates through their
-        existing connections. Identical code path to nvim's `:cd` —
-        no duplication, no parallel routing tree.
-
-        The path is already normalized by `_parse_osc7` (trailing
-        slash stripped, root-only filtered) so no further sanitation
-        is needed here. An empty path would update `_cwd` to `""`,
-        which the `if new_cwd != self._cwd` guard in `_route_capsule`
-        treats as a real change — guard against that explicitly.
-        """
-        if not path:
-            log.debug("dropping empty terminal OSC 7 path")
-            return
-        self._route_capsule({"id": "cwd", "value": path})
-
     @Slot(str)
     def on_shell_cwd(self, path: str) -> None:
         """Route the shell terminal's current directory into the same `cwd`
         capsule machinery nvim's `:cd` and the old OSC 7 path used.
 
-        Post-qmltermwidget-migration replacement for `_on_terminal_osc7`: the
+        Post-qmltermwidget-migration replacement for the old OSC 7 path
+        (terminal reader thread → `osc7_received` → `_route_capsule`): the
         shell pane is now a QMLTermSession whose `currentDir` property the
         Konsole engine tracks natively (it reads the foreground process cwd
         via /proc — no shell-side OSC 7 hook needed). A Timer in Main.qml
@@ -2202,15 +2140,13 @@ class AppController(QObject):
         # we want it joined before the event loop tears down so its
         # cross-thread emit can't fire into a half-destroyed receiver.
         self._git_controller.stop()
-        # Shutdown order for the editor: ask nvim to quit GRACEFULLY over
-        # the RPC socket first (`_backend.stop()` sends `qa!` + closes the
-        # client), THEN killpg the editor's terminal as the backstop
-        # (`_editor_backend.stop()`) in case `qa!` didn't land. Finally the
-        # shell terminal. Doing the RPC quit before the killpg lets nvim
-        # write its shada/swap cleanly rather than being SIGTERM'd mid-write.
+        # Ask nvim to quit GRACEFULLY over the RPC socket (`_backend.stop()`
+        # sends `qa!` + closes the client) so it writes shada/swap cleanly.
+        # The terminal widgets (editor nvim + shell) are owned by their
+        # QMLTermSessions (KSession); their child processes are reaped when the
+        # QML engine tears down on app quit, so there is no Python-side killpg
+        # backstop to run here anymore.
         self._backend.stop()
-        self._editor_backend.stop()
-        self._terminal_backend.stop()
         # Clean up the temporary directory that held the nvim socket.
         # The socket file itself is gone when nvim exits; the directory
         # it lived in is ours to clean up (mkdtemp creates it in /tmp).
@@ -2219,21 +2155,6 @@ class AppController(QObject):
     @property
     def backend(self) -> NvimBackend:
         return self._backend
-
-    @property
-    def terminalBackend(self) -> TerminalBackend:
-        """The Phase 2.5 shell terminal backend, exposed as a QML context
-        property by `_build_engine` and bound into the terminal surface's
-        TerminalView."""
-        return self._terminal_backend
-
-    @property
-    def editorBackend(self) -> TerminalBackend:
-        """The editor terminal backend — runs `nvim --listen` as a TUI.
-        Bound into the editor surface's TerminalView by Main.qml; the
-        RPC-only `_backend` attaches to its --listen socket for the chrome
-        relays + control."""
-        return self._editor_backend
 
     @property
     def status(self) -> StatusBarState:
@@ -2286,13 +2207,13 @@ def _register_qml_types() -> None:
     Every side-effect import is also referenced here by name so that
     automated import-pruners cannot strip the `noqa: F401` import
     without also touching this function. This applies to all QML-
-    registered modules, not just `TerminalView`.
+    registered modules (the terminal panes are no longer @QmlElement
+    types — they're QMLTermWidget items from the imported fork).
     """
     # Keep these references — they are the second layer of protection for
     # the noqa: F401 side-effect imports above. Removing any name here
     # means a linter can silently drop the import and break @QmlElement
     # registration. See CLAUDE.md gotcha #7 and project-standards §2 P1.
-    _ = TerminalView
     _ = MinimapView
     _ = CmdlineState
     _ = CompletionModel
@@ -2359,8 +2280,6 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # Make backend + capsules available to QML as a single `controller`
     # context property — keeps the QML surface small.
     ctx.setContextProperty("controller", controller)
-    ctx.setContextProperty("terminalBackend", controller.terminalBackend)
-    ctx.setContextProperty("editorBackend", controller.editorBackend)
     ctx.setContextProperty("capsuleModel", controller.capsules)
     ctx.setContextProperty("statusState", controller.status)
     ctx.setContextProperty("cmdlineState", controller.cmdline)

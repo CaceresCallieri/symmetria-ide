@@ -1,6 +1,6 @@
 """Shared JSONL line framing for the headless backends.
 
-Both the terminal REPL (``term_repl.py``) and the agent SDK sidecar host
+The agent SDK sidecar host
 (``session_host.py``) speak newline-delimited JSON, and a future Tauri bridge
 (``ide_service.py``) will too. This module is the single home for the
 line-level encode/parse primitives so a third consumer doesn't copy them a

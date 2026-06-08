@@ -61,7 +61,7 @@ def test_sync_nvim_cwd_pushes_displayed_root_on_cwd_change(
     """A live cwd update (no anchor) must push the new path to
     nvim. This is the dominant code path — terminal cd → OSC 7 →
     _route_capsule → displayedRootChanged → _sync_nvim_cwd → backend."""
-    controller._on_terminal_osc7("/tmp/some-project")
+    controller.on_shell_cwd("/tmp/some-project")
     assert "/tmp/some-project" in captured_backend
 
 
@@ -80,10 +80,10 @@ def test_sync_nvim_cwd_pushes_cwd_on_release_after_silent_drift(
     Validates that the slot reads `displayedRoot` (anchor-aware) rather
     than reacting on raw `_cwd` — the silent drift would otherwise
     trigger spurious nvim moves while anchored."""
-    controller._on_terminal_osc7("/tmp/anchored-project")
+    controller.on_shell_cwd("/tmp/anchored-project")
     controller.anchor_to_current_cwd()
     # Silent drift while anchored — no displayedRootChanged, no sync.
-    controller._on_terminal_osc7("/tmp/wandered")
+    controller.on_shell_cwd("/tmp/wandered")
     captured_backend.clear()
 
     controller.release_anchor()
@@ -98,12 +98,12 @@ def test_sync_nvim_cwd_suppressed_while_anchored(captured_backend, controller):
     (anchor pins the displayed root). The nvim sync must follow the
     same gate — nvim stays on the anchored root while the user cd's
     around in the terminal. Mirrors `_sync_git_repo_root`'s contract."""
-    controller._on_terminal_osc7("/tmp/anchored-project")
+    controller.on_shell_cwd("/tmp/anchored-project")
     controller.anchor_to_current_cwd()
     captured_backend.clear()
 
     # Wander away in the terminal — should NOT touch nvim.
-    controller._on_terminal_osc7("/tmp/elsewhere")
+    controller.on_shell_cwd("/tmp/elsewhere")
     assert captured_backend == []
 
 
@@ -140,14 +140,14 @@ def test_compact_returns_empty_string_for_empty_root(controller):
 def test_compact_collapses_home_to_tilde(controller):
     """Paths under $HOME render with `~` prefix."""
     home = os.path.expanduser("~")
-    controller._on_terminal_osc7(os.path.join(home, "projects", "foo"))
+    controller.on_shell_cwd(os.path.join(home, "projects", "foo"))
     assert controller.displayedRootCompact == "~/projects/foo"
 
 
 def test_compact_returns_home_as_tilde(controller):
     """The exact $HOME path collapses to bare `~` (not `~/`)."""
     home = os.path.expanduser("~")
-    controller._on_terminal_osc7(home)
+    controller.on_shell_cwd(home)
     assert controller.displayedRootCompact == "~"
 
 
@@ -160,14 +160,14 @@ def test_compact_does_not_collapse_partial_prefix_match(controller):
     home = os.path.expanduser("~")
     # Construct a sibling path: `<home>foo` instead of `<home>/foo`.
     sibling = home + "foo"
-    controller._on_terminal_osc7(sibling)
+    controller.on_shell_cwd(sibling)
     # The full path must come through verbatim.
     assert controller.displayedRootCompact == sibling
 
 
 def test_compact_leaves_non_home_paths_unchanged(controller):
     """Paths outside `$HOME` (e.g., `/tmp/x`, `/opt/y`) render as-is."""
-    controller._on_terminal_osc7("/tmp/some-project")
+    controller.on_shell_cwd("/tmp/some-project")
     assert controller.displayedRootCompact == "/tmp/some-project"
 
 
@@ -180,7 +180,7 @@ def test_compact_fires_change_signal_on_root_update(controller):
     emissions: list[None] = []
     controller.displayedRootChanged.connect(lambda: emissions.append(None))
 
-    controller._on_terminal_osc7("/tmp/some-project")
+    controller.on_shell_cwd("/tmp/some-project")
 
     assert len(emissions) >= 1
     assert controller.displayedRootCompact == "/tmp/some-project"

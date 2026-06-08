@@ -23,24 +23,23 @@ import pytest
 
 from symmetria_ide.app import AppController
 from symmetria_ide.nvim_backend import NvimBackend
-from symmetria_ide.terminal_backend import TerminalBackend
 
 
 # ---------------------------------------------------------------------------
-# Subprocess-free fixtures — patch start/stop on both backends so a bare
-# AppController() + start() + shutdown() cycle is hermetic.
+# Subprocess-free fixtures — patch start/stop on the RPC backend so a bare
+# AppController() + start() + shutdown() cycle is hermetic. After the
+# qmltermwidget migration the editor + shell are spawned by QMLTermSessions
+# in Main.qml (not Python TerminalBackends), so start()/shutdown() touch only
+# the nvim RPC client on the Python side.
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def patched_backends(monkeypatch):
-    """Make NvimBackend.start and TerminalBackend.start no-op, with
-    capture lists so tests can assert ordering / call args."""
+    """Make NvimBackend.start/stop no-op, with capture lists so tests can
+    assert the RPC client is brought up / torn down."""
     nvim_starts: list[None] = []
     nvim_stops: list[None] = []
-    terminal_starts: list[str] = []
-    editor_starts: list[str] = []
-    terminal_stops: list[None] = []
     call_order: list[str] = []
 
     def fake_nvim_start(self):
@@ -51,25 +50,8 @@ def patched_backends(monkeypatch):
         nvim_stops.append(None)
         call_order.append(f"nvim_stop#{len(call_order)}")
 
-    def fake_terminal_start(self, cwd, argv=None, env_extra=None):
-        # The EDITOR backend is launched with an explicit argv (nvim --listen);
-        # the plain SHELL terminal uses argv=None. Both are TerminalBackend, so
-        # we distinguish them by that to assert the cross-backend ordering.
-        if argv is not None:
-            editor_starts.append(cwd)
-            call_order.append(f"editor_start#{len(call_order)}")
-        else:
-            terminal_starts.append(cwd)
-            call_order.append(f"terminal_start#{len(call_order)}")
-
-    def fake_terminal_stop(self):
-        terminal_stops.append(None)
-        call_order.append(f"terminal_stop#{len(call_order)}")
-
     monkeypatch.setattr(NvimBackend, "start", fake_nvim_start)
     monkeypatch.setattr(NvimBackend, "stop", fake_nvim_stop)
-    monkeypatch.setattr(TerminalBackend, "start", fake_terminal_start)
-    monkeypatch.setattr(TerminalBackend, "stop", fake_terminal_stop)
 
     # Guard against SYMMETRIA_IDE_AGENT_PROMPT / _VIEW set in the caller's
     # shell or CI environment — if either is live, start() invokes
@@ -82,9 +64,6 @@ def patched_backends(monkeypatch):
     return {
         "nvim_starts": nvim_starts,
         "nvim_stops": nvim_stops,
-        "terminal_starts": terminal_starts,
-        "editor_starts": editor_starts,
-        "terminal_stops": terminal_stops,
         "call_order": call_order,
     }
 
@@ -275,69 +254,24 @@ def test_start_attaches_rpc_only(patched_backends):
     finally:
         ctrl.shutdown()
 
-    # Neither pane is launched via a Python TerminalBackend anymore — the
-    # QMLTermSessions own both spawns.
-    assert len(patched_backends["editor_starts"]) == 0
-    assert len(patched_backends["terminal_starts"]) == 0
     # The RPC client (chrome relay over nvim's socket) is the one thing start()
-    # still brings up.
+    # brings up on the Python side — both panes are spawned by QMLTermSessions.
     assert len(patched_backends["nvim_starts"]) == 1
 
 
-def test_shutdown_quits_nvim_rpc_before_killpg(patched_backends):
-    """shutdown() must call the nvim RPC client's stop() (graceful `qa!`)
-    BEFORE the terminal killpg backstops — so nvim writes shada/swap
-    cleanly rather than being SIGTERM'd mid-write."""
+def test_shutdown_quits_nvim_rpc_gracefully(patched_backends):
+    """shutdown() must call the nvim RPC client's stop() (graceful `qa!`) so
+    nvim writes shada/swap cleanly. After the qmltermwidget migration there is
+    no Python-side terminal killpg backstop — the QMLTermSessions reap their
+    children when the QML engine tears down — so the RPC quit is the only
+    Python-side shutdown step for the editor."""
     ctrl = AppController()
     ctrl.start()
     patched_backends["call_order"].clear()
     ctrl.shutdown()
 
     order = patched_backends["call_order"]
-    nvim_stop_idx = next(i for i, s in enumerate(order) if s.startswith("nvim_stop"))
-    first_term_stop_idx = next(
-        i for i, s in enumerate(order) if s.startswith("terminal_stop")
+    assert any(s.startswith("nvim_stop") for s in order), (
+        f"shutdown must stop the nvim RPC client — got: {order}"
     )
-    assert nvim_stop_idx < first_term_stop_idx, (
-        f"nvim RPC quit must precede the terminal killpg — got: {order}"
-    )
-
-
-def test_start_oserror_does_not_abort_app(patched_backends, monkeypatch):
-    """If a terminal backend's spawn raises OSError (nvim/shell missing,
-    fd-limit), the IDE must still finish starting up — log and continue,
-    don't crash."""
-
-    def raising_start(self, cwd, argv=None, env_extra=None):
-        raise OSError("no such file or directory")
-
-    monkeypatch.setattr(TerminalBackend, "start", raising_start)
-
-    ctrl = AppController()
-    try:
-        # Must NOT raise.
-        ctrl.start()
-    finally:
-        ctrl.shutdown()
-
-    # The nvim RPC client must still have started — both the editor-nvim
-    # spawn and the shell spawn are guarded by try/except OSError, and
-    # _backend.start() sits between/after them outside those guards.
-    assert len(patched_backends["nvim_starts"]) == 1, (
-        "nvim RPC must start even when a terminal OSError fires"
-    )
-
-
-# ---------------------------------------------------------------------------
-# QML-facing surface — terminalBackend property exists and returns the
-# instance held by the controller.
-# ---------------------------------------------------------------------------
-
-
-def test_terminal_backend_property_returns_instance(controller):
-    """The `terminalBackend` Python property is what `_build_engine`
-    binds as the QML context property; it must return the same instance
-    held internally."""
-    backend = controller.terminalBackend
-    assert backend is controller._terminal_backend
-    assert isinstance(backend, TerminalBackend)
+    assert len(patched_backends["nvim_stops"]) == 1
