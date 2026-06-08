@@ -622,6 +622,14 @@ class TerminalBackend(QObject):
         # one-keystroke stale read is harmless (DECCKM toggles only on
         # TUI entry/exit). See `application_cursor_keys`.
         self._app_cursor_keys = False
+        # Last cursor (x, y, hidden) the reader emitted a repaint for. pyte's
+        # `screen.dirty` tracks rows whose CONTENT changed, NOT cursor moves —
+        # a pure `CUP` reposition (nvim moving the cursor in normal mode)
+        # dirties nothing. Without tracking this, the drawn cursor block would
+        # freeze on screen while nvim's real cursor moves. The reader compares
+        # against it after each feed and forces a repaint of the old + new
+        # cursor rows on change. Owned by the reader thread.
+        self._last_cursor_pos: tuple[int, int, bool] = (0, 0, False)
 
     @property
     def stop_event(self) -> threading.Event:
@@ -1034,10 +1042,21 @@ class TerminalBackend(QObject):
                         # toggled it) so the GUI key translator picks up
                         # application-cursor-key mode on the next keystroke.
                         self._app_cursor_keys = _DECCKM_MODE in screen.mode
-                        if screen.dirty:
-                            dirty_snapshot = frozenset(screen.dirty)
+                        # A pure cursor move (nvim `CUP`, no text change) leaves
+                        # `screen.dirty` empty, so without this the on-screen
+                        # cursor freezes while nvim's real cursor moves. Force a
+                        # repaint of the old + new cursor rows on any cursor
+                        # change. See `_last_cursor_pos`.
+                        cur = (screen.cursor.x, screen.cursor.y, screen.cursor.hidden)
+                        cursor_moved = cur != self._last_cursor_pos
+                        if screen.dirty or cursor_moved:
+                            rows = set(screen.dirty)
+                            if cursor_moved:
+                                rows.add(self._last_cursor_pos[1])
+                                rows.add(cur[1])
+                                self._last_cursor_pos = cur
                             screen.dirty.clear()
-                            self.screen_dirty.emit(dirty_snapshot)
+                            self.screen_dirty.emit(frozenset(rows))
                     finally:
                         if gc_was_enabled:
                             gc.enable()

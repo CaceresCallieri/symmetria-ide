@@ -393,6 +393,31 @@ def test_dcs_buffer_pre_allocated(backend):
     assert backend._dcs_buffer == b""
 
 
+def test_last_cursor_pos_pre_allocated(backend):
+    """`_last_cursor_pos` (x, y, hidden) is the cursor-move repaint
+    tracker — init in __init__ so the reader's first compare has a
+    tuple, not None/AttributeError."""
+    assert backend._last_cursor_pos == (0, 0, False)
+
+
+def test_reader_loop_repaints_on_cursor_move():
+    """A pure cursor move (nvim `CUP`, no text change) leaves
+    `screen.dirty` empty, so the reader MUST also compare the cursor
+    against `_last_cursor_pos` and emit `screen_dirty` on change — else
+    the drawn cursor block freezes while nvim's real cursor moves."""
+    src = inspect.getsource(TerminalBackend._run_reader_loop)
+    assert "_last_cursor_pos" in src, (
+        "reader loop must track _last_cursor_pos to repaint on cursor move"
+    )
+    assert "cursor_moved" in src, (
+        "reader loop must emit screen_dirty when the cursor moved even if "
+        "screen.dirty is empty"
+    )
+    assert "screen.cursor.hidden" in src, (
+        "cursor visibility (DECTCEM show/hide) must also trigger a repaint"
+    )
+
+
 def test_reader_loop_emits_osc7_inside_gc_window():
     """GC must be suspended BEFORE `osc7_received.emit` fires — the same
     window that covers `stream.feed`. `osc7_received.emit(path)` causes
