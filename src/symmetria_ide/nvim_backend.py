@@ -203,7 +203,7 @@ class NvimBackend(QObject):
                     return pynvim.attach("socket", path=self._socket_path)
                 except Exception:  # noqa: BLE001
                     log.debug("nvim socket attach retry", exc_info=True)
-            time.sleep(_SOCKET_POLL_INTERVAL_S)
+            self._stop_event.wait(timeout=_SOCKET_POLL_INTERVAL_S)
         if not self._stop_event.is_set():
             log.error(
                 "could not attach to nvim socket %s within %.1fs",

@@ -23,7 +23,7 @@ Disciplines enforced (CLAUDE.md gotchas #10, #11, #23):
   to `(cols*cw, rows*ch)` exactly is defense-in-depth.
 
 - **gotcha #23 — font cascade via `QFont.setFamilies([primary,
-  *fallbacks])`.** Reused from `NvimView._default_font()` so editor
+  *fallbacks])`.** Shared via `editor_font.default_font()` so editor
   and terminal share the same primary family + Nerd Font / emoji
   fallback chain, and cell metrics line up exactly.
 

@@ -325,7 +325,7 @@ Window {
                     // minimap (declared as a sibling below) occupies a
                     // fixed-width ribbon on mainContent's right edge when
                     // it is visible. Reserving that strip via rightMargin
-                    // keeps NvimView's grid_resize boundary correct — the
+                    // keeps the editor TerminalView's visible boundary correct — the
                     // grid shrinks by minimap.width when the minimap is on,
                     // expands back to the full slot when the minimap hides
                     // (e.g. when a future per-buffer toggle disables it).
@@ -358,9 +358,9 @@ Window {
                     // Floating cmdline + wildmenu overlay — parented to the
                     // editor so it clips within the viewport (not over the
                     // status bar) and so its anchors.fill tracks editor resizes.
-                    // Focus stays on the NvimView; keys flow to NeoVim, which
-                    // emits ext_cmdline/ext_popupmenu events that this overlay
-                    // reads via cmdlineState / popupmenuModel.
+                    // Focus stays on the editor TerminalView; keys flow to nvim via
+                    // PTY. NeoVim relays the cmdline via vim.ui_attach over the RPC
+                    // socket; this overlay reads it via cmdlineState / completionModel.
                     CommandLine {
                         id: cmdlineOverlay
                         anchors.fill: parent

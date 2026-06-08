@@ -1,8 +1,8 @@
-"""QApplication wiring: spawns NvimBackend, loads the QML scene.
+"""QApplication wiring: spawns NvimBackend + TerminalBackends, loads the QML scene.
 
 This is the boundary between Python backend code and the QML UI. The
 QML import module `Symmetria.Ide` is registered so that QML files can
-`import Symmetria.Ide 1.0` and instantiate `NvimView`.
+`import Symmetria.Ide 1.0` and instantiate `TerminalView`, `MinimapView`, etc.
 
 `CapsuleModel` is a thin ListModel-like wrapper around a Python list
 that the StatusBar QML repeats over. Keeping it in Python (not QML)
@@ -19,6 +19,7 @@ import logging
 import os
 import signal
 import sys
+import shutil
 import tempfile
 
 from PySide6.QtCore import (
@@ -351,9 +352,6 @@ class AppController(QObject):
         # the trace emits exactly once each per launch.
         self._first_capsule_seen = False
         self._first_displayed_root_traced = False
-        # These initial dimensions are a seed that gets immediately overridden
-        # when NvimView first receives a geometryChange event and calls
-        # backend.resize() with the real pixel-derived cell count.
         # NeoVim runs as a TUI inside a dedicated terminal surface
         # (`_editor_backend`, launched with `nvim --listen <sock>` in
         # start()). `_backend` is a SECOND, RPC-only connection to that
@@ -477,7 +475,7 @@ class AppController(QObject):
         # File manager toggle-overlay lifecycle. Lua may emit via rpcnotify
         # in the future (no live emitter today); NvimBackend re-emits as
         # fm_event, this controller owns the state. The panel itself is a
-        # QML overlay over NvimView (not a separate window).
+        # QML overlay over the editor surface (not a separate window).
         self._backend.fm_event.connect(self._on_fm_event)
         self._fm_visible = False
         self._fm_initial_path = ""
@@ -2204,6 +2202,10 @@ class AppController(QObject):
         self._backend.stop()
         self._editor_backend.stop()
         self._terminal_backend.stop()
+        # Clean up the temporary directory that held the nvim socket.
+        # The socket file itself is gone when nvim exits; the directory
+        # it lived in is ours to clean up (mkdtemp creates it in /tmp).
+        shutil.rmtree(os.path.dirname(self._nvim_socket), ignore_errors=True)
 
     @property
     def backend(self) -> NvimBackend:
@@ -2265,7 +2267,7 @@ def _register_qml_types() -> None:
     Every side-effect import is also referenced here by name so that
     automated import-pruners cannot strip the `noqa: F401` import
     without also touching this function. This applies to all QML-
-    registered modules, not just `NvimView`.
+    registered modules, not just `TerminalView`.
     """
     # Keep these references — they are the second layer of protection for
     # the noqa: F401 side-effect imports above. Removing any name here
@@ -2322,7 +2324,6 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # Make backend + capsules available to QML as a single `controller`
     # context property — keeps the QML surface small.
     ctx.setContextProperty("controller", controller)
-    ctx.setContextProperty("nvimBackend", controller.backend)
     ctx.setContextProperty("terminalBackend", controller.terminalBackend)
     ctx.setContextProperty("editorBackend", controller.editorBackend)
     ctx.setContextProperty("capsuleModel", controller.capsules)

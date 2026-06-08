@@ -371,19 +371,18 @@ def test_main_qml_minimap_visibility_matches_editor():
     assert "controller.editorVisible" in minimap_block
 
 
-def test_main_qml_nvim_view_reserves_minimap_width():
-    """NvimView's `anchors.rightMargin` must reserve `minimap.width`
-    when the minimap is visible. Without this, the grid would paint
-    UNDER the minimap, which is the exact same regression class as
+def test_main_qml_editor_reserves_minimap_width():
+    """The editor TerminalView's `anchors.rightMargin` must reserve
+    `minimap.width` when the minimap is visible. Without this, the
+    editor would paint UNDER the minimap — same regression class as
     gotcha #11's "viewport leak" symptom."""
     main_src = _read_main_qml()
     assert re.search(
         r"anchors\.rightMargin\s*:\s*minimap\.visible\s*\?\s*minimap\.width\s*:\s*0",
         main_src,
     ), (
-        "NvimView must reserve minimap.width via anchors.rightMargin "
-        "when minimap.visible — otherwise grid_resize won't account "
-        "for the ribbon and the grid silently overlaps it"
+        "editor TerminalView must reserve minimap.width via anchors.rightMargin "
+        "when minimap.visible — otherwise the editor silently overlaps it"
     )
 
 
