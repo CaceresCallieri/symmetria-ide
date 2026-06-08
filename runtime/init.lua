@@ -267,9 +267,6 @@ vim.api.nvim_create_autocmd("VimEnter", {
 -- canonical path (what Neovide does), but turning on multigrid means
 -- each window becomes a separate grid — a larger architectural shift.
 -- This autocmd-based approach is a single-grid equivalent.
-local last_topline = nil
-local last_buf = nil
-
 -- Convert a logical-line range to an approximate display-row count.
 -- With `wrap = true` (or folds collapsing ranges of lines into one
 -- display row), a WinScrolled delta measured in logical lines does not
@@ -342,54 +339,22 @@ end
 -- selene: allow(global_usage)  -- IPC boundary; gotcha #2
 _G.symmetria_display_rows_between = display_rows_between
 
-vim.api.nvim_create_autocmd("WinScrolled", {
-  group = grp,
-  callback = function()
-    local buf = vim.api.nvim_get_current_buf()
-    local topline = vim.fn.line("w0")
-    if last_topline ~= nil and buf == last_buf then
-      local delta_logical = topline - last_topline
-      if delta_logical ~= 0 then
-        -- With wrap on, logical-line delta ≠ display-row delta. Python's
-        -- scrollback/spring expect display rows (that is what the grid
-        -- actually shifts). Without wrap, the two are identical, and
-        -- without folds, `display_rows_between` reduces to `|delta_logical|`.
-        local delta_display
-        if vim.wo.wrap then
-          -- `getwininfo[1].textoff` is the total width of non-text columns
-          -- (line numbers, sign column, fold column). Subtracting it gives
-          -- the column count nvim actually wraps at — using raw winwidth(0)
-          -- inflates the denominator and systematically underestimates the
-          -- display-row count on buffers with number/relativenumber enabled.
-          local info = vim.fn.getwininfo(vim.fn.win_getid())
-          local text_width = vim.fn.winwidth(0) - (info[1] and info[1].textoff or 0)
-          delta_display = display_rows_between(last_topline, topline, text_width)
-        else
-          -- wrap=off: every logical line is exactly one display row.
-          -- delta_display == delta_logical, which is already ~= 0 per outer guard.
-          delta_display = delta_logical
-        end
-        -- pcall intentional: rpcnotify fails if Python client is disconnected.
-        pcall(vim.rpcnotify, 0, "scroll", { delta = delta_display })
-      end
-    end
-    -- Unconditional update: keeps the baseline in sync for the next event.
-    -- The BufEnter/WinEnter autocmd below primes last_buf/last_topline before
-    -- the first WinScrolled fires; this path keeps them current thereafter.
-    last_buf = buf
-    last_topline = topline
-  end,
-})
+-- Minimap viewport emitter. The minimap needs the total buffer length
+-- plus the currently-visible line range to draw its viewport indicator.
+-- This REPLACES the old pixel-delta `scroll` emitter that fed the
+-- (now-deleted) grid renderer's scroll spring — line-granular, cheap.
+local function emit_viewport()
+  -- pcall intentional: rpcnotify fails if the Python client is disconnected.
+  pcall(vim.rpcnotify, 0, "viewport", {
+    top = vim.fn.line("w0"),
+    bot = vim.fn.line("w$"),
+    total = vim.fn.line("$"),
+  })
+end
 
--- Reset the tracking baseline when the active buffer or window
--- changes — otherwise the first WinScrolled in a new buffer would
--- treat the switch as a huge delta and animate a long flourish.
-vim.api.nvim_create_autocmd({ "BufEnter", "WinEnter" }, {
+vim.api.nvim_create_autocmd({ "WinScrolled", "BufEnter", "VimResized" }, {
   group = grp,
-  callback = function()
-    last_buf = vim.api.nvim_get_current_buf()
-    last_topline = vim.fn.line("w0")
-  end,
+  callback = emit_viewport,
 })
 
 -- Cursor position changes are high-frequency; emit only the cheap
@@ -549,6 +514,60 @@ vim.api.nvim_create_autocmd("CmdlineEnter", {
 -- already be attached and the capsule panel waiting for its first
 -- payload.
 M.push_state()
+
+-- --- IDE command-line relay (in-process ui_attach) -----------------
+--
+-- Keep the command line rendered by the IDE's floating overlay, not in
+-- the terminal grid. nvim runs the FULL cmdline (history, ranges,
+-- <C-r>, etc.); we attach an IN-PROCESS UI requesting ext_cmdline,
+-- which — unlike an external socket UI alongside the terminal TUI —
+-- BOTH suppresses nvim's own cmdline rendering AND delivers the cmdline
+-- events to this callback. We relay them to Python over the "cmdline"
+-- rpcnotify channel, where CmdlineState drives CommandLine.qml. Same
+-- mechanism noice.nvim uses. Spike-confirmed on nvim 0.10+ (2026-06-08).
+--
+-- The existing getcompletion pipeline + Tab-cycling c-keymaps above
+-- keep working unchanged: nvim is still genuinely in cmdline mode, so
+-- CmdlineEnter/Changed/Leave fire and the "completions" channel feeds
+-- the IDE popup exactly as before.
+--
+-- pcall-guarded: vim.ui_attach is experimental. If it errors or is
+-- removed in a future nvim, init still loads and nvim falls back to
+-- rendering the cmdline in the terminal (degraded, not broken).
+pcall(function()
+  local cmdline_ns = vim.api.nvim_create_namespace("symmetria_cmdline")
+  vim.ui_attach(cmdline_ns, { ext_cmdline = true }, function(event, ...)
+    if type(event) ~= "string" or event:sub(1, 7) ~= "cmdline" then
+      return false
+    end
+    local a = { ... }
+    if event == "cmdline_show" then
+      -- args: content (list of [attr, text] chunks), pos, firstc, prompt,
+      -- indent, level. Flatten the chunks to plain text for the overlay.
+      local chunks = a[1] or {}
+      local parts = {}
+      for _, chunk in ipairs(chunks) do
+        parts[#parts + 1] = chunk[2] or ""
+      end
+      pcall(vim.rpcnotify, 0, "cmdline", {
+        kind = "show",
+        text = table.concat(parts),
+        pos = a[2] or 0,
+        firstchar = a[3] or "",
+        prompt = a[4] or "",
+        level = a[6] or 1,
+      })
+    elseif event == "cmdline_pos" then
+      pcall(vim.rpcnotify, 0, "cmdline", { kind = "pos", pos = a[1] or 0, level = a[2] or 1 })
+    elseif event == "cmdline_hide" then
+      pcall(vim.rpcnotify, 0, "cmdline", { kind = "hide", level = a[1] or 1 })
+    end
+    -- cmdline_block_* (multi-line :g / :'<,'> ranges) are deferred: they
+    -- fall through unrelayed for now, so the block preview renders only
+    -- in the terminal. Rare; revisit if needed.
+    return false
+  end)
+end)
 
 -- --- Native which-key overlay ---------------------------------------
 --
