@@ -476,17 +476,12 @@ def test_app_connects_minimap_event_with_queued_connection():
 
 
 def test_nvim_backend_subscribes_to_minimap_channel():
-    """The pynvim subscribe call must include 'minimap' — without it,
-    notifications on that channel are silently dropped by pynvim."""
-    import inspect
+    """The backend must subscribe to 'minimap' — without it, notifications
+    on that channel are silently dropped by pynvim. Subscribe is now
+    table-driven (_CHANNEL_TO_SIGNAL); membership there is the contract."""
+    from symmetria_ide.nvim_backend import NvimBackend
 
-    from symmetria_ide import nvim_backend
-
-    src = inspect.getsource(nvim_backend)
-    assert 'subscribe("minimap")' in src, (
-        "NvimBackend.subscribe_to_capsule (or equivalent) must "
-        'call self._nvim.subscribe("minimap") alongside the other channels'
-    )
+    assert "minimap" in NvimBackend._CHANNEL_TO_SIGNAL
 
 
 def test_nvim_backend_force_pushes_minimap_snapshot_on_subscribe():
@@ -505,15 +500,10 @@ def test_nvim_backend_force_pushes_minimap_snapshot_on_subscribe():
 
 
 def test_dispatch_routes_minimap_envelope():
-    """nvim_events._dispatch_notification must have a branch for the
-    'minimap' channel that emits minimap_event with the payload."""
-    import inspect
+    """The dispatch table routes the 'minimap' channel to minimap_event."""
+    from symmetria_ide.nvim_backend import NvimBackend
 
-    from symmetria_ide import nvim_events
-
-    src = inspect.getsource(nvim_events._dispatch_notification)
-    assert 'name == "minimap"' in src
-    assert "minimap_event.emit" in src
+    assert NvimBackend._CHANNEL_TO_SIGNAL["minimap"] == "minimap_event"
 
 
 # ---------------------------------------------------------------------------
@@ -813,13 +803,10 @@ def test_app_connects_minimap_viewport_event_with_queued_connection():
 
 
 def test_nvim_backend_subscribes_to_minimap_viewport_channel():
-    """pynvim subscribe must include 'minimap_viewport' — without it,
-    notifications on that channel are silently dropped."""
-    import inspect
-    from symmetria_ide import nvim_backend
+    """The backend must subscribe to 'minimap_viewport' (table-driven)."""
+    from symmetria_ide.nvim_backend import NvimBackend
 
-    src = inspect.getsource(nvim_backend)
-    assert 'subscribe("minimap_viewport")' in src
+    assert "minimap_viewport" in NvimBackend._CHANNEL_TO_SIGNAL
 
 
 def test_nvim_backend_force_pushes_minimap_viewport():
@@ -833,14 +820,12 @@ def test_nvim_backend_force_pushes_minimap_viewport():
 
 
 def test_dispatch_routes_minimap_viewport_envelope():
-    """nvim_events._dispatch_notification must have a 'minimap_viewport'
-    branch that emits minimap_viewport_event."""
-    import inspect
-    from symmetria_ide import nvim_events
+    """The dispatch table routes 'minimap_viewport' to its signal."""
+    from symmetria_ide.nvim_backend import NvimBackend
 
-    src = inspect.getsource(nvim_events._dispatch_notification)
-    assert 'name == "minimap_viewport"' in src
-    assert "minimap_viewport_event.emit" in src
+    assert (
+        NvimBackend._CHANNEL_TO_SIGNAL["minimap_viewport"] == "minimap_viewport_event"
+    )
 
 
 def test_seek_to_row_uses_async_call_and_1_indexed_goto():
@@ -1090,14 +1075,11 @@ def test_app_connects_phase4_signals_with_queued_connection():
 
 
 def test_nvim_backend_subscribes_to_phase4_channels():
-    """The pynvim subscribe block must include both new channels —
-    otherwise notifications are silently dropped."""
-    import inspect
-    from symmetria_ide import nvim_backend
+    """The backend must subscribe to both Phase 4 channels (table-driven)."""
+    from symmetria_ide.nvim_backend import NvimBackend
 
-    src = inspect.getsource(nvim_backend)
-    assert 'subscribe("minimap_diagnostics")' in src
-    assert 'subscribe("minimap_git")' in src
+    assert "minimap_diagnostics" in NvimBackend._CHANNEL_TO_SIGNAL
+    assert "minimap_git" in NvimBackend._CHANNEL_TO_SIGNAL
 
 
 def test_nvim_backend_force_pushes_phase4_helpers():
@@ -1112,16 +1094,14 @@ def test_nvim_backend_force_pushes_phase4_helpers():
 
 
 def test_dispatch_routes_phase4_envelopes():
-    """nvim_events._dispatch_notification must have branches for both
-    new channels that emit the corresponding signals."""
-    import inspect
-    from symmetria_ide import nvim_events
+    """The dispatch table routes both Phase 4 channels to their signals."""
+    from symmetria_ide.nvim_backend import NvimBackend
 
-    src = inspect.getsource(nvim_events._dispatch_notification)
-    assert 'name == "minimap_diagnostics"' in src
-    assert "minimap_diagnostics_event.emit" in src
-    assert 'name == "minimap_git"' in src
-    assert "minimap_git_event.emit" in src
+    assert (
+        NvimBackend._CHANNEL_TO_SIGNAL["minimap_diagnostics"]
+        == "minimap_diagnostics_event"
+    )
+    assert NvimBackend._CHANNEL_TO_SIGNAL["minimap_git"] == "minimap_git_event"
 
 
 # ---------------------------------------------------------------------------

@@ -157,14 +157,13 @@ def test_clip_uses_grid_exact_dimensions_not_bounding_rect():
 # ---------------------------------------------------------------------------
 
 
-def test_font_resolved_via_nvim_view_default_font():
-    """TerminalView reuses `NvimView._default_font()` so the editor and
-    terminal share the same primary family + Nerd Font / emoji fallback
-    chain — and cell metrics line up exactly. A regression that diverges
-    the two fonts would break the visual continuity Q2-d topology demands.
-    """
+def test_font_resolved_via_shared_default_font():
+    """TerminalView uses the shared `editor_font.default_font()` so every
+    surface + the chrome's editorFontFamily share the same primary family
+    + Nerd Font / emoji fallback chain, and cell metrics line up exactly.
+    (Relocated out of the deleted NvimView._default_font.)"""
     init_src = inspect.getsource(TerminalView.__init__)
-    assert "NvimView._default_font()" in init_src
+    assert "default_font()" in init_src
 
 
 def test_font_variants_pre_built():

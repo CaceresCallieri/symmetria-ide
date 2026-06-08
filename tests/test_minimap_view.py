@@ -310,30 +310,11 @@ def test_scroll_position_setter_short_circuits_on_equality():
     assert "return" in src, "...and return without emitting the signal"
 
 
-def test_nvim_view_emits_scroll_animation_position_changed():
-    """The NvimView side must emit `scrollAnimationPositionChanged`
-    from `_on_frame_swapped`. The signal feeds MinimapView's
-    `scrollPosition` binding via Main.qml. Without the emit, the
-    binding stays at its initial value forever and the minimap
-    viewport indicator (Phase 3) will be silently broken."""
-    from symmetria_ide.nvim_view import NvimView
-
-    src = inspect.getsource(NvimView._on_frame_swapped)
-    assert "self.scrollAnimationPositionChanged.emit()" in src, (
-        "NvimView._on_frame_swapped must emit "
-        "scrollAnimationPositionChanged so MinimapView.scrollPosition "
-        "actually receives updates from the scroll spring"
-    )
-
-
-def test_nvim_view_has_scroll_animation_position_property():
-    """NvimView must expose `scrollAnimationPosition` as a Q_PROPERTY.
-    Main.qml's `MinimapView { scrollPosition: editor.scrollAnimationPosition }`
-    binding fails silently at engine load if this property is missing."""
-    from symmetria_ide.nvim_view import NvimView
-
-    assert hasattr(NvimView, "scrollAnimationPosition")
-    assert hasattr(NvimView, "scrollAnimationPositionChanged")
+# NOTE: the former NvimView scroll-spring tests (scrollAnimationPosition
+# property + its per-frame emit) were removed when the custom grid renderer
+# was deleted — nvim now renders in the terminal and the minimap's viewport
+# indicator is driven by the `minimap_viewport` rpcnotify channel instead of
+# a pixel scroll spring.
 
 
 # ---------------------------------------------------------------------------
@@ -362,13 +343,17 @@ def test_main_qml_instantiates_minimap_view():
 
 
 def test_main_qml_binds_scroll_position():
-    """The Main.qml side must bind `scrollPosition:
-    editor.scrollAnimationPosition` — without it, the scroll spring's
-    updates never reach the minimap."""
+    """The scroll spring is gone (nvim renders in the terminal), so the
+    minimap's `scrollPosition` is pinned to 0; its viewport indicator is
+    driven by the `minimap_viewport` rpcnotify channel via the model. The
+    binding must NOT reference the deleted `editor.scrollAnimationPosition`."""
     main_src = _read_main_qml()
-    assert re.search(
-        r"scrollPosition\s*:\s*editor\.scrollAnimationPosition", main_src
-    ), "Main.qml MinimapView must bind scrollPosition: editor.scrollAnimationPosition"
+    assert re.search(r"scrollPosition\s*:\s*0", main_src), (
+        "Main.qml MinimapView must bind scrollPosition: 0 (spring removed)"
+    )
+    assert "scrollAnimationPosition" not in main_src, (
+        "Main.qml must not reference the deleted scrollAnimationPosition"
+    )
 
 
 def test_main_qml_minimap_visibility_matches_editor():

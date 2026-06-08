@@ -54,7 +54,7 @@ from PySide6.QtGui import (
 from PySide6.QtQml import QmlElement
 from PySide6.QtQuick import QQuickPaintedItem
 
-from .nvim_view import NvimView
+from .editor_font import default_font
 from .terminal_backend import TerminalBackend
 from .terminal_keys import translate as translate_key
 
@@ -248,12 +248,12 @@ class TerminalView(QQuickPaintedItem):
         self.setFlag(QQuickPaintedItem.Flag.ItemAcceptsInputMethod, True)
         self.setActiveFocusOnTab(True)
 
-        # Font cascade — reuse NvimView._default_font() so cell metrics
-        # (cw, ch) match between the editor and terminal panes exactly.
-        # `font.families` cascade for Nerd Font + emoji is inherited
-        # from there. gotcha #23 — the font must be a single resolved
-        # QFont with setFamilies(), NOT a comma-separated family string.
-        self._font = NvimView._default_font()
+        # Font cascade — shared editor_font.default_font() so cell metrics
+        # (cw, ch) match across every surface, and the chrome's
+        # editorFontFamily context property tracks the same primary family.
+        # gotcha #23 — the font must be a single resolved QFont with
+        # setFamilies(), NOT a comma-separated family string.
+        self._font = default_font()
         self._metrics = QFontMetricsF(self._font)
         self._cell_w = max(1.0, self._metrics.horizontalAdvance("M"))
         self._cell_h = max(1.0, self._metrics.height())

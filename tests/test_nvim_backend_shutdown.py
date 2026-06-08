@@ -28,7 +28,7 @@ def qapp():
 
 def test_stop_event_initially_clear(qapp: QCoreApplication) -> None:
     """A freshly-constructed backend has the event clear — no shutdown yet."""
-    backend = NvimBackend()
+    backend = NvimBackend("/tmp/symmetria-test-shutdown.sock")
     assert backend.stop_event.is_set() is False
 
 
@@ -38,7 +38,7 @@ def test_stop_sets_event_even_without_nvim(qapp: QCoreApplication) -> None:
     If the nvim handle was never attached (e.g. spawn failed, or the
     caller bails early), `stop()` still has to unblock any waiter.
     """
-    backend = NvimBackend()
+    backend = NvimBackend("/tmp/symmetria-test-shutdown.sock")
     assert backend._nvim is None
 
     backend.stop()
@@ -53,7 +53,7 @@ def test_stop_event_set_before_rpc_quit(qapp: QCoreApplication) -> None:
     `stop_event.is_set() is True` the moment teardown starts — not after
     the RPC round-trip completes.
     """
-    backend = NvimBackend()
+    backend = NvimBackend("/tmp/symmetria-test-shutdown.sock")
 
     event_was_set_at_rpc_time: list[bool] = []
     fake_nvim = MagicMock()
@@ -76,10 +76,12 @@ def test_stop_event_set_on_loop_exit(qapp: QCoreApplication) -> None:
     worker unwinds, and any `stop_event.wait(timeout=...)` must return
     promptly.
     """
-    backend = NvimBackend()
+    backend = NvimBackend("/tmp/symmetria-test-shutdown.sock")
     fake_nvim = MagicMock()
     fake_nvim.run_loop.side_effect = EOFError("channel closed")
-    backend._nvim = fake_nvim  # type: ignore[assignment]
+    # _run_loop attaches first; mock the attach so it returns our fake and
+    # then enters run_loop (which raises EOFError → finally sets the event).
+    backend._attach_with_retry = lambda: fake_nvim  # type: ignore[method-assign]
 
     # Run the loop body inline — no real thread — so we can observe the
     # finally block's side effect deterministically.
@@ -94,7 +96,7 @@ def test_stop_event_wait_unblocks_within_timeout(qapp: QCoreApplication) -> None
     This is the contract external callers rely on: instead of polling
     `_worker.is_alive()`, they can `wait(timeout=...)`.
     """
-    backend = NvimBackend()
+    backend = NvimBackend("/tmp/symmetria-test-shutdown.sock")
 
     def background_stop():
         backend.stop()
@@ -116,10 +118,10 @@ def test_stop_event_set_on_generic_crash(qapp: QCoreApplication) -> None:
     The except-Exception branch logs the error; the finally block still
     sets stop_event so any waiter is unblocked.
     """
-    backend = NvimBackend()
+    backend = NvimBackend("/tmp/symmetria-test-shutdown.sock")
     fake_nvim = MagicMock()
     fake_nvim.run_loop.side_effect = RuntimeError("protocol error")
-    backend._nvim = fake_nvim  # type: ignore[assignment]
+    backend._attach_with_retry = lambda: fake_nvim  # type: ignore[method-assign]
 
     # _run_loop absorbs all exceptions internally — must not re-raise.
     backend._run_loop()

@@ -1,277 +1,168 @@
-"""NeoVim backend: spawn `nvim --embed`, pump `redraw` events.
+"""NeoVim backend: attach to an `nvim --listen` socket, relay chrome rpcnotify.
 
-Runs pynvim's blocking event loop in a worker thread. Redraw events
-update the `Grid` in place; on every `flush` event and every capsule
-notification, Qt signals cross into the GUI thread (queued connections
-handle the thread hop automatically).
+NeoVim runs as a TUI **inside the terminal editor surface** — AppController
+launches it via a second `TerminalBackend` with `nvim --listen <socket>`, and
+nvim draws its own grid in that terminal. This module attaches a SECOND RPC
+connection to that socket purely for:
 
-The GUI side calls `input(keys)` to forward keystrokes, and
-`resize(cols, rows)` when the visible grid dimensions change.
+  * CONTROL — `input`, `edit_file`, `set_current_dir` (the IDE driving nvim;
+    the seam the long-arc feature migration rides on); and
+  * DATA — the rpcnotify chrome channels (`capsule`, `cmdline`, `completions`,
+    `whichkey`, `minimap*`, `nav`, `anchor`, `fm`) that `runtime/init.lua` +
+    the orchestrator modules emit. The IDE renders these as native overlays.
 
-Event dispatch (the `_h_*` handlers and `_dispatch_redraw` /
-`_dispatch_notification`) lives in `nvim_events.py` so this module can
-focus on worker-thread lifecycle, subprocess spawning, and the
-GUI-facing API. Extracted handlers are re-bound as methods at class
-scope below so the existing test scaffold (which exercises
-`backend._h_cmdline_show(...)` etc. directly) keeps working without
-changes. `_REDRAW_HANDLERS` is re-exported at module scope for the
-same reason — dispatch tests mutate the table via
-`nvim_backend._REDRAW_HANDLERS[...]`.
+It deliberately does NOT `ui_attach` — there is no grid/redraw protocol here
+(nvim renders the grid in the terminal). The custom grid renderer, scroll/
+cursor animations, and the ext_linegrid/ext_cmdline redraw handlers that the
+embed model used are gone; the command line is now relayed by an IN-PROCESS
+`vim.ui_attach` inside init.lua over the `cmdline` channel (the noice.nvim
+mechanism — see `runtime/init.lua`).
+
+Thread layout: pynvim's blocking `run_loop` runs in `_worker`; the socket
+attach (with a retry budget, since the editor nvim may not have bound the
+socket the instant we start) also happens on that worker so the GUI thread
+never blocks. Notifications cross into the GUI thread via Qt signals (queued
+connections handle the hop). GC is suspended around the notification handler
+(gotcha #10) — the same recipe `TerminalBackend`/`SessionHost` use.
 """
 
 from __future__ import annotations
 
 import gc
 import logging
+import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import pynvim
 from PySide6.QtCore import QObject, Signal, Slot
 
-from . import nvim_events
-from .grid import Grid
-
-# Re-exported so tests can do `nvim_backend._REDRAW_HANDLERS[...]`.
-# Must be the SAME dict as `nvim_events._REDRAW_HANDLERS` — Python imports
-# mutable objects by reference, so mutations via either namespace are
-# visible to `_dispatch_redraw`.
-from .nvim_events import _REDRAW_HANDLERS  # noqa: F401
-
 
 log = logging.getLogger(__name__)
 
 
-# Directory containing our Lua runtime (init.lua, etc.).
+# Directory containing our Lua runtime (init.lua, etc.). AppController uses
+# this to build the editor nvim's launch argv; kept here as the canonical
+# location since this module owns the nvim integration contract.
 _RUNTIME_DIR = Path(__file__).resolve().parent.parent.parent / "runtime"
+
+# Socket-attach retry budget. The editor `TerminalBackend` spawns
+# `nvim --listen <sock>` slightly before we attach; the socket file appears
+# once nvim's startup reaches the `--listen` bind. We poll on the worker
+# thread (NOT the GUI thread) so the UI never freezes waiting.
+_SOCKET_WAIT_TIMEOUT_S = 5.0
+_SOCKET_POLL_INTERVAL_S = 0.05
 
 
 class NvimBackend(QObject):
-    """Owns the NeoVim process and its Grid state.
+    """Owns the RPC connection to the terminal-hosted nvim.
 
-    Thread layout: pynvim's `run_loop` blocks in `_worker`, receiving
-    redraw notifications and capsule `rpcnotify` messages. Every `flush`
-    event emits `redraw_flushed`, which QML connects to to trigger a
-    repaint. Every capsule payload emits `capsule_updated(dict)`.
+    No grid state, no rendering — just the control surface (`input`,
+    `edit_file`, `set_current_dir`) plus the chrome rpcnotify relays
+    emitted as Qt signals onto the GUI thread.
     """
 
-    redraw_flushed = Signal()
-    # Emitted when the active window's topline changes. Drives the
-    # viewport scroll animation. Payload is the line delta: positive =
-    # content scrolls up (Ctrl-d), negative = content scrolls down
-    # (Ctrl-u). Fed by the WinScrolled autocmd in runtime/init.lua.
-    # More reliable than grid_scroll events: WinScrolled fires for any
-    # viewport change, not just those where NeoVim uses the scroll-shift
-    # redraw optimization.
-    viewport_scrolled = Signal(int)
-
-    # Emitted when nvim reports a mode change OR updates mode_info.
-    # Payload is the resolved mode descriptor dict — the relevant keys
-    # for rendering are `cursor_shape` ("block" | "vertical" |
-    # "horizontal"), `cell_percentage` (int, 0-100, for bar/underline
-    # thickness), and `blinkwait` / `blinkon` / `blinkoff` (ints in ms).
-    # We resolve here rather than sending the full mode_info list + idx
-    # so the view doesn't need to worry about ordering between the two
-    # events: either one arriving triggers a re-emit with the current
-    # resolved view. Empty dict means "no info yet" — view should fall
-    # back to a solid block cursor.
-    cursor_mode_updated = Signal(dict)
-
+    # --- Chrome rpcnotify relays (emitted from the worker thread) ------
+    # Status-bar capsules (mode/file/branch/project/pos/cwd) from init.lua.
     capsule_updated = Signal(dict)
+    # Command line — relayed by the in-process vim.ui_attach in init.lua.
+    # Payload `{kind: "show"|"pos"|"hide", ...}` matches CmdlineState.apply.
     cmdline_updated = Signal(dict)
-    popupmenu_updated = Signal(dict)
+    # Our getcompletion()-based cmdline completion list.
     completions_updated = Signal(dict)
-    # Native which-key overlay payload. Shape:
-    #   { op: "show"|"hide", mode, trail, can_go_back, items: [...] }
-    # Each item is { key, desc, is_group, icon, icon_color }.
-    # See `runtime/lua/orchestrator/whichkey/init.lua` for the emitter.
+    # Native which-key overlay payload (orchestrator.whichkey emitter).
     whichkey_event = Signal(dict)
-    # File manager toggle-overlay lifecycle. Payload shape:
-    #   { op: "show"|"hide"|"toggle", initialPath?: string }
-    # The overlay floats above NvimView; the user's compositor is not
-    # involved (unlike the standalone Symmetria File Manager which spawns
-    # a separate window). Source of truth is AppController.fmVisible.
-    # The `"fm"` rpcnotify channel is preserved as a stable contract for
-    # a future Lua-side opener (e.g. a `:SymFm` user command); no
-    # currently-installed Lua emitter exists post-decoupling.
+    # File-manager toggle channel (stable contract; no live Lua emitter
+    # post-decoupling — the primary FM trigger is a Qt app shortcut).
     fm_event = Signal(dict)
-    # Window-navigation bridge. Lua emits via rpcnotify when <C-h/j/k/l>
-    # is pressed at the edge of nvim's window splits — payload is
-    # `{op:"move", dir:"left|right|up|down"}` for spillover, or
-    # `{op:"debug", event:"keymap_install", reason:...}` for diagnostic
-    # traces. Same routing pattern as fm_event.
+    # Window-navigation bridge: <C-h/j/k/l> edge spillover between panes.
     nav_event = Signal(dict)
-    # Project-anchor lifecycle from `:SymmetriaAnchor` / `:SymmetriaUnanchor`.
-    # Payload: `{op:"set", path?:string}` or `{op:"clear"}`. AppController
-    # routes "set" to anchor_to_path (or anchor_to_current_cwd when path
-    # is absent) and "clear" to release_anchor. The PRIMARY anchor trigger
-    # is a Qt application-scope shortcut that calls those Slots directly
-    # — this RPC channel is the secondary (scripted) surface.
+    # Project-anchor lifecycle from :SymmetriaAnchor / :SymmetriaUnanchor.
     anchor_event = Signal(dict)
-    # Editor minimap content channel — Phase 1 of docs/minimap-prd.md.
-    # Lua emitter at runtime/lua/orchestrator/minimap.lua pushes full
-    # buffer snapshots (and, post-Phase 1.5, patches) over the "minimap"
-    # rpcnotify channel; the payload is the dict envelope documented in
-    # `MinimapModel.apply`'s docstring. AppController connects this to
-    # MinimapModel.apply via explicit Qt.QueuedConnection (§4 P2 — the
-    # signal originates on the pynvim worker thread).
+    # Editor minimap channels (content / viewport indicator / diagnostics /
+    # git gutter) — all driven by orchestrator.minimap, renderer-independent.
     minimap_event = Signal(dict)
-    # Editor minimap viewport channel — Phase 3 of docs/minimap-prd.md.
-    # Lua emits `{first, count}` on CursorMoved/WinScrolled so the
-    # minimap's viewport indicator (the spotlight rect showing which
-    # buffer rows the editor is currently displaying) can move in step
-    # with editor scrolls. Routed to MinimapModel.apply_viewport via
-    # Qt.QueuedConnection in AppController.
     minimap_viewport_event = Signal(dict)
-    # Editor minimap diagnostic channel — Phase 4. Lua emits a list of
-    # `{lnum, severity}` entries on DiagnosticChanged so the minimap's
-    # left-edge gutter can paint coloured dots at problem rows. Routed
-    # to MinimapModel.apply_diagnostics via Qt.QueuedConnection.
     minimap_diagnostics_event = Signal(dict)
-    # Editor minimap git-diff channel — Phase 4. Lua emits a list of
-    # `{lnum, kind}` entries on BufWritePost / FocusGained / debounced
-    # TextChanged, reading from gitsigns.nvim's public Lua API.
     minimap_git_event = Signal(dict)
     closed = Signal()
 
-    # --- Dispatch bindings --------------------------------------------
-    #
-    # Each assignment below makes a free function from `nvim_events`
-    # behave as a bound method of `NvimBackend`. Python's descriptor
-    # protocol handles the self-binding at attribute-access time:
-    # `backend._h_cmdline_show(...)` resolves to
-    # `nvim_events._h_cmdline_show(backend, ...)` — identical semantics
-    # to before extraction. Tests that call these directly, or shadow
-    # them via `backend._dispatch_notification = capture_state`, keep
-    # working without modification.
-    _dispatch_redraw = nvim_events._dispatch_redraw
-    _dispatch_notification = nvim_events._dispatch_notification
-    # Helper used by _h_mode_info_set and _h_mode_change — not a dispatch
-    # entrypoint itself, but bound here so tests can call it directly.
-    _resolved_mode_info = nvim_events._resolved_mode_info
+    # rpcnotify channel name -> the Signal attribute that relays it. The
+    # worker subscribes to every key and re-emits args[0] on the matching
+    # signal. This flat table REPLACES the embed model's redraw state
+    # machine (nvim_events.py) — with no ui_attach there are no grid/redraw
+    # events to parse, only these notification channels.
+    _CHANNEL_TO_SIGNAL: dict[str, str] = {
+        "capsule": "capsule_updated",
+        "cmdline": "cmdline_updated",
+        "completions": "completions_updated",
+        "whichkey": "whichkey_event",
+        "fm": "fm_event",
+        "nav": "nav_event",
+        "anchor": "anchor_event",
+        "minimap": "minimap_event",
+        "minimap_viewport": "minimap_viewport_event",
+        "minimap_diagnostics": "minimap_diagnostics_event",
+        "minimap_git": "minimap_git_event",
+    }
 
-    # Per-event handlers (one per NeoVim UI event name):
-    _h_grid_resize = nvim_events._h_grid_resize
-    _h_grid_clear = nvim_events._h_grid_clear
-    _h_grid_line = nvim_events._h_grid_line
-    _h_grid_scroll = nvim_events._h_grid_scroll
-    _h_grid_cursor_goto = nvim_events._h_grid_cursor_goto
-    _h_hl_attr_define = nvim_events._h_hl_attr_define
-    _h_default_colors_set = nvim_events._h_default_colors_set
-    _h_mode_info_set = nvim_events._h_mode_info_set
-    _h_mode_change = nvim_events._h_mode_change
-    _h_flush = nvim_events._h_flush
-    _h_cmdline_show = nvim_events._h_cmdline_show
-    _h_cmdline_pos = nvim_events._h_cmdline_pos
-    _h_cmdline_hide = nvim_events._h_cmdline_hide
-    _h_popupmenu_show = nvim_events._h_popupmenu_show
-    _h_popupmenu_select = nvim_events._h_popupmenu_select
-    _h_popupmenu_hide = nvim_events._h_popupmenu_hide
+    # Lua globals re-invoked after subscribe to plug the subscribe-race
+    # (gotcha #2): init.lua / orchestrator fire their first push during nvim
+    # startup, BEFORE we attach + subscribe, so we explicitly re-request.
+    _INITIAL_PUSH_GLOBALS: tuple[str, ...] = (
+        "symmetria_push_state",
+        "symmetria_minimap_push_snapshot",
+        "symmetria_minimap_push_viewport",
+        "symmetria_minimap_push_diagnostics",
+        "symmetria_minimap_push_git",
+    )
 
     def __init__(
         self,
-        cols: int = 120,
-        rows: int = 30,
-        runtime_dir: Path | None = None,
-        clean: bool = False,
+        socket_path: str,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
-        self._cols = cols
-        self._rows = rows
-        self._runtime_dir = runtime_dir or _RUNTIME_DIR
-        self._clean = clean
-        self.grid = Grid()
+        self._socket_path = socket_path
         self._nvim: pynvim.Nvim | None = None
         self._worker: threading.Thread | None = None
-        # Cooperative-shutdown signal. The worker is `daemon=True` so
-        # interpreter exit alone won't hang, but the daemon-only contract
-        # is silent: the main thread can't cleanly wait for the nvim loop
-        # to finish, and tests can't assert "stop() actually unblocked."
-        # `_stop_event` is set (a) at the top of `stop()`, before any RPC
-        # or close call, and (b) in the worker's `finally` block — so
-        # both the cooperative and crash-exit paths are observable.
-        # Standards §1 P0 — "every long-running thread is daemon=True
-        # OR owns an explicit shutdown Event"; we satisfy both.
+        # Cooperative-shutdown signal. Worker is daemon=True (interpreter
+        # exit won't hang) AND owns this Event so shutdown is observable.
+        # Set at the top of stop() and in the worker's finally. §1 P0.
         self._stop_event = threading.Event()
-        self._mode_info: list[dict[str, Any]] = []
-        self._mode_idx: int = 0
 
     @property
     def stop_event(self) -> threading.Event:
-        """Shutdown signal — set as soon as teardown begins or the worker exits.
-
-        Exposed for tests and any future coordinator that needs to wait
-        on the nvim backend's lifecycle without polling `_worker.is_alive()`.
-        """
+        """Shutdown signal — set as teardown begins or the worker exits."""
         return self._stop_event
 
     # --- Lifecycle -----------------------------------------------------
 
     def start(self) -> None:
-        """Spawn nvim, attach UI, start the event thread.
+        """Start the worker, which attaches to the nvim socket then loops.
 
-        `--embed` gives us the msgpack-RPC channel over stdio; `-n`
-        skips swapfile creation. We load our `runtime/` first via `--cmd
-        luafile` so capsule emission is wired before the user's own
-        init.lua runs — their config then overrides normally.
-
-        Pass `symmetria_clean=True` to force `--clean` for isolation
-        testing (bypasses user config entirely). Default is False so
-        NeoVim motions and plugins match the user's everyday setup.
+        The attach + retry happens ON the worker thread (not here) so the
+        GUI thread never blocks waiting for the editor nvim to bind its
+        `--listen` socket. Idempotent: a second call while live is a no-op.
         """
-        if self._nvim is not None:
+        if self._worker is not None:
             return
-        argv = [
-            "nvim",
-            "--embed",
-            "-n",
-            "--cmd",
-            f"set rtp^={self._runtime_dir}",
-            "--cmd",
-            f"luafile {self._runtime_dir / 'init.lua'}",
-        ]
-        if self._clean:
-            argv.insert(3, "--clean")
-        log.info("spawning nvim: %s", argv)
-        try:
-            self._nvim = pynvim.attach("child", argv=argv)
-        except Exception:
-            log.exception("failed to spawn nvim — is nvim installed and on PATH?")
-            raise
-        # rgb=true: NeoVim sends rgb hex values (no color indices).
-        # ext_linegrid=true: use the modern grid_line-based protocol.
-        # ext_cmdline=true: NeoVim stops drawing the `:` prompt inside
-        #   the grid and instead fires cmdline_show/_pos/_hide events
-        #   that our native QML overlay renders.
-        # ext_popupmenu=true: same extraction for wildmenu autocomplete.
-        self._nvim.ui_attach(
-            self._cols,
-            self._rows,
-            rgb=True,
-            ext_linegrid=True,
-            ext_cmdline=True,
-            ext_popupmenu=True,
-        )
         self._worker = threading.Thread(
             target=self._run_loop,
-            name="nvim-event-loop",
+            name="nvim-rpc-loop",
             daemon=True,
         )
         self._worker.start()
 
     def stop(self) -> None:
-        """Tear down: schedule nvim to quit, wait for worker to exit.
+        """Ask nvim to quit (best-effort) and join the worker.
 
-        Called from the GUI thread on app shutdown. We can't call RPC
-        methods directly — they'd raise the same cross-thread error
-        `input`/`resize` would. Instead, marshal `quit` via async_call,
-        then let the worker exit naturally when nvim closes the channel.
-
-        `_stop_event` is set FIRST so any concurrent observer (tests,
-        health-check loop) sees shutdown-in-progress before the RPC
-        round-trip even starts.
+        `_stop_event` is set FIRST so a concurrent socket-wait aborts and
+        observers see shutdown-in-progress before any RPC round-trip. The
+        editor `TerminalBackend.stop()` killpg is the backstop if `qa!`
+        doesn't land (e.g. socket already gone), so this stays best-effort.
         """
         self._stop_event.set()
         nvim = self._nvim
@@ -298,136 +189,89 @@ class NvimBackend(QObject):
 
     # --- Worker thread -------------------------------------------------
 
+    def _attach_with_retry(self) -> pynvim.Nvim | None:
+        """Poll for the socket then attach, on the worker thread.
+
+        Returns the attached Nvim, or None if the budget elapses / stop()
+        is signalled first. The editor nvim binds `--listen` a beat after
+        its process spawns, so the file may not exist on our first look.
+        """
+        deadline = time.monotonic() + _SOCKET_WAIT_TIMEOUT_S
+        while not self._stop_event.is_set() and time.monotonic() < deadline:
+            if os.path.exists(self._socket_path):
+                try:
+                    return pynvim.attach("socket", path=self._socket_path)
+                except Exception:  # noqa: BLE001
+                    log.debug("nvim socket attach retry", exc_info=True)
+            time.sleep(_SOCKET_POLL_INTERVAL_S)
+        if not self._stop_event.is_set():
+            log.error(
+                "could not attach to nvim socket %s within %.1fs",
+                self._socket_path,
+                _SOCKET_WAIT_TIMEOUT_S,
+            )
+        return None
+
     def _run_loop(self) -> None:
-        assert self._nvim is not None
+        nvim = self._attach_with_retry()
+        if nvim is None:
+            self._stop_event.set()
+            self.closed.emit()
+            return
+        # Publish for the GUI-facing methods. Reference assignment is atomic
+        # under the GIL; the methods no-op while this is still None.
+        self._nvim = nvim
         try:
-            self._nvim.run_loop(
+            nvim.run_loop(
                 request_cb=self._on_request,
                 notification_cb=self._on_notification,
                 setup_cb=self._on_loop_setup,
                 err_cb=self._on_err,
             )
         except EOFError:
-            # nvim exited normally (e.g. user typed `:q` inside the
-            # editor). The channel closes, pynvim raises EOFError. This
-            # isn't a crash — log at DEBUG, not ERROR.
+            # nvim exited (e.g. user `:qa` in the editor) — channel closes,
+            # pynvim raises EOFError. Not a crash.
             log.debug("nvim closed its RPC channel (normal exit)")
         except Exception:  # noqa: BLE001
             if not self._stop_event.is_set():
-                log.exception("nvim event loop crashed")
+                log.exception("nvim rpc loop crashed")
         finally:
-            # Set unconditionally — covers both the cooperative stop()
-            # path and the "nvim crashed / closed unexpectedly" path, so
-            # anyone blocking on stop_event.wait(...) is unblocked either way.
+            # Set unconditionally — covers cooperative stop() and the
+            # crash/closed paths so stop_event.wait() always unblocks.
             self._stop_event.set()
             self.closed.emit()
 
     def _on_loop_setup(self) -> None:
-        """Runs on the loop thread before notifications start arriving.
+        """Subscribe to the chrome channels + re-request the initial pushes.
 
-        Subscribing here (not in `start`) is required: pynvim only
-        delivers notifications for event names we've explicitly asked
-        about, and the subscribe call must run on the loop thread.
-
-        After subscribing we eagerly request the current capsule state —
-        `init.lua` has already fired its initial `M.push_state()` during
-        nvim startup (before we subscribed), so without this round-trip
-        we'd see an empty status bar until the first mode change.
+        Runs on the loop thread (pynvim requires subscribe there). The
+        re-pushes plug the subscribe-race (gotcha #2): init.lua/orchestrator
+        fired their first payloads during nvim startup, before we attached.
         """
-        assert self._nvim is not None
-        try:
-            self._nvim.subscribe("capsule")
-            self._nvim.subscribe("completions")
-            self._nvim.subscribe("scroll")
-            self._nvim.subscribe("whichkey")
-            self._nvim.subscribe("minimap")
-            self._nvim.subscribe("minimap_viewport")
-            self._nvim.subscribe("minimap_diagnostics")
-            self._nvim.subscribe("minimap_git")
-            log.info(
-                "subscribed to 'capsule' + 'completions' + 'scroll' + 'whichkey' "
-                "+ 'minimap' + 'minimap_viewport' + 'minimap_diagnostics' "
-                "+ 'minimap_git' notifications"
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("subscribe(capsule/completions) failed")
-        # Force a minimap snapshot re-push to plug the subscribe race
-        # (CLAUDE.md gotcha #2). The Lua side fires its first BufEnter
-        # snapshot during nvim startup — before this subscribe call —
-        # so without the explicit re-request the minimap stays empty
-        # until the user's first edit. Same mitigation the capsule
-        # channel uses below.
-        try:
-            self._nvim.exec_lua(
-                "if _G.symmetria_minimap_push_snapshot then "
-                "_G.symmetria_minimap_push_snapshot() end"
-            )
-            log.info("requested initial minimap snapshot")
-        except Exception:  # noqa: BLE001
-            log.exception("initial minimap push request failed")
-        # Same subscribe-race mitigation for the viewport channel —
-        # WinScrolled/CursorMoved on the initial buffer fired during
-        # nvim startup, before we subscribed. Without this re-push the
-        # minimap's viewport indicator stays at (0, 0) until the user
-        # touches the cursor.
-        try:
-            self._nvim.exec_lua(
-                "if _G.symmetria_minimap_push_viewport then "
-                "_G.symmetria_minimap_push_viewport() end"
-            )
-            log.info("requested initial minimap viewport")
-        except Exception:  # noqa: BLE001
-            log.exception("initial minimap viewport push request failed")
-        # Diagnostic + git initial push — same subscribe-race rationale.
-        # DiagnosticChanged / BufWritePost may have fired before we
-        # subscribed; without the re-push the gutter would stay empty
-        # until the next user-driven event.
-        try:
-            self._nvim.exec_lua(
-                "if _G.symmetria_minimap_push_diagnostics then "
-                "_G.symmetria_minimap_push_diagnostics() end"
-            )
-            log.info("requested initial minimap diagnostics")
-        except Exception:  # noqa: BLE001
-            log.exception("initial minimap diagnostics push request failed")
-        try:
-            self._nvim.exec_lua(
-                "if _G.symmetria_minimap_push_git then "
-                "_G.symmetria_minimap_push_git() end"
-            )
-            log.info("requested initial minimap git")
-        except Exception:  # noqa: BLE001
-            log.exception("initial minimap git push request failed")
-        try:
-            self._nvim.exec_lua(
-                "if _G.symmetria_push_state then _G.symmetria_push_state() end"
-            )
-            log.info("requested initial capsule push")
-        except Exception:  # noqa: BLE001
-            log.debug("initial push_state call failed", exc_info=True)
+        nvim = self._nvim
+        if nvim is None:
+            return
+        for channel in self._CHANNEL_TO_SIGNAL:
+            try:
+                nvim.subscribe(channel)
+            except Exception:  # noqa: BLE001
+                log.exception("subscribe(%s) failed", channel)
+        for fn in self._INITIAL_PUSH_GLOBALS:
+            try:
+                nvim.exec_lua(f"if _G.{fn} then _G.{fn}() end")
+            except Exception:  # noqa: BLE001
+                log.debug("initial re-push %s failed", fn, exc_info=True)
 
     def _on_request(self, name: str, args: list[Any]) -> Any:  # noqa: ARG002
-        """Handle an RPC request from NeoVim.
-
-        NeoVim's UI client protocol does not send requests to the UI
-        (only notifications), so this handler is intentionally a no-op.
-        Returning None is correct — pynvim sends a nil reply.
-        """
+        """nvim sends no requests to a plain RPC client — no-op (nil reply)."""
         log.debug("rpc request: %s", name)
         return None
 
     def _on_notification(self, name: str, args: list[Any]) -> None:
-        # GC is suspended for the entire handler, not just _dispatch_redraw.
-        # Python 3.14's incremental cyclic GC can fire from ANY allocation
-        # on this worker thread — including logging.debug() inside pynvim's
-        # msgpack session handler BEFORE we even reach _dispatch_redraw.
-        # A crash trace showed GC mid-`logging.__init__.py:1498 debug` from
-        # `session.py:269 handler`, racing with QSGRenderThread inside
-        # `_paint_row`. Widening the gc.disable window to cover the whole
-        # notification entrypoint closes that window without affecting
-        # the existing _dispatch_redraw guard (which is now redundant when
-        # entered through here, but kept for defence-in-depth and because
-        # some code paths invoke _dispatch_redraw directly in tests).
+        # GC suspended for the whole handler (gotcha #10): Python 3.14's
+        # incremental cyclic GC can fire from any allocation on this worker
+        # thread (incl. pynvim's msgpack/logging internals) and race the
+        # QSGRenderThread. Same recipe as TerminalBackend/SessionHost.
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
             gc.disable()
@@ -437,20 +281,33 @@ class NvimBackend(QObject):
             if gc_was_enabled:
                 gc.enable()
 
+    def _dispatch_notification(self, name: str, args: list[Any]) -> None:
+        """Route an rpcnotify to its Qt signal. Unknown channels ignored."""
+        attr = self._CHANNEL_TO_SIGNAL.get(name)
+        if attr is None:
+            return
+        payload = args[0] if args else {}
+        if not isinstance(payload, dict):
+            log.debug("notification %s payload not a dict: %r", name, payload)
+            return
+        getattr(self, attr).emit(payload)
+
     def _on_err(self, msg: str) -> None:
         log.warning("nvim stderr: %s", msg.rstrip())
 
-    # --- GUI-thread-facing API -----------------------------------------
+    # --- GUI-thread-facing control API ---------------------------------
     #
-    # pynvim requires all RPC calls to run on the thread that owns its
-    # event loop — the worker thread in our case. Calling from the GUI
-    # thread raises `NvimError: request from non-main thread`. Every
-    # method below marshals its work through `nvim.async_call`, which is
-    # thread-safe and queues the callback onto the loop thread.
+    # pynvim requires RPC calls on the loop thread; every method marshals
+    # via `nvim.async_call` (thread-safe). All no-op until the worker has
+    # attached (self._nvim is None) — matches the pre-swap defensive shape.
 
     @Slot(str)
     def input(self, keys: str) -> None:
-        """Forward a NeoVim keycode string (e.g. `i`, `<Esc>`) to nvim."""
+        """Forward a NeoVim keycode string (e.g. `i`, `<Esc>`) to nvim.
+
+        Secondary/scripted path: ordinary typing flows through the editor
+        terminal's PTY straight to nvim. This is for IDE-initiated input
+        (replaying a sequence over the control channel)."""
         nvim = self._nvim
         if nvim is None or not keys:
             return
@@ -468,24 +325,13 @@ class NvimBackend(QObject):
 
     @Slot(str)
     def set_current_dir(self, path: str) -> None:
-        """Change nvim's working directory to `path`.
+        """Change nvim's working directory to `path` via nvim_set_current_dir.
 
-        Goes through the `nvim_set_current_dir` RPC (via
-        `nvim.api.set_current_dir`) rather than a `:cd <path>` command
-        string — the API call accepts a raw path without us having to
-        worry about shell-style escaping of spaces or special chars.
-        Marshalled through `nvim.async_call` per gotcha #1 (pynvim is
-        not thread-safe). No-op when nvim hasn't been spawned yet
-        (matches `input` / `resize`); the caller's slot may fire before
-        `start()` returns and we don't want to crash that path.
-
-        Does NOT touch open buffers. Wiping or refreshing buffers on a
-        project change is a deliberate non-goal here — that belongs to
-        the future session-open flow, where the user has explicitly
-        chosen to switch project context. This method only updates
-        `:pwd` so file pickers, `:find`, and git-from-nvim follow the
-        IDE's displayed project root.
-        """
+        Raw-path API call (no shell escaping). Marshalled via async_call
+        (gotcha #1). No-op before attach. Updates `:pwd` only — does not
+        touch open buffers (project-switch buffer handling is a non-goal
+        here). Keeps file pickers / `:find` / git-from-nvim following the
+        IDE's displayed project root."""
         nvim = self._nvim
         if nvim is None or not path:
             return
@@ -503,25 +349,14 @@ class NvimBackend(QObject):
 
     @Slot(str)
     def edit_file(self, path: str) -> None:
-        """Open `path` in the current window — mode-independent.
+        """Open `path` in the editor's current window via nvim_cmd.
 
-        Uses `nvim_cmd` (via `nvim.api.cmd`) instead of feeding
-        `:execute 'edit ...'` through `input()`. The keystroke route is
-        mode-dependent: in terminal mode `:` is a printable char that
-        gets shipped down the PTY to the running shell; in insert mode
-        the whole command would be typed into the buffer; in
-        operator-pending mode it's meaningless. `nvim_cmd` runs above
-        mode dispatch in nvim's command layer.
-
-        Structured `{cmd, args}` form means nvim never re-parses a
-        composed string, so paths with spaces / `%` / `#` / `[` need no
-        `fnameescape` ceremony — the path is already an opaque arg.
-
-        Marshalled via `nvim.async_call` per gotcha #1. No-op when nvim
-        hasn't spawned yet (matches `input` / `resize` / `set_current_dir`).
-        No `bang=True`: a dirty current buffer should error out the same
-        way `:edit foo` does at the cmdline, not silently discard work.
-        """
+        Structured `{cmd, args}` runs above mode dispatch, so it works
+        regardless of nvim's current mode and needs no `fnameescape` for
+        paths with spaces / `%` / `#`. This is the control path the IDE
+        file manager uses to open files in the editor surface. Marshalled
+        via async_call (gotcha #1); no-op before attach. No `bang`: a dirty
+        buffer errors like `:edit foo` rather than discarding work."""
         nvim = self._nvim
         if nvim is None or not path:
             return
@@ -536,25 +371,3 @@ class NvimBackend(QObject):
             nvim.async_call(_do)
         except Exception:  # noqa: BLE001
             log.exception("async_call(edit_file) failed")
-
-    @Slot(int, int)
-    def resize(self, cols: int, rows: int) -> None:
-        """Tell nvim to re-lay-out to this cell dimension."""
-        nvim = self._nvim
-        if nvim is None:
-            return
-        if cols == self._cols and rows == self._rows:
-            return
-        self._cols = cols
-        self._rows = rows
-
-        def _do() -> None:
-            try:
-                nvim.ui_try_resize(cols, rows)
-            except Exception:  # noqa: BLE001
-                log.exception("ui_try_resize failed")
-
-        try:
-            nvim.async_call(_do)
-        except Exception:  # noqa: BLE001
-            log.exception("async_call(resize) failed")

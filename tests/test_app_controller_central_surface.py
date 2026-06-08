@@ -39,6 +39,7 @@ def patched_backends(monkeypatch):
     nvim_starts: list[None] = []
     nvim_stops: list[None] = []
     terminal_starts: list[str] = []
+    editor_starts: list[str] = []
     terminal_stops: list[None] = []
     call_order: list[str] = []
 
@@ -50,9 +51,16 @@ def patched_backends(monkeypatch):
         nvim_stops.append(None)
         call_order.append(f"nvim_stop#{len(call_order)}")
 
-    def fake_terminal_start(self, cwd):
-        terminal_starts.append(cwd)
-        call_order.append(f"terminal_start#{len(call_order)}")
+    def fake_terminal_start(self, cwd, argv=None, env_extra=None):
+        # The EDITOR backend is launched with an explicit argv (nvim --listen);
+        # the plain SHELL terminal uses argv=None. Both are TerminalBackend, so
+        # we distinguish them by that to assert the cross-backend ordering.
+        if argv is not None:
+            editor_starts.append(cwd)
+            call_order.append(f"editor_start#{len(call_order)}")
+        else:
+            terminal_starts.append(cwd)
+            call_order.append(f"terminal_start#{len(call_order)}")
 
     def fake_terminal_stop(self):
         terminal_stops.append(None)
@@ -75,6 +83,7 @@ def patched_backends(monkeypatch):
         "nvim_starts": nvim_starts,
         "nvim_stops": nvim_stops,
         "terminal_starts": terminal_starts,
+        "editor_starts": editor_starts,
         "terminal_stops": terminal_stops,
         "call_order": call_order,
     }
@@ -255,55 +264,58 @@ def test_focus_terminal_emits_signal(controller):
 # ---------------------------------------------------------------------------
 
 
-def test_start_pre_warms_terminal_after_nvim(patched_backends):
-    """start() must call nvim's start() BEFORE the terminal's. Q1-1b:
-    nvim ordering gates the QSGRenderThread's first frame; flashing
-    an empty editor on slow hardware is the symptom of the wrong order.
-    """
+def test_start_launches_editor_nvim_then_rpc_then_shell(patched_backends):
+    """start() order: editor nvim TUI (argv-launched) FIRST so its --listen
+    socket exists, THEN the RPC client attaches (nvim_start), THEN the shell
+    terminal pre-warms. The RPC client polls for the socket on its own
+    worker, so the editor launch must precede it."""
     ctrl = AppController()
     try:
         ctrl.start()
     finally:
         ctrl.shutdown()
 
+    assert len(patched_backends["editor_starts"]) == 1
     assert len(patched_backends["nvim_starts"]) == 1
     assert len(patched_backends["terminal_starts"]) == 1
-    # terminal start receives the controller's _cwd (raw, NOT displayedRoot).
+    # Both terminals start with the controller's raw _cwd.
+    assert patched_backends["editor_starts"][0] == ctrl._cwd
     assert patched_backends["terminal_starts"][0] == ctrl._cwd
 
-    # Order: nvim_start MUST come before terminal_start.
     order = patched_backends["call_order"]
+    editor_idx = next(i for i, s in enumerate(order) if s.startswith("editor_start"))
     nvim_idx = next(i for i, s in enumerate(order) if s.startswith("nvim_start"))
     term_idx = next(i for i, s in enumerate(order) if s.startswith("terminal_start"))
-    assert nvim_idx < term_idx, f"nvim must start before terminal — got order: {order}"
+    assert editor_idx < nvim_idx < term_idx, (
+        f"order must be editor → nvim-rpc → shell — got: {order}"
+    )
 
 
-def test_shutdown_stops_terminal_before_nvim(patched_backends):
-    """shutdown() must stop the terminal BEFORE nvim. The terminal owns
-    a shell process group; killpg reaping must complete on a healthy
-    event loop, not one in nvim-teardown handshake."""
+def test_shutdown_quits_nvim_rpc_before_killpg(patched_backends):
+    """shutdown() must call the nvim RPC client's stop() (graceful `qa!`)
+    BEFORE the terminal killpg backstops — so nvim writes shada/swap
+    cleanly rather than being SIGTERM'd mid-write."""
     ctrl = AppController()
     ctrl.start()
-    # Clear the call order so shutdown's order is what we inspect.
     patched_backends["call_order"].clear()
     ctrl.shutdown()
 
     order = patched_backends["call_order"]
-    term_stop_idx = next(
+    nvim_stop_idx = next(i for i, s in enumerate(order) if s.startswith("nvim_stop"))
+    first_term_stop_idx = next(
         i for i, s in enumerate(order) if s.startswith("terminal_stop")
     )
-    nvim_stop_idx = next(i for i, s in enumerate(order) if s.startswith("nvim_stop"))
-    assert term_stop_idx < nvim_stop_idx, (
-        f"terminal must stop before nvim — got order: {order}"
+    assert nvim_stop_idx < first_term_stop_idx, (
+        f"nvim RPC quit must precede the terminal killpg — got: {order}"
     )
 
 
 def test_start_oserror_does_not_abort_app(patched_backends, monkeypatch):
-    """If the terminal backend's spawn raises OSError (shell missing,
+    """If a terminal backend's spawn raises OSError (nvim/shell missing,
     fd-limit), the IDE must still finish starting up — log and continue,
-    don't crash. The user can still use the editor."""
+    don't crash."""
 
-    def raising_start(self, cwd):
+    def raising_start(self, cwd, argv=None, env_extra=None):
         raise OSError("no such file or directory")
 
     monkeypatch.setattr(TerminalBackend, "start", raising_start)
@@ -315,11 +327,11 @@ def test_start_oserror_does_not_abort_app(patched_backends, monkeypatch):
     finally:
         ctrl.shutdown()
 
-    # nvim must still have started — the editor is the usable fallback when
-    # the terminal spawn fails. If _backend.start() is ever accidentally
-    # moved inside the try block, this catches the regression.
+    # The nvim RPC client must still have started — both the editor-nvim
+    # spawn and the shell spawn are guarded by try/except OSError, and
+    # _backend.start() sits between/after them outside those guards.
     assert len(patched_backends["nvim_starts"]) == 1, (
-        "nvim must start even when terminal OSError fires"
+        "nvim RPC must start even when a terminal OSError fires"
     )
 
 

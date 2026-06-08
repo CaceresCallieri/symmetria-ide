@@ -19,6 +19,7 @@ import logging
 import os
 import signal
 import sys
+import tempfile
 
 from PySide6.QtCore import (
     Property,
@@ -40,13 +41,12 @@ from .trace import trace
 from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registration
     CmdlineState,
     CompletionModel,
-    PopupmenuModel,
 )
 from .git_controller import GitController, GitStatusListModel
 from .minimap_model import MinimapModel
 from .minimap_view import MinimapView  # noqa: F401 — side-effect: @QmlElement registration
-from .nvim_backend import NvimBackend
-from .nvim_view import NvimView  # noqa: F401 — side-effect: @QmlElement registration
+from .editor_font import default_font
+from .nvim_backend import _RUNTIME_DIR, NvimBackend
 from .session_host import SessionHost
 from .session_models import (  # noqa: F401 — side-effect: @QmlElement registration
     SessionModel,
@@ -354,24 +354,29 @@ class AppController(QObject):
         # These initial dimensions are a seed that gets immediately overridden
         # when NvimView first receives a geometryChange event and calls
         # backend.resize() with the real pixel-derived cell count.
-        self._backend = NvimBackend(cols=120, rows=30)
-        # Phase 2.5 terminal pane. Coexists with nvim under Main.qml's
-        # `mainContent` Item — `_central_surface` toggles which is visible.
-        # Spawned eagerly from `start()` AFTER the nvim backend so the
-        # editor's grid lands first (gates QSGRenderThread's first frame —
-        # spawning the terminal first can briefly flash an empty editor
-        # on slow hardware). The closed signal is connected here so a
-        # shell that exits on its own surfaces in the log.
+        # NeoVim runs as a TUI inside a dedicated terminal surface
+        # (`_editor_backend`, launched with `nvim --listen <sock>` in
+        # start()). `_backend` is a SECOND, RPC-only connection to that
+        # socket: control (input/edit_file/set_current_dir) + the chrome
+        # rpcnotify relays (capsule/cmdline/whichkey/minimap/...). It does
+        # NOT render — nvim draws its grid in the terminal; the IDE renders
+        # the chrome overlays from the relayed channels.
+        self._nvim_socket = os.path.join(
+            tempfile.mkdtemp(prefix="symmetria-nvim-"), "nvim.sock"
+        )
+        self._editor_backend = TerminalBackend(self)
+        self._backend = NvimBackend(self._nvim_socket)
+        # Phase 2.5 terminal pane (the plain shell). Coexists with the
+        # editor + agent surfaces under Main.qml's `mainContent` Item —
+        # `_central_surface` toggles which is visible. The closed signal is
+        # connected below so a shell that exits on its own surfaces in the log.
         self._terminal_backend = TerminalBackend(self)
         # Per Q2-d topology decision: terminal is the persistent home
-        # surface, nvim is summoned over it. First-launch visible = terminal.
-        # Editor is pre-spawned hidden via `_backend.start()` so swap-to-
-        # editor is instant (Q1 answer 1b).
+        # surface, the editor is summoned over it. First-launch = terminal.
         self._central_surface: str = "terminal"
         self._status = StatusBarState(self)
         self._capsules = CapsuleModel(self)
         self._cmdline = CmdlineState(self)
-        self._popupmenu = PopupmenuModel(self)
         self._completion = CompletionModel(self)
         self._whichkey_state = WhichKeyState(self)
         self._whichkey_model = WhichKeyModel(self)
@@ -428,10 +433,13 @@ class AppController(QObject):
         # `_spawn_instance(1)`; subsequent spawns fill slots 2..5.
         # The env-var startup paths (`SYMMETRIA_IDE_AGENT_PROMPT` /
         # `_VIEW`) handle the spawn themselves in `start()`.
-        # ----- Backend signal wiring (unchanged) -------------------------
+        # ----- Backend signal wiring (chrome rpcnotify relays) -----------
+        # These signals originate on the NvimBackend worker thread; Qt's
+        # auto-connection promotes them to QueuedConnection across the
+        # thread boundary (same as the embed model used). The minimap
+        # connects below are explicit-queued per §4 P2.
         self._backend.capsule_updated.connect(self._route_capsule)
         self._backend.cmdline_updated.connect(self._cmdline.apply)
-        self._backend.popupmenu_updated.connect(self._popupmenu.apply)
         self._backend.completions_updated.connect(self._completion.apply)
         # Both whichkey consumers listen to the same payload — state
         # handles visibility/trail, model handles the items list.
@@ -2080,6 +2088,27 @@ class AppController(QObject):
 
     def start(self) -> None:
         trace("start_begin")
+        # Launch the editor NeoVim as a TUI in its own terminal surface,
+        # exposing a control socket via --listen. `_backend` (the RPC-only
+        # client) attaches to that socket on its OWN worker thread with a
+        # retry budget, so the GUI thread never blocks. Order: spawn the
+        # editor nvim first so the socket exists, then start the client.
+        # OSError from the spawn (nvim missing) is logged so the IDE still
+        # launches with a working shell terminal.
+        editor_argv = [
+            "nvim",
+            "-n",
+            "--listen",
+            self._nvim_socket,
+            "--cmd",
+            f"set rtp^={_RUNTIME_DIR}",
+            "--cmd",
+            f"luafile {_RUNTIME_DIR / 'init.lua'}",
+        ]
+        try:
+            self._editor_backend.start(self._cwd, argv=editor_argv)
+        except OSError:
+            log.exception("editor nvim spawn failed — editor surface will be inert")
         self._backend.start()
         trace("backend_started")
         # Seed the GitController with the launch cwd by firing
@@ -2166,16 +2195,15 @@ class AppController(QObject):
         # we want it joined before the event loop tears down so its
         # cross-thread emit can't fire into a half-destroyed receiver.
         self._git_controller.stop()
-        # Stop the terminal BEFORE nvim — reverse of startup order, and
-        # prevents the terminal reader thread's queued signals (closed,
-        # screen_dirty) from landing against a scene graph that's mid-
-        # nvim-teardown. NvimBackend.stop() blocks in a threading.join()
-        # for up to 1 s; completing terminal teardown (including the
-        # killpg that reaps nested TUIs like vim/htop) before that
-        # blocking join keeps shutdown predictable and avoids the terminal
-        # reader racing nvim's channel close.
-        self._terminal_backend.stop()
+        # Shutdown order for the editor: ask nvim to quit GRACEFULLY over
+        # the RPC socket first (`_backend.stop()` sends `qa!` + closes the
+        # client), THEN killpg the editor's terminal as the backstop
+        # (`_editor_backend.stop()`) in case `qa!` didn't land. Finally the
+        # shell terminal. Doing the RPC quit before the killpg lets nvim
+        # write its shada/swap cleanly rather than being SIGTERM'd mid-write.
         self._backend.stop()
+        self._editor_backend.stop()
+        self._terminal_backend.stop()
 
     @property
     def backend(self) -> NvimBackend:
@@ -2183,10 +2211,18 @@ class AppController(QObject):
 
     @property
     def terminalBackend(self) -> TerminalBackend:
-        """The Phase 2.5 terminal backend, exposed as a QML context
-        property by `_build_engine`. Main.qml binds it into TerminalView
-        the same way nvimBackend is bound into NvimView."""
+        """The Phase 2.5 shell terminal backend, exposed as a QML context
+        property by `_build_engine` and bound into the terminal surface's
+        TerminalView."""
         return self._terminal_backend
+
+    @property
+    def editorBackend(self) -> TerminalBackend:
+        """The editor terminal backend — runs `nvim --listen` as a TUI.
+        Bound into the editor surface's TerminalView by Main.qml; the
+        RPC-only `_backend` attaches to its --listen socket for the chrome
+        relays + control."""
+        return self._editor_backend
 
     @property
     def status(self) -> StatusBarState:
@@ -2199,10 +2235,6 @@ class AppController(QObject):
     @property
     def cmdline(self) -> CmdlineState:
         return self._cmdline
-
-    @property
-    def popupmenu(self) -> PopupmenuModel:
-        return self._popupmenu
 
     @property
     def completion(self) -> CompletionModel:
@@ -2239,12 +2271,10 @@ def _register_qml_types() -> None:
     # the noqa: F401 side-effect imports above. Removing any name here
     # means a linter can silently drop the import and break @QmlElement
     # registration. See CLAUDE.md gotcha #7 and project-standards §2 P1.
-    _ = NvimView
     _ = TerminalView
     _ = MinimapView
     _ = CmdlineState
     _ = CompletionModel
-    _ = PopupmenuModel
     _ = WhichKeyModel
     _ = WhichKeyState
     _ = SessionModel
@@ -2294,10 +2324,10 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     ctx.setContextProperty("controller", controller)
     ctx.setContextProperty("nvimBackend", controller.backend)
     ctx.setContextProperty("terminalBackend", controller.terminalBackend)
+    ctx.setContextProperty("editorBackend", controller.editorBackend)
     ctx.setContextProperty("capsuleModel", controller.capsules)
     ctx.setContextProperty("statusState", controller.status)
     ctx.setContextProperty("cmdlineState", controller.cmdline)
-    ctx.setContextProperty("popupmenuModel", controller.popupmenu)
     ctx.setContextProperty("completionModel", controller.completion)
     ctx.setContextProperty("whichKeyState", controller.whichkey_state)
     ctx.setContextProperty("whichKeyModel", controller.whichkey_model)
@@ -2326,7 +2356,7 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # carry-over from the original single-instance topology.
 
     # Resolve the editor font ONCE in Python so every QML overlay binds
-    # to the same family the grid (`NvimView._default_font`) chose.
+    # to the same family the editor (`editor_font.default_font`) chose.
     # QML's `font.family` is a single QString — it does NOT parse
     # comma-separated strings as a fallback list, and `font.families`
     # (plural) is not exposed on QML's font value type in Qt 6.11 — so
@@ -2341,7 +2371,7 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # primary resolved entry. .family() is equivalent for the preferred
     # path but may differ in edge cases (e.g. systemFont fallback on
     # some Qt builds where family() returns "").
-    _resolved_font = NvimView._default_font()
+    _resolved_font = default_font()
     _primary_family = (_resolved_font.families() or [_resolved_font.family()])[0]
     ctx.setContextProperty("editorFontFamily", _primary_family)
     trace("engine_ctx_ready")

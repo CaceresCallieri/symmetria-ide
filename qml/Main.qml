@@ -314,7 +314,11 @@ Window {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
 
-                NvimView {
+                // Editor surface: a TerminalView hosting `nvim --listen` as a
+                // TUI (editorBackend). nvim renders its grid here; the IDE
+                // chrome (cmdline/which-key/minimap/status) is fed by rpcnotify
+                // relays over the RPC socket the Python NvimBackend attaches to.
+                TerminalView {
                     id: editor
                     anchors.fill: parent
                     // Phase 0 (editor minimap, docs/minimap-prd.md): the
@@ -343,7 +347,7 @@ Window {
                     // overlay/scrim anymore). The three panes form an
                     // editor / terminal / agent / FM XOR cluster.
                     visible: !controller.agentVisible && !controller.fmVisible && controller.editorVisible
-                    backend: nvimBackend
+                    backend: editorBackend
                     focus: visible
 
                     Component.onCompleted: if (visible)
@@ -445,12 +449,10 @@ Window {
                 // place so each phase can extend `paint()` without
                 // re-establishing gotcha #10 hygiene.
                 //
-                // `scrollPosition` binds to NvimView's
-                // `scrollAnimationPosition` Q_PROPERTY — Phase 3 reads
-                // it to position the viewport indicator. Phase 0
-                // accepts the value but does nothing visible with it
-                // yet; the binding is wired now so the next phase can
-                // land without restructuring this site.
+                // `scrollPosition` is pinned to 0 — the pixel scroll-spring
+                // that fed it died with the grid renderer (nvim renders in
+                // the terminal now). The viewport indicator is driven by the
+                // `minimap_viewport` rpcnotify channel via the model instead.
                 //
                 // No focus participation: MinimapView.setActiveFocusOnTab(False)
                 // on the Python side, so Tab cycling skips it. Keyboard
@@ -464,7 +466,12 @@ Window {
                     visible: !controller.agentVisible
                         && !controller.fmVisible
                         && controller.editorVisible
-                    scrollPosition: editor.scrollAnimationPosition
+                    // The grid renderer's pixel scroll-spring is gone (nvim
+                    // renders in the terminal now). The viewport indicator is
+                    // driven by the minimap_viewport rpcnotify channel via the
+                    // model; scrollPosition stays at 0 (Phase 0 made no visible
+                    // use of it).
+                    scrollPosition: 0
                     // Phase 1: live binding to the minimap content model
                     // populated by runtime/lua/orchestrator/minimap.lua.
                     // Stays at 0 until the Lua side emits its first
