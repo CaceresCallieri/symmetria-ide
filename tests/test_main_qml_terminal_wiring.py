@@ -72,20 +72,23 @@ def test_swap_chord_uses_application_shortcut_context(main_qml: str):
 # ---------------------------------------------------------------------------
 
 
-def test_terminal_view_mounted(main_qml: str):
-    """TerminalView must be instantiated somewhere in Main.qml — the
-    chord wires up to controller.swap_to_terminal but if there's no
-    actual TerminalView component the swap toggles state with nothing
-    to show."""
-    assert "TerminalView {" in main_qml
+def test_terminal_pane_mounted(main_qml: str):
+    """The shell pane must be instantiated as a QMLTermWidget (the forked
+    Konsole VT engine) under `mainContent`, keeping `id: terminalView` — the
+    chord toggles state, but without an actual pane there's nothing to show.
+    Post-qmltermwidget-migration the shell is no longer a TerminalView."""
+    assert "QMLTermWidget {" in main_qml
     assert "id: terminalView" in main_qml
 
 
-def test_terminal_view_binds_backend(main_qml: str):
-    """The TerminalView must bind `backend: terminalBackend` — the
-    context property exposed by AppController._build_engine. Without
-    this binding the renderer reads a None backend and paints nothing."""
-    assert "backend: terminalBackend" in main_qml
+def test_terminal_pane_runs_shell_and_syncs_cwd(main_qml: str):
+    """The shell pane's QMLTermSession must launch the shell (`shellExec`
+    context prop) and its cwd must feed `controller.on_shell_cwd` — the
+    replacement for the old OSC 7 → terminalBackend.osc7_received path. The
+    `currentDir` poll keeps the file tree following `cd` in the shell."""
+    assert "shellProgram: shellExec" in main_qml
+    assert "controller.on_shell_cwd(" in main_qml
+    assert "shellSession.currentDir" in main_qml
 
 
 def test_terminal_view_visibility_gated(main_qml: str):

@@ -415,31 +415,70 @@ Window {
                     }
                 }
 
-                // Phase 2.5 terminal pane — sibling of NvimView under
-                // `mainContent`. Both panes are anchored to fill the
-                // same slot and gated on a `visible` binding; mutual
-                // exclusivity is guaranteed at the AppController layer
-                // (`centralSurface` is a single string, the two derived
-                // booleans are XOR by construction). Pre-warmed via
-                // `_terminal_backend.start(cwd)` in AppController.start()
-                // so the first paint shows a live shell prompt, not a
-                // blank pane — same Q1-1b pattern as nvim.
+                // Phase 2.5 terminal pane — sibling of the editor under
+                // `mainContent`, now also a QMLTermWidget (forked Konsole VT
+                // engine). Both panes fill the same slot and are gated on a
+                // `visible` binding; mutual exclusivity is guaranteed at the
+                // AppController layer (`centralSurface` is a single string, the
+                // derived booleans are XOR by construction). The shell is
+                // spawned by the QMLTermSession in Component.onCompleted.
                 //
-                // Same FocusScope pattern as NvimView: `focus: visible`
-                // plus `Component.onCompleted: if (visible) forceActiveFocus()` plus
-                // `onVisibleChanged` re-grab. When the Ctrl+Shift+T
-                // chord toggles `terminalVisible` from false to true,
-                // onVisibleChanged grabs keyboard focus so the user can
-                // type immediately without an extra click.
-                TerminalView {
+                // cwd sync: the QMLTermSession exposes `currentDir` natively
+                // (Konsole reads the foreground process cwd via /proc — no
+                // shell-side OSC 7 hook). A Timer polls it and calls
+                // `controller.on_shell_cwd` only on change, which routes through
+                // the same `_route_capsule({id:"cwd"})` path nvim's `:cd` uses.
+                //
+                // Focus: `focus: visible` + Component.onCompleted/onVisibleChanged
+                // forceActiveFocus so the Ctrl+Shift+E/T chords land typing-ready.
+                QMLTermWidget {
                     id: terminalView
                     anchors.fill: parent
                     visible: !controller.agentVisible && !controller.fmVisible && controller.terminalVisible
-                    backend: terminalBackend
                     focus: visible
 
-                    Component.onCompleted: if (visible)
-                        forceActiveFocus()
+                    colorScheme: "Symmetria"
+                    useFBORendering: false
+                    fillColor: "transparent"
+                    blinkingCursor: true
+                    font.family: editorFontFamily
+                    font.pointSize: editorFontPointSize
+
+                    session: QMLTermSession {
+                        id: shellSession
+                        shellProgram: shellExec
+                        shellProgramArgs: shellExecArgs
+                        initialWorkingDirectory: controller.displayedRoot
+                        // A shell exiting (user typed `exit`) leaves the pane
+                        // inert in v1 — log-only parity with the old
+                        // `_on_terminal_closed`. Respawn is a follow-up.
+                        onFinished: console.log("shell session finished")
+                    }
+
+                    // Poll the shell cwd. KSession has no currentDirChanged
+                    // signal, so we sample on a 600ms cadence and forward only
+                    // on change — the coalesced replacement for per-keystroke
+                    // OSC 7. 600ms is imperceptible for a file-tree follow and
+                    // cheap (one /proc read).
+                    property string _lastShellDir: ""
+                    Timer {
+                        interval: 600
+                        repeat: true
+                        running: true
+                        onTriggered: {
+                            var d = shellSession.currentDir
+                            if (d && d !== terminalView._lastShellDir) {
+                                terminalView._lastShellDir = d
+                                controller.on_shell_cwd(d)
+                            }
+                        }
+                    }
+
+                    Component.onCompleted: {
+                        shellSession.startShellProgram()
+                        if (visible)
+                            forceActiveFocus()
+                    }
                     onVisibleChanged: if (visible)
                         forceActiveFocus()
                 }

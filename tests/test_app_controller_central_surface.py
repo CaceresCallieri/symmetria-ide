@@ -264,30 +264,24 @@ def test_focus_terminal_emits_signal(controller):
 # ---------------------------------------------------------------------------
 
 
-def test_start_attaches_rpc_then_prewarms_shell(patched_backends):
-    """start() order after the qmltermwidget migration: the editor nvim is
-    spawned by the QMLTermSession in Main.qml (at engine-load time, before
-    start()), so start() itself only (1) attaches the RPC client to nvim's
-    --listen socket (nvim_start) and (2) pre-warms the shell terminal. No
-    editor TerminalBackend is launched from Python anymore."""
+def test_start_attaches_rpc_only(patched_backends):
+    """start() after the qmltermwidget migration: BOTH the editor nvim and the
+    shell are spawned by QMLTermSessions in Main.qml (at engine-load time,
+    before start()). So start() itself only attaches the RPC client to nvim's
+    --listen socket — no Python TerminalBackend is launched for either pane."""
     ctrl = AppController()
     try:
         ctrl.start()
     finally:
         ctrl.shutdown()
 
-    # The editor nvim is no longer launched via a Python TerminalBackend —
-    # the QMLTermSession owns that spawn now.
+    # Neither pane is launched via a Python TerminalBackend anymore — the
+    # QMLTermSessions own both spawns.
     assert len(patched_backends["editor_starts"]) == 0
+    assert len(patched_backends["terminal_starts"]) == 0
+    # The RPC client (chrome relay over nvim's socket) is the one thing start()
+    # still brings up.
     assert len(patched_backends["nvim_starts"]) == 1
-    assert len(patched_backends["terminal_starts"]) == 1
-    # The shell terminal pre-warms with the controller's raw _cwd.
-    assert patched_backends["terminal_starts"][0] == ctrl._cwd
-
-    order = patched_backends["call_order"]
-    nvim_idx = next(i for i, s in enumerate(order) if s.startswith("nvim_start"))
-    term_idx = next(i for i, s in enumerate(order) if s.startswith("terminal_start"))
-    assert nvim_idx < term_idx, f"order must be nvim-rpc → shell — got: {order}"
 
 
 def test_shutdown_quits_nvim_rpc_before_killpg(patched_backends):

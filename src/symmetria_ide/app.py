@@ -1611,6 +1611,33 @@ class AppController(QObject):
             return
         self._route_capsule({"id": "cwd", "value": path})
 
+    @Slot(str)
+    def on_shell_cwd(self, path: str) -> None:
+        """Route the shell terminal's current directory into the same `cwd`
+        capsule machinery nvim's `:cd` and the old OSC 7 path used.
+
+        Post-qmltermwidget-migration replacement for `_on_terminal_osc7`: the
+        shell pane is now a QMLTermSession whose `currentDir` property the
+        Konsole engine tracks natively (it reads the foreground process cwd
+        via /proc — no shell-side OSC 7 hook needed). A Timer in Main.qml
+        polls `session.currentDir` and calls this slot only when the value
+        changes, so the per-keystroke OSC 7 stream is replaced by a coalesced
+        change signal. Routing through `_route_capsule({id:"cwd", value})`
+        keeps every downstream consumer (anchor state machine, file tree,
+        git controller) on the single existing path — no parallel routing.
+
+        KSession's `currentDir` can carry a trailing slash and is empty until
+        the shell has started; normalise to match `_parse_osc7`'s output
+        (trailing slash stripped except root) and drop empties — the
+        `new_cwd != self._cwd` guard in `_route_capsule` would otherwise treat
+        an empty string as a real change.
+        """
+        if not path:
+            return
+        if len(path) > 1 and path.endswith("/"):
+            path = path.rstrip("/") or "/"
+        self._route_capsule({"id": "cwd", "value": path})
+
     @Slot(dict)
     def _on_nav_event(self, payload: dict) -> None:
         """Route Lua-emitted nav rpcnotify events.
@@ -2118,19 +2145,12 @@ class AppController(QObject):
         # `_sync_nvim_cwd`, QML bindings) all run with the correct
         # initial value.
         self.displayedRootChanged.emit()
-        # Phase 2.5 terminal pane — pre-warm eagerly AFTER nvim has
-        # started. nvim ordering gates the QSGRenderThread's first
-        # frame; spawning the terminal first can briefly flash an
-        # empty editor on slow hardware. Eager pre-warm matches Q1-1b
-        # (nvim is also pre-spawned) so the first user chord swap is
-        # instant in either direction. Failures from the spawn (shell
-        # missing, fd-limit, etc.) propagate as OSError per the
-        # TerminalBackend.start() docstring; we log and continue so
-        # the IDE still launches without a working terminal pane.
-        try:
-            self._terminal_backend.start(self._cwd)
-        except OSError:
-            log.exception("terminal backend pre-warm failed — pane will be inert")
+        # Phase 2.5 terminal pane — the shell is now spawned by the
+        # QMLTermSession in Main.qml (Konsole KSession), the same way the
+        # editor nvim is. No Python TerminalBackend pre-warm here anymore;
+        # the widget starts its shell in Component.onCompleted, and its
+        # native `currentDir` drives the file-tree cwd sync via
+        # `controller.on_shell_cwd` (polled by a Timer in QML).
         trace("terminal_started")
         # Pool stays empty unless an env-var path explicitly opts in.
         # Track-2 chord wirings will lazily spawn slot 1 via
@@ -2418,6 +2438,20 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
             f"luafile {_RUNTIME_DIR / 'init.lua'}",
         ],
     )
+
+    # Shell pane launch spec. The shell runs as a plain interactive shell so it
+    # reads the user's real ~/.zshrc / ~/.bashrc — the old OSC 7 rcfile/ZDOTDIR
+    # injection (runtime/symmetria-shell/) is gone; the QMLTermSession's native
+    # `currentDir` (Konsole reads the foreground process cwd via /proc) drives
+    # the file-tree cwd sync now, polled by a Timer in Main.qml that calls
+    # `controller.on_shell_cwd`. No args → interactive non-login, matching the
+    # prior TerminalBackend behavior.
+    # Named shellExec/shellExecArgs (not shellProgram/shellProgramArgs) to avoid
+    # colliding with QMLTermSession's OWN property names — an unqualified RHS
+    # `shellProgram: shellProgram` would self-bind to the session's property
+    # instead of resolving to the context property.
+    ctx.setContextProperty("shellExec", os.environ.get("SHELL") or "/bin/bash")
+    ctx.setContextProperty("shellExecArgs", [])
     trace("engine_ctx_ready")
 
     qml_root = QML_DIR / "Main.qml"
