@@ -440,6 +440,92 @@ def _parse_osc7(buffer: bytes, new_data: bytes) -> tuple[bytes, list[str], bytes
     return bytes(output), paths, b""
 
 
+# 7-bit ESC-form introducers for the C1 "string" control sequences that pyte
+# does NOT consume. pyte only understands CSI (`ESC [`) and OSC (`ESC ]`); for
+# these four it strips the introducer and the terminator but renders the
+# PAYLOAD as printable text — so a terminfo-probe reply like
+# `ESC P + q 544e ESC \\` paints `+q544e` into the grid. nvim emits these
+# during its terminal-capability handshake (XTGETTCAP via DCS, DECRQSS,
+# occasionally APC); the leaked glyphs are *sticky* because nvim believes it
+# already drew those cells and never repaints them, so the corruption persists
+# and makes navigation look broken. We strip them before pyte, exactly as we
+# pre-strip OSC 7.
+#   ESC P (DCS, 0x50)   ESC X (SOS, 0x58)   ESC ^ (PM, 0x5e)   ESC _ (APC, 0x5f)
+_STRING_SEQ_INTRODUCERS = frozenset(b"PX^_")
+
+
+def _strip_string_sequences(buffer: bytes, new_data: bytes) -> tuple[bytes, bytes]:
+    """Remove DCS/SOS/PM/APC string sequences from a byte stream.
+
+    Returns `(cleaned_data, remaining_partial)`. A sequence runs from its
+    `ESC <introducer>` to a String Terminator (`ESC \\`) or — leniently, to
+    match xterm and our OSC handling — a BEL (`0x07`). An unterminated tail is
+    returned as `remaining_partial`; the reader prepends it to the next read,
+    so sequences split across `os.read` chunk boundaries stitch correctly.
+
+    Composes with `_parse_osc7`: the introducer sets are disjoint (`ESC ]`
+    vs `ESC P/X/^/_`), so running this first never eats an OSC sequence and a
+    DCS payload (terminfo hex) never contains an OSC introducer. Pure
+    function — no state, no I/O — so it is trivially unit-testable.
+    """
+    combined = buffer + new_data
+    output = bytearray()
+    i = 0
+    n = len(combined)
+
+    while i < n:
+        esc_idx = combined.find(b"\x1b", i)
+        if esc_idx == -1:
+            output.extend(combined[i:])
+            return bytes(output), b""
+
+        if esc_idx + 1 >= n:
+            # Trailing lone ESC: the introducer may be in the next chunk.
+            # Emit everything before it and hold the ESC as partial so we
+            # can classify it once the following byte arrives.
+            output.extend(combined[i:esc_idx])
+            return bytes(output), combined[esc_idx:]
+
+        if combined[esc_idx + 1] not in _STRING_SEQ_INTRODUCERS:
+            # CSI / OSC / charset / orphan ST etc. — not ours. Pass the ESC
+            # through and resume scanning after it (pyte parses these). We
+            # advance past the ESC only, so a following string sequence is
+            # still caught on the next iteration.
+            output.extend(combined[i : esc_idx + 1])
+            i = esc_idx + 1
+            continue
+
+        # A string sequence starts here. Bytes before it pass through.
+        output.extend(combined[i:esc_idx])
+
+        st_idx = combined.find(b"\x1b\\", esc_idx + 2)
+        bel_idx = combined.find(b"\x07", esc_idx + 2)
+        if st_idx == -1 and bel_idx == -1:
+            # Unterminated — carry the whole thing to the next read. The cap
+            # guards a buggy/garbled emitter that never terminates.
+            partial = combined[esc_idx:]
+            if len(partial) > _OSC_BUFFER_CAP:
+                log.warning(
+                    "string-sequence partial buffer exceeded %d bytes — "
+                    "dropping (unterminated DCS/APC from child?). Length=%d",
+                    _OSC_BUFFER_CAP,
+                    len(partial),
+                )
+                return bytes(output), b""
+            return bytes(output), partial
+
+        if bel_idx == -1:
+            i = st_idx + 2
+        elif st_idx == -1:
+            i = bel_idx + 1
+        elif bel_idx < st_idx:
+            i = bel_idx + 1
+        else:
+            i = st_idx + 2
+
+    return bytes(output), b""
+
+
 class TerminalBackend(QObject):
     """Owns the PTY + shell + pyte emulator for one terminal pane.
 
@@ -526,6 +612,10 @@ class TerminalBackend(QObject):
         # `_parse_osc7` returns the unterminated trailing partial; we
         # prepend it to the next read. Always owned by the reader thread.
         self._osc_buffer: bytes = b""
+        # Carryover buffer for DCS/SOS/PM/APC string sequences split across
+        # reader-loop iterations — same discipline as `_osc_buffer`, owned by
+        # the reader thread. See `_strip_string_sequences`.
+        self._dcs_buffer: bytes = b""
         # Mirror of the child's DECCKM (application cursor keys) state.
         # Written by the reader thread after each feed, read by the GUI
         # thread's key translator. Plain bool — atomic under the GIL; a
@@ -911,8 +1001,16 @@ class TerminalBackend(QObject):
                     # buffer-aware: a sequence split across an
                     # `os.read` chunk boundary stitches on the next
                     # iteration via `_osc_buffer`.
+                    # Strip DCS/SOS/PM/APC string sequences FIRST — pyte would
+                    # render their payloads as garbage (nvim's terminfo-probe
+                    # replies leak as `+q...` into the grid). Disjoint from OSC
+                    # 7 (`ESC P/X/^/_` vs `ESC ]`), so order is safe; each keeps
+                    # its own cross-chunk carryover buffer.
+                    dcs_cleaned, self._dcs_buffer = _strip_string_sequences(
+                        self._dcs_buffer, data
+                    )
                     cleaned, paths, self._osc_buffer = _parse_osc7(
-                        self._osc_buffer, data
+                        self._osc_buffer, dcs_cleaned
                     )
 
                     # GC suspended across osc7_received emit + feed +

@@ -36,6 +36,8 @@ from symmetria_ide.terminal_backend import (
     _DEFAULT_ROWS,
     TerminalBackend,
     _AnswerbackHistoryScreen,
+    _parse_osc7,
+    _strip_string_sequences,
     _TerminalScreen,
 )
 
@@ -303,6 +305,92 @@ def test_osc_buffer_pre_allocated(backend):
     sees a bytes-typed attr instead of AttributeError or None."""
     assert isinstance(backend._osc_buffer, bytes)
     assert backend._osc_buffer == b""
+
+
+# ---------------------------------------------------------------------------
+# String-sequence stripping (DCS/SOS/PM/APC). pyte renders the PAYLOAD of
+# these as printable text, so nvim's terminfo-probe replies (XTGETTCAP via
+# DCS, DECRQSS) leak as glyphs like `+q544e` into the grid and stick there
+# (nvim never repaints cells it thinks are correct). `_strip_string_sequences`
+# removes them before pyte, mirroring `_parse_osc7`.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "seq",
+    [
+        b"\x1bP+q544e\x1b\\",  # XTGETTCAP (DCS) — the observed nvim leak
+        b"\x1bP$qm\x1b\\",  # DECRQSS (DCS)
+        b"\x1b_Gq\x1b\\",  # APC
+        b"\x1b^foo\x1b\\",  # PM
+        b"\x1bX bar \x1b\\",  # SOS
+        b"\x1bP+q5\x07",  # BEL terminator accepted leniently
+    ],
+)
+def test_strip_string_sequences_removes_payload(seq):
+    """Each string sequence is removed whole — neither introducer,
+    payload, nor terminator may survive into the cleaned stream."""
+    cleaned, partial = _strip_string_sequences(b"", b"AB" + seq + b"CD")
+    assert cleaned == b"ABCD", f"payload leaked for {seq!r}: {cleaned!r}"
+    assert partial == b""
+
+
+def test_strip_string_sequences_preserves_csi_and_text():
+    """CSI (`ESC [`) and OSC (`ESC ]`) must pass through untouched — the
+    stripper only owns DCS/SOS/PM/APC. pyte parses CSI/OSC itself."""
+    data = b"A\x1b[31mB\x1b[0m\x1b]0;title\x07C"
+    cleaned, partial = _strip_string_sequences(b"", data)
+    assert cleaned == data
+    assert partial == b""
+
+
+@pytest.mark.parametrize(
+    "split_at",
+    # Split the byte stream "AB<DCS>CD" at every index so the sequence
+    # straddles a chunk boundary at the ESC, mid-payload, and mid-ST.
+    list(range(1, len(b"AB\x1bP+q544e\x1b\\CD"))),
+)
+def test_strip_string_sequences_stitches_across_chunks(split_at):
+    """A sequence split across reader-loop reads stitches via the
+    returned partial — the same buffer discipline as `_parse_osc7`."""
+    full = b"AB\x1bP+q544e\x1b\\CD"
+    first, second = full[:split_at], full[split_at:]
+    cleaned1, partial = _strip_string_sequences(b"", first)
+    cleaned2, partial2 = _strip_string_sequences(partial, second)
+    assert cleaned1 + cleaned2 == b"ABCD"
+    assert partial2 == b""
+
+
+def test_strip_string_sequences_composes_with_osc7():
+    """The reader chains strip → OSC7. They must not eat each other:
+    introducer sets are disjoint (`ESC P/X/^/_` vs `ESC ]`)."""
+    data = b"X\x1bP+qZ\x1b\\Y\x1b]7;file:///tmp\x1b\\Z"
+    dcs_cleaned, _ = _strip_string_sequences(b"", data)
+    cleaned, paths, osc_partial = _parse_osc7(b"", dcs_cleaned)
+    assert cleaned == b"XYZ"
+    assert paths == ["/tmp"]
+    assert osc_partial == b""
+
+
+def test_reader_loop_strips_string_sequences_before_pyte():
+    """The reader loop MUST run `_strip_string_sequences` before
+    `stream.feed` (and before/with `_parse_osc7`), else pyte renders
+    DCS/APC payloads as garbage in the grid."""
+    src = inspect.getsource(TerminalBackend._run_reader_loop)
+    strip_idx = src.find("_strip_string_sequences(")
+    feed_idx = src.find("stream.feed(")
+    assert strip_idx >= 0, "reader loop must call _strip_string_sequences"
+    assert strip_idx < feed_idx, "_strip_string_sequences must run BEFORE stream.feed"
+    assert "self._dcs_buffer" in src, (
+        "reader loop must carry _dcs_buffer across iterations for fragmented sequences"
+    )
+
+
+def test_dcs_buffer_pre_allocated(backend):
+    """`_dcs_buffer` is the string-sequence carryover; init in __init__
+    so the reader's first iteration sees a bytes attr, not None."""
+    assert isinstance(backend._dcs_buffer, bytes)
+    assert backend._dcs_buffer == b""
 
 
 def test_reader_loop_emits_osc7_inside_gc_window():
