@@ -249,7 +249,12 @@ class _TerminalScreen(_AnswerbackHistoryScreen):
         if kwargs.get("private") and not self._in_alt_screen:
             alt = [m for m in modes if m in _ALT_SCREEN_MODES]
             if alt:
-                self._enter_alt_screen(save_cursor=_ALT_SCREEN_SAVE_CURSOR_MODE in alt)
+                self._enter_alt_screen(
+                    save_cursor=_ALT_SCREEN_SAVE_CURSOR_MODE in alt,
+                    # Mode 1049 homes the cursor; modes 47/1047 do not
+                    # (xterm spec: 47 = switch only, 1047 = clear only).
+                    home_cursor=_ALT_SCREEN_SAVE_CURSOR_MODE in alt,
+                )
         super().set_mode(*modes, **kwargs)
 
     def reset_mode(self, *modes: int, **kwargs: object) -> None:
@@ -293,7 +298,7 @@ class _TerminalScreen(_AnswerbackHistoryScreen):
                 for x in [c for c in line if c >= columns]:
                     line.pop(x, None)
 
-    def _enter_alt_screen(self, save_cursor: bool) -> None:
+    def _enter_alt_screen(self, save_cursor: bool, home_cursor: bool) -> None:
         self._primary_cursor = copy.copy(self.cursor) if save_cursor else None
         self._primary_buffer = self.buffer
         # Fresh empty alt buffer — same factory pyte uses in Screen.__init__.
@@ -301,7 +306,11 @@ class _TerminalScreen(_AnswerbackHistoryScreen):
             lambda: pyte.screens.StaticDefaultDict(self.default_char)
         )
         self._in_alt_screen = True
-        self.cursor_position()  # home (0,0) — xterm clears + homes on entry
+        # Only mode 1049 homes the cursor on alt-screen entry; modes 47
+        # and 1047 switch the buffer without repositioning the cursor.
+        # (xterm spec: 47 = switch only, 1047 = switch+clear, 1049 = save+clear+home).
+        if home_cursor:
+            self.cursor_position()  # home (0,0) — xterm 1049 clears + homes
         self.dirty.update(range(self.lines))
 
     def _exit_alt_screen(self, restore_cursor: bool) -> None:

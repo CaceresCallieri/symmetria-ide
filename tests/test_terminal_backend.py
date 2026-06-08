@@ -543,12 +543,16 @@ def test_alt_screen_saves_and_restores_cursor_mode_1049():
 
 def test_alt_screen_legacy_mode_47_does_not_save_cursor():
     """Legacy mode 47 swaps the buffer but does NOT save/restore the
-    cursor (only 1049/1048 do)."""
+    cursor (only 1049/1048 do). Also, mode 47 must NOT home the cursor
+    on entry — it just switches the buffer; the cursor stays put."""
     screen, stream = _alt_screen()
-    stream.feed(b"\x1b[3;5H")
+    stream.feed(b"\x1b[3;5H")  # cursor to row 3 col 5 (0-based: 2, 4)
+    cursor_before_entry = (screen.cursor.x, screen.cursor.y)
     stream.feed(b"\x1b[?47h")
     assert screen._in_alt_screen is True
-    stream.feed(b"\x1b[1;1H")  # move inside alt
+    # Mode 47 must NOT home the cursor on entry (unlike mode 1049).
+    assert (screen.cursor.x, screen.cursor.y) == cursor_before_entry
+    stream.feed(b"\x1b[1;1H")  # move cursor inside alt
     moved = (screen.cursor.x, screen.cursor.y)
     stream.feed(b"\x1b[?47l")
     # Cursor NOT restored — stays where it was left in the alt screen.

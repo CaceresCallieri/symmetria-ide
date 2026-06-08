@@ -10,12 +10,15 @@ spawning Qt — same shape as `keys.py` for the nvim side.
 
 Reference: xterm Control Sequences,
 https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-The sequences here are the "normal cursor mode" set — application
-mode (DECCKM enabled by TUIs like vim/less) sends slightly different
-codes for arrows + Home/End. A mode-aware variant is a v2 follow-up
-once we observe how often application mode actually matters in
-practice (most shells stay in normal mode; vim flips on entry and
-back on exit, so its own arrow handling masks the difference).
+
+Encoding summary:
+  - Non-cursor special keys: lookup in `_SPECIAL_KEY_BYTES` (CSI/SS3 sequences).
+  - Cursor keys (arrows + Home/End): mode- and modifier-aware via `_CURSOR_KEY_FINAL`:
+      * DECCKM off (normal mode): ESC [ <final>         (CSI)
+      * DECCKM on (application mode, e.g. nvim/less): ESC O <final>  (SS3)
+      * Any modifier held: ESC [ 1 ; <n> <final>       (xterm modifyCursorKeys)
+  - Printable chars: forwarded via Qt's text() (Ctrl encoding already applied).
+  - Alt+key: ESC prefix (xterm "meta sends escape" convention).
 """
 
 from __future__ import annotations

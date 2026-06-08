@@ -205,6 +205,12 @@ def _resolve_color(name: Any, *, is_bg: bool) -> QColor | None:
 # (avoids re-resolving two enum attrs per run inside the paint loop).
 _TEXT_ALIGN_FLAGS = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
+# Ctrl+Shift+V paste chord — defined at module level so `keyPressEvent` does
+# not allocate a new Flag value on every key press. Containment-check
+# (not equality) to survive XKB layouts that OR in extra state modifiers
+# (KeypadModifier when NumLock is on, GroupSwitchModifier on AltGr keyboards).
+_PASTE_MODS = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+
 
 @QmlElement
 class TerminalView(QQuickPaintedItem):
@@ -669,9 +675,6 @@ class TerminalView(QQuickPaintedItem):
         # AltGr keyboards). An equality check breaks the chord for
         # those users. The containment form fires iff Ctrl AND Shift
         # are both held, regardless of other active modifiers.
-        _PASTE_MODS = (
-            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
-        )
         if (
             event.modifiers() & _PASTE_MODS == _PASTE_MODS
             and event.key() == Qt.Key.Key_V

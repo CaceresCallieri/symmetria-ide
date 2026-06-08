@@ -481,9 +481,17 @@ def test_paste_chord_intercepted_in_key_press():
     assert "Qt.Key.Key_V" in src, (
         "Paste chord detection missing — keyPressEvent does not check Key_V"
     )
-    assert "ControlModifier" in src and "ShiftModifier" in src, (
-        "Paste chord must require BOTH Ctrl AND Shift; bare Ctrl+V "
-        "must still send SYN per terminal convention"
+    # _PASTE_MODS is now a module-level constant (ControlModifier | ShiftModifier)
+    # so keyPressEvent references it by name rather than spelling out both
+    # modifiers inline. Verify the module constant carries both flags.
+    import symmetria_ide.terminal_view as tv
+    from PySide6.QtCore import Qt
+
+    assert tv._PASTE_MODS == (
+        Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+    ), "Paste chord must require BOTH Ctrl AND Shift"
+    assert "_PASTE_MODS" in src, (
+        "keyPressEvent must reference _PASTE_MODS for the paste chord check"
     )
     # The modifier check MUST be bitwise containment, not equality.
     # An equality check (`== (Ctrl | Shift)`) silently breaks for users
