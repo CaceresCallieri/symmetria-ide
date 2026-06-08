@@ -1,9 +1,19 @@
 # Migration: pyte terminal → qmltermwidget (forked) — execution handoff
 
-**Status:** READY TO EXECUTE. The forked terminal widget is built, validated, and
-committed. This doc is the self-contained plan for replacing the IDE's
-pyte-based terminal renderer with the fork. Written for a fresh agent with no
-prior conversation context.
+**Status: ✅ EXECUTED (2026-06-08) on branch `qmltermwidget-editor`.** Stages
+1–4 all landed: editor pane (`aea6cf1`), shell pane (`4be129a`), dead-stack
+deletion (`5406574`, −5457 lines), docs + structural tests. Both panes now run
+on the fork; the nvim `--listen` RPC chrome relay is intact; cwd sync rides
+`QMLTermSession.currentDir`. The "live verification" + merge-to-main remain the
+user's call. The rest of this doc is the original plan, kept for the reasoning
+trail. Below was the pre-execution state.
+
+---
+
+**Status (original):** READY TO EXECUTE. The forked terminal widget is built,
+validated, and committed. This doc is the self-contained plan for replacing the
+IDE's pyte-based terminal renderer with the fork. Written for a fresh agent with
+no prior conversation context.
 
 ## Why (one paragraph)
 

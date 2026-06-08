@@ -68,7 +68,38 @@ def test_swap_chord_uses_application_shortcut_context(main_qml: str):
 
 
 # ---------------------------------------------------------------------------
-# TerminalView is mounted under mainContent and bound to the backend
+# Editor pane is a QMLTermWidget hosting nvim over the --listen socket
+# ---------------------------------------------------------------------------
+
+
+def test_qmltermwidget_imported(main_qml: str):
+    """Main.qml must import the forked QMLTermWidget module — without it the
+    editor + shell panes fail to resolve at engine load."""
+    assert "import QMLTermWidget 2.0" in main_qml
+
+
+def test_editor_pane_runs_nvim_over_listen_socket(main_qml: str):
+    """The editor pane's QMLTermSession must launch nvim via the editorProgram/
+    editorArgs context props (which carry `--listen <socket>` + the runtime
+    injection). The RPC chrome relay rides that socket; if the launch wiring
+    breaks, NvimBackend attaches to a socket nothing ever binds."""
+    assert "id: editor" in main_qml
+    assert "shellProgram: editorProgram" in main_qml
+    assert "shellProgramArgs: editorArgs" in main_qml
+    assert "editorSession.startShellProgram()" in main_qml
+
+
+def test_editor_pane_transparency_invariants(main_qml: str):
+    """Background transparency requires useFBORendering:false + transparent
+    fillColor + the Symmetria scheme on BOTH panes. Dropping any of these
+    silently returns to an opaque terminal (CLAUDE.md "The terminal panes")."""
+    assert main_qml.count("useFBORendering: false") >= 2
+    assert main_qml.count('colorScheme: "Symmetria"') >= 2
+    assert main_qml.count('fillColor: "transparent"') >= 2
+
+
+# ---------------------------------------------------------------------------
+# Shell pane is a QMLTermWidget under mainContent
 # ---------------------------------------------------------------------------
 
 
