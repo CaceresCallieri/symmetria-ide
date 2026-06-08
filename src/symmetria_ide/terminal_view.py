@@ -454,20 +454,21 @@ class TerminalView(QQuickPaintedItem):
 
         Algorithm mirrors NvimView._paint_row's run-coalescing — read
         cells left-to-right, accumulate chars into `_run_chars` until
-        the highlight tuple `(fg, bg, bold, italic)` changes, then
-        flush via `_flush_run` (one fillRect + one drawText per run).
+        the highlight tuple `(fg, bg, bold, italic, underscore,
+        strikethrough)` changes, then flush via `_flush_run` (one
+        fillRect + one drawText + optional decoration lines per run).
 
         pyte `.reverse` is handled by swapping fg/bg at the read site —
         the rest of the paint flow stays unaware. This matches how
         every terminal emulator handles reverse-video.
 
-        Run key omissions (v1 intentional deferrals):
-        - `underscore` and `strikethrough` — not rendered in v1. Before
-          adding drawLine-based decorators in v2, add these fields to the
-          run key `(fg, bg, bold, italic, underscore, strikethrough)` so
-          attribute-boundary breaks coalesce correctly.
-        - `blink` — not animated in v1 (would need a frame clock). Same
-          key extension applies when blink support is added.
+        Run key: `underscore` and `strikethrough` MUST be in the key, or
+        adjacent cells with differing decoration coalesce and the line is
+        drawn across the wrong span (the gotcha the v1 deferral warned
+        about). nvim relies on underline for LSP diagnostics + spell.
+
+        Still deferred: `blink` — not animated in v1 (would need a frame
+        clock). Extend the run key the same way when blink lands.
         """
         y = row_idx * ch
 
@@ -476,6 +477,8 @@ class TerminalView(QQuickPaintedItem):
         run_bg: Any = None
         run_bold = False
         run_italic = False
+        run_underscore = False
+        run_strike = False
         self._run_chars.clear()
 
         for col_idx in range(cols):
@@ -484,6 +487,8 @@ class TerminalView(QQuickPaintedItem):
             bg = cell.bg
             bold = bool(cell.bold)
             italic = bool(cell.italics)
+            underscore = bool(cell.underscore)
+            strike = bool(cell.strikethrough)
             if cell.reverse:
                 fg, bg = bg, fg
 
@@ -492,7 +497,16 @@ class TerminalView(QQuickPaintedItem):
                 run_bg = bg
                 run_bold = bold
                 run_italic = italic
-            elif (fg, bg, bold, italic) != (run_fg, run_bg, run_bold, run_italic):
+                run_underscore = underscore
+                run_strike = strike
+            elif (fg, bg, bold, italic, underscore, strike) != (
+                run_fg,
+                run_bg,
+                run_bold,
+                run_italic,
+                run_underscore,
+                run_strike,
+            ):
                 self._flush_run(
                     painter,
                     run_start,
@@ -504,6 +518,8 @@ class TerminalView(QQuickPaintedItem):
                     run_bg,
                     run_bold,
                     run_italic,
+                    run_underscore,
+                    run_strike,
                 )
                 self._run_chars.clear()
                 run_start = col_idx
@@ -511,6 +527,8 @@ class TerminalView(QQuickPaintedItem):
                 run_bg = bg
                 run_bold = bold
                 run_italic = italic
+                run_underscore = underscore
+                run_strike = strike
 
             self._run_chars.append(cell.data or " ")
 
@@ -526,6 +544,8 @@ class TerminalView(QQuickPaintedItem):
                 run_bg,
                 run_bold,
                 run_italic,
+                run_underscore,
+                run_strike,
             )
             self._run_chars.clear()
 
@@ -541,8 +561,11 @@ class TerminalView(QQuickPaintedItem):
         bg: Any,
         bold: bool,
         italic: bool,
+        underscore: bool,
+        strikethrough: bool,
     ) -> None:
-        """Paint one coalesced run: fillRect (if non-default bg) + drawText.
+        """Paint one coalesced run: fillRect (if non-default bg) + drawText
+        + optional underline / strikethrough lines.
 
         `bg != "default"` gate preserves the wallpaper-blend invariant —
         cells with default bg show the ambient-tinted wallpaper through;
@@ -550,7 +573,9 @@ class TerminalView(QQuickPaintedItem):
         editor running in the terminal, etc.) paint opaquely.
 
         Pooled QRectF (`_run_rect`) mutated via setRect(). Memoized
-        QColor via `_resolve_color`. No allocation inside this method.
+        QColor via `_resolve_color`. Decoration lines use the integer
+        `drawLine` overload (no QLineF wrapper) so the paint hot path
+        still allocates nothing (gotcha #10).
         """
         x = start_col * cw
         w = (end_col - start_col) * cw
@@ -570,6 +595,19 @@ class TerminalView(QQuickPaintedItem):
         fg_color = _resolve_color(fg, is_bg=False)
         painter.setPen(fg_color)
         painter.drawText(self._run_rect, _TEXT_ALIGN_FLAGS, "".join(self._run_chars))
+
+        # Decoration lines drawn in the run's fg (pen already set). Int
+        # drawLine overload — no QLineF allocation. Underline sits near the
+        # cell bottom (terminal convention); strikethrough at mid-height.
+        if underscore or strikethrough:
+            x1 = int(x)
+            x2 = int(x + w)
+            if underscore:
+                uy = int(y + ch - 1.0)
+                painter.drawLine(x1, uy, x2, uy)
+            if strikethrough:
+                sy = int(y + ch * 0.5)
+                painter.drawLine(x1, sy, x2, sy)
 
     def _paint_cursor(
         self,
@@ -649,7 +687,13 @@ class TerminalView(QQuickPaintedItem):
             event.accept()
             return
 
-        data = translate_key(event.key(), event.text(), event.modifiers())
+        # DECCKM state from the backend selects SS3 vs CSI arrow encoding.
+        app_cursor = (
+            self._backend.application_cursor_keys
+            if self._backend is not None
+            else False
+        )
+        data = translate_key(event.key(), event.text(), event.modifiers(), app_cursor)
         if data is None:
             event.ignore()
             return

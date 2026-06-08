@@ -40,12 +40,6 @@ _SPECIAL_KEY_BYTES: dict[int, bytes] = {
     int(Qt.Key.Key_Enter): b"\r",
     int(Qt.Key.Key_Insert): b"\x1b[2~",
     int(Qt.Key.Key_Delete): b"\x1b[3~",
-    int(Qt.Key.Key_Home): b"\x1b[H",
-    int(Qt.Key.Key_End): b"\x1b[F",
-    int(Qt.Key.Key_Up): b"\x1b[A",
-    int(Qt.Key.Key_Down): b"\x1b[B",
-    int(Qt.Key.Key_Right): b"\x1b[C",
-    int(Qt.Key.Key_Left): b"\x1b[D",
     int(Qt.Key.Key_PageUp): b"\x1b[5~",
     int(Qt.Key.Key_PageDown): b"\x1b[6~",
     int(Qt.Key.Key_F1): b"\x1bOP",
@@ -63,6 +57,24 @@ _SPECIAL_KEY_BYTES: dict[int, bytes] = {
 }
 
 
+# Cursor keys (arrows + Home/End) get mode- and modifier-aware encoding,
+# so they're handled separately from `_SPECIAL_KEY_BYTES`. The value is the
+# final byte of the escape sequence; the prefix is chosen at translate time:
+#   - normal mode (DECCKM off):  ESC [ <final>        (CSI)
+#   - application mode (DECCKM): ESC O <final>        (SS3) — set by nvim/less
+#   - any modifier held:         ESC [ 1 ; <n> <final>  (xterm modifyCursorKeys)
+# nvim flips DECCKM on entry, so without the SS3 form its arrow keys misbehave
+# in insert mode; the modifier form carries <C-Left>/<S-Up>/<M-Down> etc.
+_CURSOR_KEY_FINAL: dict[int, bytes] = {
+    int(Qt.Key.Key_Up): b"A",
+    int(Qt.Key.Key_Down): b"B",
+    int(Qt.Key.Key_Right): b"C",
+    int(Qt.Key.Key_Left): b"D",
+    int(Qt.Key.Key_Home): b"H",
+    int(Qt.Key.Key_End): b"F",
+}
+
+
 _MODIFIER_ONLY_KEYS = {
     int(Qt.Key.Key_Shift),
     int(Qt.Key.Key_Control),
@@ -75,12 +87,23 @@ _MODIFIER_ONLY_KEYS = {
 }
 
 
-def translate(key: int, text: str, modifiers: Qt.KeyboardModifier) -> bytes | None:
+def translate(
+    key: int,
+    text: str,
+    modifiers: Qt.KeyboardModifier,
+    app_cursor_keys: bool = False,
+) -> bytes | None:
     """Translate a Qt key event to terminal-bound bytes.
 
     Returns None when the event should be ignored (modifier-only
     press, unmapped combination). The caller passes the result
     directly to `TerminalBackend.write()`.
+
+    `app_cursor_keys` reflects the child's DECCKM state (private mode 1),
+    read from `TerminalBackend.application_cursor_keys`. When True, the
+    arrow keys + Home/End use SS3 (`ESC O x`) instead of CSI (`ESC [ x`)
+    — nvim, less, and most full-screen TUIs flip DECCKM on entry and
+    expect SS3, so without this their arrow keys break in insert mode.
 
     Qt already encodes Ctrl+letter into `text` as the corresponding
     control character (Ctrl+A → '\\x01', Ctrl+C → '\\x03', etc.) —
@@ -88,13 +111,26 @@ def translate(key: int, text: str, modifiers: Qt.KeyboardModifier) -> bytes | No
     so no special handling is needed.
 
     Alt+key uses the xterm "meta sends escape" convention: prepend
-    `ESC` (0x1b) to the key's normal bytes. Works for both printable
-    chars (Alt+a → `ESC a`) and special keys (Alt+Up → `ESC ESC [ A`).
+    `ESC` (0x1b) to the key's normal bytes. Cursor keys with ANY
+    modifier (Ctrl/Shift/Alt) instead use the xterm modifyCursorKeys
+    CSI form `ESC [ 1 ; n x` (n = 1 + shift + 2·alt + 4·ctrl), which is
+    what nvim decodes as <C-Left>/<S-Up>/<M-Down> etc.
     """
     if key in _MODIFIER_ONLY_KEYS:
         return None
 
     alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+    ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+    shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+
+    cursor_final = _CURSOR_KEY_FINAL.get(key)
+    if cursor_final is not None:
+        if shift or ctrl or alt:
+            n = 1 + (1 if shift else 0) + (2 if alt else 0) + (4 if ctrl else 0)
+            return b"\x1b[1;" + str(n).encode("ascii") + cursor_final
+        if app_cursor_keys:
+            return b"\x1bO" + cursor_final
+        return b"\x1b[" + cursor_final
 
     special = _SPECIAL_KEY_BYTES.get(key)
     if special is not None:

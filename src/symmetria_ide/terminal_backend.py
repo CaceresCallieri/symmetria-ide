@@ -32,6 +32,7 @@ PR 5 lands, plus `docs/phases.md` Phase 2.5 deliverable 2):
 
 from __future__ import annotations
 
+import copy
 import fcntl
 import gc
 import logging
@@ -43,6 +44,7 @@ import subprocess
 import termios
 import threading
 import urllib.parse
+from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
 
@@ -180,6 +182,137 @@ class _AnswerbackHistoryScreen(pyte.HistoryScreen):
         if not data or self._write_callback is None:
             return
         self._write_callback(data.encode("latin-1"))
+
+
+# Private DEC modes that switch to the alternate screen buffer. Values are
+# RAW (unshifted) as they arrive in set_mode/reset_mode(*modes, private=True)
+# — pyte shifts them <<5 internally afterwards. 1049 is the modern xterm
+# sequence (save cursor + switch + clear); 1047 and 47 are legacy variants.
+# Full-screen TUIs (nvim, lazygit, htop, less) use these to avoid clobbering
+# the user's shell scrollback.
+_ALT_SCREEN_MODES = frozenset({1049, 1047, 47})
+# 1049 (and 1048) additionally save/restore the cursor across the swap.
+_ALT_SCREEN_SAVE_CURSOR_MODE = 1049
+
+# DECCKM (private mode 1) — application cursor keys. pyte stores private
+# modes shifted <<5, so membership tests use the shifted value. When the
+# child enables this, the key translator emits SS3 arrows (ESC O x) instead
+# of CSI (ESC [ x). nvim/less flip it on entry.
+_DECCKM_MODE = 1 << 5
+
+
+class _TerminalScreen(_AnswerbackHistoryScreen):
+    """HistoryScreen with DA1/DSR answerback AND alternate-screen support.
+
+    pyte's stock screens track the alt-screen private modes (1049/1047/47)
+    in `self.mode` but never actually swap buffers — a full-screen TUI like
+    nvim/lazygit/htop would draw its UI onto the primary buffer, corrupting
+    (and being corrupted by) the shell's scrollback. This subclass adds the
+    swap so the terminal pane can host such programs:
+
+    - Entering the alt screen stashes the primary `buffer` (and, for mode
+      1049, the cursor) and installs a fresh empty buffer; leaving restores
+      them. Mirrors xterm.
+    - While in the alt screen, `index`/`reverse_index` must NOT push
+      scrolled-off lines into the history deques (the alt screen has no
+      scrollback) — we route them to the grandparent `Screen` impl, which
+      scrolls without touching `history`. Otherwise quitting nvim would
+      leave nvim's lines polluting the shell's scrollback.
+    - `resize` while in the alt screen clips the *saved* primary buffer's
+      columns so a later restore doesn't render stale over-wide rows (rows
+      beyond the new height are harmless — StaticDefaultDict yields
+      default_char, and the shell redraws its prompt on return). Best-effort
+      by design; nvim re-renders on SIGWINCH regardless.
+
+    Threading/GC: identical to the base — all mutation happens inside the
+    reader thread's gc-suspended `pyte.feed()` window (gotcha #10).
+    """
+
+    def __init__(
+        self,
+        columns: int,
+        lines: int,
+        history: int = 100,
+        ratio: float = 0.5,
+        write_callback: Callable[[bytes], None] | None = None,
+    ) -> None:
+        # Set before super().__init__ so the index/resize overrides have a
+        # defined flag if anything touches them during construction.
+        self._in_alt_screen = False
+        self._primary_buffer = None  # saved primary buffer while in alt screen
+        self._primary_cursor = None  # saved cursor (mode 1049 only)
+        super().__init__(
+            columns, lines, history=history, ratio=ratio, write_callback=write_callback
+        )
+
+    def set_mode(self, *modes: int, **kwargs: object) -> None:
+        if kwargs.get("private") and not self._in_alt_screen:
+            alt = [m for m in modes if m in _ALT_SCREEN_MODES]
+            if alt:
+                self._enter_alt_screen(save_cursor=_ALT_SCREEN_SAVE_CURSOR_MODE in alt)
+        super().set_mode(*modes, **kwargs)
+
+    def reset_mode(self, *modes: int, **kwargs: object) -> None:
+        super().reset_mode(*modes, **kwargs)
+        if kwargs.get("private") and self._in_alt_screen:
+            alt = [m for m in modes if m in _ALT_SCREEN_MODES]
+            if alt:
+                self._exit_alt_screen(
+                    restore_cursor=_ALT_SCREEN_SAVE_CURSOR_MODE in alt
+                )
+
+    def index(self) -> None:
+        # In the alt screen, scroll WITHOUT appending to scrollback — call
+        # the grandparent Screen impl directly (HistoryScreen.index would
+        # push the top line into history.top). Called via the instance
+        # (__getattribute__ wraps it with before/after_event); the explicit
+        # class calls below skip the wrapper, so before_event runs exactly
+        # once. See HistoryScreen.__getattribute__ / _make_wrapper.
+        if self._in_alt_screen:
+            pyte.screens.Screen.index(self)
+        else:
+            super().index()
+
+    def reverse_index(self) -> None:
+        if self._in_alt_screen:
+            pyte.screens.Screen.reverse_index(self)
+        else:
+            super().reverse_index()
+
+    def resize(self, lines: int | None = None, columns: int | None = None) -> None:
+        super().resize(lines, columns)
+        # Clip the saved primary buffer's columns so a later restore doesn't
+        # render stale over-wide rows. Row count is self-healing via the
+        # row defaultdict; only column overrun corrupts (gotcha-style).
+        if (
+            self._in_alt_screen
+            and self._primary_buffer is not None
+            and columns is not None
+        ):
+            for line in self._primary_buffer.values():
+                for x in [c for c in line if c >= columns]:
+                    line.pop(x, None)
+
+    def _enter_alt_screen(self, save_cursor: bool) -> None:
+        self._primary_cursor = copy.copy(self.cursor) if save_cursor else None
+        self._primary_buffer = self.buffer
+        # Fresh empty alt buffer — same factory pyte uses in Screen.__init__.
+        self.buffer = defaultdict(
+            lambda: pyte.screens.StaticDefaultDict(self.default_char)
+        )
+        self._in_alt_screen = True
+        self.cursor_position()  # home (0,0) — xterm clears + homes on entry
+        self.dirty.update(range(self.lines))
+
+    def _exit_alt_screen(self, restore_cursor: bool) -> None:
+        if self._primary_buffer is not None:
+            self.buffer = self._primary_buffer
+        self._primary_buffer = None
+        if restore_cursor and self._primary_cursor is not None:
+            self.cursor = self._primary_cursor
+        self._primary_cursor = None
+        self._in_alt_screen = False
+        self.dirty.update(range(self.lines))
 
 
 def _parse_osc7(buffer: bytes, new_data: bytes) -> tuple[bytes, list[str], bytes]:
@@ -384,6 +517,12 @@ class TerminalBackend(QObject):
         # `_parse_osc7` returns the unterminated trailing partial; we
         # prepend it to the next read. Always owned by the reader thread.
         self._osc_buffer: bytes = b""
+        # Mirror of the child's DECCKM (application cursor keys) state.
+        # Written by the reader thread after each feed, read by the GUI
+        # thread's key translator. Plain bool — atomic under the GIL; a
+        # one-keystroke stale read is harmless (DECCKM toggles only on
+        # TUI entry/exit). See `application_cursor_keys`.
+        self._app_cursor_keys = False
 
     @property
     def stop_event(self) -> threading.Event:
@@ -393,13 +532,35 @@ class TerminalBackend(QObject):
         that waits on the backend's lifecycle."""
         return self._stop_event
 
+    @property
+    def application_cursor_keys(self) -> bool:
+        """True when the child has DECCKM (private mode 1) enabled, so the
+        GUI's key translator emits SS3 arrows. Updated by the reader thread
+        after each feed; read lock-free from the GUI thread (atomic bool
+        under the GIL; a one-keystroke stale read is harmless)."""
+        return self._app_cursor_keys
+
     # --- Lifecycle -----------------------------------------------------
 
-    def start(self, cwd: str) -> None:
-        """Spawn the shell under a PTY, attach pyte, start the reader.
+    def start(
+        self,
+        cwd: str,
+        argv: list[str] | None = None,
+        env_extra: dict[str, str] | None = None,
+    ) -> None:
+        """Spawn a PTY-attached program, attach pyte, start the reader.
 
-        Idempotent: a second call while a shell is already live returns
-        immediately. To spawn a new shell after one exits, construct a
+        `argv=None` (the default) spawns the user's `$SHELL` with
+        Symmetria's OSC 7 auto-injection — the original shell-pane
+        behavior, unchanged. Pass an explicit `argv` to run an arbitrary
+        program instead (e.g. `["nvim", "--listen", sock, ...]` for the
+        editor surface); in that case the OSC 7 shell-init injection is
+        skipped (the program manages its own cwd reporting, if any) and
+        `_shell_launch_args` is bypassed. `env_extra` merges extra env
+        vars on top of the inherited environment for either path.
+
+        Idempotent: a second call while a program is already live returns
+        immediately. To spawn a new one after it exits, construct a
         fresh `TerminalBackend` — the closed-signal contract documents
         this is one-shot per instance.
 
@@ -449,7 +610,7 @@ class TerminalBackend(QObject):
         # several TUIs (vim xterm-bg, less, btop) hang without them.
         # Callback is `self.write` so replies share `_stdin_lock`
         # with main-thread keystroke writes; see the subclass docstring.
-        self._screen = _AnswerbackHistoryScreen(
+        self._screen = _TerminalScreen(
             _DEFAULT_COLS,
             _DEFAULT_ROWS,
             history=_SCROLLBACK_LINES,
@@ -472,17 +633,23 @@ class TerminalBackend(QObject):
         # chpwd hook. setsid puts the shell into its own session+process
         # group so `killpg` at shutdown reaps any TUIs (vim, htop) the
         # user launched inside.
-        shell = os.environ.get("SHELL") or "/bin/bash"
-        argv, env_additions = _shell_launch_args(shell)
+        if argv is None:
+            shell = os.environ.get("SHELL") or "/bin/bash"
+            launch_argv, env_additions = _shell_launch_args(shell)
+        else:
+            # Explicit program (e.g. nvim --listen) — run verbatim, skip
+            # the shell OSC 7 injection. The caller owns argv entirely.
+            launch_argv, env_additions = argv, {}
         env = {
             **os.environ,
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
             **env_additions,
+            **(env_extra or {}),
         }
         try:
             self._proc = subprocess.Popen(
-                argv,
+                launch_argv,
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
@@ -756,6 +923,10 @@ class TerminalBackend(QObject):
                         for path in paths:
                             self.osc7_received.emit(path)
                         stream.feed(cleaned)
+                        # Mirror DECCKM after feed (the child may have just
+                        # toggled it) so the GUI key translator picks up
+                        # application-cursor-key mode on the next keystroke.
+                        self._app_cursor_keys = _DECCKM_MODE in screen.mode
                         if screen.dirty:
                             dirty_snapshot = frozenset(screen.dirty)
                             screen.dirty.clear()

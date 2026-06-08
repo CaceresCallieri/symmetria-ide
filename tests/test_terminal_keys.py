@@ -146,11 +146,72 @@ def test_alt_printable_prepends_escape(text, expected):
 
 
 def test_alt_special_prepends_escape():
-    """Alt+special (e.g. Alt+Up) also prepends ESC to the sequence."""
+    """Alt+special (non-cursor, e.g. Alt+Insert) prepends ESC per the
+    xterm meta convention. Cursor keys (arrows + Home/End) are the
+    exception — see test_modified_cursor_keys."""
     assert (
-        translate(int(Qt.Key.Key_Up), "", Qt.KeyboardModifier.AltModifier)
-        == b"\x1b\x1b[A"
+        translate(int(Qt.Key.Key_Insert), "", Qt.KeyboardModifier.AltModifier)
+        == b"\x1b\x1b[2~"
     )
+
+
+# ---------------------------------------------------------------------------
+# Cursor keys — DECCKM (application cursor mode) + modifier encoding.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key, expected",
+    [
+        (Qt.Key.Key_Up, b"\x1bOA"),
+        (Qt.Key.Key_Down, b"\x1bOB"),
+        (Qt.Key.Key_Right, b"\x1bOC"),
+        (Qt.Key.Key_Left, b"\x1bOD"),
+        (Qt.Key.Key_Home, b"\x1bOH"),
+        (Qt.Key.Key_End, b"\x1bOF"),
+    ],
+)
+def test_cursor_keys_application_mode(key, expected):
+    """With DECCKM on (app_cursor_keys=True), arrows + Home/End emit SS3
+    (ESC O x) instead of CSI. nvim/less flip DECCKM on entry."""
+    assert translate(int(key), "", Qt.KeyboardModifier.NoModifier, True) == expected
+
+
+@pytest.mark.parametrize(
+    "key, expected",
+    [
+        (Qt.Key.Key_Up, b"\x1b[A"),
+        (Qt.Key.Key_Left, b"\x1b[D"),
+        (Qt.Key.Key_Home, b"\x1b[H"),
+    ],
+)
+def test_cursor_keys_normal_mode_default(key, expected):
+    """app_cursor_keys defaults to False → CSI (normal-mode) arrows, so
+    callers that don't pass the flag keep the original behavior."""
+    assert translate(int(key), "", Qt.KeyboardModifier.NoModifier) == expected
+
+
+@pytest.mark.parametrize(
+    "key, mods, expected",
+    [
+        # n = 1 + shift + 2*alt + 4*ctrl ; final letter per direction.
+        (Qt.Key.Key_Left, Qt.KeyboardModifier.ControlModifier, b"\x1b[1;5D"),
+        (Qt.Key.Key_Up, Qt.KeyboardModifier.ShiftModifier, b"\x1b[1;2A"),
+        (Qt.Key.Key_Up, Qt.KeyboardModifier.AltModifier, b"\x1b[1;3A"),
+        (
+            Qt.Key.Key_Up,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+            b"\x1b[1;6A",
+        ),
+        (Qt.Key.Key_Right, Qt.KeyboardModifier.ControlModifier, b"\x1b[1;5C"),
+    ],
+)
+def test_modified_cursor_keys(key, mods, expected):
+    """Any modifier on a cursor key uses the xterm modifyCursorKeys CSI
+    form (ESC [ 1 ; n x), which nvim decodes as <C-Left>/<S-Up>/<M-Down>.
+    The modifier form takes precedence over DECCKM SS3 — verify it holds
+    even with app_cursor_keys=True."""
+    assert translate(int(key), "", mods, True) == expected
 
 
 # ---------------------------------------------------------------------------

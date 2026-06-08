@@ -31,10 +31,12 @@ from unittest import mock
 import pytest
 
 from symmetria_ide.terminal_backend import (
+    _DECCKM_MODE,
     _DEFAULT_COLS,
     _DEFAULT_ROWS,
     TerminalBackend,
     _AnswerbackHistoryScreen,
+    _TerminalScreen,
 )
 
 
@@ -493,3 +495,119 @@ def test_default_screen_dims_constants():
     expectations) implicitly assume the default."""
     assert _DEFAULT_COLS == 80
     assert _DEFAULT_ROWS == 24
+
+
+# ---------------------------------------------------------------------------
+# Alt-screen buffer (_TerminalScreen) — hosting full-screen TUIs (nvim,
+# lazygit, htop). Pure tests via ByteStream, like the answerback tests.
+# ---------------------------------------------------------------------------
+
+
+def _alt_screen(cols: int = 20, rows: int = 5) -> tuple:
+    """Build a (_TerminalScreen, ByteStream) pair for alt-screen tests."""
+    import pyte
+
+    screen = _TerminalScreen(cols, rows, history=100, ratio=0.5)
+    return screen, pyte.ByteStream(screen)
+
+
+def test_alt_screen_swaps_and_restores_buffer():
+    """Entering the alt screen (DECSET 1049) hides the primary buffer and
+    presents a fresh one; leaving (DECRST 1049) restores the primary."""
+    screen, stream = _alt_screen()
+    stream.feed(b"PRIMARY LINE")
+    assert screen.display[0].strip() == "PRIMARY LINE"
+
+    stream.feed(b"\x1b[?1049h")  # enter alt
+    assert screen._in_alt_screen is True
+    assert screen.display[0].strip() == ""  # fresh, empty
+    stream.feed(b"ALT CONTENT")
+    assert screen.display[0].strip() == "ALT CONTENT"
+
+    stream.feed(b"\x1b[?1049l")  # leave alt
+    assert screen._in_alt_screen is False
+    assert screen.display[0].strip() == "PRIMARY LINE"  # primary intact
+
+
+def test_alt_screen_saves_and_restores_cursor_mode_1049():
+    """Mode 1049 saves the cursor on entry and restores it on exit."""
+    screen, stream = _alt_screen()
+    stream.feed(b"\x1b[3;5H")  # cursor to row 3 col 5 (0-based 2,4)
+    before = (screen.cursor.x, screen.cursor.y)
+
+    stream.feed(b"\x1b[?1049h")
+    stream.feed(b"\x1b[1;1H")  # move cursor inside alt screen
+    stream.feed(b"\x1b[?1049l")
+    assert (screen.cursor.x, screen.cursor.y) == before
+
+
+def test_alt_screen_legacy_mode_47_does_not_save_cursor():
+    """Legacy mode 47 swaps the buffer but does NOT save/restore the
+    cursor (only 1049/1048 do)."""
+    screen, stream = _alt_screen()
+    stream.feed(b"\x1b[3;5H")
+    stream.feed(b"\x1b[?47h")
+    assert screen._in_alt_screen is True
+    stream.feed(b"\x1b[1;1H")  # move inside alt
+    moved = (screen.cursor.x, screen.cursor.y)
+    stream.feed(b"\x1b[?47l")
+    # Cursor NOT restored — stays where it was left in the alt screen.
+    assert (screen.cursor.x, screen.cursor.y) == moved
+
+
+def test_alt_screen_no_scrollback_pollution():
+    """Scrolling inside the alt screen must NOT push lines into the
+    history deques — otherwise quitting nvim leaves its content in the
+    shell's scrollback."""
+    screen, stream = _alt_screen()
+    top_before = len(screen.history.top)
+    stream.feed(b"\x1b[?1049h")
+    for _ in range(30):  # force many scrolls inside alt
+        stream.feed(b"line\r\n")
+    assert len(screen.history.top) == top_before  # no pollution
+    stream.feed(b"\x1b[?1049l")
+
+
+def test_alt_screen_resize_clips_saved_primary_columns():
+    """Resizing while in the alt screen clips the saved primary buffer's
+    columns so a later restore doesn't render stale over-wide cells."""
+    screen, stream = _alt_screen(cols=20, rows=5)
+    stream.feed(b"X" * 20)  # fill primary row 0 to full width
+    stream.feed(b"\x1b[?1049h")
+    screen.resize(5, 10)  # (lines, columns) — narrow to 10 cols
+    # Saved primary buffer's row 0 must have no cells at col >= 10.
+    assert screen._primary_buffer is not None
+    over_wide = [c for c in screen._primary_buffer[0] if c >= 10]
+    assert over_wide == []
+
+
+def test_decckm_mode_tracked_in_screen_mode():
+    """DECSET 1 (DECCKM) lands in screen.mode as the shifted value the
+    backend's reader mirrors into application_cursor_keys."""
+    screen, stream = _alt_screen()
+    assert _DECCKM_MODE not in screen.mode
+    stream.feed(b"\x1b[?1h")
+    assert _DECCKM_MODE in screen.mode
+    stream.feed(b"\x1b[?1l")
+    assert _DECCKM_MODE not in screen.mode
+
+
+def test_application_cursor_keys_defaults_false():
+    """Before any feed, the backend reports normal cursor-key mode."""
+    b = TerminalBackend()
+    assert b.application_cursor_keys is False
+
+
+def test_start_honors_explicit_argv(monkeypatch):
+    """start(argv=...) runs the given program, NOT $SHELL — proven by
+    pointing SHELL at a nonexistent path: if argv weren't honored the
+    spawn would raise OSError trying to exec the bogus shell."""
+    monkeypatch.setenv("SHELL", "/nonexistent/shell-should-not-run")
+    b = TerminalBackend()
+    # /bin/cat with no args reads its stdin (the PTY) forever → stays alive.
+    b.start(cwd="/tmp", argv=["/bin/cat"])
+    try:
+        assert b._proc is not None
+        assert b._proc.poll() is None  # alive → argv was used, not $SHELL
+    finally:
+        b.stop()

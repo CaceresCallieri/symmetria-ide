@@ -551,3 +551,32 @@ def test_paste_imports_qgui_application():
     assert re.search(
         r"from PySide6\.QtGui import[^)]*QGuiApplication", src, re.DOTALL
     ), "QGuiApplication must be imported from PySide6.QtGui"
+
+
+# ---------------------------------------------------------------------------
+# Underline / strikethrough (0.D) — decorations nvim relies on (LSP
+# diagnostics, spell). Source-inspection per the module discipline.
+# ---------------------------------------------------------------------------
+
+
+def test_paint_row_run_key_includes_decorations():
+    """The run-coalescing key MUST include underscore + strikethrough, or
+    adjacent cells with differing decoration coalesce and the line is
+    drawn across the wrong span (the gotcha _paint_row warns about)."""
+    src = inspect.getsource(TerminalView._paint_row)
+    assert "cell.underscore" in src, "must read underscore from the cell"
+    assert "cell.strikethrough" in src, "must read strikethrough from the cell"
+    # The run-break comparison must carry both, else coalescing is wrong.
+    assert "run_underscore" in src
+    assert "run_strike" in src
+
+
+def test_flush_run_draws_decorations_without_qlinef():
+    """_flush_run draws underline/strikethrough via the integer drawLine
+    overload — NO QLineF/QLine wrapper allocation in the paint hot path
+    (gotcha #10)."""
+    src = inspect.getsource(TerminalView._flush_run)
+    assert "drawLine" in src, "must draw decoration lines"
+    assert "QLineF(" not in src, "no QLineF allocation in paint hot path"
+    assert "QLine(" not in src, "no QLine allocation in paint hot path"
+    assert "underscore" in src and "strikethrough" in src
