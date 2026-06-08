@@ -264,31 +264,30 @@ def test_focus_terminal_emits_signal(controller):
 # ---------------------------------------------------------------------------
 
 
-def test_start_launches_editor_nvim_then_rpc_then_shell(patched_backends):
-    """start() order: editor nvim TUI (argv-launched) FIRST so its --listen
-    socket exists, THEN the RPC client attaches (nvim_start), THEN the shell
-    terminal pre-warms. The RPC client polls for the socket on its own
-    worker, so the editor launch must precede it."""
+def test_start_attaches_rpc_then_prewarms_shell(patched_backends):
+    """start() order after the qmltermwidget migration: the editor nvim is
+    spawned by the QMLTermSession in Main.qml (at engine-load time, before
+    start()), so start() itself only (1) attaches the RPC client to nvim's
+    --listen socket (nvim_start) and (2) pre-warms the shell terminal. No
+    editor TerminalBackend is launched from Python anymore."""
     ctrl = AppController()
     try:
         ctrl.start()
     finally:
         ctrl.shutdown()
 
-    assert len(patched_backends["editor_starts"]) == 1
+    # The editor nvim is no longer launched via a Python TerminalBackend —
+    # the QMLTermSession owns that spawn now.
+    assert len(patched_backends["editor_starts"]) == 0
     assert len(patched_backends["nvim_starts"]) == 1
     assert len(patched_backends["terminal_starts"]) == 1
-    # Both terminals start with the controller's raw _cwd.
-    assert patched_backends["editor_starts"][0] == ctrl._cwd
+    # The shell terminal pre-warms with the controller's raw _cwd.
     assert patched_backends["terminal_starts"][0] == ctrl._cwd
 
     order = patched_backends["call_order"]
-    editor_idx = next(i for i, s in enumerate(order) if s.startswith("editor_start"))
     nvim_idx = next(i for i, s in enumerate(order) if s.startswith("nvim_start"))
     term_idx = next(i for i, s in enumerate(order) if s.startswith("terminal_start"))
-    assert editor_idx < nvim_idx < term_idx, (
-        f"order must be editor → nvim-rpc → shell — got: {order}"
-    )
+    assert nvim_idx < term_idx, f"order must be nvim-rpc → shell — got: {order}"
 
 
 def test_shutdown_quits_nvim_rpc_before_killpg(patched_backends):

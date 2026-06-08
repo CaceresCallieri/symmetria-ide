@@ -11,6 +11,8 @@ import QtQuick
 import QtQuick.Window
 import QtQuick.Layouts
 
+import QMLTermWidget 2.0
+
 import Symmetria.Ide 1.0
 import Symmetria.FileManager.UI as FmUi
 import "design"
@@ -323,71 +325,91 @@ Window {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
 
-                // Editor surface: a TerminalView hosting `nvim --listen` as a
-                // TUI (editorBackend). nvim renders its grid here; the IDE
-                // chrome (cmdline/which-key/minimap/status) is fed by rpcnotify
-                // relays over the RPC socket the Python NvimBackend attaches to.
-                TerminalView {
+                // Editor surface: a QMLTermWidget (our fork of Konsole's VT
+                // engine, see /home/jc/projects/symmetria-qmltermwidget) hosting
+                // `nvim --listen` as a TUI. nvim renders its grid here via the
+                // C++-fast terminal; the IDE chrome (cmdline/which-key/minimap/
+                // status) is fed by rpcnotify relays over the RPC socket the
+                // Python NvimBackend attaches to — independent of this widget.
+                // The QMLTermSession spawns nvim itself (KSession), using the
+                // editorProgram/editorArgs context props built in app.py.
+                QMLTermWidget {
                     id: editor
                     anchors.fill: parent
-                    // Phase 0 (editor minimap, docs/minimap-prd.md): the
-                    // minimap (declared as a sibling below) occupies a
-                    // fixed-width ribbon on mainContent's right edge when
-                    // it is visible. Reserving that strip via rightMargin
-                    // keeps the editor TerminalView's visible boundary correct — the
-                    // grid shrinks by minimap.width when the minimap is on,
-                    // expands back to the full slot when the minimap hides
-                    // (e.g. when a future per-buffer toggle disables it).
-                    // TerminalView and AgentPane do NOT carry this margin
-                    // because the minimap is gated on `editorVisible` — it
-                    // is hidden whenever those panes are active, so they
-                    // legitimately fill the full slot.
+                    // The minimap (declared as a sibling below) occupies a
+                    // fixed-width ribbon on mainContent's right edge when it is
+                    // visible; reserving that strip via rightMargin keeps the
+                    // editor's visible boundary correct. Currently gated off
+                    // (root.minimapEnabled === false), so this resolves to 0.
                     anchors.rightMargin: minimap.visible ? minimap.width : 0
-                    // Phase 2.5: editor is now ONE of two central surfaces
-                    // (the other is the terminal pane below). Visibility
-                    // requires BOTH "agent is not full-window overlaid"
-                    // AND "central surface is editor". `editorVisible`
-                    // is the boolean derivation of `controller.centralSurface`
-                    // — see AppController for the state machine.
-                    //
-                    // Also gated on `!controller.fmVisible` — the file
-                    // manager is co-mounted as a sibling pane below and,
-                    // when active, fully occupies the central slot (no
-                    // overlay/scrim anymore). The three panes form an
-                    // editor / terminal / agent / FM XOR cluster.
+                    // editor is ONE of the central surfaces (terminal / agent /
+                    // FM are the others). Visible only when the central surface
+                    // is the editor AND no full-slot pane (agent/FM) is active.
+                    // The XOR is guaranteed at the AppController layer.
                     visible: !controller.agentVisible && !controller.fmVisible && controller.editorVisible
-                    backend: editorBackend
                     focus: visible
 
-                    Component.onCompleted: if (visible)
-                        forceActiveFocus()
+                    // Transparency: useFBORendering MUST be false (the FBO path
+                    // has no alpha → opaque); the image path is still C++-fast.
+                    // colorScheme "Symmetria" applies our 0.6 background opacity
+                    // (the fork's parse+apply fix). fillColor transparent + the
+                    // Window's transparent clear = wallpaper blend on Hyprland.
+                    // Retune live via the `backgroundOpacity` Q_PROPERTY.
+                    colorScheme: "Symmetria"
+                    useFBORendering: false
+                    fillColor: "transparent"
+                    blinkingCursor: true
+                    // Same font the IDE chrome overlays bind to (editor_font.py).
+                    font.family: editorFontFamily
+                    font.pointSize: editorFontPointSize
+
+                    session: QMLTermSession {
+                        id: editorSession
+                        shellProgram: editorProgram
+                        shellProgramArgs: editorArgs
+                        initialWorkingDirectory: controller.displayedRoot
+                        // nvim exiting (`:qa`) tears down the IDE — same
+                        // semantics as the old `backend.closed → app.quit`
+                        // wire, which still fires when the RPC socket drops.
+                        onFinished: Qt.quit()
+                    }
+
+                    // Spawn nvim once the widget exists; grab focus if shown.
+                    Component.onCompleted: {
+                        editorSession.startShellProgram()
+                        if (visible)
+                            forceActiveFocus()
+                    }
                     onVisibleChanged: if (visible)
                         forceActiveFocus()
 
+                    // IDE chords (Ctrl+Shift+E/A/T) are Qt.ApplicationShortcut
+                    // at the Window root and are expected to win over the
+                    // terminal's own key handling (verified live). If a chord
+                    // ever regresses, the fix is to re-expose TerminalDisplay's
+                    // `overrideShortcutCheck(QKeyEvent*, bool&)` on the QML-facing
+                    // qtermwidget in the fork and deny the override for our
+                    // Ctrl+Shift chords — it is NOT currently reachable from QML.
+
                     // Floating cmdline + wildmenu overlay — parented to the
-                    // editor so it clips within the viewport (not over the
-                    // status bar) and so its anchors.fill tracks editor resizes.
-                    // Focus stays on the editor TerminalView; keys flow to nvim via
-                    // PTY. NeoVim relays the cmdline via vim.ui_attach over the RPC
-                    // socket; this overlay reads it via cmdlineState / completionModel.
+                    // editor so it clips within the viewport and tracks resizes.
+                    // Focus stays on the terminal; keys flow to nvim. NeoVim
+                    // relays the cmdline via vim.ui_attach over the RPC socket;
+                    // this overlay reads it via cmdlineState / completionModel.
                     CommandLine {
                         id: cmdlineOverlay
                         anchors.fill: parent
                     }
 
                     // Native which-key overlay. Bottom-anchored inside the
-                    // editor so it visually sits above the status bar and
-                    // animates alongside editor resizes. Driven entirely by
-                    // `whichKeyState` + `whichKeyModel`; Lua side controls
-                    // show/hide via rpcnotify (see runtime/lua/orchestrator/
-                    // whichkey/init.lua).
+                    // editor so it sits above the status bar. Driven entirely by
+                    // `whichKeyState` + `whichKeyModel`; the Lua side controls
+                    // show/hide via rpcnotify (runtime/lua/orchestrator/whichkey).
                     WhichKeyOverlay {
                         id: whichKeyOverlay
                         anchors.left: editor.left
                         anchors.right: editor.right
                         anchors.bottom: editor.bottom
-                        // Clamp to half the viewport so huge menus never hog
-                        // the whole editor; scroll support is a v2 follow-up.
                         height: Math.min(implicitHeight, editor.height * 0.5)
                         z: 20
                     }

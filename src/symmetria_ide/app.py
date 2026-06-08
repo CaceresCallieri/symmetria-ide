@@ -46,7 +46,7 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
 from .git_controller import GitController, GitStatusListModel
 from .minimap_model import MinimapModel
 from .minimap_view import MinimapView  # noqa: F401 — side-effect: @QmlElement registration
-from .editor_font import default_font
+from .editor_font import DEFAULT_FONT_POINT_SIZE, default_font
 from .nvim_backend import _RUNTIME_DIR, NvimBackend
 from .session_host import SessionHost
 from .session_models import (  # noqa: F401 — side-effect: @QmlElement registration
@@ -2086,27 +2086,16 @@ class AppController(QObject):
 
     def start(self) -> None:
         trace("start_begin")
-        # Launch the editor NeoVim as a TUI in its own terminal surface,
-        # exposing a control socket via --listen. `_backend` (the RPC-only
-        # client) attaches to that socket on its OWN worker thread with a
-        # retry budget, so the GUI thread never blocks. Order: spawn the
-        # editor nvim first so the socket exists, then start the client.
-        # OSError from the spawn (nvim missing) is logged so the IDE still
-        # launches with a working shell terminal.
-        editor_argv = [
-            "nvim",
-            "-n",
-            "--listen",
-            self._nvim_socket,
-            "--cmd",
-            f"set rtp^={_RUNTIME_DIR}",
-            "--cmd",
-            f"luafile {_RUNTIME_DIR / 'init.lua'}",
-        ]
-        try:
-            self._editor_backend.start(self._cwd, argv=editor_argv)
-        except OSError:
-            log.exception("editor nvim spawn failed — editor surface will be inert")
+        # The editor NeoVim is spawned by the QMLTermSession inside Main.qml
+        # (Konsole KSession), using the `editorProgram`/`editorArgs` context
+        # properties built in `_build_engine` — which runs BEFORE start(), so
+        # nvim is already launching by the time we get here. It opens a
+        # `--listen` control socket; `_backend` (the RPC-only client) attaches
+        # to that socket on its OWN worker thread with a retry budget, so the
+        # GUI thread never blocks even though the socket may not exist for the
+        # first few millis. nvim does NOT render through Python anymore — the
+        # terminal widget draws its grid; `_backend` only carries the chrome
+        # rpcnotify relays + control RPCs (input / edit_file / set_current_dir).
         self._backend.start()
         trace("backend_started")
         # Seed the GitController with the launch cwd by firing
@@ -2254,6 +2243,16 @@ class AppController(QObject):
     def minimap_model(self) -> MinimapModel:
         return self._minimap_model
 
+    @property
+    def nvimSocketPath(self) -> str:
+        """Path to the editor nvim's `--listen` control socket.
+
+        Read by `_build_engine` to build the `editorArgs` context property the
+        QMLTermSession launches nvim with, and by `NvimBackend` to attach the
+        RPC-only chrome relay. Single source of truth for the socket path.
+        """
+        return self._nvim_socket
+
 
 def _register_qml_types() -> None:
     """Named audit point for QML type registration.
@@ -2319,6 +2318,22 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
         log.info("FM QML dev override active: %s", _fm_dev_path)
         log.info("QML import path list: %s", engine.importPathList())
 
+    # The terminal/editor surface is our fork of qmltermwidget (Konsole's VT
+    # engine + renderer as a QML item). We add its build-output dir to the
+    # import path so `import QMLTermWidget 2.0` resolves to OUR build (with the
+    # background-transparency fix + Symmetria colorscheme) rather than the stock
+    # Arch package. addImportPath puts it ahead of the system path for this
+    # module. Env-overridable so a future PKGBUILD that installs the fork to
+    # /usr/lib/qt6/qml can drop the override and ship with the var unset.
+    # See /home/jc/projects/symmetria-qmltermwidget/MODIFICATIONS.md.
+    _qtw_path = os.environ.get(
+        "SYMMETRIA_IDE_QMLTERMWIDGET_PATH",
+        "/home/jc/projects/symmetria-qmltermwidget",
+    ).strip()
+    if _qtw_path:
+        engine.addImportPath(_qtw_path)
+        log.info("qmltermwidget fork import path: %s", _qtw_path)
+
     ctx = engine.rootContext()
 
     # Make backend + capsules available to QML as a single `controller`
@@ -2375,6 +2390,34 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     _resolved_font = default_font()
     _primary_family = (_resolved_font.families() or [_resolved_font.family()])[0]
     ctx.setContextProperty("editorFontFamily", _primary_family)
+    # Editor font point size — single source of truth in editor_font.py.
+    # The QMLTermWidget editor + shell panes bind `font.pointSize` to this.
+    ctx.setContextProperty("editorFontPointSize", float(DEFAULT_FONT_POINT_SIZE))
+
+    # Editor nvim launch spec, consumed by the QMLTermSession inside Main.qml.
+    # nvim is now spawned by the terminal widget (Konsole KSession), NOT by a
+    # Python TerminalBackend — but it still opens a `--listen` control socket
+    # that the RPC-only `NvimBackend` attaches to for the chrome relays
+    # (cmdline / which-key / capsules / completions / minimap). The socket path
+    # + runtime injection mirror exactly what the old `editor_argv` in
+    # `start()` used; only the spawner moved from Python to QML.
+    #   - editorProgram: argv[0]
+    #   - editorArgs:    argv[1:] (QMLTermSession.shellProgramArgs excludes the
+    #                    program name)
+    #   - editorCwd:     the launch directory (nvim's initial cwd)
+    ctx.setContextProperty("editorProgram", "nvim")
+    ctx.setContextProperty(
+        "editorArgs",
+        [
+            "-n",
+            "--listen",
+            controller.nvimSocketPath,
+            "--cmd",
+            f"set rtp^={_RUNTIME_DIR}",
+            "--cmd",
+            f"luafile {_RUNTIME_DIR / 'init.lua'}",
+        ],
+    )
     trace("engine_ctx_ready")
 
     qml_root = QML_DIR / "Main.qml"
