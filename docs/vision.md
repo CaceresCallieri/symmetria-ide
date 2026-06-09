@@ -1,6 +1,6 @@
 # Vision
 
-> **Framework pivot (2026-06):** the *what* and *why* of this vision are unchanged; the *how* is moving from PySide6/QML to **Tauri 2 (Rust + React/TS)**, with NeoVim running in xterm.js and a long arc toward an own web editor. Sections below are updated where they named the QML implementation. Authoritative detail: `docs/framework-pivot.md`.
+> **⚠ Framework pivot REVERSED (2026-06-07) — the IDE stays on PySide6 (Qt 6 + Python + QML); the sections below describe the LIVE architecture.** A Tauri 2 (Rust + React/TS) pivot was decided 2026-06-05 and partly executed, then reversed: the file-tree + git-status systems are reused across Symmetria Shell + File Manager + IDE via the FM's `Symmetria.FileManager.UI` QML module, and that reuse requires one shared QML toolkit (reimplementing it in web would be a DRY violation). `docs/framework-pivot.md` is now a **superseded** record of the considered-and-rejected pivot — kept for the reasoning trail, not for planning. The far-future "own editor core" arc (referenced below) survives the reversal; only the *wrapper* framework reverted to QML.
 
 ## The long horizon
 
@@ -22,10 +22,10 @@ Specific limitations that drive this project:
 
 ## What this IS
 
-- A **wrapper** that embeds a swappable editor (NeoVim today, an own web editor long-term), hosts an agent frontend, and integrates the File Manager.
-- Built on **Tauri 2 (Rust + React/TS)**; NeoVim runs in an xterm.js terminal with an `nvim --listen` side channel feeding the native web chrome.
-- A progressively extracted UI: NeoVim's responsibilities (chrome, file tree, which-key, git) move into native **web** surfaces over time, until NeoVim is "just a buffer" and is replaced.
-- Keyboard-first, Symmetria-aesthetic (recreated in CSS), opinionated.
+- A **wrapper** that embeds a swappable editor (NeoVim today, an own editor core long-term), hosts an agent frontend, and integrates the File Manager.
+- Built on **PySide6 (Qt 6 + Python + QML)**; NeoVim runs as a TUI inside a forked `QMLTermWidget` (Konsole's VT engine) with an `nvim --listen` side channel feeding the native QML chrome.
+- A progressively extracted UI: NeoVim's responsibilities (chrome, file tree, which-key, git) move into native **QML** surfaces over time, until NeoVim is "just a buffer" and is replaced.
+- Keyboard-first, Symmetria-aesthetic (native QML against the `Theme` design tokens), opinionated.
 
 ## Modes of inhabiting the IDE
 
@@ -60,9 +60,9 @@ The IDE houses four distinct surfaces with different roles. Their relative promi
 | **Agent**     | *Action* — how the user directs work  | Summoned over the editor via `<leader>aN`             | Always-on, default-visible primary surface       |
 | **Observation** | File tree + git status + (later) file manager — how the user *sees* project state | Always-on sidebar to the editor's right             | Unchanged — always-on, expands to also include diff views, build status, etc. |
 | **Navigation** | Terminal — how the user moves between projects and contexts | Built (Phase 2.5 — shipped 2026-05-18)             | Persistent home surface; cwd drives the observation pane until anchored |
-| **Edit & view** | NeoVim (in xterm.js) → own web editor — opening buffers to read or hand-edit | Central pane on launch; default focus              | Summoned on demand; eventually an own web editor, not the launch state |
+| **Edit & view** | NeoVim (in a `QMLTermWidget`) → own editor core — opening buffers to read or hand-edit | Central pane on launch; default focus              | Summoned on demand; eventually an own editor core, not the launch state |
 
-The chrome surfaces (agent, observation, navigation) are **native web (React) panels**; the editor is **NeoVim rendered in an xterm.js terminal**, with its data-side chrome (status/branch/cwd) fed over an `nvim --listen` RPC channel. The **direction of travel** is from an editor-centric IDE (NeoVim as the hub, agent/file-tree as satellites) toward an *agent-and-navigation-centric* IDE (terminal as the launch state, agent as the primary action surface, file tree + git as always-on observation, the editor summoned on demand).
+The chrome surfaces (agent, observation, navigation) are **native QML panels**; the editor is **NeoVim rendered as a TUI inside a forked `QMLTermWidget`** (Konsole's VT engine), with its data-side chrome (status/branch/cwd) fed over an `nvim --listen` RPC channel. The **direction of travel** is from an editor-centric IDE (NeoVim as the hub, agent/file-tree as satellites) toward an *agent-and-navigation-centric* IDE (terminal as the launch state, agent as the primary action surface, file tree + git as always-on observation, the editor summoned on demand).
 
 This is a multi-year direction, not a near-term refactor. Each Phase 2+ deliverable should be evaluated against whether it composes cleanly with the long-term topology — not whether it implements it. See `docs/future.md` for the longer-form discussion.
 
@@ -80,7 +80,7 @@ Symmetria IDE is designed to run as **many concurrent instances — one per proj
 
 ## What this is NOT
 
-- Not a replacement for NeoVim *during the transition* — NeoVim remains the real editing core (the user's actual config) until the IDE is hollowed it out enough that an own web editor with vim-style navigation can take over. The long-term plan *does* eventually retire NeoVim (a shift from the old "NeoVim forever or until gpui" framing — see `docs/framework-pivot.md` §8).
+- Not a replacement for NeoVim *during the transition* — NeoVim remains the real editing core (the user's actual config) until the IDE has hollowed it out enough that an own editor core with vim-style navigation can take over. The long-term plan *does* eventually retire NeoVim (a shift from the old "NeoVim forever or until gpui" framing — see `docs/future.md` "Own editor core"). The far-future editor-core *implementation* (web vs native) is unsettled post-reversal; the navigation *feel* (vim-style, flash-like) is the invariant, not the engine.
 - Not a general-purpose IDE for others. Personal tooling.
 - Not a monolith that swallows the whole Symmetria ecosystem. WhatsApp stays standalone. Future messaging apps stay standalone.
 

@@ -1,6 +1,6 @@
 # Phases
 
-> **Framework pivot (2026-06) — read first.** Phases 0, 2, and 2.5 below shipped on the **PySide6/QML** stack and are an accurate record of *what was built there*. The project is now pivoting the wrapper to **Tauri 2 (Rust + React/TS)**, with NeoVim running in xterm.js instead of the custom grid renderer. The **live, post-pivot roadmap** (file manager → agent panel → git system → which-key IDE gate → web editor) is in `docs/framework-pivot.md` §7, not here. The phases below remain useful as (a) the shipped-feature record and (b) the spec for *what behavior the new stack must re-deliver* (anchor model, capsule chrome, OSC-7 sync, permission UI). Phases 3–4 below are reframed by the pivot — treat them as requirements, not as QML implementation plans.
+> **Framework pivot REVERSED (2026-06-07) — read first.** A Tauri 2 (Rust + React/TS) pivot was decided 2026-06-05 then reversed; the project stays on the **PySide6/QML** stack. NeoVim runs as a TUI inside a forked `QMLTermWidget` (not xterm.js, not the deleted custom grid renderer). This document is the live native roadmap; `docs/framework-pivot.md` is a superseded historical record, not the roadmap. Phases 3–4 below are native QML implementation plans.
 
 Each phase ends with a go/no-go checkpoint. If a phase's deliverable does not feel right, reconsider before continuing.
 
@@ -123,6 +123,6 @@ Each phase ends with a go/no-go checkpoint. If a phase's deliverable does not fe
 ## Far future
 
 - **Own window manager** — fork Hyprland (~2 years out, dependent on LLM advancement). May reopen the federation architecture question.
-- **gpui migration** — *(superseded — Tauri 2 is now the chosen rewrite target; see `docs/future.md` "gpui migration — SUPERSEDED" and `docs/framework-pivot.md`).*
-- **Own editor core** — *(promoted to a declared long-arc end-state — no longer gpui-conditional; see `docs/future.md` "Own editor core — PROMOTED" and `docs/framework-pivot.md` §8).*
+- **gpui migration** — far-future full-rewrite possibility; the 2026-06 Tauri rewrite was considered and reversed, so gpui remains the standing far-future candidate. See `docs/future.md` "gpui migration."
+- **Own editor core** — long-arc end-state: progressively strip NeoVim until it is "just a buffer," then replace it with an own editor core. The engine (web vs native) is unsettled post-reversal. See `docs/future.md` "Own editor core."
 - **Custom agent harness** — Phase 2's frontend is agent-agnostic at the IPC layer. Any prompt/response protocol (OpenCode, PyAgent, custom) can plug in.

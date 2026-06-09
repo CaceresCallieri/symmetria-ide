@@ -1,12 +1,12 @@
 # Tech Stack
 
-> **Superseded by the framework pivot (2026-06).** The decision below reflects the *original* PySide6 choice and the historical alternatives analysis. The IDE is now pivoting to **Tauri 2 (Rust + React/TS)** for the wrapper, with NeoVim running in xterm.js instead of a custom grid renderer. The "Tauri rejected" and "gpui long-term" verdicts are reconsidered (see the updated notes inline and the authoritative `docs/framework-pivot.md`). This file is kept for the rationale history — it is no longer the current decision.
+> **Framework pivot REVERSED (2026-06-07) — this decision is live again.** A Tauri 2 (Rust + React/TS) pivot was decided 2026-06-05 then reversed; the IDE stays on **PySide6 (Qt 6 + Python + QML)**, exactly as this file's original decision says. NeoVim runs as a TUI inside a forked `QMLTermWidget` (Konsole's VT engine), not xterm.js and not the deleted custom grid renderer. `docs/framework-pivot.md` is a superseded historical record of the considered-and-rejected pivot. The original "Tauri rejected" reasoning below stands again; gpui returns to being the far-future full-rewrite candidate.
 
 ## Decision
 
-- **Original primary:** PySide6 (Qt 6 + Python + QML). *(What shipped Phases 0–2.5.)*
-- **Current direction:** Tauri 2 (Rust core + React/TypeScript frontend). Python backend kept as a sidecar during transition, collapsed to Rust later. See `docs/framework-pivot.md`.
-- **gpui** is no longer the long-term target — Tauri is the chosen middle ground (better ecosystem + AI-codegen than a from-scratch gpui rewrite, lighter than the from-scratch native path).
+- **Primary:** PySide6 (Qt 6 + Python + QML). *(Shipped Phases 0–2.5; live and current after the 2026-06 Tauri pivot was reversed.)*
+- **Agent backend:** a Node SDK sidecar (`@anthropic-ai/claude-agent-sdk`) driven from the Python backend.
+- **gpui** remains the far-future full-rewrite candidate (Zed's engine, pursued only if leaving Qt/QML is ever justified) — see `docs/future.md` "gpui migration."
 
 ## Primary libraries
 
@@ -52,11 +52,11 @@ The long-term target is gpui (Rust). Until gpui is stable with a public API, wai
 - **Against:** slower iteration during exploration; compile step taxes Phase 0 discovery.
 - **Verdict:** start in Python. Port hot paths to C++ later, inside the same Qt app.
 
-### Tauri (Rust + Web frontend) — **VERDICT REVERSED (2026-06)**
+### Tauri (Rust + Web frontend) — **considered 2026-06, RE-REJECTED (2026-06-07)**
 - **For:** lightweight bundle (~7-10 MB vs Electron's 150+), aligned with long-term Rust direction, *far* better AI-codegen + library ecosystem than QML, native embedded browser, agent-frontend ecosystem to lean on (Terax + web Claude UIs).
-- **Original against (now reconsidered):** "WebKitGTK on Linux has input-latency, IME, and keyboard-grab issues — fatal for a keyboard-first editor." That verdict assumed a *custom web editor* carrying the full keyboard-first burden on WebKitGTK. The new architecture runs **NeoVim in xterm.js** (the same input path VS Code uses for its terminal), which de-risks latency/grab substantially; IME is a non-issue for Spanish/English. The File-Manager-rewrite cost is now *accepted on purpose* (QML→React is where the codegen velocity is won).
+- **Original against (reconsidered during the pivot, now moot):** "WebKitGTK on Linux has input-latency, IME, and keyboard-grab issues — fatal for a keyboard-first editor." The pivot argued this assumed a *custom web editor* carrying the full keyboard-first burden, whereas its architecture *would have* run **NeoVim in xterm.js** (the input path VS Code uses for its terminal), de-risking latency/grab; IME is a non-issue for Spanish/English. With the pivot reversed, this reconsideration is moot — the concern never had to be tested.
 - **Residual risks (validated):** WebKitGTK runtime RAM is NOT lighter than Qt (measured: Terax 213 MB ≈ Symmetria IDE 217 MB — a wash); Wayland/Hyprland rendering on this NVIDIA-Optimus laptop — **spiked 2026-06-05, PASSED** (transparency + blur + 60fps, no black box; DMABUF kill-switch harmful). See `docs/framework-pivot.md` §9.
-- **Current verdict: ADOPTED** for the wrapper. Replaces this whole "rejected" section in spirit.
+- **Current verdict: NOT ADOPTED.** Tauri was adopted 2026-06-05 then reversed 2026-06-07 — the decisive factor: file-tree + git-status are reused across Shell + FM + IDE via the FM's `Symmetria.FileManager.UI` QML module, which a web IDE can't embed without reimplementing (a DRY violation). The executed Tauri work (themed shell + PTY terminal + nvim-in-xterm.js) never shipped to `main` and is archived at `git tag archive/tauri-pivot`. The for/against analysis above is retained as the rationale trail; the original PySide6/QML decision stands.
 
 ### Electron
 - **For:** huge ecosystem, easy browser embed.

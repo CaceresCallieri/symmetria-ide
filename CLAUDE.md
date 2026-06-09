@@ -249,13 +249,13 @@ Cross-cutting design rules that still hold for the parked AgentPane surface:
 ## Non-negotiables
 
 1. **Keyboard-first** — no mouse-required interactions.
-2. **Symmetria aesthetic** — minimal, calm, consistent with Shell & File Manager (recreated in CSS post-pivot; the *look* is preserved).
-3. **Vim-style navigation preserved** — real NeoVim through the transition, a vim-navigation layer (flash-like) in the end-state web editor. The navigation *feel* is sacred; the engine under it is swappable (softened from "NeoVim motions sacred" by the pivot, see `docs/framework-pivot.md` §8 "Long-term arc + identity shift").
-4. **Compose, don't reimplement** — orchestrate existing tools (NeoVim, the web platform, Claude Code) rather than replace them. *Reinforced* by the pivot: NeoVim-in-a-terminal is more "compose" than the custom grid painter was.
+2. **Symmetria aesthetic** — minimal, calm, consistent with Shell & File Manager (native QML + `Theme` tokens; the file tree + git status come from the FM's `Symmetria.FileManager.UI` QML module).
+3. **Vim-style navigation preserved** — real NeoVim through the transition, a vim-navigation layer (flash-like) in a future own-editor end-state. The navigation *feel* is sacred; the engine under it is swappable (softened from "NeoVim motions sacred"). Whether that future editor is web or native is unsettled post-reversal — see `docs/future.md` "Own editor core."
+4. **Compose, don't reimplement** — orchestrate existing tools (NeoVim, Claude Code, the FM's QML module) rather than replace them. NeoVim-in-a-terminal-widget is more "compose" than the custom grid painter was.
 
 ## Related projects in the Symmetria ecosystem
 
 - Symmetria Shell (QuickShell-based desktop shell)
-- Symmetria File Manager (currently a standalone QuickShell/QML app — under the framework pivot it is the first Tauri/React build and the source of the IDE's file tree + git status; see `docs/framework-pivot.md` §7)
+- Symmetria File Manager (native Qt/QML app; exposes its file tree + git status as the `Symmetria.FileManager.UI` QML module, which the IDE reuses rather than reimplements — the load-bearing reason the IDE stays QML)
 - Symmetria WhatsApp (standalone, not integrated)
 - `orchestrator.nvim` (NeoVim plugin driving the Claude Code workflow — **active agent runtime**; the IDE no longer intercepts its `<leader>a*` / `<C-1..5>` keymaps. The IDE-side chat pane is preserved but currently has no in-IDE activation chord — deferred, no chord assigned yet)
