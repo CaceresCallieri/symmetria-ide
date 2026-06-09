@@ -2458,6 +2458,26 @@ def _configure_render_loop_for_screenshot() -> None:
         os.environ.setdefault("QSG_RENDER_LOOP", "basic")
 
 
+def _configure_freetype_interpreter() -> None:
+    """Select FreeType's classic TrueType interpreter (v35) for this process.
+
+    The modern default (v40, "minimal hinting") deliberately ignores
+    HORIZONTAL hints, so even ``QFont.PreferFullHinting`` leaves vertical
+    stems smeared across device columns at fractional display scale
+    (Hyprland 1.6). v35 restores true two-axis stem snapping — the decisive
+    sharpness rung in the 3-way hinting comparison (2026-06-09; see
+    editor_font.py). Safe alongside the qmltermwidget fork's letter-spacing
+    cell snap: glyph advances stay grid-exact, so hinting only affects
+    raster sharpness, not spacing.
+
+    Process-local — other apps keep the system default. Qt Quick chrome
+    text is unaffected either way (distance-field rendering bypasses
+    FreeType hinting). Must be called BEFORE QGuiApplication loads
+    FreeType; setdefault so a user-set value wins.
+    """
+    os.environ.setdefault("FREETYPE_PROPERTIES", "truetype:interpreter-version=35")
+
+
 def run() -> int:
     trace("run_entered")
     configure_logging()
@@ -2479,6 +2499,8 @@ def run() -> int:
 
     # Must run before QGuiApplication — see _configure_render_loop_for_screenshot().
     _configure_render_loop_for_screenshot()
+    # Must run before QGuiApplication loads FreeType — see _configure_freetype_interpreter().
+    _configure_freetype_interpreter()
 
     # Resolve `symmetria-ide [PATH]` and chdir before QGuiApplication +
     # AppController (which reads os.getcwd() in __init__). The path is stripped

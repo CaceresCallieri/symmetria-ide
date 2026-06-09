@@ -367,22 +367,25 @@ Window {
                     // Same font the IDE chrome overlays bind to (editor_font.py).
                     font.family: editorFontFamily
                     font.pointSize: editorFontPointSize
-                    // VERTICAL hinting, deliberately — chosen by an A/B
+                    // FULL hinting + the v35 FreeType interpreter set in
+                    // app.py::run (FREETYPE_PROPERTIES) — chosen by a 3-way
                     // device-res screenshot comparison (2026-06-09):
-                    //   - FULL hinting also snaps HORIZONTAL advances, which
-                    //     fights the fractional display scale (Hyprland 1.6)
-                    //     → uneven per-column rendering (the original bug).
-                    //   - NO hinting renders evenly but visibly soft.
-                    //   - VERTICAL hinting snaps stems/baselines to the
-                    //     pixel grid (crisp) while leaving horizontal
-                    //     advances linear, so the fork's letter-spacing
-                    //     cell snap (TerminalDisplay::fontChange) stays
-                    //     exact and the cursor cannot drift off the text.
-                    // Must be set HERE: the QML font value is built fresh
-                    // from the family/pointSize context props, so
-                    // editor_font.py's QFont preference does not carry
+                    //   - NO hinting: even but visibly soft.
+                    //   - VERTICAL hinting: baselines crisp, but vertical
+                    //     stems still smear across device columns.
+                    //   - FULL hinting (+v35 for true horizontal stem
+                    //     snapping): Ghostty-class sharpness.
+                    // Full hinting WAS the original uneven-rendering bug —
+                    // but only because run glyphs drifted off the cell grid
+                    // at the font's natural fractional advance. The fork's
+                    // letter-spacing cell snap (TerminalDisplay::fontChange)
+                    // fixed the drift, which makes full hinting safe: worst
+                    // case is ±0.5px per-glyph blit rounding, no
+                    // accumulation. Must be set HERE: the QML font value is
+                    // built fresh from the family/pointSize context props,
+                    // so editor_font.py's QFont preference does not carry
                     // through. Keep both sites in sync.
-                    font.hintingPreference: Font.PreferVerticalHinting
+                    font.hintingPreference: Font.PreferFullHinting
 
                     session: QMLTermSession {
                         id: editorSession
@@ -467,7 +470,7 @@ Window {
                     margin: Theme.size.terminalPadding
                     font.family: editorFontFamily
                     font.pointSize: editorFontPointSize
-                    font.hintingPreference: Font.PreferVerticalHinting
+                    font.hintingPreference: Font.PreferFullHinting
 
                     session: QMLTermSession {
                         id: shellSession

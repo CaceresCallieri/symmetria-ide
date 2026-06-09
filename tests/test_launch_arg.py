@@ -117,3 +117,42 @@ class TestConfigureRenderLoopForScreenshot:
         import os
 
         assert os.environ.get("QSG_RENDER_LOOP") == "threaded"
+
+
+class TestConfigureFreetypeInterpreter:
+    """Tests for _configure_freetype_interpreter().
+
+    The helper is called before QGuiApplication construction (FreeType is
+    loaded during Qt init); these tests verify its env-var contract without
+    starting Qt.
+    """
+
+    def test_sets_v35_interpreter(self, monkeypatch):
+        """With no caller-set value, FREETYPE_PROPERTIES selects the v35
+        interpreter (true two-axis stem hinting at fractional DPR)."""
+        monkeypatch.delenv("FREETYPE_PROPERTIES", raising=False)
+
+        from symmetria_ide.app import _configure_freetype_interpreter
+
+        _configure_freetype_interpreter()
+
+        import os
+
+        assert os.environ.get("FREETYPE_PROPERTIES") == (
+            "truetype:interpreter-version=35"
+        )
+
+    def test_explicit_caller_override_wins(self, monkeypatch):
+        """A user-set FREETYPE_PROPERTIES must not be overwritten (setdefault
+        semantics — system-wide font tuning beats our process default)."""
+        monkeypatch.setenv("FREETYPE_PROPERTIES", "truetype:interpreter-version=40")
+
+        from symmetria_ide.app import _configure_freetype_interpreter
+
+        _configure_freetype_interpreter()
+
+        import os
+
+        assert os.environ.get("FREETYPE_PROPERTIES") == (
+            "truetype:interpreter-version=40"
+        )
