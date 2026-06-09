@@ -2,7 +2,7 @@
 
 Things that are years out but influence today's decisions.
 
-> **Framework pivot REVERSED (2026-06-07):** a Tauri 2 (Rust + React/TS) pivot was decided 2026-06-05 then reversed — the IDE stays on **PySide6/QML**. The topology-inversion and NeoVim-reclamation arcs below stand on their own (they were never pivot-dependent); read every "native QML" / "native web (React)" reference below as **native QML**, the live stack. `docs/framework-pivot.md` is a superseded historical record. The far-future editor-core *engine* (web vs native) is unsettled post-reversal — see "Own editor core" below.
+> **Framework pivot REVERSED (2026-06-07):** a Tauri 2 (Rust + React/TS) pivot was decided 2026-06-05 then reversed — the IDE stays on **PySide6/QML**. The topology-inversion and NeoVim-reclamation arcs below stand on their own (they were never pivot-dependent); read every "native QML" reference below as **native QML**, the live stack. `docs/framework-pivot.md` is a superseded historical record. The far-future editor-core *engine* (web vs native) is unsettled post-reversal — see "Own editor core" below.
 
 ## Topology inversion: agent-primary, editor-on-demand
 

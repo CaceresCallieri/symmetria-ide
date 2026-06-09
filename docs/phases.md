@@ -1,6 +1,6 @@
 # Phases
 
-> **Framework pivot REVERSED (2026-06-07) — read first.** A Tauri 2 (Rust + React/TS) pivot was decided 2026-06-05 then reversed; the project stays on the **PySide6/QML** stack. NeoVim runs as a TUI inside a forked `QMLTermWidget` (not xterm.js, not the deleted custom grid renderer). This document is the live native roadmap; `docs/framework-pivot.md` is a superseded historical record, not the roadmap. Phases 3–4 below are native QML implementation plans.
+> **Framework pivot REVERSED (2026-06-07) — read first.** A Tauri 2 (Rust + React/TS) pivot was decided 2026-06-05 then reversed; the project stays on the **PySide6/QML** stack. NeoVim runs as a TUI inside a forked `QMLTermWidget` (not xterm.js, not the deleted custom grid renderer). This document is the live native roadmap; `docs/framework-pivot.md` is a superseded historical record, not the roadmap. Phases 3–4 below are native QML implementation plans. The "Delivered" sections in completed phases (0, 2, 2.5) are implementation records from the time of delivery — the pyte terminal renderer and the NvimView grid renderer they describe were both superseded by the QMLTermWidget migration; see CLAUDE.md for the live architecture.
 
 Each phase ends with a go/no-go checkpoint. If a phase's deliverable does not feel right, reconsider before continuing.
 
@@ -34,7 +34,7 @@ Each phase ends with a go/no-go checkpoint. If a phase's deliverable does not fe
 2. **Port-only:** copy the minimum QML file-list / fuzzy-finder components into `symmetria-ide/qml/`, consume the existing C++ plugin directly. No touch to the standalone file manager. Short-term win, eventual duplication.
 3. **Skip for now; revisit after Phase 2.** File Manager integration has no runtime dependency from Phase 2 (agent pane) or Phase 3 (command-line extraction). The agent pane is the biggest-payoff phase per this doc and should not block on File Manager decisions.
 
-**Current choice:** path 3. Phase 1 is deferred; next work is Phase 2.
+**Current choice:** path 3. Phase 1 is deferred; next work is Phase 2. *(Update: path 2 partially landed outside Phase 1 scope — file-tree + git-status now reuse the FM's `Symmetria.FileManager.UI` QML module rather than the standalone FM pane. Full FM-pane embedding in the IDE remains deferred.)*
 
 **Checkpoint (unchanged, for when we return):** can the full File Manager workflow (including fuzzy search) happen inside the IDE window with no regression?
 

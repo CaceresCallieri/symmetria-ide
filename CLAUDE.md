@@ -249,8 +249,8 @@ Cross-cutting design rules that still hold for the parked AgentPane surface:
 ## Non-negotiables
 
 1. **Keyboard-first** — no mouse-required interactions.
-2. **Symmetria aesthetic** — minimal, calm, consistent with Shell & File Manager (native QML + `Theme` tokens; the file tree + git status come from the FM's `Symmetria.FileManager.UI` QML module).
-3. **Vim-style navigation preserved** — real NeoVim through the transition, a vim-navigation layer (flash-like) in a future own-editor end-state. The navigation *feel* is sacred; the engine under it is swappable (softened from "NeoVim motions sacred"). Whether that future editor is web or native is unsettled post-reversal — see `docs/future.md` "Own editor core."
+2. **Symmetria aesthetic** — minimal, calm, consistent with Shell & File Manager. Implementation means: native QML + `Theme` tokens; file tree + git status reused from the FM's `Symmetria.FileManager.UI` QML module (not reimplemented).
+3. **Vim-style navigation preserved** — real NeoVim through the transition, a vim-navigation layer (flash-like) in a future own-editor end-state. The navigation *feel* is sacred; the engine under it is swappable. Whether that future editor is web or native is unsettled post-reversal — see `docs/future.md` "Own editor core."
 4. **Compose, don't reimplement** — orchestrate existing tools (NeoVim, Claude Code, the FM's QML module) rather than replace them. NeoVim-in-a-terminal-widget is more "compose" than the custom grid painter was.
 
 ## Related projects in the Symmetria ecosystem
