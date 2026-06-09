@@ -21,7 +21,7 @@ Federation is harder to keep coherent today: inter-app communication under Hyprl
  ├─ Native status bar           ← orchestrator.nvim capsules  (Phase 0 — DONE)
  │
  ├─ Editor pane
- │   └─ NeoVim                  (--embed, msgpack-RPC)        (Phase 0 — DONE)
+ │   └─ NeoVim TUI in a QMLTermWidget  ← pynvim RPC on --listen (chrome + control)  (Phase 0 — DONE)
  │
  ├─ File manager drawer         ← deferred pending QuickShell→Qt decision
  │
@@ -37,16 +37,12 @@ Federation is harder to keep coherent today: inter-app communication under Hyprl
 ## Realized Phase 0 implementation
 
 ```
-NeoVim (--embed child process)
-    ↓ msgpack-RPC over stdio
-pynvim.Nvim (worker thread)
-    ↓ run_loop dispatches redraw + capsule notifications
+NeoVim TUI (drawn inside the editor QMLTermWidget — Konsole's VT engine renders nvim's own grid)
     │
-    ├─ redraw batches → Grid (pure Python, 2-D Cell array)
-    │                       ↓ flush
-    │                   redraw_flushed signal → NvimView.update()
-    │                                              ↓ paint()
-    │                                          QQuickPaintedItem
+    │  separately, on nvim's --listen socket:
+    ↓
+pynvim.Nvim (RPC-only client, worker thread — NO ui_attach, NO grid render)
+    ↓ run_loop dispatches Lua-emitted rpcnotify payloads
     │
     └─ capsule notifications → capsule_updated signal
                                    ↓
@@ -70,29 +66,39 @@ pynvim.Nvim (worker thread)
 
 The editor core (NeoVim buffer and window) stays untouched for years. Only the *chrome* migrates:
 
-| NeoVim chrome            | Native replacement                             | Phase      |
-|--------------------------|------------------------------------------------|------------|
-| Lualine / status line    | QML status bar with orchestrator capsules      | 0          |
-| NeoVim `:` command line  | Native QML command palette via `ext_cmdline`   | 3          |
-| LazyGit                  | Native QML agentic-git frontend                | Later      |
-| fff.nvim (fuzzy)         | Native finder (likely folds into File Manager) | Later      |
-| Editor buffer itself     | Eventually — possibly gpui-based               | Far future |
+| NeoVim chrome            | Native replacement                              | Phase      |
+|--------------------------|-------------------------------------------------|------------|
+| Lualine / status line    | QML status bar fed by the capsule protocol      | 0 — DONE   |
+| NeoVim `:` command line  | Native QML cmdline overlay + completions popup  | 0 — DONE   |
+| which-key.nvim popup     | Native QML which-key overlay (whichkey protocol)| 0 — DONE   |
+| LazyGit                  | Native QML agentic-git frontend                 | Later      |
+| fff.nvim (fuzzy)         | Native finder (likely folds into File Manager)  | Later      |
+| Editor buffer itself     | Eventually — possibly gpui-based                | Far future |
 
-NeoVim's `ui-ext` capabilities (`ui_attach` with `ext_cmdline`, `ext_messages`, `ext_popupmenu`, `ext_tabline`) are the formal hooks for this extraction. Use them deliberately for the pieces we are extracting — they cost FPS if overused (lesson from goneovim).
+**The extraction mechanism is Lua `rpcnotify`, NOT NeoVim's `ui-ext`.** nvim runs as a TUI and draws its own grid inside the editor QMLTermWidget — Python never calls `ui_attach`, so `ext_cmdline` / `ext_messages` / `ext_popupmenu` / `ext_tabline` are not in play. Instead, Lua code in `runtime/init.lua` (and the `runtime/lua/orchestrator/` modules) observes nvim's state via autocmds and pushes structured payloads to Python over the `--listen` RPC channel with `vim.rpcnotify(0, "<channel>", {...})`. Three such channels feed the native chrome:
+
+- **capsule protocol** (`"capsule"`) — mode / file / branch / project / cursor-position state → `StatusBarState` + `CapsuleModel`.
+- **completions pipeline** (`"completions"`) — `getcompletion()`-derived cmdline completion lists → `CompletionModel`, bound by `CommandLine.qml`. (We run our own pipeline rather than `ext_popupmenu` so plugin popups don't draw at the default bottom-row cmdline position.)
+- **whichkey protocol** (`"whichkey"`) — a trie built from `nvim_get_keymap` + presets → `WhichKeyState` + `WhichKeyModel`, rendered by `WhichKeyOverlay.qml`.
+
+Python routes each channel to the matching QML-bound model. This keeps the editor core untouched: only the chrome's *presentation* moves to native QML, while nvim itself remains the authority for buffers, motions, and text rendering.
 
 ## Communication topology
 
 ```
  [Python backend]
-    ├─ spawns  → [nvim --embed]            (msgpack-RPC over stdio, via pynvim)
-    ├─ spawns  → [node sidecar/dist/index.js]  (JSONL on stdin/stdout via session_host.py;
+    ├─ QML spawns → [nvim --listen]        (TUI inside the editor QMLTermWidget; draws its own grid)
+    │                                       ↑ pynvim RPC-only client attaches here (control + chrome relays)
+    ├─ QML spawns → [$SHELL]               (shell QMLTermWidget pane)
+    ├─ spawns   → [node sidecar/dist/index.js]  (JSONL on stdin/stdout via session_host.py;
     │                                            sidecar drives @anthropic-ai/claude-agent-sdk)
-    ├─ hosts   → orchestrator bridge       (reads capsule state via nvim RPC)
-    └─ exposes → QML signals / props       (backend ↔ UI data binding)
+    ├─ hosts    → orchestrator bridge      (reads capsule state via nvim RPC)
+    └─ exposes  → QML signals / props      (backend ↔ UI data binding)
 
  [QML frontend]
     ├─ StatusBar.qml
-    ├─ NvimView                        (renders nvim grid events; QQuickPaintedItem)
+    ├─ QMLTermWidget (editor)          (nvim TUI; Konsole VT engine renders the grid)
+    ├─ QMLTermWidget (shell)           (interactive $SHELL pane)
     ├─ FileManager/                    (imported from Symmetria File Manager — Phase 1, deferred)
     ├─ AgentPane.qml                   (flat event list + inline permission card)
     └─ BrowserPane.qml                 (wraps QtWebEngineView — Phase 4)
@@ -117,7 +123,7 @@ AgentPane.qml (flat ListView with typed-property delegate; permission card varia
         → SessionHost.send_permission_response (sidecar resolves canUseTool promise)
         → SessionModel.resolve_permission       (row flips to approved/denied; scoped dataChanged)
 
-Main.qml: ColumnLayout { RowLayout { NvimView(60%), AgentPane(40%) }, StatusBar }
+Main.qml: editor/shell QMLTermWidget + AgentPane share mainContent (one central surface visible at a time, driven by controller.centralSurface), with StatusBar below
 ```
 
 **Critical invariants that carried over from Phase 0:**

@@ -18,7 +18,6 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 
 - [Framework pivot REVERSED (2026-06-07)](project/active/framework_pivot.md) — Tauri pivot abandoned; staying native QML to reuse FM's Symmetria.FileManager.UI module. Plan QML, not web.
 - [Phase 2 current state (2026-04-25)](project/active/phase2_current_state.md) — Node SDK sidecar pivot landed, permission UI shipped; deferred: persistence, stop, turn grouping
-- [Post-TIOCSCTTY fzf lag — RESOLVED (2026-05-19)](project/active/post_tiocsctty_lag_investigation.md) — pyte DSR/DA1 reply via `_AnswerbackHistoryScreen`; fzf Ctrl+E now ~100ms
 
 ## Project — shipped — `project/shipped/` (past-tense systems; one consolidated bullet)
 
@@ -28,7 +27,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 
 - [Notification system is Symmetria Shell, not swaync](reference/host/notification_system.md) — do not invoke swaync-client or makoctl
 
-## Reference — nvim-rpc — `reference/nvim-rpc/` (NeoVim --embed, pynvim, msgpack-RPC)
+## Reference — nvim-rpc — `reference/nvim-rpc/` (NeoVim `--listen` socket, pynvim RPC-only, msgpack)
 
 - [Lazy-plugin keymap hijack pattern](reference/nvim-rpc/lazy_keymap_hijack_pattern.md) — User LazyLoad autocmd is the race-winning install point for `keys = {...}` lazy-loaded plugins
 

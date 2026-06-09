@@ -1,12 +1,14 @@
 # PRD — Editor minimap
 
 > **Status: Phase 0 shipped (2026-05-31).** Phase 0 surface skeleton landed in commit 142384c — empty `MinimapView` painted, QML slot + scroll wiring in place. Phase 1 (full-buffer content channel) is the next phase. This document is the planning anchor — written so a future session, including one running on a freshly-compacted context, can pick up at any phase without re-deriving prior decisions.
+>
+> **⚠ qmltermwidget migration (2026-06-08) — editor substrate changed.** This PRD was written against the deleted custom NeoVim grid renderer (`nvim_view.py`). Its references to `nvim_view.py` patterns (the scroll spring, the `_rgb_to_qcolor` memoization, specific line numbers) and to **gotcha #11** (smooth-scroll geometry, now retired) describe code that no longer exists. The editor is now a forked `QMLTermWidget` that renders itself, so the minimap must source buffer content from the Lua `minimap` rpcnotify channel (`runtime/lua/orchestrator/minimap.lua`) and its scroll position from the `QMLTermWidget` — that reconnection is the "pending viewport reconnection" noted in CLAUDE.md's source layout. Recover any referenced paint/spring patterns from git history (pre-migration commits). The phased plan and visual design below remain valid; only the editor-substrate plumbing changed.
 
 A phased plan for adding a VS Code / Zed-style minimap to the embedded NeoVim editor surface — a narrow right-side column that shows a zoomed-out view of the entire buffer (not just the visible viewport), with a viewport-indicator rectangle the user can click/drag to scroll.
 
 **Read order for cold pickup:**
 1. This PRD (you are here).
-2. `CLAUDE.md` § "Source layout" + gotchas #10, #11, #22, #23.
+2. `CLAUDE.md` § "Source layout" + gotchas #10, #22, #23 (#11 is retired — see the migration banner above).
 3. The phase you are about to work on (skip the others on first pass).
 4. Background research links in §10 if you need to re-validate technical choices.
 

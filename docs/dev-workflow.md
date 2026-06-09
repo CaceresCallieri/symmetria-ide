@@ -17,7 +17,7 @@ The app supports a headless-ish test mode driven by env vars. It bypasses the co
 ```
 SYMMETRIA_IDE_SCREENSHOT=/tmp/out.png            # save PNG and exit
 SYMMETRIA_IDE_TEST_KEYS="iHello<Esc>:w<CR>"       # inject NeoVim-notation keystrokes before screenshot
-SYMMETRIA_IDE_AGENT_PROMPT="what is 2+2?"         # spawn claude -p with this prompt; agent pane populates
+SYMMETRIA_IDE_AGENT_PROMPT="what is 2+2?"         # spawn the Node SDK sidecar with this prompt; the agent pane populates
 SYMMETRIA_IDE_WARMUP_MS=1500                      # ms to wait after app launches before sending keys
 SYMMETRIA_IDE_SETTLE_MS=800                       # ms between key injection and screenshot
 PYTHONPATH=src python -m symmetria_ide
@@ -75,7 +75,7 @@ Add to `~/.hyprdots/.config/hypr/` for persistence across sessions.
 PYTHONPATH=src python -m pytest tests/ -v
 ```
 
-125 unit tests cover the pure-Python `Grid`, Qt-key translator, scroll/cursor springs, model classes (CmdlineState/CompletionModel/PopupmenuModel/WhichKeyState/WhichKeyModel), and NvimBackend shutdown paths. No Qt display needed.
+The unit tests cover the model classes (CmdlineState/CompletionModel/WhichKeyState/WhichKeyModel/SessionModel/minimap), the AppController pool + central-surface + cwd-sync paths, the anchor + git controllers, the JSONL sidecar transport + session-host parser/permission paths, the `display_rows_between` scroll-unit converter, and NvimBackend shutdown. No Qt display needed.
 
 ## Pre-commit hooks
 
@@ -110,10 +110,10 @@ Change to `log.info` and run with default logging. Don't commit that — it's ch
 
 ## Profiling suspicion
 
-`NvimView.paint()` is the hot path — coalesces runs of same-highlight cells before calling `fillRect` + `drawText`. If redraws feel laggy, check:
-1. Are we coalescing? Look at `cell.hl_id` comparisons in the `while c < grid.cols:` loop.
-2. Is Qt text antialiasing thrashing? `TextAntialiasing` is currently on.
-3. Is the font falling back? Preferred list is `Iosevka, JetBrains Mono, Fira Code, Cascadia Code, Source Code Pro, Hack, DejaVu Sans Mono`. Fallback is `QFontDatabase.systemFont(FixedFont)`.
+The editor + shell are forked `QMLTermWidget` panes, so nvim's grid is rendered in C++ by Konsole's VT engine — there is no Python paint hot path to profile (the old `NvimView.paint()` custom grid renderer was deleted in the qmltermwidget migration). If the editor feels laggy, the suspects are:
+1. The terminal transparency invariants — `useFBORendering: false` keeps rendering on the C++ image path; flipping it to the FBO path drops alpha but is no faster here.
+2. Font fallback — `editor_font.py`'s `default_font()` builds the per-glyph Nerd-Font + emoji cascade once; a missing primary family forces a slower system fallback.
+3. The chrome relays — heavy `vim.rpcnotify` traffic (e.g. capsules firing on every `CursorMoved`) crossing the `--listen` channel can show up as input latency rather than render lag.
 
 ## Shutdown hygiene (known nit)
 
@@ -121,6 +121,6 @@ When the app exits, nvim sometimes shows `process_exited return_code = -9` in st
 
 ## QML notes
 
-- `@QmlElement` registration lives in `app.py` and `nvim_view.py`. `QML_IMPORT_NAME = "Symmetria.Ide"`, `QML_IMPORT_MAJOR_VERSION = 1`.
+- `@QmlElement` registration lives in `app.py`, `cmdline_models.py`, `whichkey_models.py`, `session_models.py`, and `minimap_view.py`. `QML_IMPORT_NAME = "Symmetria.Ide"`, `QML_IMPORT_MAJOR_VERSION = 1`.
 - QML files under `qml/` are loaded via `QUrl.fromLocalFile(str(_qml_dir() / "Main.qml"))`. Hot-reload would need `pyside6_live_coding`; not wired up yet.
-- Pyright warnings about `Import ".grid" could not be resolved` and `QAbstractItemModel override` signatures are PySide6 stub mismatches, not real issues. Runtime works.
+- Pyright warnings about relative imports not resolving and `QAbstractItemModel override` signatures are PySide6 stub mismatches, not real issues. Runtime works.

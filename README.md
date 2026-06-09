@@ -6,14 +6,14 @@ A custom IDE being grown around NeoVim and the Symmetria ecosystem. Part of a cl
 
 ## Status
 
-**Phase 0 (Spine) complete.** The spine runs: a PySide6 window embedding NeoVim (`--embed`, msgpack-RPC), the grid rendered by a `QQuickPaintedItem`, and a native QML status bar wired to an `orchestrator.nvim`-style capsule stream.
+**Phase 0 (Spine) complete.** The spine runs: a PySide6 window in which NeoVim runs as a TUI inside a forked `QMLTermWidget` (drawing its own grid), with an RPC-only `pynvim` client on nvim's `--listen` socket feeding the native QML chrome (status bar / which-key / cmdline) wired to an `orchestrator.nvim`-style capsule stream. No custom grid painter.
 
 ```
 $ sudo pacman -S --needed pyside6 python-pynvim
 $ PYTHONPATH=src python -m symmetria_ide
 ```
 
-Phase 1 (File Manager integration) is deferred; Phase 2 (Claude Code agent pane) is currently the active phase.
+Phase 1 (File Manager integration) is deferred. Phase 2 (Claude Code agent pane) is parked — the infrastructure is live but there's no in-IDE activation chord yet. Phase 2.5 (terminal pane + project anchor) has shipped.
 
 ## Concept
 
@@ -21,7 +21,7 @@ The terminal is functional but visually and interactively limited. This project 
 
 Goals:
 
-- Embed NeoVim as the editor core (via `--embed` + msgpack-RPC).
+- Embed NeoVim as a TUI inside a QMLTermWidget; drive chrome over a pynvim RPC seam on the `--listen` socket.
 - Host a native frontend for coding agents (starting with Claude Code).
 - Integrate the Symmetria File Manager.
 - Render images and HTML diagrams inline — things the terminal cannot show.
@@ -35,7 +35,7 @@ See `docs/` for the full design:
 - `docs/identity.md` — naming and design principles
 - `docs/architecture.md` — embedding and extraction model (updated with realized Phase 0)
 - `docs/tech-stack.md` — framework decision (PySide6 now, gpui later)
-- `docs/phases.md` — the phased build plan (Phase 0 done, Phase 1 deferred, Phase 2 next)
+- `docs/phases.md` — the phased build plan (Phase 0 done, Phase 1 deferred, Phase 2 parked, Phase 2.5 shipped)
 - `docs/dev-workflow.md` — concrete commands: running, headless testing, workspace rules
 - `docs/references.md` — projects that inform this one
 - `docs/future.md` — years-out direction

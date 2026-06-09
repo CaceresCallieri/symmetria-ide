@@ -7,7 +7,7 @@ Symmetria IDE is a custom IDE wrapper around NeoVim built on PySide6 + QML. The 
 Before writing code, read these. They override any habits you bring from other projects:
 
 - **`.claude/project-standards.md`** — the authoritative style + quality ruleset consumed by the `/tech-debt` and `/code-review` skills. P0 rules are mandatory; P1 are strongly encouraged; P2 are recommended.
-- **`CLAUDE.md`** — architectural context + 19 numbered gotchas burned in by past incidents. When project-standards.md cites `gotcha #N`, it means that entry. Do not "fix" gotcha-annotated code without understanding the incident it encodes — past agents have, and re-broken it each time.
+- **`CLAUDE.md`** — architectural context + 25 numbered gotchas burned in by past incidents. When project-standards.md cites `gotcha #N`, it means that entry. Do not "fix" gotcha-annotated code without understanding the incident it encodes — past agents have, and re-broken it each time.
 - **`docs/dev-workflow.md`** — env vars for headless smoke testing, Hyprland workspace-6 rule, notification-system quirks.
 
 ## Dev setup
@@ -76,7 +76,7 @@ The sidecar gates (`npm run typecheck` + `npm run build`) are mandatory whenever
 - [ ] `pyside6-qmllint qml/*.qml` clean (no `unqualified` or `required` warnings)
 - [ ] `selene` clean on any `runtime/**.lua` change
 - [ ] Tests pass under `QT_QPA_PLATFORM=offscreen`
-- [ ] If touching the render hot path (`nvim_view.py::paint`), verify zero new shiboken wrappers allocated per frame (gotcha #10)
+- [ ] If touching the render hot path (`minimap_view.py::paint` — the surviving `QQuickPaintedItem`, currently gated off in Main.qml), verify zero new shiboken wrappers allocated per frame (gotcha #10)
 - [ ] If touching `runtime/lua/orchestrator/whichkey/**`, verify against gotchas #15–#19
 - [ ] CLAUDE.md updated if the change encodes a new invariant future agents would otherwise re-break
 
