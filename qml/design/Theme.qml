@@ -11,7 +11,7 @@
 //
 // Font cascade note: `family` binds to the `editorFontFamily` context
 // property exposed from Python (`app.py::_build_engine`). Python runs
-// the actual `QFontDatabase` cascade via `NvimView._default_font()` and
+// the actual `QFontDatabase` cascade via `editor_font.default_font()` and
 // exposes the primary resolved family as a single QString — QML's
 // `font.family` is single-valued, and `font.families` (plural) is not
 // on the QML font value type in Qt 6.11 (see CLAUDE.md gotcha #23).
@@ -299,7 +299,7 @@ QtObject {
         // than the editor's ambient tint so the minimap reads as a
         // distinct right-edge ribbon without needing a hairline border.
         // The terminal/editor panes use ~60% black ambient over the
-        // wallpaper-blend (see terminal_view.py::_ambient_tint_color);
+        // wallpaper-blend (the qmltermwidget Symmetria scheme's 0.6 opacity);
         // the minimap adds an additional ~20% black overlay so it sits
         // perceptibly darker than the editor while staying in the same
         // wallpaper-blend family — no hard edge between the two surfaces.
@@ -458,10 +458,9 @@ QtObject {
 
         readonly property QtObject terminal: QtObject {
             // Background: transparent so the wallpaper ambient tint
-            // shows through, mirroring NvimView's wallpaper-blend
-            // treatment. The terminal pane sits as a sibling to
-            // NvimView in `Main.qml::mainContent`, sharing the same
-            // visual surface contract.
+            // shows through. The editor + shell QMLTermWidget panes sit
+            // as siblings in `Main.qml::mainContent`, sharing the same
+            // transparent wallpaper-blend surface contract.
             readonly property color background: "transparent"
             readonly property color foreground: theme.color.text.normal
 

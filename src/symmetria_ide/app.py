@@ -1451,7 +1451,7 @@ class AppController(QObject):
 
     @Slot()
     def focus_editor(self) -> None:
-        """Ask QML to move active focus into the NvimView.
+        """Ask QML to move active focus into the editor pane.
 
         Mirror of `focus_tree`. Called from:
         (a) `_on_nav_event` when nvim spillover targets the editor
@@ -1539,7 +1539,7 @@ class AppController(QObject):
 
     @Slot()
     def focus_terminal(self) -> None:
-        """Ask QML to move active focus into the TerminalView.
+        """Ask QML to move active focus into the terminal pane.
 
         Symmetric counterpart of `focus_editor` / `focus_tree`. Emits
         the signal rather than touching QML focus directly — Main.qml's

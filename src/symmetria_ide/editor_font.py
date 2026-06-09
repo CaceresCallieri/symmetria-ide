@@ -1,11 +1,12 @@
 """Shared editor font resolution.
 
 A single resolved `QFont` with a Nerd-Font / emoji per-glyph fallback
-cascade, used by every cell-grid surface (`TerminalView`) and exposed to
-QML as the `editorFontFamily` context property so the chrome overlays
-track the same primary family. Lives in its own module (rather than on a
-view class) so it has no rendering dependencies — the historical home,
-`NvimView._default_font`, went away with the custom grid renderer.
+cascade, exposed to QML as the `editorFontFamily` / `editorFontPointSize`
+context properties so the QMLTermWidget editor + shell panes and the
+chrome overlays all track the same primary family. Lives in its own module
+(rather than on a view class) so it has no rendering dependencies — the
+historical home, `NvimView._default_font`, went away with the custom grid
+renderer.
 
 `default_font()` is `functools.cache`d: the family probe + fallback
 assembly run once per process. Requires a live `QGuiApplication`

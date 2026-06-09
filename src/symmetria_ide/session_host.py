@@ -1,7 +1,7 @@
 """Agent session host: spawn the Node SDK sidecar, pump events.
 
-Mirrors the structure of `nvim_backend.py` post-`nvim_events`
-extraction. A daemon worker thread reads the subprocess's stdout
+Mirrors the structure of `nvim_backend.py`. A daemon worker thread
+reads the subprocess's stdout
 line-by-line, parses each JSONL event, and emits
 `event_received(dict)` onto the GUI thread through Qt's auto-queued
 cross-thread delivery. A second daemon reads stderr and emits
@@ -49,13 +49,13 @@ synthesized envelopes:
 **Thread discipline (project-standards §1 P0 + §4 P0).**
 
 - Daemon workers + explicit `threading.Event` for cooperative shutdown
-  (Standards §1 P0). `NvimBackend` adopted this exact pattern after
-  the `nvim_events` refactor; `SessionHost` follows suit.
+  (Standards §1 P0). `NvimBackend` uses this exact pattern; `SessionHost`
+  follows suit.
 - GC is suspended around signal emission in `_run_stdout_loop`
   (gotcha #10). Any Python 3.14 allocation on this worker thread can
-  race with `QSGRenderThread` during `NvimView.paint()` if it trips
-  the cyclic collector; disabling GC inside the tight hot iteration
-  closes that window without affecting long-lived state.
+  race with `QSGRenderThread` during a paint hot path (e.g. MinimapView)
+  if it trips the cyclic collector; disabling GC inside the tight hot
+  iteration closes that window without affecting long-lived state.
 - `subprocess.stdin.write` is serialised behind `_stdin_lock` —
   CPython's GIL effectively serialises same-handle writes, but the
   lock documents the contract explicitly and protects against the

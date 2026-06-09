@@ -15,12 +15,13 @@ reintroducing gotcha #10 hazards:
 - gotcha #10 — paint() allocates no fresh QColor / QRectF wrappers.
   Background + indent palette are memoized at module load
   (`_background_color`, `_indent_colors`); the paint rect is a single
-  pooled QRectF mutated via `setRect()` once per buffer line. Same
-  shape as `terminal_view.py` so the discipline is uniform across
-  the IDE's `QQuickPaintedItem` subclasses.
+  pooled QRectF mutated via `setRect()` once per buffer line. This is
+  the only `QQuickPaintedItem` left in the IDE (the grid + pyte terminal
+  renderers were deleted); the discipline is mandated by project-standards
+  §5 for any paint hot path.
 
 - gotcha #23 — no font work in Phase 2; Phase 5 (glyph sprite atlas)
-  will reuse `NvimView._default_font()` as the high-res source raster
+  will reuse `editor_font.default_font()` as the high-res source raster
   so cell metrics line up exactly across the editor and minimap panes.
 
 Theme drift: `_BACKGROUND_RGBA` mirrors `Theme.color.minimap.background`
@@ -29,15 +30,17 @@ in `qml/design/Theme.qml`, and `_INDENT_RGBA` mirrors
 is piped through Python via a context property (a v2 refactor — would
 mean an extra constructor arg or a setter slot), drift is detected by
 `tests/test_minimap_view.py::test_background_matches_theme_qml` and
-`test_indent_palette_matches_theme_qml`, same dual-source-of-truth
-pattern `_ANSI_PALETTE` uses in `terminal_view.py`.
+`test_indent_palette_matches_theme_qml` — the same dual-source-of-truth
+shape the terminal palette uses (Theme.qml mirrored by the qmltermwidget
+fork's `Symmetria.colorscheme`).
 
 QML registration: the `@QmlElement` decorator + the module-level
 `QML_IMPORT_NAME` / `QML_IMPORT_MAJOR_VERSION` constants are what make
 the QML side resolve `MinimapView { … }`. Without the decorator the
 side-effect import in `app.py` would succeed but `Main.qml` would
 raise "MinimapView is not a type" at engine load. Same registration
-contract as `NvimView` and `TerminalView`.
+contract as the other `@QmlElement` models (CmdlineState, WhichKeyModel,
+etc.) registered via side-effect import in `app.py`.
 """
 
 from __future__ import annotations
@@ -71,9 +74,8 @@ QML_IMPORT_MAJOR_VERSION = 1
 _BACKGROUND_RGBA: tuple[int, int, int, int] = (0x00, 0x00, 0x00, 0x33)
 
 # Memoized QColor — constructed once at module load so the paint loop
-# never instantiates a fresh shiboken wrapper (gotcha #10). The same
-# rationale that drives `_qcolor_cache` in `terminal_view.py` and
-# `_rgb_to_qcolor` in `nvim_view.py`.
+# never instantiates a fresh shiboken wrapper (gotcha #10, the cache-every-
+# wrapper rule project-standards §5 mandates for any paint hot path).
 _background_color: QColor = QColor(*_BACKGROUND_RGBA)
 
 
@@ -250,10 +252,9 @@ class MinimapView(QQuickPaintedItem):
     modelChanged = Signal()
 
     def __init__(self, parent=None) -> None:  # noqa: ANN001
-        # Untyped parent matches the NvimView/TerminalView constructors —
-        # PySide6 stubs are stricter (QQuickItem|None) than the runtime,
-        # which accepts any QObject. Keeping untyped sidesteps the stub
-        # mismatch without breaking Qt's metaobject system (gotcha #7).
+        # Untyped parent: PySide6 stubs are stricter (QQuickItem|None) than the
+        # runtime, which accepts any QObject. Keeping it untyped sidesteps the
+        # stub mismatch without breaking Qt's metaobject system (gotcha #7).
         super().__init__(parent)
 
         # No mouse handling in Phase 2. Phase 3 wires the click +
@@ -264,8 +265,8 @@ class MinimapView(QQuickPaintedItem):
 
         # Transparent backing-store fill — the background colour is
         # painted explicitly inside `paint()` so its alpha composites
-        # cleanly over the wallpaper-blend underneath. Same contract
-        # NvimView and TerminalView use.
+        # cleanly over the wallpaper-blend underneath. Same transparent-fill
+        # contract the QMLTermWidget terminal panes use.
         self.setFillColor(QColor(0, 0, 0, 0))
 
         # Item flags. The minimap is a visualisation, NOT a focus
@@ -273,9 +274,8 @@ class MinimapView(QQuickPaintedItem):
         #   - ItemHasContents = True (QML calls paint())
         #   - ItemIsFocusScope deliberately NOT set
         #   - setActiveFocusOnTab(False) so Tab cycling skips the pane
-        # Mirrors the focus discipline TerminalView uses (which sets
-        # ItemIsFocusScope because the terminal IS a focus target) —
-        # the inversion here is intentional.
+        # The terminal panes ARE focus targets (they grab keyboard focus);
+        # the minimap deliberately inverts that — it must never accept focus.
         self.setFlag(QQuickPaintedItem.Flag.ItemHasContents, True)
         self.setActiveFocusOnTab(False)
 
@@ -286,16 +286,16 @@ class MinimapView(QQuickPaintedItem):
         # entries; if Phase 3+ needs concurrent rect bookkeeping
         # (e.g. for the viewport overlay drawn on top of blocks),
         # add a second pool entry rather than re-using this one
-        # mid-paint — same hygiene as TerminalView's _run_rect /
-        # _clip_rect / _cursor_rect separation.
+        # mid-paint — the pooled-wrapper hygiene project-standards §5
+        # mandates for any paint hot path (gotcha #10).
         self._paint_rect = QRectF()
 
         # Backing fields for the QML-visible properties.
         self._scroll_position = 0.0
         self._buffer_row_count = 0
-        # MinimapModel reference — wired via QML setter pattern
-        # matching `NvimView.backend` / `TerminalView.backend`. None
-        # is a legitimate state at construction time (before QML
+        # MinimapModel reference — wired via the QML setter pattern
+        # (`model: minimapModel` in Main.qml). None is a legitimate
+        # state at construction time (before QML
         # assigns `model: minimapModel`). paint() bails out cleanly
         # on None, falling through to the Phase 0 background-only
         # render path.
@@ -304,10 +304,9 @@ class MinimapView(QQuickPaintedItem):
     # --- QML-visible properties ----------------------------------------
     #
     # Named-function Property form (not the @Property decorator) for
-    # read/write properties — same rationale as NvimView.backend:
-    # the @Property + @setter pair trips pyright's reportRedeclaration,
-    # while the named form reads as a class attribute that pyright
-    # handles cleanly.
+    # read/write properties: the @Property + @setter pair trips pyright's
+    # reportRedeclaration, while the named form reads as a class attribute
+    # that pyright handles cleanly.
 
     def _get_scroll_position(self) -> float:
         return self._scroll_position
@@ -322,7 +321,7 @@ class MinimapView(QQuickPaintedItem):
         # self.update(). The emit is still required so QML bindings on
         # the Main.qml wrapper side actually fire — without the notify
         # signal, QML's binding system caches the initial read and
-        # ignores subsequent writes from the NvimView side (cf.
+        # ignores subsequent writes from the Python side (cf.
         # CLAUDE.md gotcha #3 — function-call bindings don't
         # re-evaluate).
         self.scrollPositionChanged.emit()
@@ -361,8 +360,7 @@ class MinimapView(QQuickPaintedItem):
     # in Main.qml. The setter manages signal lifecycle: disconnects
     # from the prior model's linesChanged (if any), stores the new
     # model, and wires its linesChanged → self.update() so content
-    # mutations repaint immediately. Mirrors the NvimView.backend
-    # setter shape so future readers find a familiar pattern.
+    # mutations repaint immediately.
 
     def _get_model(self) -> MinimapModel | None:
         return self._model
@@ -372,7 +370,7 @@ class MinimapView(QQuickPaintedItem):
             return
         if self._model is not None:
             # Tolerate already-disconnected (model handover during
-            # teardown) — same defensive disconnect TerminalView uses.
+            # teardown) — a defensive disconnect guarded by try/except.
             try:
                 self._model.linesChanged.disconnect(self._on_lines_changed)
             except (RuntimeError, TypeError):
@@ -532,7 +530,7 @@ class MinimapView(QQuickPaintedItem):
         block_h = row_h - 1.0
         # Per-iteration locals lifted out of the loop. Even though
         # the loop body is shape-stable, hoisting attribute lookups
-        # is the same hot-path discipline NvimView's _paint_row uses.
+        # is standard paint hot-path discipline (project-standards §5).
         rect = self._paint_rect
         indent_level = self._model.indent_level
         content_length = self._model.content_length

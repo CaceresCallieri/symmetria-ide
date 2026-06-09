@@ -92,8 +92,8 @@ class NvimBackend(QObject):
 
     # rpcnotify channel name -> the Signal attribute that relays it. The
     # worker subscribes to every key and re-emits args[0] on the matching
-    # signal. This flat table REPLACES the embed model's redraw state
-    # machine (nvim_events.py) — with no ui_attach there are no grid/redraw
+    # signal. This flat table replaced the old embed model's redraw state
+    # machine (since-deleted) — with no ui_attach there are no grid/redraw
     # events to parse, only these notification channels.
     _CHANNEL_TO_SIGNAL: dict[str, str] = {
         "capsule": "capsule_updated",

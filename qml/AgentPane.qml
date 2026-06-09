@@ -1,8 +1,8 @@
 // Full-window agent surface — SDK sidecar event log + composer.
 //
 // Toggled on/off by `controller.agentVisible`. When visible, the
-// pane replaces the editor entirely (see Main.qml's `Item { NvimView
-// | AgentPane }` swap). Not a side panel — the user's stated
+// pane replaces the editor entirely (see Main.qml's `mainContent`
+// editor | terminal | AgentPane | FM swap). Not a side panel — the user's stated
 // direction is that the Claude workflow takes over the whole window
 // once entered, and the StatusBar below stays as a thin continuity
 // strip across both modes.
@@ -17,7 +17,7 @@
 //     mouse required; the user lands in the input ready to type).
 //   - Escape OR Ctrl+X in the composer (or pane chrome) calls
 //     `controller.hide_agent()` — Main.qml's `onVisibleChanged`
-//     handler then returns focus to the NvimView, where
+//     handler then returns focus to the editor, where
 //     `<leader>aN` can spawn a fresh agent slot in the pool.
 //     Both bindings exist because Escape is the cross-platform
 //     reflex while Ctrl+X is the user's preferred binding for the
@@ -756,8 +756,8 @@ Rectangle {
                     }
                 }
 
-                // Escape returns to the editor. Main.qml watches
-                // `NvimView.onVisibleChanged` to restore focus on the
+                // Escape returns to the editor. Main.qml watches the
+                // editor's `onVisibleChanged` to restore focus on the
                 // far side, so no additional focus handling needed here.
                 Keys.onEscapePressed: controller.hide_agent()
 

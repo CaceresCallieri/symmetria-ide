@@ -1,10 +1,10 @@
 // Native cmdline + wildmenu overlay.
 //
-// Floats above NvimView (parented to it in Main.qml) at ~20% from the
-// top, horizontally centered, width ~60% of viewport. Visibility is
-// driven entirely by cmdlineState.visible and completionModel.visible —
-// no mouse/focus interaction; keys always flow to the underlying
-// NvimView and NeoVim owns the cmdline state.
+// Floats above the editor terminal (parented to it in Main.qml) at ~20%
+// from the top, horizontally centered, width ~60% of viewport. Visibility
+// is driven entirely by cmdlineState.visible and completionModel.visible —
+// no mouse/focus interaction; keys always flow to the underlying editor
+// terminal and NeoVim owns the cmdline state.
 //
 // The autocomplete list uses ListView.isCurrentItem for selected-row
 // highlight (bound via `currentIndex: completionModel.selected`). Only

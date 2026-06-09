@@ -1,5 +1,6 @@
 // Application root window.
-// Hosts the NvimView filling most of the window. Two chrome strips
+// Hosts the editor (a QMLTermWidget running nvim) filling most of the
+// window. Two chrome strips
 // bracket the content area: AgentTopBar at the top (always-on agent
 // dock — pool topology visible in editor mode AND agent mode so the
 // user can see every running agent at all times) and StatusBar at
@@ -57,7 +58,7 @@ Window {
     // ---------------- IDE-wide application shortcuts ----------------
     //
     // Anchor toggle. `Qt.ApplicationShortcut` makes this fire regardless
-    // of which pane has focus — NvimView, FileTreeView, AgentPane, future
+    // of which pane has focus — editor, FileTreeView, AgentPane, future
     // terminal pane — all of them. Anchor is an IDE-level concern (not
     // a nvim or terminal concept), so a `<leader>`-style Lua keybind
     // would mis-locate it; an application-scope shortcut is the right
@@ -65,7 +66,7 @@ Window {
     //
     // Qt resolves application shortcuts in QApplication::notify BEFORE
     // the focused widget's keyPressEvent runs, so this wins over
-    // NvimView's keyboard capture — Ctrl+Shift+A does NOT leak to nvim
+    // the editor terminal's keyboard capture — Ctrl+Shift+A does NOT leak to nvim
     // even when the editor is focused and in insert mode. If a future
     // regression breaks that ordering, the symptom is "anchor seems to
     // be inserting characters in nvim"; the fix is upstream of this
@@ -118,7 +119,7 @@ Window {
     // chords above. Opens at the anchored project root (or cached cwd when
     // unanchored), the same path the file-tree and git panes use.
     //
-    // Trade-off: Qt.ApplicationShortcut intercepts before NvimView.keyPressEvent,
+    // Trade-off: Qt.ApplicationShortcut intercepts before the editor terminal's key handling,
     // so nvim's built-in `<C-e>` (scroll viewport down one line) is silently
     // consumed when the editor pane is focused. Same precedence as Ctrl+Shift+T
     // and Ctrl+Shift+E (see CLAUDE.md swap-chords entry). Accepted: FM-from-any-
@@ -306,7 +307,7 @@ Window {
 
         // Editor / agent view swap PLUS always-on file-tree sidebar.
         //
-        // Outer RowLayout: `mainContent` (the NvimView | AgentPane
+        // Outer RowLayout: `mainContent` (the editor | AgentPane
         // visibility-swap) takes fillWidth; a 1px separator + a
         // fixed-width FileTreeView pinned to the right give the user
         // persistent observability into the project layout. The
@@ -511,7 +512,7 @@ Window {
                 // Phase 0 editor minimap (docs/minimap-prd.md). Narrow
                 // ribbon anchored to mainContent's right edge, only
                 // visible when the editor is the active central surface
-                // — same visibility gate as NvimView, so the minimap and
+                // — same visibility gate as the editor, so the minimap and
                 // its host pane appear/disappear as one. Width comes from
                 // `Theme.size.minimapWidth` (Phase 0 default = 80 px).
                 //
@@ -564,13 +565,10 @@ Window {
                     // can read indent_level() / line_count() directly,
                     // without going through QML property marshalling.
                     // The setter wires linesChanged → update() so any
-                    // content mutation repaints the silhouette. Mirrors
-                    // the NvimView.backend / TerminalView.backend
-                    // injection pattern — keeps the chrome consistent
-                    // across panes.
+                    // content mutation repaints the silhouette.
                     model: minimapModel
                     // Above the central panes so the ribbon visibly sits
-                    // on top of NvimView's right edge; below
+                    // on top of the editor's right edge; below
                     // mainContentFocusBorder (z: 50) so the focus
                     // hairline still wraps the whole mainContent slot.
                     z: 10
@@ -1319,10 +1317,9 @@ Window {
             // NOTE: the Ctrl+H ApplicationShortcut at the Window root
             // calls `editor.forceActiveFocus()` directly and does NOT
             // fire this signal — keep in sync if adding new nav targets.
-            // NvimView itself IS a FocusScope (NvimView.qml manages its
-            // own focus), so a direct forceActiveFocus on `editor` lands
-            // correctly without the descendant-walker workaround needed
-            // for the tree direction.
+            // The editor QMLTermWidget accepts keyboard focus directly, so a
+            // direct forceActiveFocus on `editor` lands correctly without the
+            // descendant-walker workaround needed for the tree direction.
             function onFocusEditorRequested(): void {
                 editor.forceActiveFocus();
             }
@@ -1337,7 +1334,7 @@ Window {
             // NOTE: the Ctrl+H / Ctrl+L ApplicationShortcuts call
             // `terminalView.forceActiveFocus()` directly and do NOT
             // go through this signal.
-            // TerminalView is its own FocusScope, so a direct
+            // The terminal QMLTermWidget accepts focus directly, so a direct
             // forceActiveFocus works (no descendant-walker needed).
             function onFocusTerminalRequested(): void {
                 terminalView.forceActiveFocus();
