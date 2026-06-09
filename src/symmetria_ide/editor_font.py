@@ -21,11 +21,12 @@ import functools
 from PySide6.QtGui import QFont, QFontDatabase
 
 
-# Default cell point size. Matches the user's Ghostty config (font-size
-# 8.5) so the terminal panes read identically to the reference terminal;
-# font configuration is not yet user-exposed. Float — consumers must use
-# setPointSizeF, and the QML context prop is already exposed as a real.
-DEFAULT_FONT_POINT_SIZE = 8.5
+# Default cell point size. One point above the user's Ghostty config
+# (font-size 8.5) — explicitly requested 2026-06-09 after the sharpness
+# pass; font configuration is not yet user-exposed. Float — consumers
+# must use setPointSizeF, and the QML context prop is already exposed as
+# a real.
+DEFAULT_FONT_POINT_SIZE = 9.5
 
 
 @functools.cache
