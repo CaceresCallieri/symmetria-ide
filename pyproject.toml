@@ -12,20 +12,19 @@ authors = [
 dependencies = [
     "PySide6>=6.7",
     "pynvim>=0.5",
+    # msgpack is pynvim's RPC wire codec — we don't import it directly, but pin
+    # it so the msgpack-RPC transport version is reproducible.
     "msgpack>=1.0",
-    "pyte>=0.8.2",
 ]
+# NOTE: the terminal/editor panes require our FORK of qmltermwidget, a system
+# Qt6 QML module (a C++ .so), NOT a pip package — so it cannot live in
+# `dependencies`. Build it from /home/jc/projects/symmetria-qmltermwidget
+# (`qmake6 && make`); the IDE adds it to the QML import path. See CLAUDE.md
+# "The terminal panes" + that repo's MODIFICATIONS.md. (`pyte` was removed
+# here when the pyte-based terminal stack was deleted in the migration.)
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-# pyte is here for the Phase 2.5 native PTY terminal pane
-# (`src/symmetria_ide/terminal_backend.py` — pyte's HistoryScreen +
-# ByteStream drive the cell-grid that TerminalView paints). Phase 2
-# originally planned a pty + pyte bridge for the AGENT pane, but that
-# pivoted to `claude -p` and later to the Node SDK sidecar — neither
-# uses pyte. Phase 2.5 reintroduces pyte for the surface where it
-# always belonged (the terminal). See `docs/phases.md` Phase 2.5 and
-# `.claude/memory/project/active/phase25_current_state.md`.
 
 [project.scripts]
 symmetria-ide = "symmetria_ide.__main__:main"
@@ -37,15 +36,18 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# NB: the IDE currently runs from source (the launcher injects PYTHONPATH=src),
+# so these globs are hygiene for a future real install rather than load-bearing
+# today. They mirror what's actually under qml/ and runtime/ post-migration:
+# the design-token singleton (qml/design/) and the full Lua orchestrator tree
+# (runtime/lua/**). The old runtime/symmetria-shell/ OSC 7 scripts were deleted
+# in the qmltermwidget migration.
 [tool.setuptools.package-data]
 symmetria_ide = [
     "qml/*.qml",
+    "qml/design/*",
     "runtime/*.lua",
-    # Phase 2.5 deliverable 3 — shell-init scripts for OSC 7 cwd
-    # auto-injection. `.zshenv` / `.zshrc` are dotfiles, so the glob
-    # must use `.*` to include them; the bash init is a regular file.
-    "runtime/symmetria-shell/zsh/.*",
-    "runtime/symmetria-shell/bash/*",
+    "runtime/**/*.lua",
 ]
 
 [tool.pytest.ini_options]

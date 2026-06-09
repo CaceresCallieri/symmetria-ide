@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+import argparse
 import gc
 import logging
 import os
@@ -2393,6 +2394,46 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     return engine
 
 
+def _apply_project_arg(argv: list[str]) -> list[str]:
+    """Resolve an optional project-directory argument and `chdir` into it.
+
+    `symmetria-ide [PATH]` opens the IDE on PATH (like `code <dir>`); with no
+    arg it stays in the launch cwd (the documented default — Hyprland hands us
+    `$HOME`, a terminal hands us wherever you ran it). We `os.chdir` rather than
+    threading the path through AppController because EVERYTHING downstream
+    derives the project root from the process cwd: `AppController._cwd` reads
+    `os.getcwd()`, `controller.displayedRoot` flows from that, and the
+    QMLTermSessions launch nvim + the shell with
+    `initialWorkingDirectory: controller.displayedRoot`. One chdir, and the
+    editor, shell, file tree, and git pane all open on the right project.
+
+    Uses `parse_known_args` so any Qt flags (e.g. `-platform`) pass straight
+    through to QGuiApplication; returns the argv with the project path removed
+    (program name preserved) for the caller to hand to QGuiApplication. An
+    invalid / non-directory path logs a warning and falls back to the cwd
+    rather than aborting launch.
+    """
+    parser = argparse.ArgumentParser(
+        prog="symmetria-ide",
+        description="Symmetria IDE — NeoVim-based editor in the Symmetria ecosystem.",
+        add_help=True,
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        help="Project directory to open (defaults to the current directory).",
+    )
+    ns, qt_rest = parser.parse_known_args(argv[1:])
+    if ns.path:
+        target = os.path.abspath(os.path.expanduser(ns.path))
+        if os.path.isdir(target):
+            os.chdir(target)
+            log.info("opening project: %s", target)
+        else:
+            log.warning("project path %r is not a directory — using cwd", ns.path)
+    return [argv[0], *qt_rest]
+
+
 def run() -> int:
     trace("run_entered")
     configure_logging()
@@ -2412,7 +2453,10 @@ def run() -> int:
     fmt.setAlphaBufferSize(8)
     QSurfaceFormat.setDefaultFormat(fmt)
 
-    app = QGuiApplication(sys.argv)
+    # Resolve `symmetria-ide [PATH]` and chdir before QGuiApplication +
+    # AppController (which reads os.getcwd() in __init__). The path is stripped
+    # from the argv Qt sees; Qt flags pass through.
+    app = QGuiApplication(_apply_project_arg(sys.argv))
     app.setApplicationName("Symmetria IDE")
     app.setOrganizationName("Symmetria")
     # Sets the Wayland xdg-shell `app_id` — Hyprland sees this as the
