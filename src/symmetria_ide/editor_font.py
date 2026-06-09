@@ -69,15 +69,17 @@ def default_font() -> QFont:
             font = QFont(name)
             font.setPointSizeF(DEFAULT_FONT_POINT_SIZE)
             font.setStyleHint(QFont.StyleHint.Monospace)
-            # NoHinting, deliberately: this display runs at fractional scale
-            # (Hyprland 1.6), where terminal cells sit on integer LOGICAL px
-            # but glyphs rasterize on the 1.6× device grid — every column
-            # lands at a different sub-pixel phase. Hinted stems snap to a
-            # grid the glyphs don't sit on → uneven per-column rendering.
-            # Unhinted = uniform subpixel-positioned AA. Main.qml mirrors
-            # this via `font.hintingPreference` on the terminal panes (the
-            # family/pointSize context props don't carry it).
-            font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+            # VERTICAL hinting, deliberately (A/B-tested at device res,
+            # 2026-06-09): full hinting also snaps horizontal advances,
+            # which fights the fractional display scale (Hyprland 1.6) and
+            # rendered unevenly per column; no hinting was uniformly soft.
+            # Vertical-only snaps stems/baselines (crisp) while horizontal
+            # advances stay linear, so the qmltermwidget fork's
+            # letter-spacing cell snap stays exact. Main.qml mirrors this
+            # via `font.hintingPreference` on the terminal panes (the
+            # family/pointSize context props don't carry it) — keep both
+            # sites in sync.
+            font.setHintingPreference(QFont.HintingPreference.PreferVerticalHinting)
             if fallbacks:
                 font.setFamilies([name, *fallbacks])
             return font

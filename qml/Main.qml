@@ -367,15 +367,22 @@ Window {
                     // Same font the IDE chrome overlays bind to (editor_font.py).
                     font.family: editorFontFamily
                     font.pointSize: editorFontPointSize
-                    // Unhinted, deliberately: at fractional display scale
-                    // (Hyprland 1.6) cells sit on integer logical px while
-                    // glyphs rasterize on the 1.6× device grid, so hinted
-                    // stems snap to a grid the glyphs don't sit on → uneven
-                    // per-column rendering. Must be set HERE: the QML font
-                    // value is built fresh from the family/pointSize context
-                    // props, so editor_font.py's QFont preference does not
-                    // carry through. See editor_font.py for the full story.
-                    font.hintingPreference: Font.PreferNoHinting
+                    // VERTICAL hinting, deliberately — chosen by an A/B
+                    // device-res screenshot comparison (2026-06-09):
+                    //   - FULL hinting also snaps HORIZONTAL advances, which
+                    //     fights the fractional display scale (Hyprland 1.6)
+                    //     → uneven per-column rendering (the original bug).
+                    //   - NO hinting renders evenly but visibly soft.
+                    //   - VERTICAL hinting snaps stems/baselines to the
+                    //     pixel grid (crisp) while leaving horizontal
+                    //     advances linear, so the fork's letter-spacing
+                    //     cell snap (TerminalDisplay::fontChange) stays
+                    //     exact and the cursor cannot drift off the text.
+                    // Must be set HERE: the QML font value is built fresh
+                    // from the family/pointSize context props, so
+                    // editor_font.py's QFont preference does not carry
+                    // through. Keep both sites in sync.
+                    font.hintingPreference: Font.PreferVerticalHinting
 
                     session: QMLTermSession {
                         id: editorSession
@@ -460,7 +467,7 @@ Window {
                     margin: Theme.size.terminalPadding
                     font.family: editorFontFamily
                     font.pointSize: editorFontPointSize
-                    font.hintingPreference: Font.PreferNoHinting
+                    font.hintingPreference: Font.PreferVerticalHinting
 
                     session: QMLTermSession {
                         id: shellSession
