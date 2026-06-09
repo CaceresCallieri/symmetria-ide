@@ -63,7 +63,7 @@ hyprctl keyword windowrulev2 "workspace 6 silent,class:^(symmetria-ide)$"
 hyprctl keyword windowrulev2 "float,class:^(symmetria-ide)$"
 ```
 
-Add to `~/.hyprdots/.config/hypr/` for persistence across sessions.
+Add to `~/.dotfiles/.config/hypr/` for persistence across sessions (symlinked to `~/.config/hypr/`; `~/.hyprdots` is no longer stowed — see global CLAUDE.md dotfiles section).
 
 ## Notification system
 

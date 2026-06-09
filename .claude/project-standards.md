@@ -417,4 +417,4 @@ When working near any non-zero row, consider addressing the instance. Do not reg
 - https://ilmanzo.github.io/post/testing_pyside_gui_applications/ — offscreen platform plugin for headless CI.
 
 ### This project
-- `CLAUDE.md` gotchas #1–#19 — the concrete incidents that motivate most P0 rules here.
+- `CLAUDE.md` gotchas #1–#25 (with #11–#14 retired as a deliberate numbered gap) — the concrete incidents that motivate most P0 rules here.

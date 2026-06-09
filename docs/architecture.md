@@ -75,12 +75,12 @@ The editor core (NeoVim buffer and window) stays untouched for years. Only the *
 | fff.nvim (fuzzy)         | Native finder (likely folds into File Manager)  | Later      |
 | Editor buffer itself     | Eventually — possibly gpui-based                | Far future |
 
-**The extraction mechanism is Lua `rpcnotify`, NOT NeoVim's `ui-ext`.** nvim runs as a TUI and draws its own grid inside the editor QMLTermWidget — Python never calls `ui_attach`, so `ext_cmdline` / `ext_messages` / `ext_popupmenu` / `ext_tabline` are not in play. Instead, Lua code in `runtime/init.lua` (and the `runtime/lua/orchestrator/` modules) observes nvim's state via autocmds and pushes structured payloads to Python over the `--listen` RPC channel with `vim.rpcnotify(0, "<channel>", {...})`. Three such channels feed the native chrome:
+**The extraction mechanism is Lua `rpcnotify` (plus one in-process `vim.ui_attach` for the cmdline).** nvim runs as a TUI and draws its own grid inside the editor QMLTermWidget — Python never calls `ui_attach` for the grid, so `ext_messages` / `ext_popupmenu` / `ext_tabline` / `ext_linegrid` are not in play. The cmdline IS externalized: `runtime/init.lua` calls `vim.ui_attach({ext_cmdline=true})` in-process (the noice.nvim technique) and relays the resulting events to Python over the `--listen` RPC channel as `"cmdline"` rpcnotify payloads consumed by `cmdline_models.py`. All other chrome uses plain autocmds + `vim.rpcnotify`. Four channels feed the native chrome:
 
 - **capsule protocol** (`"capsule"`) — mode / file / branch / project / cursor-position state → `StatusBarState` + `CapsuleModel`.
+- **cmdline channel** (`"cmdline"`) — relays in-process `vim.ui_attach` `ext_cmdline` events (`show`/`pos`/`hide`) → `CmdlineState`, rendered by `CommandLine.qml`.
 - **completions pipeline** (`"completions"`) — `getcompletion()`-derived cmdline completion lists → `CompletionModel`, bound by `CommandLine.qml`. (We run our own pipeline rather than `ext_popupmenu` so plugin popups don't draw at the default bottom-row cmdline position.)
 - **whichkey protocol** (`"whichkey"`) — a trie built from `nvim_get_keymap` + presets → `WhichKeyState` + `WhichKeyModel`, rendered by `WhichKeyOverlay.qml`.
-
 Python routes each channel to the matching QML-bound model. This keeps the editor core untouched: only the chrome's *presentation* moves to native QML, while nvim itself remains the authority for buffers, motions, and text rendering.
 
 ## Communication topology

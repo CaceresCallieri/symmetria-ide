@@ -2,7 +2,7 @@
 
 > **Status: Phase 0 shipped (2026-05-31).** Phase 0 surface skeleton landed in commit 142384c — empty `MinimapView` painted, QML slot + scroll wiring in place. Phase 1 (full-buffer content channel) is the next phase. This document is the planning anchor — written so a future session, including one running on a freshly-compacted context, can pick up at any phase without re-deriving prior decisions.
 >
-> **⚠ qmltermwidget migration (2026-06-08) — editor substrate changed.** This PRD was written against the deleted custom NeoVim grid renderer (`nvim_view.py`). Its references to `nvim_view.py` patterns (the scroll spring, the `_rgb_to_qcolor` memoization, specific line numbers) and to **gotcha #11** (smooth-scroll geometry, now retired) describe code that no longer exists. The editor is now a forked `QMLTermWidget` that renders itself, so the minimap must source buffer content from the Lua `minimap` rpcnotify channel (`runtime/lua/orchestrator/minimap.lua`) and its scroll position from the `QMLTermWidget` — that reconnection is the "pending viewport reconnection" noted in CLAUDE.md's source layout. Recover any referenced paint/spring patterns from git history (pre-migration commits). The phased plan and visual design below remain valid; only the editor-substrate plumbing changed.
+> **⚠ qmltermwidget migration (2026-06-08) — editor substrate changed.** This PRD was written against the deleted custom NeoVim grid renderer (`nvim_view.py`). Its references to `nvim_view.py` patterns (the scroll spring, the `_rgb_to_qcolor` memoization, specific line numbers), to **gotcha #11** (smooth-scroll geometry, now retired), to `terminal_view.py` as a paint-discipline precedent (also deleted), and to `TerminalBackend` as a threading-shape template (also deleted) all describe code that no longer exists. The editor is now a forked `QMLTermWidget` that renders itself, so the minimap must source buffer content from the Lua `minimap` rpcnotify channel (`runtime/lua/orchestrator/minimap.lua`) and its scroll position from the `QMLTermWidget` — that reconnection is the "pending viewport reconnection" noted in CLAUDE.md's source layout. Recover any referenced paint/spring patterns from git history (pre-migration commits). The threading template to mirror is now `NvimBackend` / `SessionHost` (live). The phased plan and visual design below remain valid; only the editor-substrate plumbing changed.
 
 A phased plan for adding a VS Code / Zed-style minimap to the embedded NeoVim editor surface — a narrow right-side column that shows a zoomed-out view of the entire buffer (not just the visible viewport), with a viewport-indicator rectangle the user can click/drag to scroll.
 
@@ -63,7 +63,7 @@ These rules apply to every phase. Future-you: read this section even if you skip
 
 - The minimap content channel (Phase 1) will introduce a NEW Lua → Python `vim.rpcnotify` route alongside `"capsule"`, `"completions"`, and `"whichkey"`. Subscribe in `NvimBackend._handle_notification` exactly as the existing routes do.
 - Any cross-thread signal from `NvimBackend` to `MinimapModel` / `MinimapView` uses **explicit `Qt.QueuedConnection`** at the connect site with a one-line `# queued: <reason>` comment. (Project standards §4 P2.)
-- If we add a worker thread (e.g., a tree-sitter parse thread in Phase 6), it MUST be `daemon=True` AND own a `threading.Event` for cooperative shutdown. (Project standards §1 P0.) Mirror `NvimBackend` / `TerminalBackend` / `SessionHost` shape.
+- If we add a worker thread (e.g., a tree-sitter parse thread in Phase 6), it MUST be `daemon=True` AND own a `threading.Event` for cooperative shutdown. (Project standards §1 P0.) Mirror `NvimBackend` / `SessionHost` shape (`TerminalBackend` is deleted — see migration banner above).
 - GC is suspended around worker-thread signal emission whenever payload construction allocates. See `CLAUDE.md` gotcha #10 — Phase 6's parser thread will allocate AST nodes; the emit site must `gc.disable()` / `gc.enable()` around the signal.
 
 ### 3.2 Paint hot path (gotcha #10 is non-negotiable)
@@ -384,7 +384,7 @@ Captured here so future sessions don't need to re-research.
 
 - Phase 0: `qml/Main.qml:307-424` (where the minimap inserts) + `src/symmetria_ide/nvim_view.py:1434-1495` (where the scroll position lives).
 - Phase 1: `runtime/init.lua` (where to wire the new module) + `src/symmetria_ide/nvim_backend.py` (where to subscribe).
-- Phase 2: `src/symmetria_ide/terminal_view.py` (clean precedent for a small `QQuickPaintedItem` with the gotcha #10 discipline applied).
+- Phase 2: `src/symmetria_ide/minimap_view.py` (the current `QQuickPaintedItem` with gotcha #10 discipline already applied — Phase 0 shipped the surface skeleton); `terminal_view.py` was the previous precedent but is deleted (recover from git history pre-qmltermwidget-migration if needed).
 - Phase 5: `src/symmetria_ide/nvim_view.py:122-148` (`_rgb_to_qcolor` memoization pattern to mirror for the atlas registry).
 - Phase 6: `runtime/lua/orchestrator/whichkey/tree.lua` (precedent for a Lua module that builds an index over buffer/global state and emits to Python).
 

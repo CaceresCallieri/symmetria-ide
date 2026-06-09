@@ -77,7 +77,7 @@ The sidecar gates (`npm run typecheck` + `npm run build`) are mandatory whenever
 - [ ] `selene` clean on any `runtime/**.lua` change
 - [ ] Tests pass under `QT_QPA_PLATFORM=offscreen`
 - [ ] If touching the render hot path (`minimap_view.py::paint` — the surviving `QQuickPaintedItem`, currently gated off in Main.qml), verify zero new shiboken wrappers allocated per frame (gotcha #10)
-- [ ] If touching `runtime/lua/orchestrator/whichkey/**`, verify against gotchas #15–#19
+- [ ] If touching `runtime/lua/orchestrator/whichkey/**`, verify against gotchas #15–#21
 - [ ] CLAUDE.md updated if the change encodes a new invariant future agents would otherwise re-break
 
 ## Commit style
