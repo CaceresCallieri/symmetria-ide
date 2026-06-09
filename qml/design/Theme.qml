@@ -462,7 +462,14 @@ QtObject {
             // as siblings in `Main.qml::mainContent`, sharing the same
             // transparent wallpaper-blend surface contract.
             readonly property color background: "transparent"
-            readonly property color foreground: theme.color.text.normal
+            // Foreground deliberately BRIGHTER than text.normal (#b0b0b0):
+            // the quiet-gray ramp is a CHROME aesthetic (labels, badges,
+            // status fields), but terminal foreground is CONTENT the user
+            // reads all day — at #b0b0b0 over the 0.6-alpha dark blend it
+            // read washed-out/thin next to a reference terminal (Ghostty's
+            // Material Darker fg is #eeffff). #dcdcdc keeps Symmetria's
+            // restraint (no pure white) while restoring legibility.
+            readonly property color foreground: "#dcdcdc"
 
             // Cursor block fill — `accent.bright` so the cursor
             // reads as a warm, attention-drawing element against
@@ -530,5 +537,15 @@ QtObject {
         // for wider source files; tune-down to 60 once Phase 5 ships if
         // the 2x4 cell footprint reads as overkill.
         readonly property int minimapWidth: 80
+
+        // Padding between a terminal pane's edge and its character grid,
+        // applied via the fork's `margin` Q_PROPERTY on BOTH QMLTermWidget
+        // panes (editor nvim + shell) so they share one breathing rhythm.
+        // Reference is Ghostty's window-padding-x/y = 20; 16 follows the
+        // Theme's documented "~20% smaller than default terminal chrome"
+        // scale. The widget paints its translucent background across the
+        // padded strip too — this is NOT achievable with QML anchor
+        // margins, which would leave an unblended transparent gutter.
+        readonly property int terminalPadding: 16
     }
 }

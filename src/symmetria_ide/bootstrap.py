@@ -93,6 +93,22 @@ def configure_headless_mode(
             controller.backend.input(test_keys)
 
     def _grab_and_exit() -> None:
+        # DEADLOCK CONTRACT: this synchronous grabWindow() is safe ONLY
+        # because app.run() forces QSG_RENDER_LOOP=basic whenever
+        # SYMMETRIA_IDE_SCREENSHOT is set. Under the default THREADED
+        # render loop, grabWindow blocks the GUI thread (GIL held) on a
+        # wait condition until the render thread completes a render pass —
+        # and with any Python-derived QQuickPaintedItem in the scene
+        # (MinimapView), the render thread needs the GIL to resolve the
+        # paint() override → ABBA deadlock, surfacing as a Hyprland
+        # "Application Not Responding" dialog (diagnosed via gdb thread
+        # dump, 2026-06-09). The async grabToImage() avoids the deadlock
+        # but stalls forever on a hidden workspace (no compositor frame
+        # requests, and it doesn't force a render), so it is NOT a valid
+        # substitute here — the basic-loop + grabWindow pairing is the
+        # only combination that is both deadlock-free and hidden-window
+        # capable. If you touch this, re-run the repeated-launch hang
+        # repro before trusting it.
         if shot_path:
             for obj in engine.rootObjects():
                 if isinstance(obj, QQuickWindow):

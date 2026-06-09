@@ -21,9 +21,11 @@ import functools
 from PySide6.QtGui import QFont, QFontDatabase
 
 
-# Default cell point size. Conservative Phase-0 value; font configuration
-# is not yet user-exposed.
-DEFAULT_FONT_POINT_SIZE = 9
+# Default cell point size. Matches the user's Ghostty config (font-size
+# 8.5) so the terminal panes read identically to the reference terminal;
+# font configuration is not yet user-exposed. Float — consumers must use
+# setPointSizeF, and the QML context prop is already exposed as a real.
+DEFAULT_FONT_POINT_SIZE = 8.5
 
 
 @functools.cache
@@ -65,15 +67,23 @@ def default_font() -> QFont:
     for name in preferred:
         if name in families:
             font = QFont(name)
-            font.setPointSize(DEFAULT_FONT_POINT_SIZE)
+            font.setPointSizeF(DEFAULT_FONT_POINT_SIZE)
             font.setStyleHint(QFont.StyleHint.Monospace)
-            font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+            # NoHinting, deliberately: this display runs at fractional scale
+            # (Hyprland 1.6), where terminal cells sit on integer LOGICAL px
+            # but glyphs rasterize on the 1.6× device grid — every column
+            # lands at a different sub-pixel phase. Hinted stems snap to a
+            # grid the glyphs don't sit on → uneven per-column rendering.
+            # Unhinted = uniform subpixel-positioned AA. Main.qml mirrors
+            # this via `font.hintingPreference` on the terminal panes (the
+            # family/pointSize context props don't carry it).
+            font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
             if fallbacks:
                 font.setFamilies([name, *fallbacks])
             return font
 
     font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-    font.setPointSize(DEFAULT_FONT_POINT_SIZE)
+    font.setPointSizeF(DEFAULT_FONT_POINT_SIZE)
     if fallbacks:
         # systemFont's first family is whatever fontconfig picked; preserve
         # it and append our cascade. `families()` can be [] on some Qt

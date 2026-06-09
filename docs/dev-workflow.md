@@ -27,6 +27,8 @@ Key-notation examples: `i`, `<Esc>`, `<CR>`, `:e file.txt<CR>`, `100G`, `<C-w>v`
 
 Use this pattern when you need to verify a UI change without opening a window the user can see. Screenshots land cleanly even if workspace 6 isn't active.
 
+Setting `SYMMETRIA_IDE_SCREENSHOT` also forces `QSG_RENDER_LOOP=basic` (single-threaded scene-graph rendering). This is load-bearing, not an optimization: the synchronous `grabWindow()` under the default threaded loop deadlocks against the GIL whenever a Python-derived `QQuickPaintedItem` (MinimapView) needs syncing, and the async `grabToImage()` alternative stalls forever on a hidden workspace. See the comments in `app.py::run` and `bootstrap.py::_grab_and_exit` before changing either side. Consequence: harness screenshots verify *content*, not threaded-render timing — threading behavior is only exercised by real launches.
+
 ## Sidecar setup *(one-time)*
 
 Phase 2's agent pane is driven by a Node sidecar that runs `@anthropic-ai/claude-agent-sdk` programmatically. The sidecar lives in `sidecar/` and ships built artifacts gitignored — install + build once after cloning, and again whenever `sidecar/src/**` or its dependencies change.

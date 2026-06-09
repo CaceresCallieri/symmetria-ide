@@ -360,9 +360,22 @@ Window {
                     useFBORendering: false
                     fillColor: "transparent"
                     blinkingCursor: true
+                    // Padding between pane edge and character grid — the
+                    // fork's `margin` Q_PROPERTY (modification #5); the
+                    // translucent background still covers the padded strip.
+                    margin: Theme.size.terminalPadding
                     // Same font the IDE chrome overlays bind to (editor_font.py).
                     font.family: editorFontFamily
                     font.pointSize: editorFontPointSize
+                    // Unhinted, deliberately: at fractional display scale
+                    // (Hyprland 1.6) cells sit on integer logical px while
+                    // glyphs rasterize on the 1.6× device grid, so hinted
+                    // stems snap to a grid the glyphs don't sit on → uneven
+                    // per-column rendering. Must be set HERE: the QML font
+                    // value is built fresh from the family/pointSize context
+                    // props, so editor_font.py's QFont preference does not
+                    // carry through. See editor_font.py for the full story.
+                    font.hintingPreference: Font.PreferNoHinting
 
                     session: QMLTermSession {
                         id: editorSession
@@ -442,8 +455,12 @@ Window {
                     useFBORendering: false
                     fillColor: "transparent"
                     blinkingCursor: true
+                    // Same padding + hinting rationale as the editor pane
+                    // above — both panes share one rendering contract.
+                    margin: Theme.size.terminalPadding
                     font.family: editorFontFamily
                     font.pointSize: editorFontPointSize
+                    font.hintingPreference: Font.PreferNoHinting
 
                     session: QMLTermSession {
                         id: shellSession

@@ -20,4 +20,6 @@ def test_default_font_is_cached():
 
 
 def test_default_point_size_constant():
-    assert DEFAULT_FONT_POINT_SIZE == 9
+    """8.5 matches the user's Ghostty font-size so the IDE terminal panes
+    and the reference terminal render text at the same size."""
+    assert DEFAULT_FONT_POINT_SIZE == 8.5
