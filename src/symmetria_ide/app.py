@@ -2434,6 +2434,30 @@ def _apply_project_arg(argv: list[str]) -> list[str]:
     return [argv[0], *qt_rest]
 
 
+def _configure_render_loop_for_screenshot() -> None:
+    """Force the single-threaded "basic" scene-graph render loop when the
+    headless smoke harness is active (SYMMETRIA_IDE_SCREENSHOT set).
+
+    Two load-bearing reasons (diagnosed via gdb thread dump, 2026-06-09):
+      1. Under the default threaded loop, bootstrap's grabWindow() blocks the
+         GUI thread (GIL held) waiting on the render thread, which needs the
+         GIL to resolve MinimapView's Python paint() override → ABBA deadlock
+         (Hyprland ANR). On the basic loop the grab renders synchronously on
+         the GUI thread; PyGILState_Ensure is re-entrant same-thread, so no
+         deadlock is possible.
+      2. The async alternative (grabToImage) avoids the deadlock but stalls
+         forever when the window sits on a hidden workspace (workspace-6 rule)
+         — the compositor never requests frames, and grabToImage doesn't force
+         one. grabWindow + basic loop renders regardless of expose state.
+
+    Must be called BEFORE QGuiApplication construction. setdefault so an
+    explicit caller override (e.g. QSG_RENDER_LOOP=threaded in an integration
+    test) still wins. Production launches keep Qt's default threaded loop.
+    """
+    if os.environ.get("SYMMETRIA_IDE_SCREENSHOT"):
+        os.environ.setdefault("QSG_RENDER_LOOP", "basic")
+
+
 def run() -> int:
     trace("run_entered")
     configure_logging()
@@ -2453,25 +2477,8 @@ def run() -> int:
     fmt.setAlphaBufferSize(8)
     QSurfaceFormat.setDefaultFormat(fmt)
 
-    # Headless smoke harness (SYMMETRIA_IDE_SCREENSHOT): force the
-    # single-threaded "basic" scene-graph render loop. Two reasons, both
-    # load-bearing (diagnosed via gdb thread dump, 2026-06-09):
-    #   1. Under the default threaded loop, bootstrap's grabWindow()
-    #      blocks the GUI thread (GIL held) waiting on the render thread,
-    #      which needs the GIL to resolve MinimapView's Python paint()
-    #      override → ABBA deadlock (Hyprland ANR). On the basic loop the
-    #      grab renders synchronously on the GUI thread; PyGILState_Ensure
-    #      is re-entrant same-thread, so no deadlock is possible.
-    #   2. The async alternative (grabToImage) avoids the deadlock but
-    #      stalls forever when the window sits on a hidden workspace
-    #      (workspace-6 rule) — the compositor never requests frames, and
-    #      grabToImage doesn't force one. grabWindow + basic loop renders
-    #      regardless of expose state.
-    # Must be set BEFORE QGuiApplication construction; setdefault so an
-    # explicit caller override still wins. Production launches keep Qt's
-    # default threaded loop.
-    if os.environ.get("SYMMETRIA_IDE_SCREENSHOT"):
-        os.environ.setdefault("QSG_RENDER_LOOP", "basic")
+    # Must run before QGuiApplication — see _configure_render_loop_for_screenshot().
+    _configure_render_loop_for_screenshot()
 
     # Resolve `symmetria-ide [PATH]` and chdir before QGuiApplication +
     # AppController (which reads os.getcwd() in __init__). The path is stripped

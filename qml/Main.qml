@@ -361,8 +361,8 @@ Window {
                     fillColor: "transparent"
                     blinkingCursor: true
                     // Padding between pane edge and character grid — the
-                    // fork's `margin` Q_PROPERTY (modification #5); the
-                    // translucent background still covers the padded strip.
+                    // fork's `margin` Q_PROPERTY; the translucent background
+                    // still covers the padded strip.
                     margin: Theme.size.terminalPadding
                     // Same font the IDE chrome overlays bind to (editor_font.py).
                     font.family: editorFontFamily

@@ -68,3 +68,52 @@ def test_tilde_is_expanded(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     _apply_project_arg(["symmetria-ide", "~"])
     assert os.path.realpath(os.getcwd()) == os.path.realpath(str(tmp_path))
+
+
+class TestConfigureRenderLoopForScreenshot:
+    """Tests for _configure_render_loop_for_screenshot().
+
+    The helper is called before QGuiApplication construction; these tests
+    verify its env-var contract without starting Qt.
+    """
+
+    def test_sets_basic_when_screenshot_env_set(self, monkeypatch):
+        """When SYMMETRIA_IDE_SCREENSHOT is set, QSG_RENDER_LOOP should become 'basic'."""
+        monkeypatch.setenv("SYMMETRIA_IDE_SCREENSHOT", "/tmp/out.png")
+        monkeypatch.delenv("QSG_RENDER_LOOP", raising=False)
+
+        from symmetria_ide.app import _configure_render_loop_for_screenshot
+
+        _configure_render_loop_for_screenshot()
+
+        import os
+
+        assert os.environ.get("QSG_RENDER_LOOP") == "basic"
+
+    def test_no_op_when_screenshot_env_absent(self, monkeypatch):
+        """Without SYMMETRIA_IDE_SCREENSHOT, QSG_RENDER_LOOP must not be touched."""
+        monkeypatch.delenv("SYMMETRIA_IDE_SCREENSHOT", raising=False)
+        monkeypatch.delenv("QSG_RENDER_LOOP", raising=False)
+
+        from symmetria_ide.app import _configure_render_loop_for_screenshot
+
+        _configure_render_loop_for_screenshot()
+
+        import os
+
+        assert os.environ.get("QSG_RENDER_LOOP") is None
+
+    def test_explicit_caller_override_wins(self, monkeypatch):
+        """An explicit QSG_RENDER_LOOP set by the caller must not be overwritten
+        (setdefault semantics — the deadlock mitigation should never trump an
+        intentional integration-test override like QSG_RENDER_LOOP=threaded)."""
+        monkeypatch.setenv("SYMMETRIA_IDE_SCREENSHOT", "/tmp/out.png")
+        monkeypatch.setenv("QSG_RENDER_LOOP", "threaded")
+
+        from symmetria_ide.app import _configure_render_loop_for_screenshot
+
+        _configure_render_loop_for_screenshot()
+
+        import os
+
+        assert os.environ.get("QSG_RENDER_LOOP") == "threaded"
