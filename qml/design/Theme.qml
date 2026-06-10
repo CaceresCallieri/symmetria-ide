@@ -69,6 +69,11 @@ QtObject {
         readonly property QtObject bg: QtObject {
             readonly property color chrome: "#201F1F"      // mattePill(m3surfaceContainerHigh, 0.3)
             readonly property color selected: "#282728"    // mattePill(m3surfaceContainerHigh, 0.7)
+            // Modal backdrop (AgentSpawnMenu). Black @ 45% — dims the
+            // surface enough to read "modal" without hiding context;
+            // sits over the already-translucent terminal panes, so a
+            // heavier alpha would read as a full blackout on Hyprland.
+            readonly property color scrim: "#73000000"
         }
 
         // Borders.

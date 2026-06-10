@@ -160,17 +160,23 @@ def test_focus_terminal_requested_handler(main_qml: str):
 def test_window_activation_considers_terminal_visible(main_qml: str):
     """Window.onActiveChanged must route to terminalView when the
     terminal is the current central surface. Without this, alt-tabbing
-    back when terminal-visible leaves focus on a dead surface."""
-    # Look for the specific dispatch branch.
-    assert "controller.terminalVisible" in main_qml
-    # The Window.onActiveChanged block should now contain a terminal branch.
-    # Spread across multiple lines; we look for the terminalView focus call
-    # alongside the activation dispatch.
+    back when terminal-visible leaves focus on a dead surface.
+
+    The dispatch now lives in the shared `_restoreCentralFocus()` helper
+    (also used by modal dismissals like AgentSpawnMenu's Esc) —
+    onActiveChanged delegates to it.
+    """
     on_active_idx = main_qml.find("onActiveChanged:")
     assert on_active_idx >= 0
-    # Body of onActiveChanged contains terminalView.forceActiveFocus.
-    on_active_block = main_qml[on_active_idx : on_active_idx + 600]
-    assert "terminalView.forceActiveFocus()" in on_active_block
+    on_active_block = main_qml[on_active_idx : on_active_idx + 200]
+    assert "_restoreCentralFocus()" in on_active_block
+    # The shared dispatch must carry the terminal branch (and the agent
+    # surface branch, which routes through focus_agent).
+    dispatch_idx = main_qml.find("function _restoreCentralFocus()")
+    assert dispatch_idx >= 0
+    dispatch_block = main_qml[dispatch_idx : dispatch_idx + 700]
+    assert "terminalView.forceActiveFocus()" in dispatch_block
+    assert "controller.focus_agent(controller.focusedAgent)" in dispatch_block
 
 
 def test_startup_focus_routes_to_terminal_when_visible(main_qml: str):
@@ -266,59 +272,79 @@ def test_location_header_reflects_anchor_state(main_qml: str):
 
 
 # ---------------------------------------------------------------------------
-# orchestrator.nvim chord relay — Ctrl+1..5 / Ctrl+Shift+Q → nvim RPC
+# Terminal-agent chord family — Ctrl+1..5 / Ctrl+Shift+N/Q/H/L / Ctrl+U/D
+# (HARD CUTOVER: these chords previously relayed to orchestrator.nvim via
+# controller.send_editor_keys; the IDE-native agent surface owns them now.)
 # ---------------------------------------------------------------------------
 
 
-def test_orchestrator_ctrl_digit_relay_present(main_qml: str):
-    """An Instantiator with model:5 must exist and call
-    `controller.send_editor_keys` for each Ctrl+1..5 chord.
-
-    These chords are nvim-side orchestrator.nvim keymaps that the
-    qmltermwidget fork cannot deliver (legacy VT key encoding has no
-    byte representation for Ctrl+digit). Main.qml must intercept them at
-    the Qt layer and inject the keycode over the RPC socket. Without this
-    block the Ctrl+1..5 AgentsFocus keymaps are silently lost inside the
-    embedded editor.
+def test_orchestrator_relay_absent(main_qml: str):
+    """The nvim chord relay must be GONE — Ctrl+1..5 / Ctrl+Shift+Q now
+    drive the IDE's own terminal-agent pool, not orchestrator.nvim
+    keymaps inside the embedded editor. A reappearing
+    `controller.send_editor_keys` call means the hard cutover regressed
+    (likely a bad merge resurrecting commit 45a8faa's relay block).
     """
-    assert "Instantiator {" in main_qml
-    assert "model: 5" in main_qml
-    assert "controller.send_editor_keys(" in main_qml
-    # The delegate must be gated on editorVisible so the relay fires only
-    # when the editor is the active surface — not while shell/agent/FM is up.
-    assert "enabled: controller.editorVisible" in main_qml
+    assert "controller.send_editor_keys(" not in main_qml
+    assert '"<C-S-q>"' not in main_qml
 
 
-def test_orchestrator_ctrl_shift_q_relay_present(main_qml: str):
-    """A standalone Shortcut for Ctrl+Shift+Q must call
-    `controller.send_editor_keys` with the `<C-S-q>` keycode.
+def test_agent_focus_chords_present(main_qml: str):
+    """An Instantiator over maxAgentSlots must bind Ctrl+N → focus_agent.
 
-    This is orchestrator.nvim's AgentsClose chord — unencodable via the
-    VT layer (Ctrl+Shift+letter collapses to Ctrl+letter in the 0x1f
-    mask). Must be gated on `controller.editorVisible` — same rationale
-    as Ctrl+1..5 above.
+    Always-enabled by design: focus_agent auto-switches the central
+    surface, so the chords double as surface switchers; Python no-ops on
+    empty slots.
     """
+    assert "model: controller.maxAgentSlots" in main_qml
+    assert "controller.focus_agent(index + 1)" in main_qml
+
+
+def test_agent_management_chords_present(main_qml: str):
+    """Spawn menu (Ctrl+Shift+N), close (Ctrl+Shift+Q), and cycle
+    (Ctrl+Shift+H/L) chords must exist; close/cycle gated on the agent
+    surface so they can't fire into nothing.
+    """
+    assert 'sequences: ["Ctrl+Shift+N"]' in main_qml
+    assert "agentSpawnMenu.open()" in main_qml
     assert 'sequences: ["Ctrl+Shift+Q"]' in main_qml
-    assert '"<C-S-q>"' in main_qml
+    assert "controller.close_focused_agent()" in main_qml
+    assert "controller.cycle_agent_focus(-1)" in main_qml
+    assert "controller.cycle_agent_focus(1)" in main_qml
 
 
-def test_orchestrator_relay_gated_not_always_on(main_qml: str):
-    """The relay chords must NOT be always-on (as the swap chords are).
-
-    If Ctrl+1 were an ApplicationShortcut enabled unconditionally, it
-    would fire while the shell pane is focused and inject a keycode into
-    an unseen editor — silent, invisible state corruption. The `enabled:`
-    binding to `controller.editorVisible` is the load-bearing gate.
-    Verify the binding appears in the relay block, not just anywhere in
-    the file.
+def test_agent_scrollback_chords_present(main_qml: str):
+    """Ctrl+U/D half-page scrollback must route through the agentSurface
+    helper and stay gated off while the sidebar holds focus (the tree
+    owns Ctrl+U/D for its own paging).
     """
-    # Find the Instantiator block and verify the gate appears within it.
-    inst_idx = main_qml.find("Instantiator {")
-    assert inst_idx >= 0
-    # The block extends ~200 chars to the closing brace — enough to cover
-    # the delegate's enabled property.
-    relay_block = main_qml[inst_idx : inst_idx + 400]
-    assert "controller.editorVisible" in relay_block
+    assert "agentSurface.scrollFocusedAgent(1)" in main_qml
+    assert "agentSurface.scrollFocusedAgent(-1)" in main_qml
+    assert (
+        "enabled: controller.agentSurfaceVisible && !treeScope.activeFocus" in main_qml
+    )
+    assert "simulateWheel(" in main_qml
+
+
+def test_agent_surface_pool_structure(main_qml: str):
+    """The agent surface must be a FIXED Repeater over maxAgentSlots with
+    per-slot Loaders — list-model churn would destroy live claude
+    processes (see the agentSurface comment block).
+    """
+    assert "agentSlotRepeater" in main_qml
+    assert "active: controller.agentSlotActive[slotLoader.index]" in main_qml
+    assert "visible: controller.focusedAgent === slotLoader.slot" in main_qml
+    assert "controller.agent_spawn_argv(slotLoader.slot)" in main_qml
+    assert "controller.on_agent_finished(slotLoader.slot)" in main_qml
+    assert "controller.on_agent_title(slotLoader.slot" in main_qml
+
+
+def test_legacy_sdk_pane_env_gated(main_qml: str):
+    """AgentPane (the parked Node-SDK chat) must be gated behind
+    legacySdkPaneEnabled so it never co-shows with the terminal-agent
+    surface in a default launch.
+    """
+    assert "legacySdkPaneEnabled && controller.agentVisible" in main_qml
 
 
 # ---------------------------------------------------------------------------

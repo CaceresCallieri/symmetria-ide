@@ -130,45 +130,77 @@ Window {
         onActivated: controller.toggle_fm()
     }
 
-    // orchestrator.nvim chord relay — Ctrl+1..5 (AgentsFocus N) and
-    // Ctrl+Shift+Q (AgentsClose). These are nvim-side keymaps, but the
-    // terminal pane CANNOT deliver them: the qmltermwidget fork's
-    // Konsole-era VT engine speaks only the legacy key encoding, where
-    // Ctrl+digit has no byte representation (falls through to plain
-    // "2") and Ctrl+Shift+letter collapses to Ctrl+letter (0x1f mask
-    // in Vt102Emulation::sendKeyEvent). Ghostty delivers these via the
-    // kitty keyboard protocol; the fork predates it. So the IDE
-    // intercepts at the Qt layer — where key + modifiers are fully
-    // distinguishable — and injects the keycode over the RPC control
-    // socket (`controller.send_editor_keys` → `nvim_input`), bypassing
-    // terminal encoding entirely. Per the keybind-layer doctrine
+    // Terminal-agent chord family — the IDE-native orchestrator runtime.
+    //
+    // HARD CUTOVER NOTE (2026-06-10): these chords previously RELAYED to
+    // orchestrator.nvim's keymaps inside the embedded nvim
+    // (`controller.send_editor_keys` → nvim_input — see commit 45a8faa for
+    // the VT-encoding rationale that made the relay necessary). The
+    // IDE-native agent surface now owns them outright: Ctrl+1..5 focuses
+    // the IDE's own agent slots, and orchestrator.nvim's <C-1..5>/<C-S-q>
+    // keymaps are intentionally unreachable from the IDE. Per the
+    // keybind-layer doctrine
     // (`.claude/memory/project/meta/ide_owns_keybind_layer.md`).
     //
-    // Gated on `controller.editorVisible` (not ApplicationShortcut-
-    // always-on like the swap chords above): the keymaps live in the
-    // embedded nvim, so firing them while the shell/agent/FM surface
-    // is up would mutate an unseen editor. When disabled, the chords
-    // fall through to the focused pane unchanged.
-    //
-    // If the fork ever grows kitty-protocol support (the "Option B"
-    // upstream fix), these interceptors become redundant and can be
-    // deleted wholesale — nvim would see the chords natively.
+    // Always-enabled (no surface gate): focus_agent auto-switches the
+    // central surface to "agent", so the chords double as surface
+    // switchers from anywhere; Python no-ops on empty slots.
     Instantiator {
-        model: 5
+        model: controller.maxAgentSlots
         delegate: Shortcut {
             required property int index
             sequences: ["Ctrl+" + (index + 1)]
             context: Qt.ApplicationShortcut
-            enabled: controller.editorVisible
-            onActivated: controller.send_editor_keys("<C-" + (index + 1) + ">")
+            onActivated: controller.focus_agent(index + 1)
         }
+    }
+
+    // Spawn menu — keyboard-first popup (f/c/r dangerous, F/C/R safe).
+    Shortcut {
+        sequences: ["Ctrl+Shift+N"]
+        context: Qt.ApplicationShortcut
+        onActivated: agentSpawnMenu.open()
     }
 
     Shortcut {
         sequences: ["Ctrl+Shift+Q"]
         context: Qt.ApplicationShortcut
-        enabled: controller.editorVisible
-        onActivated: controller.send_editor_keys("<C-S-q>")
+        enabled: controller.agentSurfaceVisible
+        onActivated: controller.close_focused_agent()
+    }
+
+    // Cycle through occupied agent slots without reaching for the digit row.
+    Shortcut {
+        sequences: ["Ctrl+Shift+H"]
+        context: Qt.ApplicationShortcut
+        enabled: controller.agentSurfaceVisible
+        onActivated: controller.cycle_agent_focus(-1)
+    }
+    Shortcut {
+        sequences: ["Ctrl+Shift+L"]
+        context: Qt.ApplicationShortcut
+        enabled: controller.agentSurfaceVisible
+        onActivated: controller.cycle_agent_focus(1)
+    }
+
+    // Half-page scrollback in the focused agent terminal. claude's TUI is
+    // an alternate-screen app, but its output history rides Konsole's
+    // scrollback; Ctrl+U/D mirror vim's half-page motion. simulateWheel
+    // bypasses VT key encoding entirely (the fork has no kitty protocol),
+    // and Qt's wheel handling converts 120 units → 3 lines, hence the
+    // lines/6 notch math for a half page. Gated off while the sidebar
+    // holds focus — the tree owns Ctrl+U/D for its own paging.
+    Shortcut {
+        sequences: ["Ctrl+U"]
+        context: Qt.ApplicationShortcut
+        enabled: controller.agentSurfaceVisible && !treeScope.activeFocus
+        onActivated: agentSurface.scrollFocusedAgent(1)
+    }
+    Shortcut {
+        sequences: ["Ctrl+D"]
+        context: Qt.ApplicationShortcut
+        enabled: controller.agentSurfaceVisible && !treeScope.activeFocus
+        onActivated: agentSurface.scrollFocusedAgent(-1)
     }
 
     // Clipboard paste into the terminal panes. Same VT-encoding gap as the
@@ -185,12 +217,19 @@ Window {
     Shortcut {
         sequences: ["Ctrl+Shift+V"]
         context: Qt.ApplicationShortcut
-        enabled: controller.editorVisible || controller.terminalVisible
+        enabled: controller.editorVisible || controller.terminalVisible || controller.agentSurfaceVisible
         onActivated: {
-            if (controller.editorVisible)
+            if (controller.editorVisible) {
                 editor.pasteClipboard();
-            else
+            } else if (controller.agentSurfaceVisible) {
+                // Bracketed paste into the focused agent's claude TUI —
+                // the primary "paste a prompt" path on the agent surface.
+                var term = agentSurface.focusedTerminal();
+                if (term)
+                    term.pasteClipboard();
+            } else {
                 terminalView.pasteClipboard();
+            }
         }
     }
 
@@ -613,7 +652,29 @@ Window {
                     anchors.fill: parent
                     visible: controller.agentSurfaceVisible && !controller.fmVisible && !controller.agentVisible
 
+                    /// The focused slot's live QMLTermWidget, or null.
+                    function focusedTerminal() {
+                        var idx = controller.focusedAgent - 1;
+                        if (idx < 0)
+                            return null;
+                        var loader = agentSlotRepeater.itemAt(idx);
+                        return (loader && loader.item) ? loader.item : null;
+                    }
+
+                    /// Half-page scrollback on the focused agent terminal.
+                    /// direction: +1 = up (older output), -1 = down. Qt
+                    /// converts 120 wheel units → 3 lines, so half a page
+                    /// is (lines / 2) / 3 notches.
+                    function scrollFocusedAgent(direction) {
+                        var term = focusedTerminal();
+                        if (!term)
+                            return;
+                        var notches = Math.max(1, Math.round(term.lines / 6));
+                        term.simulateWheel(0, 0, 0, 0, Qt.point(0, direction * notches * 120));
+                    }
+
                     Repeater {
+                        id: agentSlotRepeater
                         model: controller.maxAgentSlots
 
                         delegate: Loader {
@@ -1689,21 +1750,34 @@ Window {
     // even with `controller.fmVisible == true`. Falling through to the
     // editor branch in that frame is benign — `onFmVisibleChanged`
     // will reassert FM focus on the next tick when the Loader settles.
-    onActiveChanged: {
-        if (!active)
-            return;
+    // Agent spawn menu — Window-level modal overlay (Ctrl+Shift+N).
+    // On dismiss (Esc) focus returns to whatever surface is visible via
+    // the same dispatch onActiveChanged uses; on spawn, focus_agent's
+    // focusAgentRequested handles the handoff to the new terminal.
+    AgentSpawnMenu {
+        id: agentSpawnMenu
+        onDismissed: root._restoreCentralFocus()
+    }
+
+    /// Shared focus dispatch: pull active focus into the visible central
+    /// surface. Used by Window.onActiveChanged and modal dismissals.
+    function _restoreCentralFocus() {
         if (controller.fmVisible && fmPaneLoader.item)
             fmPaneLoader.item.forceActiveFocus();
         else if (controller.agentVisible)
             agentPane.forceActiveFocus();
         else if (controller.agentSurfaceVisible)
-            // Terminal-agent surface: route through focus_agent so the
-            // focused slot's delegate grabs focus (see agentSurface).
             controller.focus_agent(controller.focusedAgent);
         else if (controller.terminalVisible)
             terminalView.forceActiveFocus();
         else
             editor.forceActiveFocus();
+    }
+
+    onActiveChanged: {
+        if (!active)
+            return;
+        root._restoreCentralFocus();
     }
 
     // Startup focus override. Component.onCompleted fires
