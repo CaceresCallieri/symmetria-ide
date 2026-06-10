@@ -17,7 +17,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 ## Project — active — `project/active/` (operational state being maintained)
 
 - [Framework pivot REVERSED (2026-06-07)](project/active/framework_pivot.md) — Tauri pivot abandoned; staying native QML to reuse FM's Symmetria.FileManager.UI module. Plan QML, not web.
-- [Phase 2 current state (2026-04-25)](project/active/phase2_current_state.md) — Node SDK sidecar pivot landed, permission UI shipped; deferred: persistence, stop, turn grouping
+- [Phase 2 SDK pane (parked+env-gated 2026-06-10)](project/active/phase2_current_state.md) — terminal-agent runtime superseded it; mounts only via SYMMETRIA_IDE_SDK_PANE=1
 
 ## Project — shipped — `project/shipped/` (past-tense systems; one consolidated bullet)
 

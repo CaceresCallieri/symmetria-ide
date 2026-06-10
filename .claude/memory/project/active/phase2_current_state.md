@@ -1,11 +1,18 @@
 ---
 name: Phase 2 agent pane — current state
-description: 2026-04-26 snapshot. Permission-mode pill + Shift+Tab cycling landed atop the in-pane permission card; sidecar honours mode via setPermissionMode + canUseTool short-circuit.
+description: PARKED + ENV-GATED since 2026-06-10 (terminal-agent runtime shipped; AgentPane mounts only with SYMMETRIA_IDE_SDK_PANE=1). 2026-04-26 snapshot below still accurate for the gated surface.
 type: project
 originSessionId: a094e8d9-4dcb-4507-bc47-56d8a4453394
 ---
 
-# Phase 2 — current state (2026-04-26)
+# Phase 2 — current state (2026-04-26; parked + env-gated 2026-06-10)
+
+> **2026-06-10:** The terminal-agent runtime (CLAUDE.md "The terminal-agent
+> runtime") replaced this pane as the agent surface. Everything below still
+> describes the SDK stack accurately, but `AgentPane` only mounts when
+> `legacySdkPaneEnabled` is true (`SYMMETRIA_IDE_SDK_PANE=1`, implied by
+> `SYMMETRIA_IDE_AGENT_PROMPT`/`_VIEW`). The AgentTopBar chip strip now
+> renders the TERMINAL-agent pool, not this SDK pool.
 
 ## What's wired today
 
