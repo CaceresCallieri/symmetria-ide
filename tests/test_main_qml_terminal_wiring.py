@@ -338,8 +338,12 @@ def test_paste_chord_present(main_qml: str):
     panes, and the STT system's sendshortcut fallback
     (`hyprctl dispatch sendshortcut CTRL SHIFT, V`) dies with it.
     """
-    assert 'sequences: ["Ctrl+Shift+V"]' in main_qml
-    assert "pasteClipboard()" in main_qml
+    paste_idx = main_qml.find('sequences: ["Ctrl+Shift+V"]')
+    assert paste_idx >= 0, "Ctrl+Shift+V Shortcut block not found in Main.qml"
+    paste_block = main_qml[paste_idx : paste_idx + 400]
+    assert "pasteClipboard()" in paste_block, (
+        "pasteClipboard() not called within the Ctrl+Shift+V Shortcut block"
+    )
 
 
 def test_paste_chord_gated_to_terminal_surfaces(main_qml: str):
