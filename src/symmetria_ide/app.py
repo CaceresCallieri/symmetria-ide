@@ -1188,6 +1188,27 @@ class AppController(QObject):
         self.open_in_nvim(path)
         self.hide_fm()
 
+    @Slot(str)
+    def send_editor_keys(self, keys: str) -> None:
+        """Inject a NeoVim keycode string (e.g. `<C-2>`, `<C-S-q>`) into
+        the editor nvim over the RPC control socket.
+
+        Exists for chords the terminal pane CANNOT deliver: the fork's
+        Konsole-era VT engine speaks only the legacy key encoding, where
+        Ctrl+digit has no byte representation and Ctrl+Shift+letter
+        collapses to plain Ctrl+letter (`Vt102Emulation::sendKeyEvent`
+        masks with 0x1f). Ghostty delivers these via the kitty keyboard
+        protocol, which the fork lacks — so Main.qml intercepts the
+        chords at the Qt layer (where key + modifiers are fully
+        distinguishable) and routes them here. `nvim_input` parses the
+        keycode notation directly, no terminal encoding involved —
+        verified empirically that `<C-2>` / `<C-S-q>` mappings fire.
+
+        Thin passthrough to `NvimBackend.input` (async-marshalled,
+        no-op before attach) so QML never touches the backend directly.
+        """
+        self._backend.input(keys)
+
     # --- File-tree sidebar ----------------------------------------------
 
     @Property(str, notify=cwdChanged)

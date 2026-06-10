@@ -130,6 +130,47 @@ Window {
         onActivated: controller.toggle_fm()
     }
 
+    // orchestrator.nvim chord relay — Ctrl+1..5 (AgentsFocus N) and
+    // Ctrl+Shift+Q (AgentsClose). These are nvim-side keymaps, but the
+    // terminal pane CANNOT deliver them: the qmltermwidget fork's
+    // Konsole-era VT engine speaks only the legacy key encoding, where
+    // Ctrl+digit has no byte representation (falls through to plain
+    // "2") and Ctrl+Shift+letter collapses to Ctrl+letter (0x1f mask
+    // in Vt102Emulation::sendKeyEvent). Ghostty delivers these via the
+    // kitty keyboard protocol; the fork predates it. So the IDE
+    // intercepts at the Qt layer — where key + modifiers are fully
+    // distinguishable — and injects the keycode over the RPC control
+    // socket (`controller.send_editor_keys` → `nvim_input`), bypassing
+    // terminal encoding entirely. Per the keybind-layer doctrine
+    // (`.claude/memory/project/meta/ide_owns_keybind_layer.md`).
+    //
+    // Gated on `controller.editorVisible` (not ApplicationShortcut-
+    // always-on like the swap chords above): the keymaps live in the
+    // embedded nvim, so firing them while the shell/agent/FM surface
+    // is up would mutate an unseen editor. When disabled, the chords
+    // fall through to the focused pane unchanged.
+    //
+    // If the fork ever grows kitty-protocol support (the "Option B"
+    // upstream fix), these interceptors become redundant and can be
+    // deleted wholesale — nvim would see the chords natively.
+    Instantiator {
+        model: 5
+        delegate: Shortcut {
+            required property int index
+            sequences: ["Ctrl+" + (index + 1)]
+            context: Qt.ApplicationShortcut
+            enabled: controller.editorVisible
+            onActivated: controller.send_editor_keys("<C-" + (index + 1) + ">")
+        }
+    }
+
+    Shortcut {
+        sequences: ["Ctrl+Shift+Q"]
+        context: Qt.ApplicationShortcut
+        enabled: controller.editorVisible
+        onActivated: controller.send_editor_keys("<C-S-q>")
+    }
+
     // IDE-wide horizontal pane navigation.
     //
     // Spatial chord: Ctrl+H = move left, Ctrl+L = move right. The
