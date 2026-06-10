@@ -25,6 +25,7 @@ import signal
 import sys
 import shutil
 import tempfile
+import time
 
 from PySide6.QtCore import (
     Property,
@@ -41,6 +42,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QGuiApplication, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine, QmlElement
 
+from .agent_bridge import AgentBridgeClient
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .trace import trace
 from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registration
@@ -307,6 +309,18 @@ class AppController(QObject):
     # Connections block translates it into `terminalView.forceActiveFocus()`.
     centralSurfaceChanged = Signal()
     focusTerminalRequested = Signal()
+    # Terminal-agent pool (the IDE-native orchestrator runtime — Claude CLI
+    # instances in QMLTermWidget panes on the "agent" central surface).
+    # Distinct from the parked SDK pool's instanceCount/instanceTitles
+    # signals: that pool drives the env-gated AgentPane; this one drives
+    # the agent surface + AgentTopBar bubbles. `termAgentsChanged` covers
+    # slot occupancy AND titles (one notify keeps the QML strip's
+    # occupancy/title bindings in lockstep); `agentActivityChanged` is
+    # separate because activity churns on every Claude hook event and
+    # shouldn't re-evaluate occupancy bindings.
+    termAgentsChanged = Signal()
+    focusedAgentChanged = Signal()
+    agentActivityChanged = Signal()
 
     # Cycle order for Shift+Tab in the agent pane. Tuple is the source of
     # truth for both validation (gate `_set_permission_mode` against this)
@@ -427,6 +441,37 @@ class AppController(QObject):
         # `_spawn_instance(1)`; subsequent spawns fill slots 2..5.
         # The env-var startup paths (`SYMMETRIA_IDE_AGENT_PROMPT` /
         # `_VIEW`) handle the spawn themselves in `start()`.
+        # ----- Terminal-agent pool (IDE-native orchestrator runtime) ----
+        #
+        # Claude CLI instances hosted in QMLTermWidget panes on the
+        # "agent" central surface — the IDE-native replacement for
+        # running orchestrator.nvim inside the embedded nvim. Parallel
+        # to (NOT generalised with) the parked SDK pool above: the SDK
+        # dicts are 1:1 with sidecar subprocesses Python owns, whereas
+        # these slots are 1:1 with QML-owned KSessions (KSession is not
+        # Python-wrappable — the Loaders in Main.qml own the process
+        # lifecycle; Python owns only the bookkeeping + bridge publish).
+        #
+        # Slot numbering is 1-based (1.._MAX_INSTANCES), matching the
+        # Ctrl+1..5 chords. Per-slot record: {spawn_type, dangerous,
+        # cwd, title, spawned_at}.
+        self._term_agents: dict[int, dict] = {}
+        # slot -> {state, tool, agentType} — mirrored from the bridge's
+        # consolidated snapshots (hook-driven activity arrives THROUGH
+        # the bridge, never directly). Drives the AgentTopBar sparkles.
+        self._term_agent_activity: dict[int, dict] = {}
+        # 0 = no agent focused (empty pool). 1-based slot otherwise.
+        self._focused_term_agent: int = 0
+        # Publish/subscribe client to Symmetria Shell's agent-bridge hub.
+        # Publishes this pool's spawns/focus/titles so the shell dashboard
+        # shows IDE agents; subscribes to consolidated snapshots so the
+        # top-bar bubbles animate from Claude-hook activity.
+        self._agent_bridge = AgentBridgeClient(self)
+        # queued: snapshot_received originates on the bridge reader
+        # thread; this controller mutates GUI-thread state (§4 P2).
+        self._agent_bridge.snapshot_received.connect(
+            self._on_bridge_snapshot, Qt.ConnectionType.QueuedConnection
+        )
         # ----- Backend signal wiring (chrome rpcnotify relays) -----------
         # These signals originate on the NvimBackend worker thread; Qt's
         # auto-connection promotes them to QueuedConnection across the
@@ -764,13 +809,28 @@ class AppController(QObject):
         wants focus to fall back toward older work, not all the way
         to the start.
         """
-        if not self._session_hosts:
+        return self._pick_focus_after_close(
+            closed_slot, self._session_hosts.keys(), self._MAX_INSTANCES
+        )
+
+    @staticmethod
+    def _pick_focus_after_close(
+        closed_slot: int, occupied, max_slots: int
+    ) -> int | None:
+        """Shared below-first/above-second walk over an occupied-slot set.
+
+        Used by both pools (the parked SDK pool via
+        `_next_focus_after_close` and the terminal-agent pool via
+        `close_agent`) so the refocus semantics can't drift between them.
+        """
+        occupied = set(occupied)
+        if not occupied:
             return None
         for candidate in range(closed_slot - 1, 0, -1):
-            if candidate in self._session_hosts:
+            if candidate in occupied:
                 return candidate
-        for candidate in range(closed_slot + 1, self._MAX_INSTANCES + 1):
-            if candidate in self._session_hosts:
+        for candidate in range(closed_slot + 1, max_slots + 1):
+            if candidate in occupied:
                 return candidate
         return None
 
@@ -1508,6 +1568,33 @@ class AppController(QObject):
     def terminalVisible(self) -> bool:
         return self._central_surface == "terminal"
 
+    @Property(bool, notify=centralSurfaceChanged)
+    def agentSurfaceVisible(self) -> bool:
+        """True when the terminal-agent surface owns the central area.
+
+        Named `agentSurfaceVisible` (not `agentVisible`) because the
+        latter is the parked SDK AgentPane's overlay flag — a separate
+        mechanism kept env-gated behind SYMMETRIA_IDE_SDK_PANE.
+        """
+        return self._central_surface == "agent"
+
+    @Slot(str)
+    def set_central_surface(self, surface: str) -> None:
+        """Make `surface` ("terminal" | "editor" | "agent") the central one.
+
+        Idempotent (no signal on no-op) and validating — the generic
+        primitive behind the StatusBar switcher segments and
+        `focus_agent`'s auto-switch. The dedicated `swap_to_*` slots
+        remain as chord-facing wrappers.
+        """
+        if surface not in ("terminal", "editor", "agent"):
+            log.warning("set_central_surface: unknown surface %r — no-op", surface)
+            return
+        if self._central_surface == surface:
+            return
+        self._central_surface = surface
+        self.centralSurfaceChanged.emit()
+
     @Slot()
     def swap_to_terminal(self) -> None:
         """Make the terminal pane the visible central surface.
@@ -1517,10 +1604,7 @@ class AppController(QObject):
         user-facing chord is `Ctrl+Shift+E` (the earlier `Ctrl+Shift+T`
         was retired when the toggle landed).
         """
-        if self._central_surface == "terminal":
-            return
-        self._central_surface = "terminal"
-        self.centralSurfaceChanged.emit()
+        self.set_central_surface("terminal")
 
     @Slot()
     def swap_to_editor(self) -> None:
@@ -1531,10 +1615,7 @@ class AppController(QObject):
         callable from internal slots/tests; the user-facing chord
         (`Ctrl+Shift+E`) now goes through the toggle.
         """
-        if self._central_surface == "editor":
-            return
-        self._central_surface = "editor"
-        self.centralSurfaceChanged.emit()
+        self.set_central_surface("editor")
 
     @Slot()
     def toggle_editor_terminal(self) -> None:
@@ -1568,6 +1649,280 @@ class AppController(QObject):
         receipt.
         """
         self.focusTerminalRequested.emit()
+
+    # ------------------------------------------------------------------
+    # Terminal-agent pool (IDE-native orchestrator runtime)
+    # ------------------------------------------------------------------
+    #
+    # The QML side (Main.qml's agent surface) holds a fixed Repeater of
+    # `maxAgentSlots` Loaders; each Loader's `active` binds to
+    # `agentSlotActive[index]` and instantiates a QMLTermWidget +
+    # QMLTermSession running `agent_spawn_argv(slot)`. Python never
+    # touches the KSession (not wrappable) — spawn/close are expressed
+    # purely as state flips that the Loaders react to.
+
+    @Property(int, constant=True)
+    def maxAgentSlots(self) -> int:
+        return self._MAX_INSTANCES
+
+    @Property("QVariantList", notify=termAgentsChanged)
+    def activeAgentSlots(self) -> list:
+        """Sorted occupied slot numbers — the AgentTopBar chip model."""
+        return sorted(self._term_agents.keys())
+
+    @Property("QVariantList", notify=termAgentsChanged)
+    def agentSlotActive(self) -> list:
+        """Per-slot occupancy, indexed `slot - 1` (len == maxAgentSlots).
+
+        This is the Loaders' `active` binding — a stable-length list so
+        the fixed Repeater never churns delegates (which would tear down
+        live claude processes; see Main.qml's agent surface comment).
+        """
+        return [slot in self._term_agents for slot in range(1, self._MAX_INSTANCES + 1)]
+
+    @Property("QVariantList", notify=termAgentsChanged)
+    def agentTitles(self) -> list:
+        """Per-slot OSC titles, indexed `slot - 1`; "" = no title yet."""
+        return [
+            self._term_agents.get(slot, {}).get("title", "")
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
+    @Property(int, notify=focusedAgentChanged)
+    def focusedAgent(self) -> int:
+        """1-based focused slot; 0 = none (empty pool)."""
+        return self._focused_term_agent
+
+    @Property("QVariantList", notify=agentActivityChanged)
+    def agentActivity(self) -> list:
+        """Per-slot activity dicts ({state, tool, agentType}), indexed `slot - 1`.
+
+        Mirrored from the bridge subscription feed — empty state for
+        slots with no activity yet (idle chips render the dormant dot).
+        """
+        return [
+            self._term_agent_activity.get(
+                slot, {"state": "", "tool": "", "agentType": "claude"}
+            )
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
+    @Slot(str, bool)
+    def spawn_agent(self, spawn_type: str = "fresh", dangerous: bool = True) -> None:
+        """Allocate the lowest free slot for a Claude instance and focus it.
+
+        `dangerous=True` is the DEFAULT polarity (matches the user's
+        orchestrator.nvim muscle memory — the lowercase spawn chords run
+        --dangerously-skip-permissions; the safe variants are the
+        explicit opt-in). The QML Loader reacting to `agentSlotActive`
+        performs the actual process spawn via `agent_spawn_argv`.
+
+        Resume (`-r`) intentionally carries no session id in v1 — claude
+        opens its own interactive session picker inside the terminal,
+        which IS the picker UX (no IDE-side session-list plumbing).
+        """
+        if spawn_type not in ("fresh", "resume", "continue"):
+            log.warning("spawn_agent: unknown spawn_type %r — no-op", spawn_type)
+            return
+        if shutil.which("claude") is None:
+            log.error("spawn_agent: `claude` not found on PATH — cannot spawn")
+            return
+        slot = self._next_free_term_slot()
+        if slot is None:
+            log.warning("spawn_agent: pool full (%d slots)", self._MAX_INSTANCES)
+            return
+        cwd = self.displayedRoot
+        self._term_agents[slot] = {
+            "spawn_type": spawn_type,
+            "dangerous": dangerous,
+            "cwd": cwd,
+            "title": "",
+            "spawned_at": int(time.time()),
+        }
+        self.termAgentsChanged.emit()
+        self._agent_bridge.notify_spawn(self._term_instance_payload(slot))
+        log.info(
+            "spawn_agent: slot %d (%s%s) in %s",
+            slot,
+            spawn_type,
+            " ⚠ dangerous" if dangerous else "",
+            cwd,
+        )
+        self.focus_agent(slot)
+
+    @Slot(int, result="QVariantList")
+    def agent_spawn_argv(self, slot: int) -> list:
+        """argv for the slot's QMLTermSession (read once at Loader load).
+
+        `env`-wrapper because KSession::setEnvironment is not
+        QML-reachable — same technique orchestrator.nvim's termopen uses.
+        SYMMETRIA_AGENT_ID is what the Claude hooks report activity
+        under; `<ide_pid>_<slot>` matches the bridge's
+        `f"{nvim_pid}_{buf}"` keying for agents we publish with
+        `nvim_pid = os.getpid()`, `buf = slot`.
+        """
+        inst = self._term_agents.get(slot)
+        if inst is None:
+            log.warning("agent_spawn_argv: slot %d not in pool", slot)
+            return []
+        argv = ["env", f"SYMMETRIA_AGENT_ID={os.getpid()}_{slot}", "claude"]
+        if inst["dangerous"]:
+            argv.append("--dangerously-skip-permissions")
+        argv += {"fresh": [], "resume": ["-r"], "continue": ["-c"]}[inst["spawn_type"]]
+        return argv
+
+    @Slot(int)
+    def focus_agent(self, slot: int) -> None:
+        """Focus the slot's terminal and bring the agent surface forward.
+
+        Bound to Ctrl+1..5 — pressing the chord from ANY surface lands
+        on the agent surface with that slot visible, so the chords double
+        as surface switchers. No-op (with log) on empty slots so the
+        chords are always-enabled in QML.
+        """
+        if slot not in self._term_agents:
+            log.info("focus_agent: slot %d empty — no-op", slot)
+            return
+        if self._focused_term_agent != slot:
+            self._focused_term_agent = slot
+            self.focusedAgentChanged.emit()
+        self._agent_bridge.notify_focus(slot)
+        self.set_central_surface("agent")
+
+    @Slot(int)
+    def cycle_agent_focus(self, direction: int) -> None:
+        """Move focus to the next/previous occupied slot (wraps around).
+
+        Bound to Ctrl+Shift+L (+1) / Ctrl+Shift+H (-1) on the agent
+        surface. Single-agent pools are a no-op (nothing to cycle to).
+        """
+        slots = sorted(self._term_agents.keys())
+        if not slots:
+            return
+        if self._focused_term_agent not in slots:
+            self.focus_agent(slots[0])
+            return
+        idx = slots.index(self._focused_term_agent)
+        self.focus_agent(slots[(idx + direction) % len(slots)])
+
+    @Slot(int)
+    def close_agent(self, slot: int) -> None:
+        """Drop the slot — the QML Loader deactivates and reaps claude.
+
+        Refocus follows `_pick_focus_after_close` (below-first); closing
+        the last agent falls back to the terminal surface (the persistent
+        home surface per the Phase 2.5 topology decision).
+        """
+        if slot not in self._term_agents:
+            log.warning("close_agent: slot %d not in pool — no-op", slot)
+            return
+        del self._term_agents[slot]
+        self._term_agent_activity.pop(slot, None)
+        self.termAgentsChanged.emit()
+        self.agentActivityChanged.emit()
+        self._agent_bridge.notify_remove(slot)
+        log.info("close_agent: slot %d closed", slot)
+        if self._focused_term_agent == slot:
+            next_slot = self._pick_focus_after_close(
+                slot, self._term_agents.keys(), self._MAX_INSTANCES
+            )
+            if next_slot is None:
+                self._focused_term_agent = 0
+                self.focusedAgentChanged.emit()
+                if self._central_surface == "agent":
+                    self.set_central_surface("terminal")
+            else:
+                self.focus_agent(next_slot)
+
+    @Slot()
+    def close_focused_agent(self) -> None:
+        """Ctrl+Shift+Q on the agent surface."""
+        if self._focused_term_agent:
+            self.close_agent(self._focused_term_agent)
+
+    @Slot(int)
+    def on_agent_finished(self, slot: int) -> None:
+        """QML callback when a slot's claude process exits on its own
+        (user typed /exit, or the process crashed). Same bookkeeping as
+        an explicit close; the no-op guard makes it idempotent with a
+        close that already removed the slot (closing flips the Loader
+        off, which fires onFinished as the session tears down).
+        """
+        if slot in self._term_agents:
+            log.info("on_agent_finished: slot %d exited", slot)
+            self.close_agent(slot)
+
+    @Slot(int, str)
+    def on_agent_title(self, slot: int, title: str) -> None:
+        """QML callback for KSession.titleChanged (OSC 0/2 from claude)."""
+        if slot not in self._term_agents:
+            return
+        title = title.strip()
+        if self._term_agents[slot]["title"] == title:
+            return
+        self._term_agents[slot]["title"] = title
+        self.termAgentsChanged.emit()
+        self._agent_bridge.notify_title(slot, title)
+
+    def _next_free_term_slot(self) -> int | None:
+        """Lowest unoccupied terminal-agent slot, or None when full.
+
+        Mirrors `_next_free_slot` (the SDK pool's allocator) over
+        `_term_agents` — fill-from-the-bottom so the first spawn is
+        Ctrl+1-reachable.
+        """
+        for slot in range(1, self._MAX_INSTANCES + 1):
+            if slot not in self._term_agents:
+                return slot
+        return None
+
+    def _term_instance_payload(self, slot: int) -> dict:
+        """The bridge's per-instance shape (bridge.lua:185-203 parity)."""
+        inst = self._term_agents[slot]
+        cwd = inst["cwd"]
+        return {
+            "buf": slot,
+            "cwd": cwd,
+            "project": os.path.basename(cwd.rstrip("/")) or cwd,
+            "spawn_type": inst["spawn_type"],
+            "color_idx": slot,
+            "dangerous": inst["dangerous"],
+            "title": inst["title"],
+            "spawned_at": inst["spawned_at"],
+            "active": True,
+            "agent_type": "claude",
+        }
+
+    @Slot(dict)
+    def _on_bridge_snapshot(self, payload: dict) -> None:
+        """Mirror this IDE's agents' activity out of a bridge snapshot.
+
+        The feed carries EVERY agent system-wide; we keep only ids with
+        our pid prefix (this IDE's agents) whose slot is still in the
+        pool, and emit only when the mirrored state actually changed —
+        snapshots arrive on every system-wide event and most don't
+        concern us.
+        """
+        prefix = f"{os.getpid()}_"
+        new_activity: dict[int, dict] = {}
+        for agent in payload.get("agents", []):
+            agent_id = str(agent.get("id", ""))
+            if not agent_id.startswith(prefix):
+                continue
+            try:
+                slot = int(agent_id[len(prefix) :])
+            except ValueError:
+                continue
+            if slot not in self._term_agents:
+                continue
+            new_activity[slot] = {
+                "state": agent.get("activity_state", ""),
+                "tool": agent.get("activity_tool", ""),
+                "agentType": agent.get("agent_type", "") or "claude",
+            }
+        if new_activity != self._term_agent_activity:
+            self._term_agent_activity = new_activity
+            self.agentActivityChanged.emit()
 
     @Slot(str)
     def on_shell_cwd(self, path: str) -> None:
@@ -2084,6 +2439,10 @@ class AppController(QObject):
         # rpcnotify relays + control RPCs (input / edit_file / set_current_dir).
         self._backend.start()
         trace("backend_started")
+        # Connect to Symmetria Shell's agent bridge (publish + subscribe).
+        # Non-blocking: the client's reader thread owns connect/retry, so
+        # a missing bridge (shell down) just means silent backoff.
+        self._agent_bridge.start()
         # Seed the GitController with the launch cwd by firing
         # `displayedRootChanged` once at startup. Without this, the very
         # first nvim cwd capsule arrives with a value equal to `_cwd`
@@ -2150,6 +2509,10 @@ class AppController(QObject):
         self.backendReady.emit()
 
     def shutdown(self) -> None:
+        # Tell the shell bridge we're going away (goodbye removes this
+        # IDE's agents from the dashboard) and join the reader thread
+        # before the event loop tears down.
+        self._agent_bridge.stop()
         # Stop every pooled session host first — the subprocesses are
         # the noisier of the two and we'd rather have their workers
         # joined before nvim's shutdown handshake owns the event loop.
@@ -2408,6 +2771,19 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # instead of resolving to the context property.
     ctx.setContextProperty("shellExec", os.environ.get("SHELL") or "/bin/bash")
     ctx.setContextProperty("shellExecArgs", [])
+
+    # The parked Node-SDK AgentPane is env-gated now that the terminal-agent
+    # surface owns "agent" as a central surface. Unset (the default) keeps
+    # the SDK stack dormant. SYMMETRIA_IDE_SDK_PANE=1 re-enables it, and the
+    # SDK startup paths (SYMMETRIA_IDE_AGENT_PROMPT / _VIEW — they spawn an
+    # SDK slot and call show_agent()) imply it so the headless smoke-test
+    # workflow keeps working without a second env var.
+    ctx.setContextProperty(
+        "legacySdkPaneEnabled",
+        os.environ.get("SYMMETRIA_IDE_SDK_PANE") == "1"
+        or bool(os.environ.get("SYMMETRIA_IDE_AGENT_PROMPT"))
+        or os.environ.get("SYMMETRIA_IDE_AGENT_VIEW") == "1",
+    )
     trace("engine_ctx_ready")
 
     qml_root = QML_DIR / "Main.qml"
