@@ -76,6 +76,7 @@ Item {
                 font.family: Theme.font.family
                 font.pixelSize: Theme.font.size.sm
                 font.weight: Theme.font.weight.bold
+                renderType: Text.NativeRendering
             }
 
             Repeater {
@@ -96,12 +97,14 @@ Item {
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.xs
                         font.weight: Theme.font.weight.medium
+                        renderType: Text.NativeRendering
                     }
                     Text {
                         text: entryRow.modelData.label
                         color: Theme.color.text.normal
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.xs
+                        renderType: Text.NativeRendering
                     }
                 }
             }
@@ -122,6 +125,7 @@ Item {
                         color: Theme.color.text.dim
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.xs
+                        renderType: Text.NativeRendering
                     }
                 }
             }
@@ -143,7 +147,7 @@ Item {
         // on, so this never fights a legitimate focus handoff.
         onActiveFocusChanged: {
             if (!activeFocus && root.visible)
-                Qt.callLater(function () {
+                Qt.callLater(() => {
                     if (root.visible)
                         keyCatcher.forceActiveFocus();
                 });

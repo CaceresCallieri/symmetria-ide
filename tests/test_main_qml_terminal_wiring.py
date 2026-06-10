@@ -181,10 +181,13 @@ def test_window_activation_considers_terminal_visible(main_qml: str):
     assert "controller.focus_agent(controller.focusedAgent)" in dispatch_block
     # Modal guard: re-activation must NOT yank focus out of an open spawn
     # menu (visible-but-deaf menu regression). The guard must run before
-    # any surface branch.
+    # any surface branch — check against the earliest branch (fmPaneLoader)
+    # so a future reordering that moves the guard between branches is caught.
     guard_idx = dispatch_block.find("agentSpawnMenu.visible")
+    fm_idx = dispatch_block.find("fmPaneLoader")
     terminal_idx = dispatch_block.find("terminalView.forceActiveFocus()")
-    assert 0 <= guard_idx < terminal_idx
+    assert 0 <= guard_idx < fm_idx
+    assert guard_idx < terminal_idx
 
 
 def test_startup_focus_routes_to_terminal_when_visible(main_qml: str):
