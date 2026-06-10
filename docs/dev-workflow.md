@@ -29,6 +29,38 @@ Use this pattern when you need to verify a UI change without opening a window th
 
 Setting `SYMMETRIA_IDE_SCREENSHOT` also forces `QSG_RENDER_LOOP=basic` (single-threaded scene-graph rendering). This is load-bearing, not an optimization: the synchronous `grabWindow()` under the default threaded loop deadlocks against the GIL whenever a Python-derived `QQuickPaintedItem` (MinimapView) needs syncing, and the async `grabToImage()` alternative stalls forever on a hidden workspace. See the comments in `app.py::run` and `bootstrap.py::_grab_and_exit` before changing either side. Consequence: harness screenshots verify *content*, not threaded-render timing — threading behavior is only exercised by real launches.
 
+## Terminal-agent runtime — manual E2E
+
+The IDE-native orchestrator (CLAUDE.md "The terminal-agent runtime"). Full
+interactive verification checklist after touching the agent pool, the
+bridge client, or the chord family:
+
+1. Launch the IDE → `Ctrl+Shift+N` → `f` → claude opens on the agent
+   surface, cwd = project anchor, top-bar chip appears (sparkle + slot 1).
+2. Send a prompt → the chip's sparkle animates within a hook cycle
+   (activity flows `SYMMETRIA_AGENT_ID=<ide_pid>_<slot>` → hooks →
+   agent-bridge → subscription snapshot → `controller.agentActivity`).
+3. The Symmetria Shell dashboard shows the same agent (project, ⚠
+   dangerous badge, `✳ Claude Code` OSC title); clicking it focuses the
+   IDE window (`terminal_pid` = IDE pid via the declared
+   `host_window_pid`).
+4. `Ctrl+Shift+E` to editor → `Ctrl+1` → back on slot 1, terminal focused
+   typing-ready; `Ctrl+U`/`Ctrl+D` scroll the agent's scrollback;
+   `Ctrl+Shift+N` again for a second agent; `Ctrl+Shift+H/L` cycles.
+5. `Ctrl+Shift+Q` closes → chip disappears, dashboard updates,
+   `pgrep -f 'claude --dangerously'` shows no orphan from this IDE.
+6. Quit the IDE → dashboard drops its agents (goodbye); no orphans.
+
+Scripted spawn for headless smoke runs (composes with the screenshot
+harness): `SYMMETRIA_IDE_SPAWN_AGENT=fresh` spawns one agent at launch.
+Bridge-side state is inspectable via `pkill -USR1 -f agent-bridge.py` →
+`~/.local/state/symmetria/agent-bridge-diagnostic.json` (look for your
+IDE pid under `clients`).
+
+Known harness limit: the screenshot grab canvas clips chrome near the
+window bottom at fractional display scale — the StatusBar (and anything
+anchored there) needs an interactive launch to verify visually.
+
 ## Sidecar setup *(one-time)*
 
 Phase 2's agent pane is driven by a Node sidecar that runs `@anthropic-ai/claude-agent-sdk` programmatically. The sidecar lives in `sidecar/` and ships built artifacts gitignored — install + build once after cloning, and again whenever `sidecar/src/**` or its dependencies change.
@@ -41,9 +73,14 @@ npm run build
 
 Requires Node `>=20` (Arch ships >=22 in the `nodejs` package). `npm install` fetches `@anthropic-ai/claude-agent-sdk` (pinned to `0.2.119`) plus dev tooling (esbuild, typescript, @types/node). `npm run build` produces `sidecar/dist/index.js`, which the Python `SessionHost` spawns at runtime. If the bundle is missing, `SessionHost.start` logs a clear error pointing right back at this section.
 
-## Phase 2 agent pane
+## Phase 2 agent pane (parked SDK chat — env-gated)
 
-The agent pane is editor-first by design: `SYMMETRIA_IDE_AGENT_PROMPT` unset means no sidecar spawns and the pane renders its empty-state affordance ("agent pane — set SYMMETRIA_IDE_AGENT_PROMPT to populate"). Set the env var to opt in.
+The Node-SDK AgentPane is parked AND env-gated since the terminal-agent
+runtime shipped: it only mounts when `legacySdkPaneEnabled` is true —
+`SYMMETRIA_IDE_SDK_PANE=1`, or implied by either env var below. The
+terminal-agent runtime (previous section) is the live agent workflow.
+
+`SYMMETRIA_IDE_AGENT_PROMPT` unset means no sidecar spawns. Set the env var to opt in.
 
 ```
 SYMMETRIA_IDE_AGENT_PROMPT="explain the capsule protocol" \
