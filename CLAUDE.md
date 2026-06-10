@@ -16,6 +16,7 @@ A custom IDE wrapper built on NeoVim, in the Symmetria ecosystem.
 - **Runtime deps on Arch:** `sudo pacman -S --needed pyside6 python-pynvim`, plus the **forked qmltermwidget** built at `/home/jc/projects/symmetria-qmltermwidget` (`qmake6 && make -j$(nproc)`; the IDE adds it to the QML import path — see "The terminal panes"). The stock `qmltermwidget` package is not sufficient (it lacks the transparency fix).
 - **Run:** `PYTHONPATH=src python -m symmetria_ide`.
 - **Dev workflow doc:** `docs/dev-workflow.md` — env vars for headless smoke testing, Hyprland workspace-6 rule, notification-system quirks.
+- **Branching:** this directory is the `dev` worktree — ALL development happens here. `~/projects/symmetria-ide-stable` holds `main` (the daily-driven build); never edit it, it only moves via user-initiated promotion. Full rules + promotion procedure: `docs/branch-workflow.md`.
 
 ## Source layout
 
@@ -230,6 +231,7 @@ Cross-cutting design rules that still hold for the parked AgentPane surface:
 
 ## Where to look first
 
+- `docs/branch-workflow.md` — stable/dev worktree split, promotion procedure, window-class routing
 - `docs/vision.md` — what we're building and why
 - `docs/identity.md` — naming, tagline, design principles
 - `docs/architecture.md` — embedding model, extraction strategy

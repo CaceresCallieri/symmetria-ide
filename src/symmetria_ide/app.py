@@ -2557,7 +2557,10 @@ def run() -> int:
     app.setOrganizationName("Symmetria")
     # Sets the Wayland xdg-shell `app_id` — Hyprland sees this as the
     # window class, so window rules can match on `symmetria-ide`.
-    app.setDesktopFileName("symmetria-ide")
+    # SYMMETRIA_IDE_APP_ID lets a launcher present a distinct class: the
+    # stable worktree sets `symmetria-ide-stable` so the dev-only
+    # workspace-6 rule doesn't catch it (see docs/branch-workflow.md).
+    app.setDesktopFileName(os.environ.get("SYMMETRIA_IDE_APP_ID", "symmetria-ide"))
     trace("qgui_created")
 
     _register_qml_types()
