@@ -133,6 +133,21 @@ Item {
         // Modal key routing: while the menu is visible this item holds
         // active focus, so the chords below never leak to the surface
         // underneath.
+        //
+        // Self-heal: if anything steals active focus while the menu is
+        // still visible (window re-activation dispatch, a terminal pane
+        // re-grabbing focus after Alt-Tab), take it back on the next
+        // event-loop tick. Without this the menu goes deaf — visible but
+        // receiving no keys, with no way to dismiss it. Both close paths
+        // (_spawn/dismiss) flip root.visible to false BEFORE focus moves
+        // on, so this never fights a legitimate focus handoff.
+        onActiveFocusChanged: {
+            if (!activeFocus && root.visible)
+                Qt.callLater(function () {
+                    if (root.visible)
+                        keyCatcher.forceActiveFocus();
+                });
+        }
         Keys.onPressed: function (event) {
             event.accepted = true;
             switch (event.key) {

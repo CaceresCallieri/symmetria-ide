@@ -1806,6 +1806,15 @@ Window {
     /// Shared focus dispatch: pull active focus into the visible central
     /// surface. Used by Window.onActiveChanged and modal dismissals.
     function _restoreCentralFocus() {
+        // Modal guard: window re-activation (Alt-Tab away and back) must
+        // not yank focus out of an open spawn menu — that left the menu
+        // visible but deaf, with every key falling through to the surface
+        // underneath and no way to dismiss it. open() is idempotent and
+        // re-asserts the modal's key catcher.
+        if (agentSpawnMenu.visible) {
+            agentSpawnMenu.open();
+            return;
+        }
         if (controller.fmVisible && fmPaneLoader.item)
             fmPaneLoader.item.forceActiveFocus();
         else if (controller.agentVisible)

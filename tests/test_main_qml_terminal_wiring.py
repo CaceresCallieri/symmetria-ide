@@ -174,9 +174,17 @@ def test_window_activation_considers_terminal_visible(main_qml: str):
     # surface branch, which routes through focus_agent).
     dispatch_idx = main_qml.find("function _restoreCentralFocus()")
     assert dispatch_idx >= 0
-    dispatch_block = main_qml[dispatch_idx : dispatch_idx + 700]
+    # 1400-char window: the modal-guard comment block precedes the surface
+    # branches inside the function body.
+    dispatch_block = main_qml[dispatch_idx : dispatch_idx + 1400]
     assert "terminalView.forceActiveFocus()" in dispatch_block
     assert "controller.focus_agent(controller.focusedAgent)" in dispatch_block
+    # Modal guard: re-activation must NOT yank focus out of an open spawn
+    # menu (visible-but-deaf menu regression). The guard must run before
+    # any surface branch.
+    guard_idx = dispatch_block.find("agentSpawnMenu.visible")
+    terminal_idx = dispatch_block.find("terminalView.forceActiveFocus()")
+    assert 0 <= guard_idx < terminal_idx
 
 
 def test_startup_focus_routes_to_terminal_when_visible(main_qml: str):
