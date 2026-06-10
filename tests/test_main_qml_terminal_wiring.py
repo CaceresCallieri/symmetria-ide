@@ -263,3 +263,59 @@ def test_location_header_reflects_anchor_state(main_qml: str):
     # window that covers the Rectangle + its RowLayout children.
     header_block = main_qml[header_idx : header_idx + 2000]
     assert "controller.anchored" in header_block
+
+
+# ---------------------------------------------------------------------------
+# orchestrator.nvim chord relay — Ctrl+1..5 / Ctrl+Shift+Q → nvim RPC
+# ---------------------------------------------------------------------------
+
+
+def test_orchestrator_ctrl_digit_relay_present(main_qml: str):
+    """An Instantiator with model:5 must exist and call
+    `controller.send_editor_keys` for each Ctrl+1..5 chord.
+
+    These chords are nvim-side orchestrator.nvim keymaps that the
+    qmltermwidget fork cannot deliver (legacy VT key encoding has no
+    byte representation for Ctrl+digit). Main.qml must intercept them at
+    the Qt layer and inject the keycode over the RPC socket. Without this
+    block the Ctrl+1..5 AgentsFocus keymaps are silently lost inside the
+    embedded editor.
+    """
+    assert "Instantiator {" in main_qml
+    assert "model: 5" in main_qml
+    assert "controller.send_editor_keys(" in main_qml
+    # The delegate must be gated on editorVisible so the relay fires only
+    # when the editor is the active surface — not while shell/agent/FM is up.
+    assert "enabled: controller.editorVisible" in main_qml
+
+
+def test_orchestrator_ctrl_shift_q_relay_present(main_qml: str):
+    """A standalone Shortcut for Ctrl+Shift+Q must call
+    `controller.send_editor_keys` with the `<C-S-q>` keycode.
+
+    This is orchestrator.nvim's AgentsClose chord — unencodable via the
+    VT layer (Ctrl+Shift+letter collapses to Ctrl+letter in the 0x1f
+    mask). Must be gated on `controller.editorVisible` — same rationale
+    as Ctrl+1..5 above.
+    """
+    assert 'sequences: ["Ctrl+Shift+Q"]' in main_qml
+    assert '"<C-S-q>"' in main_qml
+
+
+def test_orchestrator_relay_gated_not_always_on(main_qml: str):
+    """The relay chords must NOT be always-on (as the swap chords are).
+
+    If Ctrl+1 were an ApplicationShortcut enabled unconditionally, it
+    would fire while the shell pane is focused and inject a keycode into
+    an unseen editor — silent, invisible state corruption. The `enabled:`
+    binding to `controller.editorVisible` is the load-bearing gate.
+    Verify the binding appears in the relay block, not just anywhere in
+    the file.
+    """
+    # Find the Instantiator block and verify the gate appears within it.
+    inst_idx = main_qml.find("Instantiator {")
+    assert inst_idx >= 0
+    # The block extends ~200 chars to the closing brace — enough to cover
+    # the delegate's enabled property.
+    relay_block = main_qml[inst_idx : inst_idx + 400]
+    assert "controller.editorVisible" in relay_block
