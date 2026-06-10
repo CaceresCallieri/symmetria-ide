@@ -49,9 +49,14 @@ def default_font() -> QFont:
     be listed explicitly — fontconfig's system fallback will NOT fire.
     """
     preferred = [
-        # Patched variants first — self-sufficient, and what the user's
-        # Ghostty config likely also resolves to.
-        "JetBrainsMono Nerd Font Mono",
+        # Non-"Mono" variant, deliberately — it is literally the family the
+        # user's Ghostty config names, and Nerd Fonts' "Mono" flavor shrinks
+        # every icon glyph to single-cell width, which made all TUI icons
+        # (file tree, git, powerline) visibly smaller than Ghostty's.
+        # A/B-verified in the terminal pane (2026-06-09): full-size icons,
+        # no clipping (icons bleed into the conventional trailing space
+        # cell), identical ASCII metrics so the cell grid is unaffected.
+        "JetBrainsMono Nerd Font",
         "CaskaydiaCove Nerd Font Mono",
         # Plain families below — glyph fallback kicks in for icons.
         "Iosevka",
@@ -63,7 +68,18 @@ def default_font() -> QFont:
         "DejaVu Sans Mono",
     ]
     families = QFontDatabase.families()
-    fallbacks = [c for c in ("Symbols Nerd Font", "Noto Color Emoji") if c in families]
+    # Ordered per-glyph fallbacks. "Adwaita Mono" (pacman: adwaita-fonts)
+    # supplies the dingbat/star glyphs JetBrains Mono lacks — notably the
+    # Claude Code spinner family U+2733 ✳ / U+273B ✻ / U+273D ✽ — and is
+    # the same font fontconfig resolves for Ghostty, so those glyphs render
+    # identically in both terminals. It MUST precede "Noto Color Emoji":
+    # U+2733 has an emoji presentation, and with the emoji font first that
+    # codepoint renders as a color emoji sticker instead of monochrome text.
+    fallbacks = [
+        c
+        for c in ("Symbols Nerd Font", "Adwaita Mono", "Noto Color Emoji")
+        if c in families
+    ]
 
     for name in preferred:
         if name in families:
