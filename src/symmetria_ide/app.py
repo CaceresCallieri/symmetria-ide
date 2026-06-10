@@ -1727,15 +1727,40 @@ class AppController(QObject):
         opens its own interactive session picker inside the terminal,
         which IS the picker UX (no IDE-side session-list plumbing).
         """
+        slot = self._next_free_term_slot()
+        if slot is None:
+            log.warning("spawn_agent: pool full (%d slots)", self._MAX_INSTANCES)
+            return
+        self._spawn_agent_in(slot, spawn_type, dangerous)
+
+    @Slot(int, str, bool)
+    def spawn_agent_in_slot(
+        self, slot: int, spawn_type: str = "fresh", dangerous: bool = True
+    ) -> None:
+        """Spawn into a SPECIFIC slot — the Ctrl+N-on-empty-slot path.
+
+        Pressing Ctrl+2 with slot 2 empty opens the spawn menu targeted
+        at slot 2; the chosen session lands exactly there, so the chord
+        that summoned the menu is the chord that reaches the agent
+        afterwards. No-op (with log) when the slot is occupied or out of
+        range — `focus_agent` owns the occupied case.
+        """
+        if not 1 <= slot <= self._MAX_INSTANCES:
+            log.warning("spawn_agent_in_slot: slot %d out of range — no-op", slot)
+            return
+        if slot in self._term_agents:
+            log.warning("spawn_agent_in_slot: slot %d occupied — no-op", slot)
+            return
+        self._spawn_agent_in(slot, spawn_type, dangerous)
+
+    def _spawn_agent_in(self, slot: int, spawn_type: str, dangerous: bool) -> None:
+        """Shared spawn path behind `spawn_agent` (lowest-free) and
+        `spawn_agent_in_slot` (explicit target)."""
         if spawn_type not in ("fresh", "resume", "continue"):
             log.warning("spawn_agent: unknown spawn_type %r — no-op", spawn_type)
             return
         if shutil.which("claude") is None:
             log.error("spawn_agent: `claude` not found on PATH — cannot spawn")
-            return
-        slot = self._next_free_term_slot()
-        if slot is None:
-            log.warning("spawn_agent: pool full (%d slots)", self._MAX_INSTANCES)
             return
         cwd = self.displayedRoot
         self._term_agents[slot] = {

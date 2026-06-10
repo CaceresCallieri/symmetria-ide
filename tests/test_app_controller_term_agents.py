@@ -380,3 +380,34 @@ def test_real_title_after_default_replaces_it(controller, bridge):
     controller.on_agent_title(1, "✶ refactor the bridge client")
     assert controller.agentTitles[0] == "refactor the bridge client"
     assert bridge.titles == [(1, "refactor the bridge client")]
+
+
+# ---------------------------------------------------------------------------
+# Slot-targeted spawn (Ctrl+N on an empty slot)
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_in_slot_lands_on_requested_slot(controller):
+    controller.spawn_agent_in_slot(3, "fresh", True)
+    assert controller.activeAgentSlots == [3]
+    assert controller.focusedAgent == 3
+    assert controller.agent_spawn_argv(3)[1].endswith("_3")
+
+
+def test_spawn_in_slot_occupied_is_a_no_op(controller, bridge):
+    controller.spawn_agent_in_slot(2, "fresh", True)
+    controller.spawn_agent_in_slot(2, "continue", False)
+    assert controller.activeAgentSlots == [2]
+    assert len(bridge.spawns) == 1
+
+
+def test_spawn_in_slot_out_of_range_is_a_no_op(controller):
+    controller.spawn_agent_in_slot(6, "fresh", True)
+    controller.spawn_agent_in_slot(0, "fresh", True)
+    assert controller.activeAgentSlots == []
+
+
+def test_lowest_free_spawn_skips_explicitly_taken_slot(controller):
+    controller.spawn_agent_in_slot(1, "fresh", True)
+    controller.spawn_agent("fresh", True)
+    assert controller.activeAgentSlots == [1, 2]

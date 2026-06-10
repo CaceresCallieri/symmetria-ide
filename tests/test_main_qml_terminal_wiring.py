@@ -298,6 +298,9 @@ def test_agent_focus_chords_present(main_qml: str):
     """
     assert "model: controller.maxAgentSlots" in main_qml
     assert "controller.focus_agent(index + 1)" in main_qml
+    # Empty slot → spawn menu targeted at that slot (Ctrl+2 with nothing
+    # in slot 2 means "give me an agent there", not a silent no-op).
+    assert "agentSpawnMenu.open(index + 1)" in main_qml
 
 
 def test_agent_management_chords_present(main_qml: str):
