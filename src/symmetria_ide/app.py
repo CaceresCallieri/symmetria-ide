@@ -2339,6 +2339,14 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # Editor font point size — single source of truth in editor_font.py.
     # The QMLTermWidget editor + shell panes bind `font.pointSize` to this.
     ctx.setContextProperty("editorFontPointSize", float(DEFAULT_FONT_POINT_SIZE))
+    # Per-glyph fallback chain for the terminal panes. Gotcha #23 cuts both
+    # ways: QML font values are single-family, so the setFamilies cascade
+    # built in editor_font.py CANNOT travel through `font.family` — without
+    # this, missing glyphs (Claude Code's ✻ spark, dingbats, emoji) resolve
+    # via Qt's generic system fallback, which picks different fonts than
+    # Ghostty. The fork's `fallbackFamilies` Q_PROPERTY (modification #9)
+    # re-composes the cascade inside setVTFont.
+    ctx.setContextProperty("editorFontFallbacks", _resolved_font.families()[1:])
 
     # Editor nvim launch spec, consumed by the QMLTermSession inside Main.qml.
     # nvim is now spawned by the terminal widget (Konsole KSession), NOT by a
@@ -2478,6 +2486,22 @@ def _configure_freetype_interpreter() -> None:
     os.environ.setdefault("FREETYPE_PROPERTIES", "truetype:interpreter-version=35")
 
 
+def _export_host_window_pid() -> None:
+    """Publish this process's PID to child processes as the host window PID.
+
+    Symmetria Shell's agent-bridge resolves which Hyprland window hosts a
+    NeoVim instance by walking /proc ancestors looking for known terminal
+    emulators. Inside the IDE that walk hits this Python process and fails,
+    so click-to-focus / workspace badges / STT targeting for orchestrator.nvim
+    agents all degrade. The bridge falls back to reading this variable from
+    /proc/<nvim_pid>/environ — our PID IS the Hyprland window PID (one
+    QGuiApplication, one window). Both QMLTermSession panes (editor nvim and
+    shell) inherit it, so agents spawned from either pane resolve correctly.
+    Must run before the QML engine spawns the panes.
+    """
+    os.environ["SYMMETRIA_HOST_WINDOW_PID"] = str(os.getpid())
+
+
 def run() -> int:
     trace("run_entered")
     configure_logging()
@@ -2501,6 +2525,8 @@ def run() -> int:
     _configure_render_loop_for_screenshot()
     # Must run before QGuiApplication loads FreeType — see _configure_freetype_interpreter().
     _configure_freetype_interpreter()
+    # Must run before the engine spawns the terminal panes — see _export_host_window_pid().
+    _export_host_window_pid()
 
     # Resolve `symmetria-ide [PATH]` and chdir before QGuiApplication +
     # AppController (which reads os.getcwd() in __init__). The path is stripped

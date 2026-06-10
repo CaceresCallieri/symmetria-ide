@@ -367,6 +367,12 @@ Window {
                     // Same font the IDE chrome overlays bind to (editor_font.py).
                     font.family: editorFontFamily
                     font.pointSize: editorFontPointSize
+                    // Per-glyph fallback chain (fork modification #9). QML
+                    // font values are single-family (gotcha #23), so the
+                    // editor_font.py cascade cannot ride font.family —
+                    // without this, missing glyphs (✻ spark, dingbats)
+                    // resolve via Qt's generic fallback, not Ghostty's.
+                    fallbackFamilies: editorFontFallbacks
                     // FULL hinting + the v35 FreeType interpreter set in
                     // app.py::run (FREETYPE_PROPERTIES) — chosen by a 3-way
                     // device-res screenshot comparison (2026-06-09):
@@ -471,6 +477,7 @@ Window {
                     font.family: editorFontFamily
                     font.pointSize: editorFontPointSize
                     font.hintingPreference: Font.PreferFullHinting
+                    fallbackFamilies: editorFontFallbacks
 
                     session: QMLTermSession {
                         id: shellSession

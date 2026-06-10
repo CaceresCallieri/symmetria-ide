@@ -68,16 +68,21 @@ def default_font() -> QFont:
         "DejaVu Sans Mono",
     ]
     families = QFontDatabase.families()
-    # Ordered per-glyph fallbacks. "Adwaita Mono" (pacman: adwaita-fonts)
-    # supplies the dingbat/star glyphs JetBrains Mono lacks — notably the
-    # Claude Code spinner family U+2733 ✳ / U+273B ✻ / U+273D ✽ — and is
-    # the same font fontconfig resolves for Ghostty, so those glyphs render
-    # identically in both terminals. It MUST precede "Noto Color Emoji":
-    # U+2733 has an emoji presentation, and with the emoji font first that
-    # codepoint renders as a color emoji sticker instead of monochrome text.
+    # Ordered per-glyph fallbacks, mirroring what Ghostty actually resolves
+    # on this system so shared glyphs render identically in both terminals:
+    #   - "FreeSerif" supplies the dingbat/star glyphs JetBrains Mono lacks
+    #     — notably the Claude Code spinner family U+2733 ✳ / U+273B ✻ /
+    #     U+273D ✽. Verified via `ghostty +show-face --cp=10043` →
+    #     “FreeSerif” (NOT fc-match's first candidate, Adwaita Mono — the
+    #     two discovery algorithms disagree; trust the renderer's answer).
+    #   - "Adwaita Mono" (pacman: adwaita-fonts) stays as a mono-friendly
+    #     backstop for codepoints FreeSerif lacks.
+    #   - Both MUST precede "Noto Color Emoji": U+2733 has an emoji
+    #     presentation, and with the emoji font first that codepoint
+    #     renders as a color emoji sticker instead of monochrome text.
     fallbacks = [
         c
-        for c in ("Symbols Nerd Font", "Adwaita Mono", "Noto Color Emoji")
+        for c in ("Symbols Nerd Font", "FreeSerif", "Adwaita Mono", "Noto Color Emoji")
         if c in families
     ]
 
