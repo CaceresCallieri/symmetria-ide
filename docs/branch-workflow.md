@@ -69,9 +69,11 @@ match — freeing the stable instance from workspace 6 is the whole point.
 Both are machine-local (not stowed), following the existing pattern:
 
 - `~/.local/bin/symmetria-ide` — dev tree, default class. Bound to
-  Super+Shift+Return in `~/.dotfiles/.config/hypr/keybindings.conf`.
+  **Super+Shift+Ctrl+Return** in `~/.dotfiles/.config/hypr/keybindings.conf`.
 - `~/.local/bin/symmetria-ide-stable` — stable tree, exports
-  `SYMMETRIA_IDE_APP_ID=symmetria-ide-stable`. Plus a desktop entry at
+  `SYMMETRIA_IDE_APP_ID=symmetria-ide-stable`. Bound to
+  **Super+Shift+Return** (the convenient chord belongs to the daily driver).
+  Plus a desktop entry at
   `~/.local/share/applications/symmetria-ide-stable.desktop` so the Symmetria
   Shell app launcher can start it.
 
