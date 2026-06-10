@@ -1848,6 +1848,20 @@ class AppController(QObject):
         if slot not in self._term_agents:
             log.warning("close_agent: slot %d not in pool — no-op", slot)
             return
+        if slot not in self._agent_order:
+            # Defensive: _term_agents and _agent_order should always be in sync.
+            # A desync here (double-close race or logic bug) would raise ValueError
+            # from index(); log and recover rather than crash.
+            log.error(
+                "close_agent: slot %d in _term_agents but not _agent_order — "
+                "pool desync detected; removing from agents only",
+                slot,
+            )
+            del self._term_agents[slot]
+            self._term_agent_activity.pop(slot, None)
+            self.termAgentsChanged.emit()
+            self._agent_bridge.notify_remove(slot)
+            return
         closed_position = self._agent_order.index(slot)
         self._agent_order.remove(slot)
         del self._term_agents[slot]

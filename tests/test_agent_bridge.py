@@ -37,9 +37,11 @@ class FakeBridgeServer:
         self._thread.start()
 
     def _run(self) -> None:
+        self._server.settimeout(
+            0.2
+        )  # set once; repeated calls inside the loop are no-ops
         while not self._stop.is_set():
             try:
-                self._server.settimeout(0.2)
                 conn, _ = self._server.accept()
             except (TimeoutError, OSError):
                 continue
@@ -213,9 +215,11 @@ def test_notify_title_for_unknown_slot_is_dropped(bridge_server, client):
     client.start()
     bridge_server.wait_for_messages(3)
     client.notify_title(9, "ghost")
-    _pump_events(lambda: True)
-    time.sleep(0.3)
-    QCoreApplication.processEvents()
+    # The debounce timer fires after 200ms; pump events for long enough to cover
+    # that window AND give the (absent) updated message a chance to arrive
+    # server-side.  _pump_events drains the Qt event loop on each iteration
+    # instead of using a raw sleep (project-standards §8: no time.sleep in tests).
+    _pump_events(lambda: True, timeout=0.5)
     assert not any(m["type"] == "updated" for m in bridge_server.received)
 
 
