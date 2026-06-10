@@ -171,6 +171,29 @@ Window {
         onActivated: controller.send_editor_keys("<C-S-q>")
     }
 
+    // Clipboard paste into the terminal panes. Same VT-encoding gap as the
+    // relay chords above: the fork's legacy key encoding collapses
+    // Ctrl+Shift+V to Ctrl+V (0x1f mask strips Shift), so the widget never
+    // receives a distinguishable paste chord — in stock Konsole this
+    // shortcut lives in the embedding app, which here is us. We call the
+    // widget's pasteClipboard() slot directly (Konsole's emitSelection:
+    // bracketed paste, CRLF→CR normalization), targeting whichever central
+    // terminal surface is visible. Editor pane: bracketed paste is what
+    // nvim's TUI and orchestrator.nvim's embedded Claude Code terminals
+    // expect, so text lands as a paste, not replayed keystrokes. Other
+    // surfaces (agent/FM): disabled — Qt text fields handle Ctrl+V natively.
+    Shortcut {
+        sequences: ["Ctrl+Shift+V"]
+        context: Qt.ApplicationShortcut
+        enabled: controller.editorVisible || controller.terminalVisible
+        onActivated: {
+            if (controller.editorVisible)
+                editor.pasteClipboard();
+            else
+                terminalView.pasteClipboard();
+        }
+    }
+
     // IDE-wide horizontal pane navigation.
     //
     // Spatial chord: Ctrl+H = move left, Ctrl+L = move right. The

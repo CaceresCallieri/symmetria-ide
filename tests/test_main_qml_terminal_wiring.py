@@ -319,3 +319,35 @@ def test_orchestrator_relay_gated_not_always_on(main_qml: str):
     # the delegate's enabled property.
     relay_block = main_qml[inst_idx : inst_idx + 400]
     assert "controller.editorVisible" in relay_block
+
+
+# ---------------------------------------------------------------------------
+# Clipboard paste chord — Ctrl+Shift+V → pasteClipboard() on the visible pane
+# ---------------------------------------------------------------------------
+
+
+def test_paste_chord_present(main_qml: str):
+    """A Ctrl+Shift+V Shortcut must call pasteClipboard() on the visible
+    terminal pane.
+
+    The fork's legacy VT key encoding collapses Ctrl+Shift+V to Ctrl+V
+    (the 0x1f mask strips Shift), so the widget never receives a
+    distinguishable paste chord. In stock Konsole this shortcut lives in
+    the embedding application — which here is Main.qml. Without this
+    block, paste is silently impossible in both the editor and shell
+    panes, and the STT system's sendshortcut fallback
+    (`hyprctl dispatch sendshortcut CTRL SHIFT, V`) dies with it.
+    """
+    assert 'sequences: ["Ctrl+Shift+V"]' in main_qml
+    assert "pasteClipboard()" in main_qml
+
+
+def test_paste_chord_gated_to_terminal_surfaces(main_qml: str):
+    """The paste chord must be disabled while the agent/FM surface is up —
+    Qt text inputs handle Ctrl+V natively, and pasting into an unseen
+    terminal would be invisible state corruption (same rationale as the
+    orchestrator relay gate)."""
+    paste_idx = main_qml.find('sequences: ["Ctrl+Shift+V"]')
+    assert paste_idx >= 0
+    paste_block = main_qml[paste_idx : paste_idx + 400]
+    assert "controller.editorVisible || controller.terminalVisible" in paste_block
