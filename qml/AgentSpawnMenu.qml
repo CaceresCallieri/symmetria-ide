@@ -106,11 +106,24 @@ Item {
                 }
             }
 
-            Text {
-                text: "lowercase ⚠ skip-permissions · Shift+key safe · Esc cancel"
-                color: Theme.color.text.dim
-                font.family: Theme.font.family
-                font.pixelSize: Theme.font.size.xs
+            // Footer hints — one per row: a single joined line overflows
+            // the fixed panel width and gets clipped at the right edge.
+            Column {
+                spacing: Theme.spacing.xs
+                Repeater {
+                    model: [
+                        "lowercase ⚠ skip-permissions",
+                        "Shift+key → safe mode (ask permissions)",
+                        "Esc → cancel",
+                    ]
+                    delegate: Text {
+                        required property string modelData
+                        text: modelData
+                        color: Theme.color.text.dim
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.xs
+                    }
+                }
             }
         }
     }
