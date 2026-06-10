@@ -257,6 +257,11 @@ Window {
                 fmPaneLoader.item.forceActiveFocus();
             else if (controller.agentVisible)
                 agentPane.forceActiveFocus();
+            else if (controller.agentSurfaceVisible)
+                // Terminal-agent surface: re-request focus for the focused
+                // slot — the delegate's onFocusAgentRequested handler lands
+                // it on the visible agent terminal.
+                controller.focus_agent(controller.focusedAgent);
             else if (controller.terminalVisible)
                 terminalView.forceActiveFocus();
             else
@@ -586,6 +591,114 @@ Window {
                         forceActiveFocus()
                 }
 
+                // IDE-native orchestrator surface — the terminal-agent pool.
+                // Claude CLI instances run in their own QMLTermWidget panes
+                // (one per pool slot), replacing the orchestrator.nvim
+                // terminal-buffer workflow inside the embedded nvim. One
+                // agent is visible at a time (`controller.focusedAgent`);
+                // Ctrl+1..5 / Ctrl+Shift+H/L switch which.
+                //
+                // STRUCTURE IS LOAD-BEARING: a fixed `model:
+                // controller.maxAgentSlots` Repeater over per-slot Loaders.
+                // Spawning = the slot's `agentSlotActive[index]` flips true →
+                // Loader instantiates the terminal and starts claude. Closing
+                // = the flag flips false → Loader teardown destroys the
+                // KSession, whose destructor hangs up the Pty and reaps the
+                // claude child. Do NOT replace the fixed Repeater with a
+                // model over `activeAgentSlots` — list churn would
+                // destroy/recreate sibling delegates and kill live claude
+                // processes on every spawn/close.
+                Item {
+                    id: agentSurface
+                    anchors.fill: parent
+                    visible: controller.agentSurfaceVisible && !controller.fmVisible && !controller.agentVisible
+
+                    Repeater {
+                        model: controller.maxAgentSlots
+
+                        delegate: Loader {
+                            id: slotLoader
+
+                            required property int index
+                            readonly property int slot: slotLoader.index + 1
+
+                            anchors.fill: parent
+                            active: controller.agentSlotActive[slotLoader.index]
+                            visible: controller.focusedAgent === slotLoader.slot
+
+                            sourceComponent: QMLTermWidget {
+                                id: agentTerm
+
+                                // Same rendering contract as the editor +
+                                // shell panes above (transparency invariants,
+                                // padding, font cascade + hinting) — keep the
+                                // three in sync.
+                                colorScheme: "Symmetria"
+                                useFBORendering: false
+                                fillColor: "transparent"
+                                blinkingCursor: true
+                                margin: Theme.size.terminalPadding
+                                font.family: editorFontFamily
+                                font.pointSize: editorFontPointSize
+                                fallbackFamilies: editorFontFallbacks
+                                font.hintingPreference: Font.PreferFullHinting
+
+                                session: QMLTermSession {
+                                    id: agentSession
+                                    initialWorkingDirectory: controller.displayedRoot
+                                    // claude exited on its own (/exit or crash)
+                                    // — Python drops the slot, which flips the
+                                    // Loader off. Idempotent with an explicit
+                                    // close (the slot is already gone then).
+                                    onFinished: controller.on_agent_finished(slotLoader.slot)
+                                    // OSC 0/2 terminal title from claude — the
+                                    // v1 session-title source for the top-bar
+                                    // chips (Python debounces the churn).
+                                    onTitleChanged: controller.on_agent_title(slotLoader.slot, agentSession.title)
+                                }
+
+                                Component.onCompleted: {
+                                    // One-shot argv read (gotcha #3 doesn't
+                                    // apply — deliberately not a binding; the
+                                    // spawn spec is frozen at load time).
+                                    // env-wrapper argv because KSession's
+                                    // setEnvironment is not QML-reachable.
+                                    var argv = controller.agent_spawn_argv(slotLoader.slot)
+                                    if (argv.length > 0) {
+                                        agentSession.shellProgram = argv[0]
+                                        // Manual copy, not argv.slice(1):
+                                        // QVariantList from a PySide slot is
+                                        // not a real JS Array in Qt 6.11 (see
+                                        // memory: Array.isArray rejects it).
+                                        var args = []
+                                        for (var i = 1; i < argv.length; i++)
+                                            args.push(argv[i])
+                                        agentSession.shellProgramArgs = args
+                                        agentSession.startShellProgram()
+                                    }
+                                    if (visible)
+                                        forceActiveFocus()
+                                }
+                                onVisibleChanged: if (visible)
+                                    forceActiveFocus()
+
+                                // Focus pull for the already-visible case
+                                // (chord pressed while the sidebar held focus
+                                // and this slot was already showing) — the
+                                // onVisibleChanged path above only covers
+                                // slot/surface switches.
+                                Connections {
+                                    target: controller
+                                    function onFocusAgentRequested(slot) {
+                                        if (slot === slotLoader.slot && agentTerm.visible)
+                                            agentTerm.forceActiveFocus()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // REGRESSION NOTE: a 2026-05-23 experiment wrapped AgentPane
                 // in a Loader (`active: controller.agentVisible || item !== null`)
                 // to defer its 800-line parse + Symmetria.Ide import cost
@@ -604,7 +717,11 @@ Window {
                 AgentPane {
                     id: agentPane
                     anchors.fill: parent
-                    visible: controller.agentVisible && !controller.fmVisible
+                    // Env-gated since the terminal-agent surface took over
+                    // "agent" as a central surface: legacySdkPaneEnabled is
+                    // true only for SYMMETRIA_IDE_SDK_PANE=1 or the SDK
+                    // smoke-test env vars (AGENT_PROMPT / AGENT_VIEW).
+                    visible: legacySdkPaneEnabled && controller.agentVisible && !controller.fmVisible
                 }
 
                 // Phase 0 editor minimap (docs/minimap-prd.md). Narrow
@@ -1579,6 +1696,10 @@ Window {
             fmPaneLoader.item.forceActiveFocus();
         else if (controller.agentVisible)
             agentPane.forceActiveFocus();
+        else if (controller.agentSurfaceVisible)
+            // Terminal-agent surface: route through focus_agent so the
+            // focused slot's delegate grabs focus (see agentSurface).
+            controller.focus_agent(controller.focusedAgent);
         else if (controller.terminalVisible)
             terminalView.forceActiveFocus();
         else

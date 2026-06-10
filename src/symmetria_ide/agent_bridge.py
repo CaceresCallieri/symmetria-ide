@@ -225,7 +225,20 @@ class AgentBridgeClient(QObject):
         """hello → sync → subscribe, sent on every (re)connect."""
         with self._instances_lock:
             instances = [dict(inst) for inst in self._instances.values()]
-        self._send({"type": "hello", "nvim_pid": self._pid, "nvim_socket": ""})
+        # host_window_pid declares this process as the Hyprland window
+        # owning the agents — authoritative over the bridge's /proc-walk
+        # heuristic, which misresolves when the IDE is launched from a dev
+        # terminal (the walk finds that terminal first) and cannot use the
+        # environ fallback for our OWN pid (putenv after exec is invisible
+        # in /proc/pid/environ).
+        self._send(
+            {
+                "type": "hello",
+                "nvim_pid": self._pid,
+                "nvim_socket": "",
+                "host_window_pid": self._pid,
+            }
+        )
         self._send({"type": "sync", "nvim_pid": self._pid, "instances": instances})
         self._send({"type": "subscribe"})
 

@@ -321,6 +321,12 @@ class AppController(QObject):
     termAgentsChanged = Signal()
     focusedAgentChanged = Signal()
     agentActivityChanged = Signal()
+    # QML focus pull for the agent surface — carries the slot so the
+    # matching terminal delegate can forceActiveFocus even when nothing
+    # else changed (e.g. Ctrl+N pressed while the sidebar held focus and
+    # slot N was already the visible agent). Sibling of
+    # focusTreeRequested / focusEditorRequested / focusTerminalRequested.
+    focusAgentRequested = Signal(int)
 
     # Cycle order for Shift+Tab in the agent pane. Tuple is the source of
     # truth for both validation (gate `_set_permission_mode` against this)
@@ -1788,6 +1794,7 @@ class AppController(QObject):
             self.focusedAgentChanged.emit()
         self._agent_bridge.notify_focus(slot)
         self.set_central_surface("agent")
+        self.focusAgentRequested.emit(slot)
 
     @Slot(int)
     def cycle_agent_focus(self, direction: int) -> None:
@@ -2506,6 +2513,17 @@ class AppController(QObject):
                 log.info("SYMMETRIA_IDE_AGENT_VIEW set — pre-warming slot 1")
                 self._spawn_instance(1)
             self.show_agent()
+        # Terminal-agent smoke-test hook: SYMMETRIA_IDE_SPAWN_AGENT=<type>
+        # spawns one agent at launch (value = fresh|resume|continue; "1" is
+        # accepted as fresh). Used by the headless E2E flow in
+        # docs/dev-workflow.md so a scripted launch can exercise the full
+        # spawn → bridge publish → hook activity → bubble pipeline without
+        # the Ctrl+Shift+N chord.
+        spawn_request = os.environ.get("SYMMETRIA_IDE_SPAWN_AGENT") or ""
+        if spawn_request:
+            spawn_type = "fresh" if spawn_request == "1" else spawn_request
+            log.info("SYMMETRIA_IDE_SPAWN_AGENT=%s — spawning at launch", spawn_request)
+            self.spawn_agent(spawn_type, True)
         self.backendReady.emit()
 
     def shutdown(self) -> None:
