@@ -2684,6 +2684,17 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
         engine.addImportPath(_qtw_path)
         log.info("qmltermwidget fork import path: %s", _qtw_path)
 
+    # Shared agent visuals (Symmetria.Agents.UI — the sparkle/chip module
+    # also consumed by Symmetria Shell). Normally resolved from the
+    # installed copy at /usr/lib/qt6/qml/Symmetria/Agents/UI (see
+    # ~/projects/symmetria-agents-ui/install.sh); the env var points at a
+    # checkout's qml/ dir for pre-install iteration — same prepend-wins
+    # mechanics as the FM override above.
+    _agents_ui_path = os.environ.get("SYMMETRIA_IDE_AGENTS_QML_PATH", "").strip()
+    if _agents_ui_path:
+        engine.setImportPathList([_agents_ui_path, *engine.importPathList()])
+        log.info("Agents.UI QML dev override active: %s", _agents_ui_path)
+
     ctx = engine.rootContext()
 
     # Make backend + capsules available to QML as a single `controller`
