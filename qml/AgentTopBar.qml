@@ -70,15 +70,20 @@ Rectangle {
             Layout.alignment: Qt.AlignVCenter
 
             Repeater {
-                model: controller.activeAgentSlots
+                // Display order (dense, compacts on close) — the chip's
+                // visible number is its POSITION (index + 1); modelData is
+                // the frozen INTERNAL slot (baked into SYMMETRIA_AGENT_ID
+                // + the bridge identity) used for state lookups + focus.
+                model: controller.agentOrder
 
                 delegate: Rectangle {
                     id: chip
 
-                    required property int index        // 0-based row in the Repeater
-                    required property int modelData    // the actual slot number
+                    required property int index        // 0-based display position
+                    required property int modelData    // internal pool slot
 
                     readonly property int slot: chip.modelData
+                    readonly property int displayNumber: chip.index + 1
                     readonly property bool isFocused: controller.focusedAgent === chip.slot
                     readonly property string sessionTitle: controller.agentTitles[chip.slot - 1] || ""
                     readonly property var activity: controller.agentActivity[chip.slot - 1]
@@ -115,7 +120,7 @@ Rectangle {
                         Text {
                             id: slotNumber
                             anchors.verticalCenter: parent.verticalCenter
-                            text: chip.slot
+                            text: chip.displayNumber
                             color: chip.isFocused
                                 ? Theme.color.text.strong
                                 : Theme.color.text.dim

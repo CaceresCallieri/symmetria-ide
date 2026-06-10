@@ -297,10 +297,12 @@ def test_agent_focus_chords_present(main_qml: str):
     empty slots.
     """
     assert "model: controller.maxAgentSlots" in main_qml
-    assert "controller.focus_agent(index + 1)" in main_qml
-    # Empty slot → spawn menu targeted at that slot (Ctrl+2 with nothing
-    # in slot 2 means "give me an agent there", not a silent no-op).
-    assert "agentSpawnMenu.open(index + 1)" in main_qml
+    # Ctrl+N addresses the Nth chip in DISPLAY order (dense, compacting),
+    # so the dispatch reads controller.agentOrder, not internal slots.
+    assert "controller.focus_agent(order[index])" in main_qml
+    # A position with no agent opens the spawn menu (appends as next
+    # dense number) instead of silently no-opping.
+    assert "agentSpawnMenu.open()" in main_qml
 
 
 def test_agent_management_chords_present(main_qml: str):

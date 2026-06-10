@@ -26,13 +26,7 @@ Item {
 
     signal dismissed()
 
-    /// 0 = "lowest free slot" (the Ctrl+Shift+A path). A positive slot
-    /// targets that exact slot — set by Ctrl+N on an empty slot, so the
-    /// chord that summoned the menu is the chord that reaches the agent.
-    property int targetSlot: 0
-
-    function open(slot) {
-        root.targetSlot = slot || 0;
+    function open() {
         root.visible = true;
         keyCatcher.forceActiveFocus();
     }
@@ -43,14 +37,11 @@ Item {
     }
 
     function _spawn(spawnType, dangerous) {
-        // Both spawn slots focus the new agent and switch the central
-        // surface, which lands keyboard focus on the agent terminal —
-        // no explicit focus restore needed on this path.
+        // spawn_agent appends in display order, focuses the new agent
+        // and switches the central surface, which lands keyboard focus
+        // on the agent terminal — no explicit focus restore needed.
         root.visible = false;
-        if (root.targetSlot > 0)
-            controller.spawn_agent_in_slot(root.targetSlot, spawnType, dangerous);
-        else
-            controller.spawn_agent(spawnType, dangerous);
+        controller.spawn_agent(spawnType, dangerous);
     }
 
     // Dim the surface behind the panel so the modal state is legible.
@@ -77,9 +68,10 @@ Item {
             spacing: Theme.spacing.sm
 
             Text {
-                text: root.targetSlot > 0
-                    ? "Spawn agent → slot " + root.targetSlot
-                    : "Spawn agent"
+                // Numbering is dense display order, so a new agent always
+                // becomes #(count + 1) — name it so the user knows which
+                // Ctrl+N will reach it afterwards.
+                text: "Spawn agent → #" + (controller.agentOrder.length + 1)
                 color: Theme.color.text.strong
                 font.family: Theme.font.family
                 font.pixelSize: Theme.font.size.sm

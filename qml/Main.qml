@@ -148,9 +148,11 @@ Window {
     //
     // Always-enabled (no surface gate): focus_agent auto-switches the
     // central surface to "agent", so the chords double as surface
-    // switchers from anywhere. An EMPTY slot opens the spawn menu
-    // targeted at that slot instead of no-opping — Ctrl+2 with nothing
-    // in slot 2 means "give me an agent there".
+    // switchers from anywhere. Ctrl+N addresses the Nth chip in DISPLAY
+    // order (controller.agentOrder — dense, compacting on close), not an
+    // internal slot. A position with no agent opens the spawn menu —
+    // Ctrl+2 with one agent running means "give me a second one"; the
+    // new agent always appends as the next dense number.
     Instantiator {
         model: controller.maxAgentSlots
         delegate: Shortcut {
@@ -158,10 +160,11 @@ Window {
             sequences: ["Ctrl+" + (index + 1)]
             context: Qt.ApplicationShortcut
             onActivated: {
-                if (controller.agentSlotActive[index])
-                    controller.focus_agent(index + 1);
+                var order = controller.agentOrder;
+                if (index < order.length)
+                    controller.focus_agent(order[index]);
                 else
-                    agentSpawnMenu.open(index + 1);
+                    agentSpawnMenu.open();
             }
         }
     }

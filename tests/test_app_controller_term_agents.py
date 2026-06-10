@@ -98,13 +98,13 @@ def test_spawn_continue_appends_c_flag(controller):
 
 def test_spawn_unknown_type_is_a_no_op(controller):
     controller.spawn_agent("bogus", True)
-    assert controller.activeAgentSlots == []
+    assert controller.agentOrder == []
 
 
 def test_spawn_without_claude_on_path_is_a_no_op(controller, monkeypatch):
     monkeypatch.setattr("symmetria_ide.app.shutil.which", lambda _name: None)
     controller.spawn_agent("fresh", True)
-    assert controller.activeAgentSlots == []
+    assert controller.agentOrder == []
 
 
 def test_agent_spawn_argv_for_empty_slot_returns_empty(controller):
@@ -119,22 +119,26 @@ def test_agent_spawn_argv_for_empty_slot_returns_empty(controller):
 def test_slots_fill_from_the_bottom(controller):
     controller.spawn_agent("fresh", True)
     controller.spawn_agent("fresh", True)
-    assert controller.activeAgentSlots == [1, 2]
+    assert controller.agentOrder == [1, 2]
     assert controller.agentSlotActive == [True, True, False, False, False]
 
 
 def test_pool_exhaustion_at_max_slots(controller):
     for _ in range(controller.maxAgentSlots + 1):
         controller.spawn_agent("fresh", True)
-    assert controller.activeAgentSlots == [1, 2, 3, 4, 5]
+    assert controller.agentOrder == [1, 2, 3, 4, 5]
 
 
-def test_freed_slot_is_reused(controller):
+def test_freed_internal_slot_is_reused(controller):
     controller.spawn_agent("fresh", True)
     controller.spawn_agent("fresh", True)
     controller.close_agent(1)
     controller.spawn_agent("fresh", True)
-    assert controller.activeAgentSlots == [1, 2]
+    # Internal slot 1 is reused (SYMMETRIA_AGENT_ID stays unique within
+    # the 1..5 range) but the newcomer APPENDS in display order — the
+    # survivor keeps position 1.
+    assert sorted(controller.agentOrder) == [1, 2]
+    assert controller.agentOrder == [2, 1]
 
 
 def test_spawn_publishes_bridge_instance_payload(controller, bridge):
@@ -196,19 +200,19 @@ def test_cycle_agent_focus_on_empty_pool_is_a_no_op(controller):
 # ---------------------------------------------------------------------------
 
 
-def test_close_focused_refocuses_below_first(controller):
+def test_close_focused_refocuses_previous_in_display_order(controller):
     for _ in range(3):
         controller.spawn_agent("fresh", True)
     controller.focus_agent(3)
     controller.close_agent(3)
     assert controller.focusedAgent == 2
-    assert controller.activeAgentSlots == [1, 2]
+    assert controller.agentOrder == [1, 2]
 
 
 def test_close_last_agent_falls_back_to_terminal_surface(controller, bridge):
     controller.spawn_agent("fresh", True)
     controller.close_focused_agent()
-    assert controller.activeAgentSlots == []
+    assert controller.agentOrder == []
     assert controller.focusedAgent == 0
     assert controller.centralSurface == "terminal"
     assert bridge.removes == [1]
@@ -226,7 +230,7 @@ def test_close_unfocused_agent_keeps_focus(controller):
 def test_on_agent_finished_closes_the_slot(controller, bridge):
     controller.spawn_agent("fresh", True)
     controller.on_agent_finished(1)
-    assert controller.activeAgentSlots == []
+    assert controller.agentOrder == []
     assert bridge.removes == [1]
 
 
@@ -383,31 +387,38 @@ def test_real_title_after_default_replaces_it(controller, bridge):
 
 
 # ---------------------------------------------------------------------------
-# Slot-targeted spawn (Ctrl+N on an empty slot)
+# Display-order compaction (chip numbers are dense positions, not slots)
 # ---------------------------------------------------------------------------
 
 
-def test_spawn_in_slot_lands_on_requested_slot(controller):
-    controller.spawn_agent_in_slot(3, "fresh", True)
-    assert controller.activeAgentSlots == [3]
-    assert controller.focusedAgent == 3
-    assert controller.agent_spawn_argv(3)[1].endswith("_3")
+def test_close_first_agent_promotes_survivor_to_position_one(controller):
+    controller.spawn_agent("fresh", True)  # internal slot 1, position 1
+    controller.spawn_agent("fresh", True)  # internal slot 2, position 2
+    controller.close_agent(1)
+    # Survivor (internal slot 2) is now display position 1...
+    assert controller.agentOrder == [2]
+    # ...while its frozen identity (SYMMETRIA_AGENT_ID env of the live
+    # process) keeps the internal slot number.
+    assert controller.agent_spawn_argv(2)[1].endswith("_2")
 
 
-def test_spawn_in_slot_occupied_is_a_no_op(controller, bridge):
-    controller.spawn_agent_in_slot(2, "fresh", True)
-    controller.spawn_agent_in_slot(2, "continue", False)
-    assert controller.activeAgentSlots == [2]
-    assert len(bridge.spawns) == 1
+def test_spawn_after_compaction_appends_as_next_position(controller):
+    controller.spawn_agent("fresh", True)  # slot 1
+    controller.spawn_agent("fresh", True)  # slot 2
+    controller.close_agent(1)
+    controller.spawn_agent("fresh", True)  # reuses internal slot 1
+    # Display order: survivor first (position 1), newcomer appended
+    # (position 2) — internal slot numbers are NOT the display order.
+    assert controller.agentOrder == [2, 1]
 
 
-def test_spawn_in_slot_out_of_range_is_a_no_op(controller):
-    controller.spawn_agent_in_slot(6, "fresh", True)
-    controller.spawn_agent_in_slot(0, "fresh", True)
-    assert controller.activeAgentSlots == []
-
-
-def test_lowest_free_spawn_skips_explicitly_taken_slot(controller):
-    controller.spawn_agent_in_slot(1, "fresh", True)
-    controller.spawn_agent("fresh", True)
-    assert controller.activeAgentSlots == [1, 2]
+def test_cycle_follows_display_order_after_compaction(controller):
+    controller.spawn_agent("fresh", True)  # slot 1
+    controller.spawn_agent("fresh", True)  # slot 2
+    controller.close_agent(1)
+    controller.spawn_agent("fresh", True)  # slot 1 again, position 2
+    controller.focus_agent(2)  # position 1
+    controller.cycle_agent_focus(1)
+    assert controller.focusedAgent == 1  # position 2 (internal slot 1)
+    controller.cycle_agent_focus(1)
+    assert controller.focusedAgent == 2  # wrapped to position 1

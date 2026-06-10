@@ -468,6 +468,10 @@ class AppController(QObject):
         self._term_agent_activity: dict[int, dict] = {}
         # 0 = no agent focused (empty pool). 1-based slot otherwise.
         self._focused_term_agent: int = 0
+        # Internal slots in DISPLAY order (see the agentOrder property):
+        # spawns append, closes remove — chip numbers and the Ctrl+N
+        # chords address POSITIONS in this list, never internal slots.
+        self._agent_order: list[int] = []
         # Publish/subscribe client to Symmetria Shell's agent-bridge hub.
         # Publishes this pool's spawns/focus/titles so the shell dashboard
         # shows IDE agents; subscribes to consolidated snapshots so the
@@ -1672,9 +1676,19 @@ class AppController(QObject):
         return self._MAX_INSTANCES
 
     @Property("QVariantList", notify=termAgentsChanged)
-    def activeAgentSlots(self) -> list:
-        """Sorted occupied slot numbers — the AgentTopBar chip model."""
-        return sorted(self._term_agents.keys())
+    def agentOrder(self) -> list:
+        """Internal slots in DISPLAY order — the AgentTopBar chip model.
+
+        Display numbering is dense and order-based: the chip number (and
+        the Ctrl+N chord) is the 1-based POSITION in this list, not the
+        internal slot. Closing an agent compacts the numbering (close #1
+        of two → the survivor becomes #1) while internal slots stay
+        frozen — they're baked into the running claude's
+        SYMMETRIA_AGENT_ID env and the bridge identity, so they cannot
+        renumber post-spawn. New spawns append (the newest agent is
+        always the highest number).
+        """
+        return list(self._agent_order)
 
     @Property("QVariantList", notify=termAgentsChanged)
     def agentSlotActive(self) -> list:
@@ -1727,40 +1741,15 @@ class AppController(QObject):
         opens its own interactive session picker inside the terminal,
         which IS the picker UX (no IDE-side session-list plumbing).
         """
-        slot = self._next_free_term_slot()
-        if slot is None:
-            log.warning("spawn_agent: pool full (%d slots)", self._MAX_INSTANCES)
-            return
-        self._spawn_agent_in(slot, spawn_type, dangerous)
-
-    @Slot(int, str, bool)
-    def spawn_agent_in_slot(
-        self, slot: int, spawn_type: str = "fresh", dangerous: bool = True
-    ) -> None:
-        """Spawn into a SPECIFIC slot — the Ctrl+N-on-empty-slot path.
-
-        Pressing Ctrl+2 with slot 2 empty opens the spawn menu targeted
-        at slot 2; the chosen session lands exactly there, so the chord
-        that summoned the menu is the chord that reaches the agent
-        afterwards. No-op (with log) when the slot is occupied or out of
-        range — `focus_agent` owns the occupied case.
-        """
-        if not 1 <= slot <= self._MAX_INSTANCES:
-            log.warning("spawn_agent_in_slot: slot %d out of range — no-op", slot)
-            return
-        if slot in self._term_agents:
-            log.warning("spawn_agent_in_slot: slot %d occupied — no-op", slot)
-            return
-        self._spawn_agent_in(slot, spawn_type, dangerous)
-
-    def _spawn_agent_in(self, slot: int, spawn_type: str, dangerous: bool) -> None:
-        """Shared spawn path behind `spawn_agent` (lowest-free) and
-        `spawn_agent_in_slot` (explicit target)."""
         if spawn_type not in ("fresh", "resume", "continue"):
             log.warning("spawn_agent: unknown spawn_type %r — no-op", spawn_type)
             return
         if shutil.which("claude") is None:
             log.error("spawn_agent: `claude` not found on PATH — cannot spawn")
+            return
+        slot = self._next_free_term_slot()
+        if slot is None:
+            log.warning("spawn_agent: pool full (%d slots)", self._MAX_INSTANCES)
             return
         cwd = self.displayedRoot
         self._term_agents[slot] = {
@@ -1770,6 +1759,13 @@ class AppController(QObject):
             "title": "",
             "spawned_at": int(time.time()),
         }
+        # Display ordering: new agents always APPEND — the newest agent
+        # is the highest chip number, and closing compacts (agentOrder).
+        # A previous iteration had a slot-targeted spawn here
+        # (spawn_agent_in_slot, for Ctrl+N-on-empty); dense order-based
+        # numbering superseded it — the position an agent gets is always
+        # len(order)+1 regardless of which chord opened the menu.
+        self._agent_order.append(slot)
         self.termAgentsChanged.emit()
         self._agent_bridge.notify_spawn(self._term_instance_payload(slot))
         log.info(
@@ -1823,31 +1819,37 @@ class AppController(QObject):
 
     @Slot(int)
     def cycle_agent_focus(self, direction: int) -> None:
-        """Move focus to the next/previous occupied slot (wraps around).
+        """Move focus to the next/previous agent in DISPLAY order (wraps).
 
         Bound to Ctrl+Shift+L (+1) / Ctrl+Shift+H (-1) on the agent
-        surface. Single-agent pools are a no-op (nothing to cycle to).
+        surface. Display order (not sorted internal slots) so cycling
+        matches the chip strip left-to-right.
         """
-        slots = sorted(self._term_agents.keys())
-        if not slots:
+        order = self._agent_order
+        if not order:
             return
-        if self._focused_term_agent not in slots:
-            self.focus_agent(slots[0])
+        if self._focused_term_agent not in order:
+            self.focus_agent(order[0])
             return
-        idx = slots.index(self._focused_term_agent)
-        self.focus_agent(slots[(idx + direction) % len(slots)])
+        idx = order.index(self._focused_term_agent)
+        self.focus_agent(order[(idx + direction) % len(order)])
 
     @Slot(int)
     def close_agent(self, slot: int) -> None:
         """Drop the slot — the QML Loader deactivates and reaps claude.
 
-        Refocus follows `_pick_focus_after_close` (below-first); closing
-        the last agent falls back to the terminal surface (the persistent
-        home surface per the Phase 2.5 topology decision).
+        Display numbering compacts: the closed agent leaves no gap (the
+        survivors renumber via `agentOrder`). Refocus goes to the
+        PREVIOUS agent in display order (the one whose chip slid into
+        the closed position's left neighbour), or the new first agent;
+        closing the last agent falls back to the terminal surface (the
+        persistent home surface per the Phase 2.5 topology decision).
         """
         if slot not in self._term_agents:
             log.warning("close_agent: slot %d not in pool — no-op", slot)
             return
+        closed_position = self._agent_order.index(slot)
+        self._agent_order.remove(slot)
         del self._term_agents[slot]
         self._term_agent_activity.pop(slot, None)
         self.termAgentsChanged.emit()
@@ -1855,16 +1857,13 @@ class AppController(QObject):
         self._agent_bridge.notify_remove(slot)
         log.info("close_agent: slot %d closed", slot)
         if self._focused_term_agent == slot:
-            next_slot = self._pick_focus_after_close(
-                slot, self._term_agents.keys(), self._MAX_INSTANCES
-            )
-            if next_slot is None:
+            if not self._agent_order:
                 self._focused_term_agent = 0
                 self.focusedAgentChanged.emit()
                 if self._central_surface == "agent":
                     self.set_central_surface("terminal")
             else:
-                self.focus_agent(next_slot)
+                self.focus_agent(self._agent_order[max(0, closed_position - 1)])
 
     @Slot()
     def close_focused_agent(self) -> None:
