@@ -86,8 +86,6 @@ class TestConfigureRenderLoopForScreenshot:
 
         _configure_render_loop_for_screenshot()
 
-        import os
-
         assert os.environ.get("QSG_RENDER_LOOP") == "basic"
 
     def test_no_op_when_screenshot_env_absent(self, monkeypatch):
@@ -98,8 +96,6 @@ class TestConfigureRenderLoopForScreenshot:
         from symmetria_ide.app import _configure_render_loop_for_screenshot
 
         _configure_render_loop_for_screenshot()
-
-        import os
 
         assert os.environ.get("QSG_RENDER_LOOP") is None
 
@@ -113,8 +109,6 @@ class TestConfigureRenderLoopForScreenshot:
         from symmetria_ide.app import _configure_render_loop_for_screenshot
 
         _configure_render_loop_for_screenshot()
-
-        import os
 
         assert os.environ.get("QSG_RENDER_LOOP") == "threaded"
 
@@ -136,8 +130,6 @@ class TestConfigureFreetypeInterpreter:
 
         _configure_freetype_interpreter()
 
-        import os
-
         assert os.environ.get("FREETYPE_PROPERTIES") == (
             "truetype:interpreter-version=35"
         )
@@ -151,8 +143,37 @@ class TestConfigureFreetypeInterpreter:
 
         _configure_freetype_interpreter()
 
-        import os
-
         assert os.environ.get("FREETYPE_PROPERTIES") == (
             "truetype:interpreter-version=40"
         )
+
+
+class TestExportHostWindowPid:
+    """Tests for _export_host_window_pid().
+
+    Unlike _configure_freetype_interpreter and _configure_render_loop_for_screenshot,
+    this helper uses unconditional assignment (not setdefault) — the IDE's own PID
+    must always win, because child processes (nvim, shell) need to resolve back to
+    the parent QGuiApplication window regardless of what the caller set.
+    """
+
+    def test_sets_pid_of_current_process(self, monkeypatch):
+        """SYMMETRIA_HOST_WINDOW_PID is set to the current process PID as a string."""
+        monkeypatch.delenv("SYMMETRIA_HOST_WINDOW_PID", raising=False)
+
+        from symmetria_ide.app import _export_host_window_pid
+
+        _export_host_window_pid()
+
+        assert os.environ.get("SYMMETRIA_HOST_WINDOW_PID") == str(os.getpid())
+
+    def test_overwrites_any_existing_value(self, monkeypatch):
+        """Unlike the setdefault helpers, _export_host_window_pid unconditionally
+        writes our PID — a stale value from a parent shell must not persist."""
+        monkeypatch.setenv("SYMMETRIA_HOST_WINDOW_PID", "99999")
+
+        from symmetria_ide.app import _export_host_window_pid
+
+        _export_host_window_pid()
+
+        assert os.environ.get("SYMMETRIA_HOST_WINDOW_PID") == str(os.getpid())

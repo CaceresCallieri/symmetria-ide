@@ -476,8 +476,8 @@ Window {
                     margin: Theme.size.terminalPadding
                     font.family: editorFontFamily
                     font.pointSize: editorFontPointSize
-                    font.hintingPreference: Font.PreferFullHinting
                     fallbackFamilies: editorFontFallbacks
+                    font.hintingPreference: Font.PreferFullHinting
 
                     session: QMLTermSession {
                         id: shellSession
