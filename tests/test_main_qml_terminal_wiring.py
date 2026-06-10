@@ -261,7 +261,7 @@ def test_location_header_reflects_anchor_state(main_qml: str):
     whether the user has anchored or is drifting, defeating the
     "modes of inhabiting the IDE" UI thesis."""
     # Grep the immediate vicinity of the header for `controller.anchored`
-    # so we don't get a false positive from the Ctrl+Shift+A handler
+    # so we don't get a false positive from the Ctrl+Shift+P anchor handler
     # elsewhere in the file.
     header_idx = main_qml.find("id: locationHeader")
     assert header_idx >= 0
@@ -272,7 +272,7 @@ def test_location_header_reflects_anchor_state(main_qml: str):
 
 
 # ---------------------------------------------------------------------------
-# Terminal-agent chord family — Ctrl+1..5 / Ctrl+Shift+N/Q/H/L / Ctrl+U/D
+# Terminal-agent chord family — Ctrl+1..5 / Ctrl+Shift+A/Q/H/L / Ctrl+U/D
 # (HARD CUTOVER: these chords previously relayed to orchestrator.nvim via
 # controller.send_editor_keys; the IDE-native agent surface owns them now.)
 # ---------------------------------------------------------------------------
@@ -301,11 +301,11 @@ def test_agent_focus_chords_present(main_qml: str):
 
 
 def test_agent_management_chords_present(main_qml: str):
-    """Spawn menu (Ctrl+Shift+N), close (Ctrl+Shift+Q), and cycle
+    """Agent menu (Ctrl+Shift+A), close (Ctrl+Shift+Q), and cycle
     (Ctrl+Shift+H/L) chords must exist; close/cycle gated on the agent
     surface so they can't fire into nothing.
     """
-    assert 'sequences: ["Ctrl+Shift+N"]' in main_qml
+    assert 'sequences: ["Ctrl+Shift+A"]' in main_qml
     assert "agentSpawnMenu.open()" in main_qml
     assert 'sequences: ["Ctrl+Shift+Q"]' in main_qml
     assert "controller.close_focused_agent()" in main_qml

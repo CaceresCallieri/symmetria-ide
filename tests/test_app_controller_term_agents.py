@@ -345,3 +345,38 @@ def test_toggle_editor_terminal_from_agent_lands_on_editor(controller):
     controller.set_central_surface("agent")
     controller.toggle_editor_terminal()
     assert controller.centralSurface == "editor"
+
+
+# ---------------------------------------------------------------------------
+# Title cleaning (sparkle glyph + default-title suppression)
+# ---------------------------------------------------------------------------
+
+
+def test_title_strips_leading_sparkle_glyph(controller, bridge):
+    controller.spawn_agent("fresh", True)
+    controller.on_agent_title(1, "✳ fix the flaky tests")
+    assert controller.agentTitles[0] == "fix the flaky tests"
+    assert bridge.titles == [(1, "fix the flaky tests")]
+
+
+def test_default_claude_code_title_is_suppressed(controller, bridge):
+    controller.spawn_agent("fresh", True)
+    controller.on_agent_title(1, "✳ Claude Code")
+    assert controller.agentTitles[0] == ""
+    # No publish either — "" equals the initial title, so the dedupe
+    # guard drops it (the dashboard shows no title until a real one).
+    assert bridge.titles == []
+
+
+def test_bare_claude_code_title_is_suppressed_case_insensitively(controller):
+    controller.spawn_agent("fresh", True)
+    controller.on_agent_title(1, "claude code")
+    assert controller.agentTitles[0] == ""
+
+
+def test_real_title_after_default_replaces_it(controller, bridge):
+    controller.spawn_agent("fresh", True)
+    controller.on_agent_title(1, "✳ Claude Code")
+    controller.on_agent_title(1, "✶ refactor the bridge client")
+    assert controller.agentTitles[0] == "refactor the bridge client"
+    assert bridge.titles == [(1, "refactor the bridge client")]

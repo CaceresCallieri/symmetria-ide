@@ -2,14 +2,14 @@
 // bottom. Surfaces the terminal-agent pool (the IDE-native orchestrator
 // runtime) so the user can see every running agent at all times, even
 // while focused on the editor or the shell. Ctrl+1..5 focuses a slot,
-// Ctrl+Shift+N spawns into the next free one, Ctrl+Shift+Q closes the
+// Ctrl+Shift+A → n spawns into the next free one, Ctrl+Shift+Q closes the
 // focused one — closing dims its bubble here in the same frame.
 //
 // Visibility:
 //   Always visible. Chrome height stays constant (`Theme.size.statusBarHeight`)
 //   so the central viewport doesn't jump as instances spawn or close. The
 //   chip strip is empty at launch (lazy-spawn: nothing runs until the
-//   user presses Ctrl+Shift+N or an env-var startup path opts in). An
+//   user presses Ctrl+Shift+A → n or an env-var startup path opts in). An
 //   empty strip is intentional — the bar is always present as chrome so
 //   layout doesn't shift, but chips only appear once the user asks.
 //
@@ -53,10 +53,10 @@ Rectangle {
         anchors.rightMargin: Theme.spacing.md
         spacing: Theme.spacing.md
 
-        // Stretch fills the bar's left side so the bubble strip sits
-        // anchored to the right edge — matches the user's original
-        // preferred placement when the bubbles lived inside the agent
-        // pane's chromeRow.
+        // Symmetric stretches center the bubble strip in the bar
+        // (space-around) — per the 2026-06-10 layout decision; the
+        // earlier right-anchored placement was carried over from the
+        // SDK pane's chromeRow and is retired.
         Item { Layout.fillWidth: true }
 
         // --- Instance chip strip ------------------------------------
@@ -164,5 +164,9 @@ Rectangle {
                 }
             }
         }
+
+        // Right-side counterpart of the leading stretch — together they
+        // center the strip.
+        Item { Layout.fillWidth: true }
     }
 }

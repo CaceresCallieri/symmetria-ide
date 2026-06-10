@@ -1859,12 +1859,33 @@ class AppController(QObject):
             log.info("on_agent_finished: slot %d exited", slot)
             self.close_agent(slot)
 
+    # Leading glyphs claude prefixes to its OSC titles ("✳ Claude Code").
+    # Stripped before display: the chip already renders the ANIMATED
+    # sparkle from Symmetria.Agents.UI, so the static text glyph is
+    # redundant next to it.
+    _TITLE_GLYPHS = "✳✻✶✦✢*"
+
+    @classmethod
+    def _clean_agent_title(cls, title: str) -> str:
+        """Normalise claude's OSC title for chip display.
+
+        Strips the leading sparkle glyph(s) + whitespace, and treats the
+        bare product name ("Claude Code" — what claude reports before a
+        session has a real summary) as NO title, so the chip shows just
+        the animated sparkle + slot number until a meaningful session
+        name exists.
+        """
+        cleaned = title.strip().lstrip(cls._TITLE_GLYPHS).strip()
+        if cleaned.lower() == "claude code":
+            return ""
+        return cleaned
+
     @Slot(int, str)
     def on_agent_title(self, slot: int, title: str) -> None:
         """QML callback for KSession.titleChanged (OSC 0/2 from claude)."""
         if slot not in self._term_agents:
             return
-        title = title.strip()
+        title = self._clean_agent_title(title)
         if self._term_agents[slot]["title"] == title:
             return
         self._term_agents[slot]["title"] = title

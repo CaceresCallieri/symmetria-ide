@@ -66,7 +66,7 @@ Window {
     //
     // Qt resolves application shortcuts in QApplication::notify BEFORE
     // the focused widget's keyPressEvent runs, so this wins over
-    // the editor terminal's keyboard capture — Ctrl+Shift+A does NOT leak to nvim
+    // the editor terminal's keyboard capture — the chord does NOT leak to nvim
     // even when the editor is focused and in insert mode. If a future
     // regression breaks that ordering, the symptom is "anchor seems to
     // be inserting characters in nvim"; the fix is upstream of this
@@ -78,8 +78,12 @@ Window {
     // feature ("am I anchored or not"). Anchored state is surfaced via
     // `controller.anchored` so a future affordance (file-tree title
     // badge, status-bar pill) is a single binding away from here.
+    //
+    // P-for-pin: this chord was Ctrl+Shift+A until 2026-06-10, when A
+    // was reassigned to the agent namespace (the spawn menu below) —
+    // A-for-agent beat A-for-anchor in the user's mental model.
     Shortcut {
-        sequences: ["Ctrl+Shift+A"]
+        sequences: ["Ctrl+Shift+P"]
         context: Qt.ApplicationShortcut
         onActivated: {
             if (controller.anchored) {
@@ -91,7 +95,7 @@ Window {
     }
 
     // Phase 2.5 central-surface toggle chord. Same application-scope
-    // pattern as Ctrl+Shift+A — fires regardless of which pane has
+    // pattern as the anchor chord above — fires regardless of which pane has
     // focus, including from inside nvim's insert mode. The anchor block
     // above documents the QApplication::notify ordering rationale in
     // full; the same reasoning applies here.
@@ -155,9 +159,12 @@ Window {
         }
     }
 
-    // Spawn menu — keyboard-first popup (f/c/r dangerous, F/C/R safe).
+    // Agent menu — A-for-agent, the namespace entry point: a keyboard-
+    // first popup where n/c/r spawn new/continue/resume (dangerous;
+    // Shift+letter = the permission-checked variant). Future backends
+    // extend the menu (o = OpenCode) without burning more chords.
     Shortcut {
-        sequences: ["Ctrl+Shift+N"]
+        sequences: ["Ctrl+Shift+A"]
         context: Qt.ApplicationShortcut
         onActivated: agentSpawnMenu.open()
     }
@@ -250,7 +257,7 @@ Window {
     // owns horizontal navigation; nvim/terminal/agent are demoted
     // to bare engines and never see the chord (Qt resolves
     // ApplicationShortcut in QApplication::notify BEFORE the focused
-    // widget's keyPressEvent, exactly like Ctrl+Shift+A — see the
+    // widget's keyPressEvent, exactly like Ctrl+Shift+P — see the
     // anchor block above for the full ordering rationale).
     //
     // Why bare Ctrl+H/L, not Ctrl+Shift+H/L: matches the user's
@@ -651,6 +658,33 @@ Window {
                     id: agentSurface
                     anchors.fill: parent
                     visible: controller.agentSurfaceVisible && !controller.fmVisible && !controller.agentVisible
+
+                    // Empty-state affordance: the surface is reachable with
+                    // no agents alive (StatusBar switcher click), and an
+                    // unexplained empty pane reads as broken. Names the
+                    // spawn chord so the path is discoverable without docs.
+                    Column {
+                        anchors.centerIn: parent
+                        spacing: Theme.spacing.sm
+                        visible: controller.focusedAgent === 0
+
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: "no agents running"
+                            color: Theme.color.text.dim
+                            font.family: Theme.font.family
+                            font.pixelSize: Theme.font.size.sm
+                            renderType: Text.NativeRendering
+                        }
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: "Ctrl+Shift+A — spawn an agent"
+                            color: Theme.color.text.normal
+                            font.family: Theme.font.family
+                            font.pixelSize: Theme.font.size.sm
+                            renderType: Text.NativeRendering
+                        }
+                    }
 
                     /// The focused slot's live QMLTermWidget, or null.
                     function focusedTerminal() {
@@ -1279,7 +1313,7 @@ Window {
                     // `controller.displayedRootCompact` (HOME-collapsed)
                     // and `controller.anchored` — both are reactive @Property
                     // bindings, so cd-ing in the terminal or pressing
-                    // Ctrl+Shift+A updates this header without any extra
+                    // Ctrl+Shift+P updates this header without any extra
                     // wiring. Anchored state surfaces two ways:
                     //   (a) text color flips from text.normal → accent.primary
                     //       so the header reads as "this is committed work"
@@ -1452,7 +1486,7 @@ Window {
                             // to the anchored project root when the user has
                             // anchored. When unanchored, `displayedRoot` is
                             // identical to `cwd` — no behavior change from the
-                            // pre-anchor world. The Ctrl+Shift+A application-
+                            // pre-anchor world. The Ctrl+Shift+P application-
                             // scope Shortcut at the Window root toggles the
                             // anchor; `:SymmetriaAnchor` / `:SymmetriaUnanchor`
                             // are the scripted surface for the same Slots.
@@ -1750,7 +1784,7 @@ Window {
     // even with `controller.fmVisible == true`. Falling through to the
     // editor branch in that frame is benign — `onFmVisibleChanged`
     // will reassert FM focus on the next tick when the Loader settles.
-    // Agent spawn menu — Window-level modal overlay (Ctrl+Shift+N).
+    // Agent spawn menu — Window-level modal overlay (Ctrl+Shift+A).
     // On dismiss (Esc) focus returns to whatever surface is visible via
     // the same dispatch onActiveChanged uses; on spawn, focus_agent's
     // focusAgentRequested handles the handoff to the new terminal.

@@ -1,11 +1,13 @@
-// Keyboard-first agent spawn menu (Ctrl+Shift+N).
+// Keyboard-first agent menu (Ctrl+Shift+A — A-for-agent namespace).
 //
-// A centered modal panel listing the three spawn types. Lowercase keys
-// spawn the DANGEROUS variant (--dangerously-skip-permissions — the
-// daily-driver polarity inherited from orchestrator.nvim's <leader>an
-// family); uppercase spawns the permission-checked variant. Esc
-// dismisses. No mouse interaction in v1 — this is a chord-driven
-// surface per the keyboard-first non-negotiable.
+// A centered modal panel: n/c/r spawn a NEW / CONTINUE / RESUME Claude
+// session. Lowercase keys spawn the DANGEROUS variant
+// (--dangerously-skip-permissions — the daily-driver polarity inherited
+// from orchestrator.nvim's <leader>an family); Shift+letter spawns the
+// permission-checked variant. Esc dismisses. Future backends extend the
+// key set (o = OpenCode) instead of burning new chords. No mouse
+// interaction in v1 — this is a chord-driven surface per the
+// keyboard-first non-negotiable.
 //
 // Placeholder-discipline styling (minimal panel, Theme tokens only);
 // richer treatment lands once the agent surface has real usage cadence.
@@ -75,7 +77,7 @@ Item {
 
             Repeater {
                 model: [
-                    { key: "f", label: "fresh" },
+                    { key: "n", label: "new session" },
                     { key: "c", label: "continue" },
                     { key: "r", label: "resume (claude's picker)" },
                 ]
@@ -102,7 +104,7 @@ Item {
             }
 
             Text {
-                text: "lowercase ⚠ skip-permissions · UPPERCASE safe · Esc cancel"
+                text: "lowercase ⚠ skip-permissions · Shift+key safe · Esc cancel"
                 color: Theme.color.text.dim
                 font.family: Theme.font.family
                 font.pixelSize: Theme.font.size.xs
@@ -121,7 +123,7 @@ Item {
             case Qt.Key_Escape:
                 root.dismiss();
                 break;
-            case Qt.Key_F:
+            case Qt.Key_N:
                 root._spawn("fresh", !(event.modifiers & Qt.ShiftModifier));
                 break;
             case Qt.Key_C:
