@@ -699,13 +699,14 @@ Window {
                 }
 
                 // Active-pane focus border. Renders a 1px accent hairline
-                // around the visible central surface when any of its three
-                // candidate panes (agent / editor / terminal) has the
-                // active keyboard focus. When focus moves to the tree or
-                // to the FM overlay, the border disappears — the existing
-                // 1px static separator between mainContent and treeScope
-                // remains as the always-visible delineator, so the layout
-                // never gains visual weight in the idle state.
+                // around the visible central surface when the agent pane
+                // or the FM is the active surface. The editor and the
+                // terminal deliberately do NOT light the hairline — they
+                // are the dominant, full-bleed surfaces and the border
+                // read as visual noise there; the existing 1px static
+                // separator between mainContent and treeScope remains as
+                // the always-visible delineator, so the layout never
+                // gains visual weight in the idle state.
                 //
                 // Why a sibling Rectangle (not Rectangle.border on each
                 // pane): the editor + shell are QMLTermWidget items (no
@@ -746,8 +747,6 @@ Window {
                     // and matches the XOR shape that already governs the
                     // other panes.
                     border.color: (agentPane.paneActive
-                                   || editor.activeFocus
-                                   || terminalView.activeFocus
                                    || (controller.fmVisible && !treeScope.activeFocus))
                                   ? Theme.color.accent.focus
                                   : "transparent"
