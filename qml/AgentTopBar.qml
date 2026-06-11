@@ -47,6 +47,65 @@ Rectangle {
         anchors.bottom: root.bottom
     }
 
+    // Surface switcher — terminal / editor / agents, pinned to the bar's
+    // left edge (moved here from StatusBar's center per the 2026-06-11
+    // layout decision). Anchored as a SIBLING of the centering RowLayout,
+    // not a member: the chip strip must stay centered on the WHOLE bar,
+    // and a layout member would shift that center by the switcher's
+    // width. No overlap at sane widths — chips would need to span half
+    // the bar minus the switcher before colliding; verify visually if
+    // the pool grows past 5 or titles get long. Clicking is a
+    // convenience; the chords (Ctrl+Shift+E toggle, Ctrl+1..5 agent
+    // focus) remain primary.
+    Row {
+        id: surfaceSwitcher
+        anchors.left: root.left
+        anchors.leftMargin: Theme.spacing.md
+        anchors.verticalCenter: root.verticalCenter
+        spacing: Theme.spacing.sm
+        z: 1
+
+        Repeater {
+            // `surface` is the controller's centralSurface value (the
+            // wire name stays singular "agent"); `label` is display-only.
+            model: [
+                { surface: "terminal", label: "terminal" },
+                { surface: "editor", label: "editor" },
+                { surface: "agent", label: "agents" },
+            ]
+
+            delegate: Rectangle {
+                id: segment
+
+                required property var modelData
+                readonly property bool isCurrent: controller.centralSurface === segment.modelData.surface
+
+                height: Theme.size.modeBadgeHeight
+                radius: height / 2
+                color: segment.isCurrent ? Theme.color.bg.selected : "transparent"
+                implicitWidth: segmentLabel.implicitWidth + Theme.spacing.md * 2
+
+                Text {
+                    id: segmentLabel
+                    anchors.centerIn: parent
+                    text: segment.modelData.label
+                    color: segment.isCurrent ? Theme.color.text.strong : Theme.color.text.dim
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                    font.weight: segment.isCurrent ? Theme.font.weight.bold : Theme.font.weight.medium
+                    font.letterSpacing: 0.6
+                    renderType: Text.NativeRendering
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: controller.set_central_surface(segment.modelData.surface)
+                }
+            }
+        }
+    }
+
     RowLayout {
         anchors.fill: parent
         anchors.leftMargin: Theme.spacing.md

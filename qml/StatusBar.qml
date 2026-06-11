@@ -46,55 +46,9 @@ Rectangle {
                                          && !controller.fmVisible
                                          && controller.editorVisible
 
-    // Centered surface switcher — terminal / editor / agent. Anchored to
-    // the WHOLE bar (not editorColumn), per the user's layout decision:
-    // the switcher is the bar's visual anchor point regardless of how
-    // the side columns flex. Declared after the column layout below in
-    // z-order terms is irrelevant (no overlap at sane widths — the file
-    // path elides before reaching center; verify visually if capsule
-    // density grows). Clicking is a convenience; the chords
-    // (Ctrl+Shift+E toggle, Ctrl+1..5 agent focus) remain primary.
-    Row {
-        id: surfaceSwitcher
-        anchors.horizontalCenter: root.horizontalCenter
-        anchors.verticalCenter: root.verticalCenter
-        spacing: Theme.spacing.sm
-        z: 1
-
-        Repeater {
-            model: ["terminal", "editor", "agent"]
-
-            delegate: Rectangle {
-                id: segment
-
-                required property string modelData
-                readonly property bool isCurrent: controller.centralSurface === segment.modelData
-
-                height: Theme.size.modeBadgeHeight
-                radius: height / 2
-                color: segment.isCurrent ? Theme.color.bg.selected : "transparent"
-                implicitWidth: segmentLabel.implicitWidth + Theme.spacing.md * 2
-
-                Text {
-                    id: segmentLabel
-                    anchors.centerIn: parent
-                    text: segment.modelData
-                    color: segment.isCurrent ? Theme.color.text.strong : Theme.color.text.dim
-                    font.family: Theme.font.family
-                    font.pixelSize: Theme.font.size.xs
-                    font.weight: segment.isCurrent ? Theme.font.weight.bold : Theme.font.weight.medium
-                    font.letterSpacing: 0.6
-                    renderType: Text.NativeRendering
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: controller.set_central_surface(segment.modelData)
-                }
-            }
-        }
-    }
+    // The surface switcher (terminal / editor / agents) lived here
+    // centered until 2026-06-11 — it now sits at the left edge of
+    // AgentTopBar.qml, freeing the bottom bar's center for capsules.
 
     // Two-column outer layout mirrors the editor+sidebar RowLayout
     // sibling above (Main.qml mainContent + 1px separator + treeScope).
