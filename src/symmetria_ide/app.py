@@ -21,6 +21,7 @@ import argparse
 import gc
 import logging
 import os
+import re
 import signal
 import sys
 import shutil
@@ -1897,11 +1898,15 @@ class AppController(QObject):
             log.info("on_agent_finished: slot %d exited", slot)
             self.close_agent(slot)
 
-    # Leading glyphs claude prefixes to its OSC titles ("✳ Claude Code").
-    # Stripped before display: the chip already renders the ANIMATED
-    # sparkle from Symmetria.Agents.UI, so the static text glyph is
-    # redundant next to it.
-    _TITLE_GLYPHS = "✳✻✶✦✢*"
+    # Leading decoration claude prefixes to its OSC titles ("✳ Claude
+    # Code"). Stripped before display: the chip already renders the
+    # ANIMATED sparkle from Symmetria.Agents.UI, so the static text glyph
+    # is redundant next to it. A regex over "anything that isn't a word
+    # character or a path lead (~ / .)" rather than an explicit glyph
+    # list — claude's spinner alphabet is unstable across versions
+    # (✳ ✻ ✶ ✦ ✢ ✽ · …) and an unlisted glyph both leaked a tofu box
+    # into the chip AND broke the "Claude Code" placeholder match below.
+    _TITLE_PREFIX_RE = re.compile(r"^[^\w~/.]+")
 
     @classmethod
     def _clean_agent_title(cls, title: str) -> str:
@@ -1913,7 +1918,7 @@ class AppController(QObject):
         the animated sparkle + slot number until a meaningful session
         name exists.
         """
-        cleaned = title.strip().lstrip(cls._TITLE_GLYPHS).strip()
+        cleaned = cls._TITLE_PREFIX_RE.sub("", title.strip()).strip()
         if cleaned.lower() == "claude code":
             return ""
         return cleaned

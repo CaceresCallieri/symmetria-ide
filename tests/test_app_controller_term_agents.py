@@ -378,6 +378,18 @@ def test_bare_claude_code_title_is_suppressed_case_insensitively(controller):
     assert controller.agentTitles[0] == ""
 
 
+def test_unlisted_spinner_glyph_still_suppresses_default_title(controller):
+    # claude's spinner alphabet is unstable across versions — a glyph
+    # outside the old hardcoded strip set leaked a tofu box into the
+    # chip AND defeated the "Claude Code" suppression (the screenshot
+    # bug of 2026-06-11). The regex prefix-strip must handle any
+    # non-word decoration, including multi-char ones.
+    controller.spawn_agent("fresh", True)
+    for raw in ("✽ Claude Code", "· Claude Code", "⠴ Claude Code", "✻ ✽ Claude Code"):
+        controller.on_agent_title(1, raw)
+        assert controller.agentTitles[0] == "", raw
+
+
 def test_real_title_after_default_replaces_it(controller, bridge):
     controller.spawn_agent("fresh", True)
     controller.on_agent_title(1, "✳ Claude Code")
