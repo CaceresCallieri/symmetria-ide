@@ -328,6 +328,12 @@ class AppController(QObject):
     # slot N was already the visible agent). Sibling of
     # focusTreeRequested / focusEditorRequested / focusTerminalRequested.
     focusAgentRequested = Signal(int)
+    # Bridge-mediated STT injection into an agent pane: (slot, text,
+    # submit, request_id). Python cannot drive QMLTermSession (KSession is
+    # not Python-wrappable — see "The terminal panes" in CLAUDE.md), so the
+    # controller validates the request and hands delivery to QML; the agent
+    # surface answers via agent_inject_done with the same request_id.
+    agentInjectRequested = Signal(int, str, bool, str)
 
     # Cycle order for Shift+Tab in the agent pane. Tuple is the source of
     # truth for both validation (gate `_set_permission_mode` against this)
@@ -482,6 +488,11 @@ class AppController(QObject):
         # thread; this controller mutates GUI-thread state (§4 P2).
         self._agent_bridge.snapshot_received.connect(
             self._on_bridge_snapshot, Qt.ConnectionType.QueuedConnection
+        )
+        # queued: inject_requested also originates on the bridge reader
+        # thread; delivery mutates GUI/QML state (§4 P2).
+        self._agent_bridge.inject_requested.connect(
+            self._on_bridge_inject, Qt.ConnectionType.QueuedConnection
         )
         # ----- Backend signal wiring (chrome rpcnotify relays) -----------
         # These signals originate on the NvimBackend worker thread; Qt's
@@ -1965,6 +1976,11 @@ class AppController(QObject):
             "spawned_at": inst["spawned_at"],
             "active": True,
             "agent_type": "claude",
+            # Capability flag the snapshot propagates to consumers: these
+            # agents are claude TUIs in IDE-owned terminal panes with NO
+            # nvim socket — text delivery (STT) must route through the
+            # bridge's inject verb, not nvim RPC.
+            "inject_via": "bridge",
         }
 
     @Slot(dict)
@@ -1997,6 +2013,55 @@ class AppController(QObject):
         if new_activity != self._term_agent_activity:
             self._term_agent_activity = new_activity
             self.agentActivityChanged.emit()
+
+    @Slot(dict)
+    def _on_bridge_inject(self, payload: dict) -> None:
+        """Validate a bridge-routed inject and hand delivery to QML.
+
+        Target resolution mirrors orchestrator.nvim's stt_inject: an
+        explicit live slot wins (captured by the shell at recording stop,
+        so a mid-transcription focus switch doesn't redirect the text);
+        absent/dead slot falls back to the currently focused agent. With
+        no live agent at all, fail fast so the requester's toast fires
+        instead of its timeout.
+        """
+        request_id = str(payload.get("request_id") or "")
+        if not request_id:
+            return
+        raw_text = payload.get("text")
+        # Strip ESC defensively: the text is typed into a live TUI via a
+        # bracketed paste, and an embedded \x1b[201~ would terminate the
+        # paste early and leak the remainder as keystrokes.
+        text = (raw_text if isinstance(raw_text, str) else "").replace("\x1b", "")
+        if not text:
+            self._agent_bridge.send_inject_result(
+                request_id, False, False, "empty-text"
+            )
+            return
+        slot = payload.get("buf")
+        if not isinstance(slot, int) or slot not in self._term_agents:
+            slot = self._focused_term_agent
+        if slot not in self._term_agents:
+            self._agent_bridge.send_inject_result(request_id, False, False, "no-agent")
+            return
+        log.info(
+            "bridge inject: slot=%d textLen=%d submit=%s request=%s",
+            slot,
+            len(text),
+            bool(payload.get("submit")),
+            request_id,
+        )
+        self.agentInjectRequested.emit(
+            slot, text, bool(payload.get("submit")), request_id
+        )
+
+    @Slot(str, bool, bool, str)
+    def agent_inject_done(
+        self, request_id: str, ok: bool, submitted: bool, error: str = ""
+    ) -> None:
+        """QML callback closing the inject loop — relays the result to the
+        bridge, which relays it to the STT requester."""
+        self._agent_bridge.send_inject_result(request_id, ok, submitted, error)
 
     @Slot(str)
     def on_shell_cwd(self, path: str) -> None:

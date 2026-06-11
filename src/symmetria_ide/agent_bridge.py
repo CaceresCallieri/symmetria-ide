@@ -91,6 +91,14 @@ class AgentBridgeClient(QObject):
     # Wired to AppController._on_bridge_snapshot via explicit Qt.QueuedConnection.
     snapshot_received = Signal(dict)
 
+    # Bridge-routed inject command for one of THIS IDE's agents:
+    # {"type": "inject", "request_id": str, "buf": int, "text": str,
+    #  "submit": bool}. The hub routes these from an STT requester to the
+    # publisher connection that owns the target agent (us). Wired to
+    # AppController._on_bridge_inject via explicit Qt.QueuedConnection;
+    # the reply goes back through send_inject_result.
+    inject_requested = Signal(dict)
+
     # True on (re)connect after the hello/sync/subscribe replay, False on
     # connection loss. Informational — publishes while disconnected are
     # dropped (the reconnect sync restores bridge-side state).
@@ -200,6 +208,26 @@ class AgentBridgeClient(QObject):
                 {"type": "updated", "nvim_pid": self._pid, "buf": slot, "title": title}
             )
 
+    def send_inject_result(
+        self, request_id: str, ok: bool, submitted: bool, error: str = ""
+    ) -> None:
+        """Answer a bridge-routed inject command (GUI thread).
+
+        The hub holds the requester's connection open until this arrives
+        (or its own timeout fires), so send promptly on every code path —
+        a swallowed failure leaves the requester waiting out the timeout.
+        """
+        self._send(
+            {
+                "type": "inject_result",
+                "nvim_pid": self._pid,
+                "request_id": request_id,
+                "ok": ok,
+                "submitted": submitted,
+                "error": error,
+            }
+        )
+
     # ------------------------------------------------------------------
     # Wire helpers (any thread; serialised by _sock_lock)
     # ------------------------------------------------------------------
@@ -280,7 +308,12 @@ class AgentBridgeClient(QObject):
                     except json.JSONDecodeError:
                         log.warning("bridge snapshot: bad JSON (%.100s)", text)
                         continue
-                    self._emit_gc_safe(self.snapshot_received, payload)
+                    # The subscription feed is untyped snapshot lines;
+                    # commands the hub routes to us carry a "type" field.
+                    if payload.get("type") == "inject":
+                        self._emit_gc_safe(self.inject_requested, payload)
+                    else:
+                        self._emit_gc_safe(self.snapshot_received, payload)
             except OSError:
                 pass  # connection dropped — fall through to reconnect
             finally:

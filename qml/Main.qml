@@ -737,6 +737,63 @@ Window {
                         return (loader && loader.item) ? loader.item : null;
                     }
 
+                    // Bridge-mediated STT injection (controller →
+                    // agentInjectRequested → here). Python validated the
+                    // slot but cannot touch the KSession (not wrappable);
+                    // delivery happens here: a bracketed paste into the
+                    // slot's pty — claude's TUI enables bracketed paste,
+                    // so embedded newlines arrive as paste content, not
+                    // premature submits — then, for submit requests, Enter
+                    // after a short settle delay (mirrors orchestrator.
+                    // nvim's stt_inject, which waits for the terminal
+                    // buffer to absorb the paste before sending Enter).
+                    // One in-flight request at a time: STT deliveries are
+                    // serial by construction (one recording at a time), so
+                    // a second concurrent request reports busy rather than
+                    // racing the settle timer.
+                    property var _injectPending: null
+
+                    Timer {
+                        id: injectSubmitTimer
+                        interval: 150
+                        onTriggered: {
+                            var p = agentSurface._injectPending;
+                            agentSurface._injectPending = null;
+                            if (!p)
+                                return;
+                            var loader = agentSlotRepeater.itemAt(p.slot - 1);
+                            if (loader && loader.item) {
+                                loader.item.session.sendText("\r");
+                                controller.agent_inject_done(p.requestId, true, true, "");
+                            } else {
+                                // Agent closed during the settle window.
+                                controller.agent_inject_done(p.requestId, false, false, "agent-closed");
+                            }
+                        }
+                    }
+
+                    Connections {
+                        target: controller
+                        function onAgentInjectRequested(slot, text, submit, requestId) {
+                            var loader = agentSlotRepeater.itemAt(slot - 1);
+                            if (!loader || !loader.item) {
+                                controller.agent_inject_done(requestId, false, false, "no-pane");
+                                return;
+                            }
+                            if (agentSurface._injectPending) {
+                                controller.agent_inject_done(requestId, false, false, "busy");
+                                return;
+                            }
+                            loader.item.session.sendText("\x1b[200~" + text + "\x1b[201~");
+                            if (submit) {
+                                agentSurface._injectPending = ({ requestId: requestId, slot: slot });
+                                injectSubmitTimer.restart();
+                            } else {
+                                controller.agent_inject_done(requestId, true, false, "");
+                            }
+                        }
+                    }
+
                     /// Half-page scrollback on the focused agent terminal.
                     /// direction: +1 = up (older output), -1 = down. Qt
                     /// converts 120 wheel units → 3 lines, so half a page

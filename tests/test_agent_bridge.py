@@ -253,6 +253,43 @@ def test_malformed_snapshot_line_is_skipped(bridge_server, client):
 
 
 # ---------------------------------------------------------------------------
+# Bridge-routed inject commands
+# ---------------------------------------------------------------------------
+
+
+def test_inject_lines_route_to_inject_requested_not_snapshot(bridge_server, client):
+    snapshots: list[dict] = []
+    injects: list[dict] = []
+    client.snapshot_received.connect(snapshots.append)
+    client.inject_requested.connect(injects.append)
+    client.start()
+    bridge_server.wait_for_messages(3)
+    bridge_server.push(
+        {"type": "inject", "request_id": "r1", "buf": 2, "text": "hola", "submit": True}
+    )
+    bridge_server.push({"agents": [], "projects": []})
+    _pump_events(lambda: len(snapshots) == 1 and len(injects) == 1)
+    assert injects[0]["request_id"] == "r1"
+    assert injects[0]["buf"] == 2
+    assert snapshots[0] == {"agents": [], "projects": []}
+
+
+def test_send_inject_result_wire_format(bridge_server, client):
+    client.start()
+    bridge_server.wait_for_messages(3)
+    client.send_inject_result("r2", True, True, "")
+    messages = bridge_server.wait_for_messages(4)
+    assert messages[3] == {
+        "type": "inject_result",
+        "nvim_pid": client._pid,
+        "request_id": "r2",
+        "ok": True,
+        "submitted": True,
+        "error": "",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Reconnect + lifecycle
 # ---------------------------------------------------------------------------
 

@@ -24,6 +24,7 @@ class FakeBridge:
         self.removes: list[int] = []
         self.focuses: list[int] = []
         self.titles: list[tuple[int, str]] = []
+        self.inject_results: list[tuple[str, bool, bool, str]] = []
         self.start_calls = 0
         self.stop_calls = 0
 
@@ -38,6 +39,11 @@ class FakeBridge:
 
     def notify_title(self, slot: int, title: str) -> None:
         self.titles.append((slot, title))
+
+    def send_inject_result(
+        self, request_id: str, ok: bool, submitted: bool, error: str = ""
+    ) -> None:
+        self.inject_results.append((request_id, ok, submitted, error))
 
     def start(self) -> None:
         self.start_calls += 1
@@ -447,3 +453,75 @@ def test_cycle_follows_display_order_after_compaction(controller):
     assert controller.focusedAgent == 1  # position 2 (internal slot 1)
     controller.cycle_agent_focus(1)
     assert controller.focusedAgent == 2  # wrapped to position 1
+
+
+# ---------------------------------------------------------------------------
+# Bridge-mediated STT injection (_on_bridge_inject routing + validation)
+# ---------------------------------------------------------------------------
+
+
+def _capture_inject_emissions(controller):
+    emitted: list[tuple[int, str, bool, str]] = []
+    controller.agentInjectRequested.connect(
+        lambda slot, text, submit, rid: emitted.append((slot, text, submit, rid))
+    )
+    return emitted
+
+
+def test_inject_routes_to_requested_slot(controller, bridge):
+    controller.spawn_agent("fresh", True)  # slot 1
+    controller.spawn_agent("fresh", True)  # slot 2
+    emitted = _capture_inject_emissions(controller)
+    controller._on_bridge_inject(
+        {"request_id": "r1", "buf": 2, "text": "hola", "submit": True}
+    )
+    assert emitted == [(2, "hola", True, "r1")]
+    assert bridge.inject_results == []  # QML closes the loop, not Python
+
+
+def test_inject_dead_slot_falls_back_to_focused(controller):
+    controller.spawn_agent("fresh", True)  # slot 1, focused
+    emitted = _capture_inject_emissions(controller)
+    controller._on_bridge_inject(
+        {"request_id": "r2", "buf": 4, "text": "hola", "submit": False}
+    )
+    assert emitted == [(1, "hola", False, "r2")]
+
+
+def test_inject_with_no_agents_fails_fast(controller, bridge):
+    emitted = _capture_inject_emissions(controller)
+    controller._on_bridge_inject(
+        {"request_id": "r3", "buf": 1, "text": "hola", "submit": True}
+    )
+    assert emitted == []
+    assert bridge.inject_results == [("r3", False, False, "no-agent")]
+
+
+def test_inject_empty_text_fails_fast(controller, bridge):
+    controller.spawn_agent("fresh", True)
+    controller._on_bridge_inject({"request_id": "r4", "buf": 1, "text": ""})
+    assert bridge.inject_results == [("r4", False, False, "empty-text")]
+
+
+def test_inject_strips_escape_characters(controller):
+    # An embedded ESC could terminate the QML-side bracketed paste early
+    # (\x1b[201~) and leak the remainder as live keystrokes.
+    controller.spawn_agent("fresh", True)
+    emitted = _capture_inject_emissions(controller)
+    controller._on_bridge_inject(
+        {"request_id": "r5", "buf": 1, "text": "a\x1b[201~rm -rf", "submit": False}
+    )
+    assert emitted == [(1, "a[201~rm -rf", False, "r5")]
+
+
+def test_inject_missing_request_id_is_ignored(controller, bridge):
+    controller.spawn_agent("fresh", True)
+    emitted = _capture_inject_emissions(controller)
+    controller._on_bridge_inject({"buf": 1, "text": "hola"})
+    assert emitted == []
+    assert bridge.inject_results == []
+
+
+def test_agent_inject_done_relays_to_bridge(controller, bridge):
+    controller.agent_inject_done("r6", True, True, "")
+    assert bridge.inject_results == [("r6", True, True, "")]
