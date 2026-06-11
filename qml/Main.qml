@@ -670,7 +670,7 @@ Window {
                     visible: controller.agentSurfaceVisible && !controller.fmVisible && !controller.agentVisible
 
                     // Empty-state affordance: the surface is reachable with
-                    // no agents alive (StatusBar switcher click), and an
+                    // no agents alive (AgentTopBar switcher click), and an
                     // unexplained empty pane reads as broken. Names the
                     // spawn chord so the path is discoverable without docs.
                     Column {
