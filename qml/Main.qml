@@ -250,6 +250,34 @@ Window {
         }
     }
 
+    // Shift+Enter → newline in a claude prompt instead of submitting.
+    // Same VT-encoding gap as the paste chord above: the fork's legacy
+    // key encoding has no representation for Shift+Enter (no kitty
+    // CSI-u), so the widget sends a bare CR and claude submits the
+    // message. We intercept at the Window level and inject "\\\r" —
+    // backslash + CR, claude's documented line-continuation sequence
+    // (the exact text its own /terminal-setup binds Shift+Enter to in
+    // VSCode/iTerm). Scoped to the agent surface (focused agent's
+    // claude) and the shell pane (claude run by hand; in plain zsh the
+    // trailing backslash degrades gracefully to a continuation prompt).
+    // The editor surface is deliberately excluded — nvim owns its own
+    // Shift+Enter semantics.
+    Shortcut {
+        sequences: ["Shift+Return", "Shift+Enter"]
+        context: Qt.ApplicationShortcut
+        enabled: (controller.agentSurfaceVisible || controller.terminalVisible)
+                 && !treeScope.activeFocus && !agentSpawnMenu.visible
+        onActivated: {
+            if (controller.agentSurfaceVisible) {
+                var term = agentSurface.focusedTerminal();
+                if (term)
+                    term.session.sendText("\\\r");
+            } else {
+                shellSession.sendText("\\\r");
+            }
+        }
+    }
+
     // IDE-wide horizontal pane navigation.
     //
     // Spatial chord: Ctrl+H = move left, Ctrl+L = move right. The
