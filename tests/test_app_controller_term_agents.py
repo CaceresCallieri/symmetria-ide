@@ -457,6 +457,11 @@ def test_cycle_follows_display_order_after_compaction(controller):
 
 # ---------------------------------------------------------------------------
 # Bridge-mediated STT injection (_on_bridge_inject routing + validation)
+#
+# Scope: Python-side validation/routing only. The QML delivery half
+# (bracketed paste, settle timer, busy/no-pane/agent-closed replies in
+# Main.qml's agentSurface) is out of unit-test reach — verified manually
+# and guarded by comments at the QML site.
 # ---------------------------------------------------------------------------
 
 

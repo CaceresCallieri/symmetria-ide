@@ -755,6 +755,13 @@ Window {
 
                     Timer {
                         id: injectSubmitTimer
+                        // WORKAROUND: 150ms settle guess before Enter — the
+                        // fork's KSession exposes no paste-absorbed signal,
+                        // so there is nothing to acknowledge against
+                        // (orchestrator.nvim waits on terminal-buffer
+                        // onLines; a raw pty has no equivalent). Remove if
+                        // the fork ever surfaces a bracketed-paste-complete
+                        // signal on the QML-facing session.
                         interval: 150
                         onTriggered: {
                             var p = agentSurface._injectPending;
@@ -762,21 +769,41 @@ Window {
                             if (!p)
                                 return;
                             var loader = agentSlotRepeater.itemAt(p.slot - 1);
-                            if (loader && loader.item) {
+                            // Identity check, not just liveness: if the agent
+                            // exited during the settle window and a NEW agent
+                            // spawned into the freed slot (slots fill from
+                            // the bottom), the loader holds a different item
+                            // — Enter there would auto-submit into the wrong
+                            // pane. A destroyed item never compares equal to
+                            // its replacement, so this catches close AND
+                            // slot reuse.
+                            if (loader && loader.item && loader.item === p.term
+                                    && loader.item.session) {
                                 loader.item.session.sendText("\r");
                                 controller.agent_inject_done(p.requestId, true, true, "");
                             } else {
-                                // Agent closed during the settle window.
                                 controller.agent_inject_done(p.requestId, false, false, "agent-closed");
                             }
                         }
                     }
 
+                    // Deliberately NOT gated on agentSurface.visible: the
+                    // target is the slot's pty, not the foreground surface —
+                    // STT must deliver while the user is looking at the
+                    // editor/terminal/FM. Do not add a visibility guard.
                     Connections {
                         target: controller
                         function onAgentInjectRequested(slot, text, submit, requestId) {
+                            // Python already validated `slot in _term_agents`;
+                            // this re-check is the Loader-liveness backstop
+                            // (the bookkeeping dict and the Loader item can
+                            // briefly disagree around spawn/teardown). The
+                            // .session guard keeps a mid-construction item
+                            // from throwing past agent_inject_done — the
+                            // requester would otherwise wait out the bridge's
+                            // full timeout instead of failing fast.
                             var loader = agentSlotRepeater.itemAt(slot - 1);
-                            if (!loader || !loader.item) {
+                            if (!loader || !loader.item || !loader.item.session) {
                                 controller.agent_inject_done(requestId, false, false, "no-pane");
                                 return;
                             }
@@ -786,7 +813,7 @@ Window {
                             }
                             loader.item.session.sendText("\x1b[200~" + text + "\x1b[201~");
                             if (submit) {
-                                agentSurface._injectPending = ({ requestId: requestId, slot: slot });
+                                agentSurface._injectPending = ({ requestId: requestId, slot: slot, term: loader.item });
                                 injectSubmitTimer.restart();
                             } else {
                                 controller.agent_inject_done(requestId, true, false, "");

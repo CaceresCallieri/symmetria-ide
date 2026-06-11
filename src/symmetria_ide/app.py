@@ -2027,6 +2027,9 @@ class AppController(QObject):
         """
         request_id = str(payload.get("request_id") or "")
         if not request_id:
+            # No id to reply to — drop, but loudly: a missing request_id
+            # means a malformed command upstream, not a benign no-op.
+            log.warning("bridge inject: missing request_id (%.80s)", payload)
             return
         raw_text = payload.get("text")
         # Strip ESC defensively: the text is typed into a live TUI via a
