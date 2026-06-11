@@ -1451,20 +1451,20 @@ Window {
                         // prior whole-side-panel `treeScopeFocusBorder`
                         // — the user couldn't tell WHICH sub-pane had
                         // focus from a single envelope around the whole
-                        // column. Same 1px hairline / transparent-when-
-                        // inactive contract as `mainContentFocusBorder`,
-                        // just scoped to this individual sub-pane.
-                        // border.color flips (not border.width) to keep
-                        // the geometry stable — toggling width costs a
-                        // layout round-trip that's visibly janky during
-                        // focus transitions.
+                        // column. Left-edge bar only (was a full 1px
+                        // envelope): subtler, and the right edge was
+                        // crowding the scrollbar. `color` flips (not
+                        // width/visible) to keep the geometry stable —
+                        // toggling geometry costs a layout round-trip
+                        // that's visibly janky during focus transitions.
                         Rectangle {
-                            anchors.fill: parent
-                            color: "transparent"
-                            border.color: gitStatusPanel.activeFocus
-                                          ? Theme.color.accent.focus
-                                          : "transparent"
-                            border.width: 1
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            width: 1
+                            color: gitStatusPanel.activeFocus
+                                   ? Theme.color.accent.focus
+                                   : "transparent"
                             z: 50
                         }
                     }
@@ -1589,12 +1589,13 @@ Window {
                         // FocusScope), which flips when the inner
                         // ListView gains/loses activeFocus.
                         Rectangle {
-                            anchors.fill: parent
-                            color: "transparent"
-                            border.color: mainTreeScope.activeFocus
-                                          ? Theme.color.accent.focus
-                                          : "transparent"
-                            border.width: 1
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            width: 1
+                            color: mainTreeScope.activeFocus
+                                   ? Theme.color.accent.focus
+                                   : "transparent"
                             z: 50
                         }
                     }
