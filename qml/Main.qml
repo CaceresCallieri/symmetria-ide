@@ -1285,8 +1285,11 @@ Window {
                 // WHICH sub-pane (changes vs main tree) had focus, which
                 // mattered once Ctrl+J/Ctrl+K subdivided the side panel
                 // into two independently-navigable regions. The per-pane
-                // borders use the same 1px hairline / accent-on-focus /
-                // transparent-otherwise contract as `mainContentFocusBorder`.
+                // FocusBars share `mainContentFocusBorder`'s color-flip
+                // contract (accent.focus ↔ transparent on color, never
+                // on geometry) but render as a left-edge bar rather
+                // than a full envelope — subtler, and clear of the
+                // scrollbar.
 
                 // Three-section composition inside the side panel:
                 //   1. LocationHeader — current displayedRoot + anchor
@@ -1451,21 +1454,10 @@ Window {
                         // prior whole-side-panel `treeScopeFocusBorder`
                         // — the user couldn't tell WHICH sub-pane had
                         // focus from a single envelope around the whole
-                        // column. Left-edge bar only (was a full 1px
-                        // envelope): subtler, and the right edge was
-                        // crowding the scrollbar. `color` flips (not
-                        // width/visible) to keep the geometry stable —
-                        // toggling geometry costs a layout round-trip
-                        // that's visibly janky during focus transitions.
-                        Rectangle {
-                            anchors.left: parent.left
-                            anchors.top: parent.top
-                            anchors.bottom: parent.bottom
-                            width: 1
-                            color: gitStatusPanel.activeFocus
-                                   ? Theme.color.accent.focus
-                                   : "transparent"
-                            z: 50
+                        // column. Geometry + rationale live in
+                        // FocusBar.qml.
+                        FocusBar {
+                            focused: gitStatusPanel.activeFocus
                         }
                     }
 
@@ -1584,19 +1576,12 @@ Window {
 
                         // Per-sub-pane focus indicator for the main
                         // FileTreeView. Symmetric counterpart of
-                        // GitStatusPanel's overlay border above. Bound
+                        // GitStatusPanel's focus bar above. Bound
                         // to `mainTreeScope.activeFocus` (the wrapping
                         // FocusScope), which flips when the inner
                         // ListView gains/loses activeFocus.
-                        Rectangle {
-                            anchors.left: parent.left
-                            anchors.top: parent.top
-                            anchors.bottom: parent.bottom
-                            width: 1
-                            color: mainTreeScope.activeFocus
-                                   ? Theme.color.accent.focus
-                                   : "transparent"
-                            z: 50
+                        FocusBar {
+                            focused: mainTreeScope.activeFocus
                         }
                     }
                 }
