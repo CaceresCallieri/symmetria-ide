@@ -1918,7 +1918,10 @@ class AppController(QObject):
         the animated sparkle + slot number until a meaningful session
         name exists.
         """
-        cleaned = cls._TITLE_PREFIX_RE.sub("", title.strip()).strip()
+        # One trailing strip suffices: the regex already consumes leading
+        # whitespace (it's a non-word character), and the strip removes
+        # the separator space the glyph left behind plus any tail.
+        cleaned = cls._TITLE_PREFIX_RE.sub("", title).strip()
         if cleaned.lower() == "claude code":
             return ""
         return cleaned

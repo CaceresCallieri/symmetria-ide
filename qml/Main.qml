@@ -265,6 +265,10 @@ Window {
     Shortcut {
         sequences: ["Shift+Return", "Shift+Enter"]
         context: Qt.ApplicationShortcut
+        // The spawn-menu guard is needed precisely BECAUSE this is an
+        // ApplicationShortcut: Qt resolves it before the modal's key
+        // catcher ever sees the event, so without the guard Shift+Enter
+        // would inject text into the hidden terminal behind the menu.
         enabled: (controller.agentSurfaceVisible || controller.terminalVisible)
                  && !treeScope.activeFocus && !agentSpawnMenu.visible
         onActivated: {

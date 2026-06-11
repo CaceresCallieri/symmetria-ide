@@ -378,16 +378,29 @@ def test_bare_claude_code_title_is_suppressed_case_insensitively(controller):
     assert controller.agentTitles[0] == ""
 
 
-def test_unlisted_spinner_glyph_still_suppresses_default_title(controller):
-    # claude's spinner alphabet is unstable across versions — a glyph
-    # outside the old hardcoded strip set leaked a tofu box into the
-    # chip AND defeated the "Claude Code" suppression (the screenshot
-    # bug of 2026-06-11). The regex prefix-strip must handle any
-    # non-word decoration, including multi-char ones.
+# claude's spinner alphabet is unstable across versions — a glyph
+# outside the old hardcoded strip set leaked a tofu box into the
+# chip AND defeated the "Claude Code" suppression (the screenshot
+# bug of 2026-06-11). The regex prefix-strip must handle any
+# non-word decoration, including multi-char ones.
+@pytest.mark.parametrize(
+    "raw",
+    ["✽ Claude Code", "· Claude Code", "⠴ Claude Code", "✻ ✽ Claude Code"],
+    ids=["heavy-asterisk", "middle-dot", "braille-spinner", "double-glyph"],
+)
+def test_unlisted_spinner_glyph_still_suppresses_default_title(controller, raw):
     controller.spawn_agent("fresh", True)
-    for raw in ("✽ Claude Code", "· Claude Code", "⠴ Claude Code", "✻ ✽ Claude Code"):
-        controller.on_agent_title(1, raw)
-        assert controller.agentTitles[0] == "", raw
+    controller.on_agent_title(1, raw)
+    assert controller.agentTitles[0] == ""
+
+
+def test_unlisted_spinner_glyph_strips_from_real_title(controller):
+    # The suppression cases above share their strip path with REAL
+    # titles — an unlisted glyph on a meaningful session name must be
+    # stripped without suppressing the title itself.
+    controller.spawn_agent("fresh", True)
+    controller.on_agent_title(1, "✽ fix the flaky tests")
+    assert controller.agentTitles[0] == "fix the flaky tests"
 
 
 def test_real_title_after_default_replaces_it(controller, bridge):
