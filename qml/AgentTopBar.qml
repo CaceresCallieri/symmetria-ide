@@ -145,7 +145,14 @@ Rectangle {
 
                     readonly property int slot: chip.modelData
                     readonly property int displayNumber: chip.index + 1
+                    // Highlight only when the focused agent is actually on
+                    // screen. controller.focusedAgent deliberately persists
+                    // across surface swaps (it anchors Ctrl+Shift+A's
+                    // go-then-spawn "back to where I was"), so the visual
+                    // emphasis — not the state — gates on the agent surface
+                    // being the visible one.
                     readonly property bool isFocused: controller.focusedAgent === chip.slot
+                                                      && controller.centralSurface === "agent"
                     readonly property string sessionTitle: controller.agentTitles[chip.slot - 1] || ""
                     readonly property var activity: controller.agentActivity[chip.slot - 1]
 
