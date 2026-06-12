@@ -182,7 +182,14 @@ Window {
         sequences: ["Ctrl+Shift+A"]
         context: Qt.ApplicationShortcut
         onActivated: {
-            if (controller.focusedAgent === 0 || controller.agentSurfaceVisible)
+            // Modal guard (same rationale as _restoreCentralFocus): with
+            // the menu already open — possibly over a NON-agent surface,
+            // via Ctrl+N-on-empty — the go branch would focus_agent and
+            // yank focus out of the modal, leaving it visible but deaf.
+            // open() is idempotent and re-asserts the key catcher.
+            if (agentSpawnMenu.visible
+                    || controller.focusedAgent === 0
+                    || controller.agentSurfaceVisible)
                 agentSpawnMenu.open();
             else
                 controller.focus_agent(controller.focusedAgent);
