@@ -918,6 +918,16 @@ class AppController(QObject):
                         new_cwd,
                     )
             return
+        if cid == "gitpoke":
+            # Editor save (BufWritePost) — wake the GitController's
+            # debounced re-scan so the Active Changes panel / badges track
+            # saves immediately. Intercepted like `cwd`: not a status-bar
+            # field, must not fall through to CapsuleModel as a stray pill.
+            # Redundant with the recursive working-tree watcher by design —
+            # this path stays live when that watcher degraded (watchdog
+            # missing, inotify watch exhaustion).
+            self._git_controller.poke()
+            return
         if self._status.apply(payload):
             return
         self._capsules.update(payload)

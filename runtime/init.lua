@@ -187,6 +187,20 @@ vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "DirChanged" }, {
   end,
 })
 
+-- Git re-scan poke on every buffer write. Routed by AppController to
+-- `GitController.poke()` (a debounced status re-scan) — an editor save
+-- is the highest-signal "git status probably changed" event nvim can
+-- report. Deliberately a separate capsule id rather than piggybacking
+-- on the `file` capsule above: `file` also fires on BufEnter, and
+-- poking a git scan on every buffer SWITCH would fork git processes
+-- during plain navigation.
+vim.api.nvim_create_autocmd("BufWritePost", {
+  group = grp,
+  callback = function()
+    emit_capsule("gitpoke", "", "")
+  end,
+})
+
 -- Mode capsule hygiene. Two-layer defense against drift between what
 -- the UI shows and what NeoVim is actually doing:
 --

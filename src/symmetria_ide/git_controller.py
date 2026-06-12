@@ -53,6 +53,7 @@ from PySide6.QtCore import (
 )
 
 from .trace import trace
+from .worktree_watcher import WorktreeWatcher
 
 log = logging.getLogger(__name__)
 
@@ -614,6 +615,22 @@ class GitController(QObject):
             Qt.ConnectionType.QueuedConnection,
         )
 
+        # Working-tree watcher — recursive watchdog/inotify observer over
+        # the resolved repo root. Closes the gap the `.git` trigger-file
+        # watcher leaves open: ordinary edits (editor saves, agent
+        # rewrites, shell-pane appends, new untracked files) never touch
+        # `.git`, so without this the status panel froze until the next
+        # git operation. Events are pre-filtered on the observer thread
+        # against `is_path_ignored` so ignored-tree churn (node_modules,
+        # build outputs) never crosses into Qt. Re-pointed alongside the
+        # `.git` watcher in `_refresh_watcher_for_root`.
+        self._worktree_watcher = WorktreeWatcher(self.is_path_ignored, parent=self)
+        # queued: WorktreeWatcher emitter thread → GUI debounce (§4 P2)
+        self._worktree_watcher.changed.connect(
+            self._on_worktree_changed,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
     # -- QML-facing API ----------------------------------------------------
 
     @Property(str, notify=repoRootChanged)
@@ -754,6 +771,7 @@ class GitController(QObject):
         # over-expansion of `.venv` / `node_modules` etc. before the new
         # scan catches up.
         self._clear_watcher()
+        self._worktree_watcher.set_root("")
         with self._lock:
             self._status_map = {}
             self._stats = GitStats()
@@ -848,6 +866,7 @@ class GitController(QObject):
         self._stop_event.set()
         self._scan_wakeup.set()
         self._worker.join(timeout=1.0)
+        self._worktree_watcher.stop()
 
     # -- Worker thread -----------------------------------------------------
 
@@ -890,8 +909,14 @@ class GitController(QObject):
 
         resolved = self._resolve_repo_root(repo_root)
         if not resolved:
-            # Not a git repo — clear map, emit (panel hides), no watcher.
+            # Not a git repo — clear map, emit (panel hides), and tear the
+            # watchers down (empty root clears both the .git trigger files
+            # and the working-tree observer). Matters when a watched repo
+            # STOPS being one mid-session (`.git` deleted) — without the
+            # emit, the working-tree observer would keep firing into a
+            # permanently-empty scan loop.
             self._publish({}, "", GitStats(), {})
+            self._watcherRefreshRequested.emit("")
             return
 
         new_map = self._run_status(resolved)
@@ -1201,6 +1226,11 @@ class GitController(QObject):
         emit, so runs on the GUI thread where `_watcher` lives.
         """
         self._clear_watcher()
+        # Re-point the recursive working-tree observer at the same moment
+        # the .git trigger files re-arm — both watchers track the RESOLVED
+        # root, not the asked-for path. set_root is idempotent on equal
+        # values, so the per-scan call is free in the steady state.
+        self._worktree_watcher.set_root(resolved)
         if not resolved:
             return
         git_dir = self._git_dir_for(resolved)
@@ -1299,6 +1329,59 @@ class GitController(QObject):
         if os.path.exists(path) and path not in self._watcher.files():
             self._watcher.addPath(path)
         self._debounce.start()
+
+    @Slot()
+    def _on_worktree_changed(self) -> None:
+        """Working-tree change observed — debounce into one scan.
+
+        Queued from the WorktreeWatcher's emitter thread; runs on the GUI
+        thread where `_debounce` lives. Same coalescing path the `.git`
+        trigger files use, so a burst of editor saves + the resulting
+        index refresh still collapse to a single scan.
+        """
+        self._debounce.start()
+
+    def poke(self) -> None:
+        """External request for a debounced re-scan. GUI thread only.
+
+        Wired to the nvim `gitpoke` capsule (BufWritePost) in
+        AppController — an editor save is the highest-signal "status
+        probably changed" event we have, and this path stays live even
+        when the working-tree observer degraded (watchdog missing,
+        inotify watch exhaustion).
+        """
+        self._debounce.start()
+
+    def is_path_ignored(self, absolute_path: str) -> bool:
+        """Thread-safe gitignore membership test for the watcher's filter.
+
+        True when `absolute_path` or any of its ancestors (up to, not
+        including, the resolved repo root) is in the ignored set. The
+        ancestor walk is required because `_run_ignored_set` aggregates
+        ignored DIRECTORIES into a single entry (`--directory`) — a file
+        inside `node_modules` is not itself listed, only `node_modules`.
+
+        Called from the watchdog emitter thread: snapshot-by-reference
+        under the lock is safe because `_publish` replaces `_ignored_set`
+        wholesale, never mutates it in place (same invariant
+        `changedPathSet` relies on).
+
+        Unknown-repo conservatism: with no resolved root (first scan not
+        landed yet) nothing is treated as ignored — a spurious extra scan
+        is cheaper than a missed real change.
+        """
+        with self._lock:
+            ignored = self._ignored_set
+            root = self._resolved_root
+        if not root or not ignored:
+            return False
+        path = absolute_path.rstrip("/")
+        root = root.rstrip("/")
+        while path.startswith(root) and len(path) > len(root):
+            if path in ignored:
+                return True
+            path = os.path.dirname(path)
+        return False
 
     def _wake_worker(self) -> None:
         """Set the wakeup event so the worker exits its wait and scans."""
