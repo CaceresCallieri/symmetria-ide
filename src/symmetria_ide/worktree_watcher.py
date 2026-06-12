@@ -175,6 +175,13 @@ class WorktreeWatcher(QObject):
             return
         if not self._any_path_relevant(event):
             return
+        # Unsynchronized read-modify-write is safe: watchdog dispatches all
+        # events for a watch from ONE emitter thread, so there is no
+        # concurrent access. Leading-edge-only throttling (drop the rest of
+        # the window, no trailing emit) is safe ONLY because the emit that
+        # does get through restarts GitController's 200ms debounce, which
+        # outlives the 50ms window — the final state is always scanned. Do
+        # not convert to trailing-edge without re-checking that coupling.
         now = time.monotonic()
         if now - self._last_emit_monotonic < _EMIT_THROTTLE_SEC:
             return

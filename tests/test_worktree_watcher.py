@@ -225,6 +225,13 @@ def test_path_outside_root_is_not_ignored(controller: GitController) -> None:
     assert not controller.is_path_ignored("/elsewhere/node_modules/x.js")
 
 
+def test_string_prefix_sibling_is_not_ignored(controller: GitController) -> None:
+    # `/repo-sibling` shares a string prefix with root `/repo` — the
+    # containment check must be separator-bounded, not bare startswith.
+    seed_ignored(controller, "/repo", {"/repo-sibling/node_modules": True})
+    assert not controller.is_path_ignored("/repo-sibling/node_modules/x.js")
+
+
 # ---------------------------------------------------------------------------
 # GitController trigger surface
 # ---------------------------------------------------------------------------
@@ -266,6 +273,10 @@ def test_observer_emits_on_file_creation(tmp_path) -> None:
     watcher.changed.connect(recorder.on_changed, Qt.ConnectionType.DirectConnection)
     watcher.set_root(str(tmp_path))
     try:
+        # Give the emitter thread a beat to arm the inotify watches —
+        # without it, a fast create can land before the recursive watch
+        # is scheduled and the wait below flakes on loaded machines.
+        time.sleep(0.2)
         (tmp_path / "newfile.txt").write_text("hello")
         assert recorder.fired.wait(timeout=5.0), (
             "observer did not report the file creation"

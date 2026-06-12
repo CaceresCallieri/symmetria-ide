@@ -1377,7 +1377,12 @@ class GitController(QObject):
             return False
         path = absolute_path.rstrip("/")
         root = root.rstrip("/")
-        while path.startswith(root) and len(path) > len(root):
+        # Separator-bounded containment check — a bare startswith(root)
+        # would also admit string-prefix siblings (`/repo-other` under
+        # root `/repo`) into the ancestor walk.
+        if not path.startswith(root + "/"):
+            return False
+        while len(path) > len(root):
             if path in ignored:
                 return True
             path = os.path.dirname(path)
