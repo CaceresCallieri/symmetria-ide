@@ -1741,6 +1741,16 @@ Window {
                             // color so the IDE never hardcodes hex values from
                             // the FM palette.
                             statusProvider: gitProviderAdapter
+                            // File operations (d/r/a delete/rename/create,
+                            // y/x/p yank/cut/paste, Space multi-select,
+                            // g/c/, chords). The FM's shared FileOpsHandler
+                            // only dispatches when a non-null WindowState is
+                            // bound — without it the tree is navigation-only
+                            // (its pre-2026-06 IDE behavior). The instance +
+                            // the modal popups it drives live as treeScope
+                            // siblings below (see the "File-operation state"
+                            // block after the ColumnLayout).
+                            windowState: treeOpsWindowState
                             onFileActivated: function (path) {
                                 controller.open_in_nvim(path);
                                 if (editor.visible)
@@ -1758,6 +1768,80 @@ Window {
                             focused: mainTreeScope.activeFocus
                         }
                     }
+                }
+
+                // === File-operation state + modal surfaces (main tree) ===
+                //
+                // The FM keeps FileTreeView popup-free on purpose: in the
+                // standalone FM the modal layer lives once at
+                // FileManager.qml scope and is shared by both views. The
+                // IDE replicates that host role here, scoped to the side
+                // panel (popups overlay treeScope, not the whole window).
+                //
+                // Every modal reachable from tree keys MUST be hosted:
+                // while `activeModal != modalNone` the tree swallows ALL
+                // keys (TreeKeyHandler's first guard), so a reachable-but-
+                // unhosted modal would soft-lock the pane with no visible
+                // UI. Reachable set: delete (d), create (a), rename (r),
+                // fuzzy finder (f). Zoxide + context-menu are Miller-only
+                // — intentionally not hosted.
+                //
+                // Scoped to the MAIN tree only: GitStatusPanel's embedded
+                // tree stays navigation-only (no windowState), which lets
+                // RenamePopup's positional bindings assume fileTreeView
+                // coordinates unconditionally. Extending ops to the
+                // changes pane means sharing this WindowState and making
+                // the positional trio activeTreeSubPane-aware.
+                FmUi.WindowState {
+                    id: treeOpsWindowState
+                    // Live binding chain: initialPath → currentPath (the
+                    // fuzzy finder searches from currentPath), so the
+                    // search root follows the anchored project root.
+                    initialPath: controller.displayedRoot
+                }
+
+                // Re-pin currentPath after a bookmark-chord navigate()
+                // breaks the initialPath → currentPath binding (navigate
+                // assigns currentPath imperatively; QML bindings don't
+                // survive imperative writes). Without this, one g-chord
+                // bookmark jump would permanently detach the fuzzy
+                // finder's search root from the project root.
+                Connections {
+                    target: controller
+                    function onDisplayedRootChanged(): void {
+                        treeOpsWindowState.navigate(controller.displayedRoot);
+                    }
+                }
+
+                FmUi.DeleteConfirmPopup {
+                    anchors.fill: parent
+                    windowState: treeOpsWindowState
+                }
+                FmUi.CreateFilePopup {
+                    anchors.fill: parent
+                    windowState: treeOpsWindowState
+                }
+                FmUi.RenamePopup {
+                    anchors.fill: parent
+                    windowState: treeOpsWindowState
+                    // FM contract: coordinates relative to the popup's
+                    // parent (treeScope here). The tree fills
+                    // mainTreeScope, which sits inside the ColumnLayout
+                    // at treeScope's origin — one offset hop suffices.
+                    targetItemY: mainTreeScope.y + fileTreeView.currentItemBottomY
+                    targetColumnX: mainTreeScope.x + fileTreeView.currentColumnX
+                    targetColumnWidth: fileTreeView.currentColumnWidth
+                }
+                FmUi.FuzzyFinderPopup {
+                    anchors.fill: parent
+                    windowState: treeOpsWindowState
+                }
+                // Chord hints (g/c/, which-key). Non-modal — opacity-
+                // gated internally; renders only while a chord prefix
+                // or bookmark sub-mode is active.
+                FmUi.WhichKeyPopup {
+                    anchors.fill: parent
+                    windowState: treeOpsWindowState
                 }
             }
         }
