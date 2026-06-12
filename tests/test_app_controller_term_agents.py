@@ -340,7 +340,10 @@ def test_snapshot_emits_only_on_change(controller):
 
 
 def _stt_snapshot(stt: dict | None, *agents: dict) -> dict:
-    return {"agents": list(agents), "projects": [], "stt": stt}
+    # Delegate to the canonical snapshot builder so the two can't drift.
+    snap = _snapshot(*agents)
+    snap["stt"] = stt
+    return snap
 
 
 def test_stt_targets_explicit_live_slot(controller):
@@ -368,6 +371,25 @@ def test_stt_buf_minus_one_resolves_to_focused_slot(controller):
         _stt_snapshot({"terminal_pid": os.getpid(), "buf": -1, "transcribing": False})
     )
     assert controller.sttTargetSlot == 2
+
+
+def test_stt_buf_minus_one_with_empty_pool_clears(controller):
+    # No agents spawned: the focused-slot fallback resolves to 0, so the
+    # indicator must stay dark and transcribing must not latch.
+    controller._on_bridge_snapshot(
+        _stt_snapshot({"terminal_pid": os.getpid(), "buf": -1, "transcribing": True})
+    )
+    assert controller.sttTargetSlot == 0
+    assert controller.sttTranscribing is False
+
+
+def test_stt_buf_zero_never_resolves(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_bridge_snapshot(
+        _stt_snapshot({"terminal_pid": os.getpid(), "buf": 0, "transcribing": True})
+    )
+    assert controller.sttTargetSlot == 0
+    assert controller.sttTranscribing is False
 
 
 def test_stt_foreign_pid_is_ignored(controller):

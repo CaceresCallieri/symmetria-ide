@@ -2035,7 +2035,7 @@ class AppController(QObject):
             self.agentActivityChanged.emit()
         self._mirror_stt_state(payload.get("stt"))
 
-    def _mirror_stt_state(self, stt: object) -> None:
+    def _mirror_stt_state(self, stt: dict | None) -> None:
         """Mirror the snapshot's shell-reported STT target into QML props.
 
         The shell keys the target by (window pid, buf) — for our agents the
@@ -2051,6 +2051,9 @@ class AppController(QObject):
                 terminal_pid = int(stt.get("terminal_pid", -1))
                 buf = int(stt.get("buf", -1))
             except (TypeError, ValueError):
+                # Error-path -1 for terminal_pid can never equal os.getpid(),
+                # so the guard below rejects malformed payloads before buf's
+                # legitimate -1 "focused agent" sentinel is ever interpreted.
                 terminal_pid, buf = -1, -1
             if terminal_pid == os.getpid():
                 if buf in self._term_agents:
