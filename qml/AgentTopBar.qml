@@ -145,14 +145,16 @@ Rectangle {
 
                     readonly property int slot: chip.modelData
                     readonly property int displayNumber: chip.index + 1
-                    // Highlight only when the focused agent is actually on
-                    // screen. controller.focusedAgent deliberately persists
-                    // across surface swaps (it anchors Ctrl+Shift+A's
-                    // go-then-spawn "back to where I was"), so the visual
-                    // emphasis — not the state — gates on the agent surface
-                    // being the visible one.
-                    readonly property bool isFocused: controller.focusedAgent === chip.slot
-                                                      && controller.centralSurface === "agent"
+                    // Two tiers of "focused": isFocusedSlot is the raw
+                    // surface-agnostic focus state (controller.focusedAgent
+                    // deliberately persists across surface swaps — it anchors
+                    // Ctrl+Shift+A's go-then-spawn "back to where I was") and
+                    // feeds the sparkle's `active` identity prop; isFocused
+                    // additionally gates on the agent surface being the
+                    // visible one and drives the text emphasis, so chips dim
+                    // while the editor or terminal is on screen.
+                    readonly property bool isFocusedSlot: controller.focusedAgent === chip.slot
+                    readonly property bool isFocused: chip.isFocusedSlot && controller.centralSurface === "agent"
                     readonly property string sessionTitle: controller.agentTitles[chip.slot - 1] || ""
                     readonly property var activity: controller.agentActivity[chip.slot - 1]
 
@@ -177,7 +179,13 @@ Rectangle {
                         AgentsUI.AgentChip {
                             anchors.verticalCenter: parent.verticalCenter
                             size: Theme.font.size.sm * 1.4
-                            active: chip.isFocused
+                            // Surface-agnostic on purpose: `active` is the
+                            // chip's focus identity, not visual emphasis.
+                            // (Currently unconsumed inside AgentChip — the
+                            // sparkle runs off activityState — but keep the
+                            // semantics honest in case the shared module
+                            // starts reading it.)
+                            active: chip.isFocusedSlot
                             activityState: chip.activity ? chip.activity.state : ""
                             activityTool: chip.activity ? chip.activity.tool : ""
                             agentType: chip.activity ? chip.activity.agentType : "claude"
