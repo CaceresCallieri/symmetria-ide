@@ -1877,8 +1877,19 @@ class AppController(QObject):
         if inst is None:
             log.warning("agent_spawn_argv: slot %d not in pool", slot)
             return []
+        spec = agent_harness.HARNESSES.get(inst["harness"])
+        if spec is None:
+            # spawn_agent validates before storing, so this only fires if
+            # a future code path populates _term_agents without it — fail
+            # like an empty slot rather than crashing the QML Loader.
+            log.error(
+                "agent_spawn_argv: slot %d has unknown harness %r",
+                slot,
+                inst["harness"],
+            )
+            return []
         return agent_harness.spawn_argv(
-            agent_harness.HARNESSES[inst["harness"]],
+            spec,
             inst["spawn_type"],
             inst["dangerous"],
             f"{os.getpid()}_{slot}",
@@ -2046,7 +2057,13 @@ class AppController(QObject):
         ).start()
 
     def _fetch_opencode_sessions(self, cwd: str) -> None:
-        """Worker-thread body of request_opencode_sessions (one-shot)."""
+        """Worker-thread body of request_opencode_sessions (one-shot).
+
+        Every path MUST reach the emit below — an unhandled exception
+        here would kill the worker silently and leave the picker stuck
+        in its "loading" state with no error feedback, hence the broad
+        catch around the whole fetch+parse.
+        """
         sessions: list[dict] | None = None
         try:
             result = subprocess.run(
@@ -2056,9 +2073,6 @@ class AppController(QObject):
                 text=True,
                 timeout=15,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            log.error("opencode session list failed: %s", exc)
-        else:
             if result.returncode != 0:
                 log.error(
                     "opencode session list exited %d: %s",
@@ -2069,6 +2083,8 @@ class AppController(QObject):
                 sessions = agent_harness.parse_opencode_sessions(result.stdout)
                 if sessions is None:
                     log.error("opencode session list: unparseable output")
+        except Exception:
+            log.exception("opencode session list failed")
         emit_gc_safe(
             self._opencode_sessions_fetched,
             {"ok": sessions is not None, "sessions": sessions or []},

@@ -161,6 +161,56 @@ def test_opencode_activity_fallback_uses_slot_harness(controller):
     assert controller.agentActivity[0]["agentType"] == "opencode"
 
 
+class _FakeCompletedProcess:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _fetch_payload(controller, monkeypatch, **run_result):
+    """Run _fetch_opencode_sessions with a faked subprocess and capture
+    the worker's emitted payload (same-thread emit → direct connection,
+    so no event-loop pump is needed)."""
+    captured: list[dict] = []
+    controller._opencode_sessions_fetched.connect(captured.append)
+
+    def fake_run(*_a, **_k):
+        if "raises" in run_result:
+            raise run_result["raises"]
+        return _FakeCompletedProcess(**run_result)
+
+    monkeypatch.setattr("symmetria_ide.app.subprocess.run", fake_run)
+    controller._fetch_opencode_sessions("/tmp")
+    assert len(captured) == 1
+    return captured[0]
+
+
+def test_fetch_opencode_sessions_success_payload(controller, monkeypatch):
+    payload = _fetch_payload(
+        controller, monkeypatch, stdout='[{"id": "ses_1", "title": "t"}]'
+    )
+    assert payload["ok"] is True
+    assert [s["id"] for s in payload["sessions"]] == ["ses_1"]
+
+
+def test_fetch_opencode_sessions_nonzero_exit_is_not_ok(controller, monkeypatch):
+    payload = _fetch_payload(controller, monkeypatch, returncode=1, stderr="boom")
+    assert payload == {"ok": False, "sessions": []}
+
+
+def test_fetch_opencode_sessions_garbage_stdout_is_not_ok(controller, monkeypatch):
+    payload = _fetch_payload(controller, monkeypatch, stdout="not json")
+    assert payload == {"ok": False, "sessions": []}
+
+
+def test_fetch_opencode_sessions_oserror_still_emits(controller, monkeypatch):
+    # The emit is the contract — a dead worker would hang the picker in
+    # its "loading" state, so every failure path must still report.
+    payload = _fetch_payload(controller, monkeypatch, raises=OSError("no exe"))
+    assert payload == {"ok": False, "sessions": []}
+
+
 def test_snapshot_empty_agent_type_falls_back_to_slot_harness(controller):
     controller.spawn_agent("fresh", True, "opencode")
     controller._on_bridge_snapshot(

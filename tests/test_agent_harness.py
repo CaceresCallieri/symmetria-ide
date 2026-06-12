@@ -89,6 +89,14 @@ def test_parse_sorts_newest_first_and_falls_back_title_to_id():
     assert all(r["when"] for r in rows)  # every row got a timestamp label
 
 
+def test_parse_skips_non_dict_array_elements():
+    # Non-dicts must be filtered BEFORE sorting — the sort key runs on
+    # every element, so `[1, 2, {...}]` used to raise AttributeError.
+    rows = parse_opencode_sessions('[1, "x", {"id": "ses_1"}]')
+    assert rows is not None
+    assert [r["id"] for r in rows] == ["ses_1"]
+
+
 def test_parse_skips_entries_without_id():
     rows = parse_opencode_sessions('[{"title": "no id"}, {"id": "ses_1"}]')
     assert rows is not None

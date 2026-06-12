@@ -113,20 +113,21 @@ def parse_opencode_sessions(stdout: str) -> list[dict] | None:
     if not isinstance(decoded, list):
         return None
 
-    def sort_key(session: dict) -> float:
-        ts = session.get("updated") or session.get("created") or 0
-        return ts if isinstance(ts, (int, float)) else 0
+    def session_ts(session: dict) -> int | float | None:
+        ts = session.get("updated") or session.get("created")
+        return ts if isinstance(ts, (int, float)) else None
 
+    # Filter BEFORE sorting — sort_key runs on every element, so a
+    # non-dict entry in an otherwise valid array would raise there.
+    sessions = [s for s in decoded if isinstance(s, dict)]
     rows = []
-    for session in sorted(decoded, key=sort_key, reverse=True):
-        if not isinstance(session, dict):
-            continue
+    for session in sorted(sessions, key=lambda s: session_ts(s) or 0, reverse=True):
         session_id = str(session.get("id") or "")
         if not session_id:
             continue
-        ts = session.get("updated") or session.get("created")
+        ts = session_ts(session)
         when = ""
-        if isinstance(ts, (int, float)):
+        if ts is not None:
             when = time.strftime("%b %d %H:%M", time.localtime(ts / 1000))
         rows.append(
             {

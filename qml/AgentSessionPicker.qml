@@ -62,6 +62,12 @@ Item {
         var session = root.sessions[root.selectedIndex];
         root.visible = false;
         controller.spawn_agent("resume", root.dangerous, "opencode", session.id);
+        // Always run the dismissal focus restore: if spawn_agent no-ops
+        // (pool filled during the ~1s list fetch, opencode vanished from
+        // PATH), focus would otherwise be orphaned with the modal gone.
+        // On the happy path this is idempotent with spawn_agent's own
+        // focus handoff — _restoreCentralFocus re-asserts the same agent.
+        root.dismissed();
     }
 
     function _move(delta) {
@@ -138,8 +144,10 @@ Item {
                 visible: root.state_ === "ready"
                 width: parent.width
                 // Cap the panel: ~10 rows, then scroll (positionViewAtIndex
-                // keeps the selection in view).
-                height: Math.min(contentHeight, 10 * (Theme.font.size.xs + Theme.spacing.sm * 2))
+                // keeps the selection in view). The estimate mirrors the
+                // delegate height: rowText implicitHeight (≈ font size) +
+                // a single spacing.sm.
+                height: Math.min(contentHeight, 10 * (Theme.font.size.xs + Theme.spacing.sm))
                 interactive: false
                 model: root.sessions
                 reuseItems: true
