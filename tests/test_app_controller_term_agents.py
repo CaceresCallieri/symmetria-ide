@@ -335,6 +335,100 @@ def test_snapshot_emits_only_on_change(controller):
 
 
 # ---------------------------------------------------------------------------
+# STT indicator mirroring (snapshot "stt" field → sttTargetSlot/sttTranscribing)
+# ---------------------------------------------------------------------------
+
+
+def _stt_snapshot(stt: dict | None, *agents: dict) -> dict:
+    return {"agents": list(agents), "projects": [], "stt": stt}
+
+
+def test_stt_targets_explicit_live_slot(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_bridge_snapshot(
+        _stt_snapshot({"terminal_pid": os.getpid(), "buf": 1, "transcribing": False})
+    )
+    assert controller.sttTargetSlot == 1
+    assert controller.sttTranscribing is False
+
+
+def test_stt_transcribing_flag_mirrors(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_bridge_snapshot(
+        _stt_snapshot({"terminal_pid": os.getpid(), "buf": 1, "transcribing": True})
+    )
+    assert controller.sttTranscribing is True
+
+
+def test_stt_buf_minus_one_resolves_to_focused_slot(controller):
+    controller.spawn_agent("fresh", True)
+    controller.spawn_agent("fresh", True)
+    controller.focus_agent(2)
+    controller._on_bridge_snapshot(
+        _stt_snapshot({"terminal_pid": os.getpid(), "buf": -1, "transcribing": False})
+    )
+    assert controller.sttTargetSlot == 2
+
+
+def test_stt_foreign_pid_is_ignored(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_bridge_snapshot(
+        _stt_snapshot({"terminal_pid": 99999, "buf": 1, "transcribing": False})
+    )
+    assert controller.sttTargetSlot == 0
+
+
+def test_stt_dead_slot_is_ignored(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_bridge_snapshot(
+        _stt_snapshot({"terminal_pid": os.getpid(), "buf": 4, "transcribing": True})
+    )
+    assert controller.sttTargetSlot == 0
+    assert controller.sttTranscribing is False
+
+
+def test_stt_null_clears_previous_target(controller):
+    controller.spawn_agent("fresh", True)
+    active = _stt_snapshot(
+        {"terminal_pid": os.getpid(), "buf": 1, "transcribing": False}
+    )
+    controller._on_bridge_snapshot(active)
+    assert controller.sttTargetSlot == 1
+    controller._on_bridge_snapshot(_stt_snapshot(None))
+    assert controller.sttTargetSlot == 0
+
+
+def test_stt_missing_field_is_tolerated(controller):
+    # Old hub builds emit snapshots without "stt" — must not raise or latch.
+    controller.spawn_agent("fresh", True)
+    controller._on_bridge_snapshot(
+        _stt_snapshot({"terminal_pid": os.getpid(), "buf": 1, "transcribing": False})
+    )
+    controller._on_bridge_snapshot(_snapshot())
+    assert controller.sttTargetSlot == 0
+
+
+def test_stt_emits_only_on_change(controller):
+    controller.spawn_agent("fresh", True)
+    emissions: list[None] = []
+    controller.sttStateChanged.connect(lambda: emissions.append(None))
+    payload = _stt_snapshot(
+        {"terminal_pid": os.getpid(), "buf": 1, "transcribing": False}
+    )
+    controller._on_bridge_snapshot(payload)
+    controller._on_bridge_snapshot(payload)
+    assert len(emissions) == 1
+
+
+def test_stt_malformed_payload_is_ignored(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_bridge_snapshot(
+        _stt_snapshot({"terminal_pid": "garbage", "buf": "x", "transcribing": True})
+    )
+    assert controller.sttTargetSlot == 0
+
+
+# ---------------------------------------------------------------------------
 # Central-surface "agent" value
 # ---------------------------------------------------------------------------
 

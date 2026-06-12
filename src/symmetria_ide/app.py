@@ -322,6 +322,12 @@ class AppController(QObject):
     termAgentsChanged = Signal()
     focusedAgentChanged = Signal()
     agentActivityChanged = Signal()
+    # STT recording/transcribing indicator for the AgentTopBar chips. The
+    # shell pushes its STT target into the bridge hub, the hub carries it
+    # in snapshots as the top-level "stt" field, and _on_bridge_snapshot
+    # mirrors it here when the target is one of OUR agents — the same
+    # bridge-only path the sparkle activity uses (never a direct channel).
+    sttStateChanged = Signal()
     # QML focus pull for the agent surface — carries the slot so the
     # matching terminal delegate can forceActiveFocus even when nothing
     # else changed (e.g. Ctrl+N pressed while the sidebar held focus and
@@ -475,6 +481,10 @@ class AppController(QObject):
         self._term_agent_activity: dict[int, dict] = {}
         # 0 = no agent focused (empty pool). 1-based slot otherwise.
         self._focused_term_agent: int = 0
+        # STT indicator mirrored from snapshot "stt" (0 = no dictation
+        # targeting one of our agents). See sttStateChanged.
+        self._stt_target_slot: int = 0
+        self._stt_transcribing: bool = False
         # Internal slots in DISPLAY order (see the agentOrder property):
         # spawns append, closes remove — chip numbers and the Ctrl+N
         # chords address POSITIONS in this list, never internal slots.
@@ -1739,6 +1749,16 @@ class AppController(QObject):
             for slot in range(1, self._MAX_INSTANCES + 1)
         ]
 
+    @Property(int, notify=sttStateChanged)
+    def sttTargetSlot(self) -> int:
+        """1-based slot the STT pipeline is dictating into; 0 = none."""
+        return self._stt_target_slot
+
+    @Property(bool, notify=sttStateChanged)
+    def sttTranscribing(self) -> bool:
+        """True once recording stopped and transcription is in flight."""
+        return self._stt_transcribing
+
     @Slot(str, bool)
     def spawn_agent(self, spawn_type: str = "fresh", dangerous: bool = True) -> None:
         """Allocate the lowest free slot for a Claude instance and focus it.
@@ -2013,6 +2033,36 @@ class AppController(QObject):
         if new_activity != self._term_agent_activity:
             self._term_agent_activity = new_activity
             self.agentActivityChanged.emit()
+        self._mirror_stt_state(payload.get("stt"))
+
+    def _mirror_stt_state(self, stt: object) -> None:
+        """Mirror the snapshot's shell-reported STT target into QML props.
+
+        The shell keys the target by (window pid, buf) — for our agents the
+        window pid IS this process's pid (the IDE declares host_window_pid
+        in hello) and buf is the pool slot. A buf of -1 means "the active
+        agent" (shell semantics for representative targeting), which here
+        resolves to the focused slot — same fallback _on_bridge_inject uses.
+        """
+        slot = 0
+        transcribing = False
+        if isinstance(stt, dict):
+            try:
+                terminal_pid = int(stt.get("terminal_pid", -1))
+                buf = int(stt.get("buf", -1))
+            except (TypeError, ValueError):
+                terminal_pid, buf = -1, -1
+            if terminal_pid == os.getpid():
+                if buf in self._term_agents:
+                    slot = buf
+                elif buf == -1:
+                    slot = self._focused_term_agent
+                if slot:
+                    transcribing = bool(stt.get("transcribing", False))
+        if (slot, transcribing) != (self._stt_target_slot, self._stt_transcribing):
+            self._stt_target_slot = slot
+            self._stt_transcribing = transcribing
+            self.sttStateChanged.emit()
 
     @Slot(dict)
     def _on_bridge_inject(self, payload: dict) -> None:

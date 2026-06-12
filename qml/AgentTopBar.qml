@@ -20,8 +20,10 @@
 // vs dim) per the "no per-instance colour system" preference; the
 // sparkle's brand orange is a backend identity, not a slot colour.
 //
-// STT props are bound inert (isSttTarget/sttIsTranscribing false) — STT
-// targeting for IDE-native agents is deferred; the visuals are ready.
+// STT props mirror controller.sttTargetSlot/sttTranscribing — the shell
+// pushes its dictation target into the bridge hub, snapshots carry it as
+// the "stt" field, and _mirror_stt_state (app.py) resolves it to one of
+// our slots. Same bridge-only path the sparkle activity rides.
 //
 // All color and typography values bind against the `Theme` singleton
 // (`qml/design/Theme.qml`). One-off pixel ratios (the 1.4× sparkle
@@ -172,8 +174,8 @@ Rectangle {
                             activityState: chip.activity ? chip.activity.state : ""
                             activityTool: chip.activity ? chip.activity.tool : ""
                             agentType: chip.activity ? chip.activity.agentType : "claude"
-                            isSttTarget: false
-                            sttIsTranscribing: false
+                            isSttTarget: controller.sttTargetSlot === chip.slot
+                            sttIsTranscribing: controller.sttTranscribing
                         }
 
                         Text {
