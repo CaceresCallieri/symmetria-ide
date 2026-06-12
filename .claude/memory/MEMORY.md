@@ -39,6 +39,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [QML typed param + default value](reference/qt-pyside/qml_typed_param_no_default.md) — Qt 6.11 rejects `x: T = default`; cascades to "type unavailable" at engine load
 - [QML Array.isArray rejects QVariantList](reference/qt-pyside/qml_qvariantlist_array_check.md) — PySide6 list props fail `Array.isArray()` in Qt 6.11; use `x != null && x.length > 0`
 - [grabWindow GIL deadlock](reference/qt-pyside/grabwindow_gil_deadlock.md) — sync grab + Python QQuickPaintedItem + threaded loop = ABBA hang; force basic loop
+- [Fork changes need makepkg](reference/qt-pyside/fork_changes_need_makepkg.md) — launchers load the pacman qmltermwidget pkg; commit + makepkg -sif after fork edits
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
 

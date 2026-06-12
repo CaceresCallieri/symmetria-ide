@@ -274,6 +274,32 @@ Window {
         }
     }
 
+    // Clipboard copy from the terminal panes. Same VT-encoding gap as the
+    // paste chord above: the fork's legacy key encoding collapses
+    // Ctrl+Shift+C to Ctrl+C, so the widget would deliver SIGINT instead of
+    // a copy chord. We call the widget's copyClipboard() slot directly
+    // (no-op when nothing is selected — deliberately NOT falling through to
+    // Ctrl+C, matching stock terminal-emulator behavior where the copy
+    // chord never interrupts). Mouse selection over a mouse-reporting app
+    // (nvim, claude TUI) requires Shift+drag per Konsole convention; the
+    // selection this copies is the widget-level one either way.
+    Shortcut {
+        sequences: ["Ctrl+Shift+C"]
+        context: Qt.ApplicationShortcut
+        enabled: controller.editorVisible || controller.terminalVisible || controller.agentSurfaceVisible
+        onActivated: {
+            if (controller.editorVisible) {
+                editor.copyClipboard();
+            } else if (controller.agentSurfaceVisible) {
+                var term = agentSurface.focusedTerminal();
+                if (term)
+                    term.copyClipboard();
+            } else {
+                terminalView.copyClipboard();
+            }
+        }
+    }
+
     // Shift+Enter → newline in a claude prompt instead of submitting.
     // Same VT-encoding gap as the paste chord above: the fork's legacy
     // key encoding has no representation for Shift+Enter (no kitty
@@ -546,6 +572,11 @@ Window {
                     // fork's `margin` Q_PROPERTY; the translucent background
                     // still covers the padded strip.
                     margin: Theme.size.terminalPadding
+                    // Copy-on-select (fork modification #11): a completed
+                    // mouse selection (drag release / double-click word /
+                    // triple-click line) lands on the clipboard without a
+                    // chord; Ctrl+Shift+C stays as the explicit re-copy.
+                    autoCopySelectedText: true
                     // Same font the IDE chrome overlays bind to (editor_font.py).
                     font.family: editorFontFamily
                     font.pointSize: editorFontPointSize
@@ -653,9 +684,10 @@ Window {
                     useFBORendering: false
                     fillColor: "transparent"
                     blinkingCursor: true
-                    // Same padding + hinting rationale as the editor pane
-                    // above — both panes share one rendering contract.
+                    // Same padding + hinting + copy-on-select rationale as
+                    // the editor pane above — the panes share one contract.
                     margin: Theme.size.terminalPadding
+                    autoCopySelectedText: true
                     font.family: editorFontFamily
                     font.pointSize: editorFontPointSize
                     fallbackFamilies: editorFontFallbacks
@@ -884,6 +916,7 @@ Window {
                                 fillColor: "transparent"
                                 blinkingCursor: true
                                 margin: Theme.size.terminalPadding
+                                autoCopySelectedText: true
                                 font.family: editorFontFamily
                                 font.pointSize: editorFontPointSize
                                 fallbackFamilies: editorFontFallbacks
