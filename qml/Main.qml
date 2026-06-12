@@ -1800,16 +1800,31 @@ Window {
                     initialPath: controller.displayedRoot
                 }
 
-                // Re-pin currentPath after a bookmark-chord navigate()
-                // breaks the initialPath → currentPath binding (navigate
-                // assigns currentPath imperatively; QML bindings don't
-                // survive imperative writes). Without this, one g-chord
-                // bookmark jump would permanently detach the fuzzy
-                // finder's search root from the project root.
+                // Re-pin currentPath whenever the project root changes —
+                // anchor toggle (Ctrl+Shift+P / :SymmetriaAnchor),
+                // terminal/nvim cd while unanchored, or after a
+                // bookmark-chord navigate() broke the initialPath →
+                // currentPath binding (navigate assigns currentPath
+                // imperatively; QML bindings don't survive imperative
+                // writes). Without this, one g-chord bookmark jump would
+                // permanently detach the fuzzy finder's search root from
+                // the project root.
+                //
+                // Modal guard: navigate() unconditionally closes any open
+                // modal (correct FM semantics — changing directory cancels
+                // in-flight dialogs). But here a root change can arrive
+                // from OUTSIDE the sidebar (an unanchored cd in the
+                // terminal) while the user is mid-rename, discarding their
+                // typed input. Operations target absolute paths, so the
+                // modal stays valid across a re-root — assign currentPath
+                // directly in that case and let the user finish.
                 Connections {
                     target: controller
                     function onDisplayedRootChanged(): void {
-                        treeOpsWindowState.navigate(controller.displayedRoot);
+                        if (treeOpsWindowState.activeModal === treeOpsWindowState.modalNone)
+                            treeOpsWindowState.navigate(controller.displayedRoot);
+                        else
+                            treeOpsWindowState.currentPath = controller.displayedRoot;
                     }
                 }
 
