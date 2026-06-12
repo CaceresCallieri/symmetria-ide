@@ -169,14 +169,24 @@ Window {
         }
     }
 
-    // Agent menu — A-for-agent, the namespace entry point: a keyboard-
-    // first popup where n/c/r spawn new/continue/resume (dangerous;
-    // Shift+letter = the permission-checked variant). Future backends
-    // extend the menu (o = OpenCode) without burning more chords.
+    // Agent chord — A-for-agent, the namespace entry point with
+    // go-then-spawn semantics: from a non-agent surface it jumps to the
+    // last-focused agent (focusedAgent survives surface swaps, so this
+    // is a true "back to where I was"); pressed again while already on
+    // the agent surface — or with an empty pool (focusedAgent == 0) —
+    // it opens the spawn menu, the keyboard-first popup where n/c/r
+    // spawn new/continue/resume (dangerous; Shift+letter = the
+    // permission-checked variant). Future backends extend the menu
+    // (o = OpenCode) without burning more chords.
     Shortcut {
         sequences: ["Ctrl+Shift+A"]
         context: Qt.ApplicationShortcut
-        onActivated: agentSpawnMenu.open()
+        onActivated: {
+            if (controller.focusedAgent === 0 || controller.agentSurfaceVisible)
+                agentSpawnMenu.open();
+            else
+                controller.focus_agent(controller.focusedAgent);
+        }
     }
 
     Shortcut {
