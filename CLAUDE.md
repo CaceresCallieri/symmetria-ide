@@ -66,7 +66,9 @@ To add a new well-known capsule, add the field + notify signal to `StatusBarStat
 
 ## The terminal-agent runtime (IDE-native orchestrator)
 
-Shipped 2026-06-10 — THE agent workflow inside the IDE. Claude CLI instances run in IDE-owned `QMLTermWidget` panes on the `"agent"` central surface (one visible at a time, pool of 5), with an always-visible top bar carrying the sparkle bubbles plus the terminal/editor/agents surface switcher, and Symmetria Shell's `agent-bridge.py` as the single state hub. Replaces running orchestrator.nvim inside the embedded nvim (hard cutover — see "Chords").
+Shipped 2026-06-10 — THE agent workflow inside the IDE. Agent CLI instances (Claude or OpenCode — see "Harnesses" below) run in IDE-owned `QMLTermWidget` panes on the `"agent"` central surface (one visible at a time, pool of 5), with an always-visible top bar carrying the sparkle bubbles plus the terminal/editor/agents surface switcher, and Symmetria Shell's `agent-bridge.py` as the single state hub. Replaces running orchestrator.nvim inside the embedded nvim (hard cutover — see "Chords").
+
+**Harnesses.** A slot's agent CLI is its *harness* — `claude` or `opencode`, registered in `src/symmetria_ide/agent_harness.py` (pure module mirroring orchestrator.nvim `terminal.lua::M.backends` semantics: claude's dangerous mode is a flag, opencode's is the `OPENCODE_PERMISSION` nested allow-all env var — the nested form is load-bearing, see the module comment). In the spawn menu, `o` toggles the harness (re-opens on Claude); n/c/r spawn in the selected harness. OpenCode resume requires a session id (`--session` has no picker form), so `r` on the OpenCode harness opens `qml/AgentSessionPicker.qml` — a QML list over `opencode session list --format json` (fetched on a one-shot daemon thread via `request_opencode_sessions`). Tracking is harness-agnostic: both reporters (claude's hooks, `~/.config/opencode/plugin/symmetria-agent.js`) key on the same `SYMMETRIA_AGENT_ID`, and the instance payload's `agent_type` carries the harness to the bridge/dashboard.
 
 **Topology.** Three cooperating pieces:
 
@@ -76,7 +78,7 @@ Shipped 2026-06-10 — THE agent workflow inside the IDE. Claude CLI instances r
 
 **Why hooks Just Work:** the spawn argv exports `SYMMETRIA_AGENT_ID=<ide_pid>_<slot>`, which matches the bridge's `f"{nvim_pid}_{buf}"` keying for our published instances — Claude's hooks (`symmetria-agent-hook.py`) report activity to the bridge under that id, the bridge folds it into snapshots, and the subscription feed drives both the IDE's bubbles and the shell dashboard identically.
 
-**Smoke hook:** `SYMMETRIA_IDE_SPAWN_AGENT=fresh|resume|continue` spawns one agent at launch (E2E flow in `docs/dev-workflow.md`). Resume carries no session id by design — claude's own interactive `-r` picker is the picker UX.
+**Smoke hook:** `SYMMETRIA_IDE_SPAWN_AGENT=fresh|resume|continue` spawns one agent at launch, with an optional `:<harness>` suffix (`fresh:opencode`) — E2E flow in `docs/dev-workflow.md`. Claude resume carries no session id by design — claude's own interactive `-r` picker is the picker UX (opencode resume goes through the IDE's AgentSessionPicker instead).
 
 ## The agent backend (Node SDK sidecar — PARKED, env-gated)
 

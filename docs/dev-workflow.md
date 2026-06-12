@@ -53,7 +53,8 @@ bridge client, or the chord family:
 6. Quit the IDE → dashboard drops its agents (goodbye); no orphans.
 
 Scripted spawn for headless smoke runs (composes with the screenshot
-harness): `SYMMETRIA_IDE_SPAWN_AGENT=fresh` spawns one agent at launch.
+harness): `SYMMETRIA_IDE_SPAWN_AGENT=fresh` spawns one agent at launch;
+an optional `:<agent-harness>` suffix selects the CLI (`fresh:opencode`).
 Bridge-side state is inspectable via `pkill -USR1 -f agent-bridge.py` →
 `~/.local/state/symmetria/agent-bridge-diagnostic.json` (look for your
 IDE pid under `clients`).

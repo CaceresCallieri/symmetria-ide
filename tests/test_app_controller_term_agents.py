@@ -118,6 +118,67 @@ def test_agent_spawn_argv_for_empty_slot_returns_empty(controller):
 
 
 # ---------------------------------------------------------------------------
+# Harness selection (claude / opencode)
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_opencode_fresh_dangerous_argv(controller):
+    controller.spawn_agent("fresh", True, "opencode")
+    assert controller.agent_spawn_argv(1) == [
+        "env",
+        f"SYMMETRIA_AGENT_ID={os.getpid()}_1",
+        'OPENCODE_PERMISSION={"*":{"*":"allow"}}',
+        "opencode",
+    ]
+
+
+def test_spawn_opencode_resume_with_session_id_argv(controller):
+    controller.spawn_agent("resume", False, "opencode", "ses_abc")
+    assert controller.agent_spawn_argv(1)[-2:] == ["--session", "ses_abc"]
+
+
+def test_spawn_opencode_resume_without_session_id_is_a_no_op(controller):
+    # `opencode --session` with no id errors on spawn — the controller
+    # refuses the spawn instead (the QML picker supplies the id).
+    controller.spawn_agent("resume", True, "opencode")
+    assert controller.agentOrder == []
+
+
+def test_spawn_unknown_harness_is_a_no_op(controller):
+    controller.spawn_agent("fresh", True, "copilot")
+    assert controller.agentOrder == []
+
+
+def test_spawn_opencode_publishes_agent_type(controller, bridge):
+    controller.spawn_agent("fresh", True, "opencode")
+    assert bridge.spawns[0]["agent_type"] == "opencode"
+
+
+def test_opencode_activity_fallback_uses_slot_harness(controller):
+    # Pre-first-activity (no bridge snapshot yet) the chip must show
+    # the harness we spawned, not default to claude.
+    controller.spawn_agent("fresh", True, "opencode")
+    assert controller.agentActivity[0]["agentType"] == "opencode"
+
+
+def test_snapshot_empty_agent_type_falls_back_to_slot_harness(controller):
+    controller.spawn_agent("fresh", True, "opencode")
+    controller._on_bridge_snapshot(
+        {
+            "agents": [
+                {
+                    "id": f"{os.getpid()}_1",
+                    "activity_state": "working",
+                    "activity_tool": "Running",
+                    "agent_type": "",
+                }
+            ]
+        }
+    )
+    assert controller.agentActivity[0]["agentType"] == "opencode"
+
+
+# ---------------------------------------------------------------------------
 # Slot allocation + pool-shape properties
 # ---------------------------------------------------------------------------
 
@@ -497,6 +558,14 @@ def test_default_claude_code_title_is_suppressed(controller, bridge):
 def test_bare_claude_code_title_is_suppressed_case_insensitively(controller):
     controller.spawn_agent("fresh", True)
     controller.on_agent_title(1, "claude code")
+    assert controller.agentTitles[0] == ""
+
+
+def test_bare_opencode_title_is_suppressed(controller):
+    # OpenCode's placeholder product-name title plays the same role as
+    # claude's "Claude Code" — no title until a real session summary.
+    controller.spawn_agent("fresh", True, "opencode")
+    controller.on_agent_title(1, "OpenCode")
     assert controller.agentTitles[0] == ""
 
 

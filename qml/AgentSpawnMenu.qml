@@ -1,13 +1,20 @@
 // Keyboard-first agent menu (Ctrl+Shift+A — A-for-agent namespace).
 //
-// A centered modal panel: n/c/r spawn a NEW / CONTINUE / RESUME Claude
-// session. Lowercase keys spawn the DANGEROUS variant
-// (--dangerously-skip-permissions — the daily-driver polarity inherited
-// from orchestrator.nvim's <leader>an family); Shift+letter spawns the
-// permission-checked variant. Esc dismisses. Future backends extend the
-// key set (o = OpenCode) instead of burning new chords. No mouse
-// interaction in v1 — this is a chord-driven surface per the
-// keyboard-first non-negotiable.
+// A centered modal panel: n/c/r spawn a NEW / CONTINUE / RESUME session
+// in the selected HARNESS (the agent CLI — Claude or OpenCode; `o`
+// toggles between them and the menu always re-opens on Claude, the
+// daily-driver default). Lowercase keys spawn the DANGEROUS variant
+// (skip-permissions — the daily-driver polarity inherited from
+// orchestrator.nvim's <leader>an family); Shift+letter spawns the
+// permission-checked variant. Esc dismisses. No mouse interaction in
+// v1 — this is a chord-driven surface per the keyboard-first
+// non-negotiable.
+//
+// Resume semantics differ per harness: claude's bare `-r` opens its own
+// interactive picker inside the terminal; opencode's `--session`
+// requires an id, so `r` on the OpenCode harness defers to the
+// AgentSessionPicker overlay (wired in Main.qml via
+// resumePickerRequested).
 //
 // Placeholder-discipline styling (minimal panel, Theme tokens only);
 // richer treatment lands once the agent surface has real usage cadence.
@@ -24,9 +31,18 @@ Item {
     visible: false
     z: 40 // above the which-key overlay (z 20) and the focus hairline
 
+    // The agent CLI the n/c/r keys spawn. Always resets to claude on
+    // open() — harness choice is per-spawn, not sticky session state.
+    property string harness: "claude"
+
     signal dismissed()
+    // OpenCode resume needs a session id — Main.qml routes this to the
+    // AgentSessionPicker overlay (carries the dangerous polarity the
+    // user chose with the case of the `r` keypress).
+    signal resumePickerRequested(bool dangerous)
 
     function open() {
+        root.harness = "claude";
         root.visible = true;
         keyCatcher.forceActiveFocus();
     }
@@ -41,7 +57,18 @@ Item {
         // and switches the central surface, which lands keyboard focus
         // on the agent terminal — no explicit focus restore needed.
         root.visible = false;
-        controller.spawn_agent(spawnType, dangerous);
+        controller.spawn_agent(spawnType, dangerous, root.harness);
+    }
+
+    function _resume(dangerous) {
+        if (root.harness === "opencode") {
+            // No picker flag in the opencode CLI — hand off to the IDE's
+            // session picker, which spawns `--session <id>` on accept.
+            root.visible = false;
+            root.resumePickerRequested(dangerous);
+            return;
+        }
+        root._spawn("resume", dangerous);
     }
 
     // Dim the surface behind the panel so the modal state is legible.
@@ -79,11 +106,33 @@ Item {
                 renderType: Text.NativeRendering
             }
 
+            Row {
+                spacing: Theme.spacing.sm
+                Text {
+                    text: "o / O"
+                    color: Theme.color.text.strong
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                    font.weight: Theme.font.weight.medium
+                    renderType: Text.NativeRendering
+                }
+                Text {
+                    text: "harness: "
+                          + (root.harness === "opencode" ? "OpenCode" : "Claude")
+                    color: Theme.color.text.normal
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                    renderType: Text.NativeRendering
+                }
+            }
+
             Repeater {
                 model: [
                     { key: "n", label: "new session" },
                     { key: "c", label: "continue" },
-                    { key: "r", label: "resume (claude's picker)" },
+                    { key: "r", label: root.harness === "opencode"
+                                       ? "resume (session picker)"
+                                       : "resume (claude's picker)" },
                 ]
 
                 delegate: Row {
@@ -158,6 +207,9 @@ Item {
             case Qt.Key_Escape:
                 root.dismiss();
                 break;
+            case Qt.Key_O:
+                root.harness = root.harness === "claude" ? "opencode" : "claude";
+                break;
             case Qt.Key_N:
                 root._spawn("fresh", !(event.modifiers & Qt.ShiftModifier));
                 break;
@@ -165,7 +217,7 @@ Item {
                 root._spawn("continue", !(event.modifiers & Qt.ShiftModifier));
                 break;
             case Qt.Key_R:
-                root._spawn("resume", !(event.modifiers & Qt.ShiftModifier));
+                root._resume(!(event.modifiers & Qt.ShiftModifier));
                 break;
             default:
                 // Swallow everything else — modal.

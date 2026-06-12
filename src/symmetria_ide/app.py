@@ -23,9 +23,11 @@ import logging
 import os
 import re
 import signal
+import subprocess
 import sys
 import shutil
 import tempfile
+import threading
 import time
 
 from PySide6.QtCore import (
@@ -43,7 +45,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QGuiApplication, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine, QmlElement
 
-from .agent_bridge import AgentBridgeClient
+from . import agent_harness
+from .agent_bridge import AgentBridgeClient, emit_gc_safe
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .trace import trace
 from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registration
@@ -340,6 +343,14 @@ class AppController(QObject):
     # controller validates the request and hands delivery to QML; the agent
     # surface answers via agent_inject_done with the same request_id.
     agentInjectRequested = Signal(int, str, bool, str)
+    # QML-facing result of `request_opencode_sessions` for the resume
+    # picker: {"ok": bool, "sessions": [{id, title, when}, ...]} — ok is
+    # False when the CLI failed/timed out (distinct from ok with an
+    # empty list = genuinely no sessions for this project).
+    opencodeSessionsReady = Signal(dict)
+    # Internal cross-thread marshal for the above: the session-list
+    # worker emits this; a queued connection re-emits on the GUI thread.
+    _opencode_sessions_fetched = Signal(dict)
 
     # Cycle order for Shift+Tab in the agent pane. Tuple is the source of
     # truth for both validation (gate `_set_permission_mode` against this)
@@ -462,7 +473,8 @@ class AppController(QObject):
         # `_VIEW`) handle the spawn themselves in `start()`.
         # ----- Terminal-agent pool (IDE-native orchestrator runtime) ----
         #
-        # Claude CLI instances hosted in QMLTermWidget panes on the
+        # Agent CLI instances (claude / opencode — see agent_harness)
+        # hosted in QMLTermWidget panes on the
         # "agent" central surface — the IDE-native replacement for
         # running orchestrator.nvim inside the embedded nvim. Parallel
         # to (NOT generalised with) the parked SDK pool above: the SDK
@@ -473,7 +485,7 @@ class AppController(QObject):
         #
         # Slot numbering is 1-based (1.._MAX_INSTANCES), matching the
         # Ctrl+1..5 chords. Per-slot record: {spawn_type, dangerous,
-        # cwd, title, spawned_at}.
+        # harness, session_id, cwd, title, spawned_at}.
         self._term_agents: dict[int, dict] = {}
         # slot -> {state, tool, agentType} — mirrored from the bridge's
         # consolidated snapshots (hook-driven activity arrives THROUGH
@@ -503,6 +515,12 @@ class AppController(QObject):
         # thread; delivery mutates GUI/QML state (§4 P2).
         self._agent_bridge.inject_requested.connect(
             self._on_bridge_inject, Qt.ConnectionType.QueuedConnection
+        )
+        # queued: _opencode_sessions_fetched originates on the one-shot
+        # session-list worker thread; the QML-facing re-emit must run on
+        # the GUI thread (§4 P2).
+        self._opencode_sessions_fetched.connect(
+            self._on_opencode_sessions, Qt.ConnectionType.QueuedConnection
         )
         # ----- Backend signal wiring (chrome rpcnotify relays) -----------
         # These signals originate on the NvimBackend worker thread; Qt's
@@ -1744,7 +1762,17 @@ class AppController(QObject):
         """
         return [
             self._term_agent_activity.get(
-                slot, {"state": "", "tool": "", "agentType": "claude"}
+                slot,
+                {
+                    "state": "",
+                    "tool": "",
+                    # Pre-first-activity fallback: the slot's own harness,
+                    # so an opencode chip never flashes the claude glyph
+                    # while waiting for the plugin's "starting" event.
+                    "agentType": self._term_agents.get(slot, {}).get(
+                        "harness", "claude"
+                    ),
+                },
             )
             for slot in range(1, self._MAX_INSTANCES + 1)
         ]
@@ -1760,24 +1788,46 @@ class AppController(QObject):
         return self._stt_transcribing
 
     @Slot(str, bool)
-    def spawn_agent(self, spawn_type: str = "fresh", dangerous: bool = True) -> None:
-        """Allocate the lowest free slot for a Claude instance and focus it.
+    @Slot(str, bool, str)
+    @Slot(str, bool, str, str)
+    def spawn_agent(
+        self,
+        spawn_type: str = "fresh",
+        dangerous: bool = True,
+        harness: str = "claude",
+        session_id: str = "",
+    ) -> None:
+        """Allocate the lowest free slot for an agent instance and focus it.
 
-        `dangerous=True` is the DEFAULT polarity (matches the user's
-        orchestrator.nvim muscle memory — the lowercase spawn chords run
-        --dangerously-skip-permissions; the safe variants are the
-        explicit opt-in). The QML Loader reacting to `agentSlotActive`
-        performs the actual process spawn via `agent_spawn_argv`.
+        `harness` selects the agent CLI ("claude" | "opencode" — see
+        agent_harness.HARNESSES). `dangerous=True` is the DEFAULT
+        polarity for every harness (matches the user's orchestrator.nvim
+        muscle memory — the lowercase spawn chords skip permissions; the
+        safe variants are the explicit opt-in). The QML Loader reacting
+        to `agentSlotActive` performs the actual process spawn via
+        `agent_spawn_argv`.
 
-        Resume (`-r`) intentionally carries no session id in v1 — claude
-        opens its own interactive session picker inside the terminal,
-        which IS the picker UX (no IDE-side session-list plumbing).
+        Resume semantics differ per harness: claude's bare `-r` opens
+        its own interactive session picker inside the terminal (no
+        session_id needed); opencode's `--session` REQUIRES an id, which
+        the AgentSessionPicker overlay supplies.
         """
         if spawn_type not in ("fresh", "resume", "continue"):
             log.warning("spawn_agent: unknown spawn_type %r — no-op", spawn_type)
             return
-        if shutil.which("claude") is None:
-            log.error("spawn_agent: `claude` not found on PATH — cannot spawn")
+        spec = agent_harness.HARNESSES.get(harness)
+        if spec is None:
+            log.warning("spawn_agent: unknown harness %r — no-op", harness)
+            return
+        if shutil.which(spec.executable) is None:
+            log.error(
+                "spawn_agent: `%s` not found on PATH — cannot spawn", spec.executable
+            )
+            return
+        if spawn_type == "resume" and spec.resume_requires_id and not session_id:
+            # `opencode --session` with no id errors on spawn — the QML
+            # session picker is responsible for supplying one.
+            log.warning("spawn_agent: %s resume requires a session id — no-op", harness)
             return
         slot = self._next_free_term_slot()
         if slot is None:
@@ -1787,6 +1837,8 @@ class AppController(QObject):
         self._term_agents[slot] = {
             "spawn_type": spawn_type,
             "dangerous": dangerous,
+            "harness": harness,
+            "session_id": session_id,
             "cwd": cwd,
             "title": "",
             "spawned_at": int(time.time()),
@@ -1801,8 +1853,9 @@ class AppController(QObject):
         self.termAgentsChanged.emit()
         self._agent_bridge.notify_spawn(self._term_instance_payload(slot))
         log.info(
-            "spawn_agent: slot %d (%s%s) in %s",
+            "spawn_agent: slot %d (%s %s%s) in %s",
             slot,
+            harness,
             spawn_type,
             " ⚠ dangerous" if dangerous else "",
             cwd,
@@ -1813,22 +1866,24 @@ class AppController(QObject):
     def agent_spawn_argv(self, slot: int) -> list:
         """argv for the slot's QMLTermSession (read once at Loader load).
 
-        `env`-wrapper because KSession::setEnvironment is not
-        QML-reachable — same technique orchestrator.nvim's termopen uses.
-        SYMMETRIA_AGENT_ID is what the Claude hooks report activity
-        under; `<ide_pid>_<slot>` matches the bridge's
-        `f"{nvim_pid}_{buf}"` keying for agents we publish with
-        `nvim_pid = os.getpid()`, `buf = slot`.
+        SYMMETRIA_AGENT_ID is what the activity reporters (claude's
+        hooks, opencode's symmetria-agent plugin) report under;
+        `<ide_pid>_<slot>` matches the bridge's `f"{nvim_pid}_{buf}"`
+        keying for agents we publish with `nvim_pid = os.getpid()`,
+        `buf = slot`. Per-harness flag/env semantics live in
+        agent_harness.spawn_argv.
         """
         inst = self._term_agents.get(slot)
         if inst is None:
             log.warning("agent_spawn_argv: slot %d not in pool", slot)
             return []
-        argv = ["env", f"SYMMETRIA_AGENT_ID={os.getpid()}_{slot}", "claude"]
-        if inst["dangerous"]:
-            argv.append("--dangerously-skip-permissions")
-        argv += {"fresh": [], "resume": ["-r"], "continue": ["-c"]}[inst["spawn_type"]]
-        return argv
+        return agent_harness.spawn_argv(
+            agent_harness.HARNESSES[inst["harness"]],
+            inst["spawn_type"],
+            inst["dangerous"],
+            f"{os.getpid()}_{slot}",
+            inst["session_id"],
+        )
 
     @Slot(int)
     def focus_agent(self, slot: int) -> None:
@@ -1953,7 +2008,10 @@ class AppController(QObject):
         # whitespace (it's a non-word character), and the strip removes
         # the separator space the glyph left behind plus any tail.
         cleaned = cls._TITLE_PREFIX_RE.sub("", title).strip()
-        if cleaned.lower() == "claude code":
+        # Bare product names are placeholders, not session summaries —
+        # "opencode" is what the OpenCode TUI reports before (and between)
+        # meaningful titles, same role as claude's "Claude Code".
+        if cleaned.lower() in ("claude code", "opencode"):
             return ""
         return cleaned
 
@@ -1968,6 +2026,58 @@ class AppController(QObject):
         self._term_agents[slot]["title"] = title
         self.termAgentsChanged.emit()
         self._agent_bridge.notify_title(slot, title)
+
+    @Slot()
+    def request_opencode_sessions(self) -> None:
+        """Fetch this project's OpenCode session list for the resume picker.
+
+        `opencode session list` scopes itself to the project derived from
+        its cwd (same trick orchestrator.nvim's resume_picker uses), so we
+        run it in displayedRoot and let OpenCode do the grouping. Async on
+        a one-shot daemon thread — the CLI takes ~1s and must never block
+        the GUI; the result arrives via opencodeSessionsReady.
+        """
+        cwd = self.displayedRoot
+        threading.Thread(
+            target=self._fetch_opencode_sessions,
+            args=(cwd,),
+            daemon=True,
+            name="opencode-session-list",
+        ).start()
+
+    def _fetch_opencode_sessions(self, cwd: str) -> None:
+        """Worker-thread body of request_opencode_sessions (one-shot)."""
+        sessions: list[dict] | None = None
+        try:
+            result = subprocess.run(
+                ["opencode", "session", "list", "--format", "json"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log.error("opencode session list failed: %s", exc)
+        else:
+            if result.returncode != 0:
+                log.error(
+                    "opencode session list exited %d: %s",
+                    result.returncode,
+                    (result.stderr or "").strip(),
+                )
+            else:
+                sessions = agent_harness.parse_opencode_sessions(result.stdout)
+                if sessions is None:
+                    log.error("opencode session list: unparseable output")
+        emit_gc_safe(
+            self._opencode_sessions_fetched,
+            {"ok": sessions is not None, "sessions": sessions or []},
+        )
+
+    @Slot(dict)
+    def _on_opencode_sessions(self, payload: dict) -> None:
+        """GUI-thread re-emit of the worker's session-list result."""
+        self.opencodeSessionsReady.emit(payload)
 
     def _next_free_term_slot(self) -> int | None:
         """Lowest unoccupied terminal-agent slot, or None when full.
@@ -1995,7 +2105,7 @@ class AppController(QObject):
             "title": inst["title"],
             "spawned_at": inst["spawned_at"],
             "active": True,
-            "agent_type": "claude",
+            "agent_type": inst["harness"],
             # Capability flag the snapshot propagates to consumers: these
             # agents are claude TUIs in IDE-owned terminal panes with NO
             # nvim socket — text delivery (STT) must route through the
@@ -2028,7 +2138,10 @@ class AppController(QObject):
             new_activity[slot] = {
                 "state": agent.get("activity_state", ""),
                 "tool": agent.get("activity_tool", ""),
-                "agentType": agent.get("agent_type", "") or "claude",
+                # Empty agent_type (pre-first-activity snapshot) falls
+                # back to what we spawned in the slot, not "claude".
+                "agentType": agent.get("agent_type", "")
+                or self._term_agents[slot]["harness"],
             }
         if new_activity != self._term_agent_activity:
             self._term_agent_activity = new_activity
@@ -2703,15 +2816,17 @@ class AppController(QObject):
             self.show_agent()
         # Terminal-agent smoke-test hook: SYMMETRIA_IDE_SPAWN_AGENT=<type>
         # spawns one agent at launch (value = fresh|resume|continue; "1" is
-        # accepted as fresh). Used by the headless E2E flow in
-        # docs/dev-workflow.md so a scripted launch can exercise the full
-        # spawn → bridge publish → hook activity → bubble pipeline without
-        # the Ctrl+Shift+N chord.
+        # accepted as fresh; an optional ":<harness>" suffix selects the
+        # agent CLI, e.g. "fresh:opencode"). Used by the headless E2E flow
+        # in docs/dev-workflow.md so a scripted launch can exercise the
+        # full spawn → bridge publish → hook activity → bubble pipeline
+        # without the Ctrl+Shift+A chord.
         spawn_request = os.environ.get("SYMMETRIA_IDE_SPAWN_AGENT") or ""
         if spawn_request:
             spawn_type = "fresh" if spawn_request == "1" else spawn_request
+            spawn_type, _, harness = spawn_type.partition(":")
             log.info("SYMMETRIA_IDE_SPAWN_AGENT=%s — spawning at launch", spawn_request)
-            self.spawn_agent(spawn_type, True)
+            self.spawn_agent(spawn_type, True, harness or "claude")
         self.backendReady.emit()
 
     def shutdown(self) -> None:

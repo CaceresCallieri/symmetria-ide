@@ -332,18 +332,23 @@ class AgentBridgeClient(QObject):
 
     @staticmethod
     def _emit_gc_safe(signal: SignalInstance, payload) -> None:
-        """Emit a cross-thread signal with the cyclic GC suspended.
+        emit_gc_safe(signal, payload)
 
-        Gotcha #10: a Python 3.14 collection triggered from this worker
-        thread while QSGRenderThread is mid-paint SEGVs. The emit allocates
-        (queued-connection payload marshalling), so the collector is
-        suspended for its duration — same mitigation as SessionHost.
-        """
-        gc_was_enabled = gc.isenabled()
+
+def emit_gc_safe(signal: SignalInstance, payload) -> None:
+    """Emit a cross-thread signal with the cyclic GC suspended.
+
+    Gotcha #10: a Python 3.14 collection triggered from a worker thread
+    while QSGRenderThread is mid-paint SEGVs. The emit allocates
+    (queued-connection payload marshalling), so the collector is
+    suspended for its duration — same mitigation as SessionHost. Shared
+    by the bridge reader thread and AppController's one-shot workers.
+    """
+    gc_was_enabled = gc.isenabled()
+    if gc_was_enabled:
+        gc.disable()
+    try:
+        signal.emit(payload)
+    finally:
         if gc_was_enabled:
-            gc.disable()
-        try:
-            signal.emit(payload)
-        finally:
-            if gc_was_enabled:
-                gc.enable()
+            gc.enable()

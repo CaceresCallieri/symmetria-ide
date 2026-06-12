@@ -160,6 +160,11 @@ Window {
             sequences: ["Ctrl+" + (index + 1)]
             context: Qt.ApplicationShortcut
             onActivated: {
+                // Modal guard: opening the spawn menu (or yanking focus
+                // via focus_agent) over the session picker would stack
+                // two z-40 modals fighting for the key catcher.
+                if (agentSessionPicker.visible)
+                    return;
                 var order = controller.agentOrder;
                 if (index < order.length)
                     controller.focus_agent(order[index]);
@@ -176,8 +181,8 @@ Window {
     // the agent surface — or with an empty pool (focusedAgent == 0) —
     // it opens the spawn menu, the keyboard-first popup where n/c/r
     // spawn new/continue/resume (dangerous; Shift+letter = the
-    // permission-checked variant). Future backends extend the menu
-    // (o = OpenCode) without burning more chords.
+    // permission-checked variant) in the selected harness — `o` toggles
+    // Claude ↔ OpenCode without burning more chords.
     Shortcut {
         sequences: ["Ctrl+Shift+A"]
         context: Qt.ApplicationShortcut
@@ -187,6 +192,8 @@ Window {
             // via Ctrl+N-on-empty — the go branch would focus_agent and
             // yank focus out of the modal, leaving it visible but deaf.
             // open() is idempotent and re-asserts the key catcher.
+            if (agentSessionPicker.visible)
+                return; // same modal guard as the Ctrl+N chords
             if (agentSpawnMenu.visible
                     || controller.focusedAgent === 0
                     || controller.agentSurfaceVisible)
@@ -288,6 +295,7 @@ Window {
         // would inject text into the hidden terminal behind the menu.
         enabled: (controller.agentSurfaceVisible || controller.terminalVisible)
                  && !treeScope.activeFocus && !agentSpawnMenu.visible
+                 && !agentSessionPicker.visible
         onActivated: {
             if (controller.agentSurfaceVisible) {
                 var term = agentSurface.focusedTerminal();
@@ -1920,6 +1928,16 @@ Window {
     AgentSpawnMenu {
         id: agentSpawnMenu
         onDismissed: root._restoreCentralFocus()
+        // OpenCode resume needs a session id (`--session` has no
+        // interactive picker form) — chain into the session picker.
+        onResumePickerRequested: dangerous => agentSessionPicker.open(dangerous)
+    }
+
+    // OpenCode session picker — the resume path for the OpenCode
+    // harness (spawns `opencode --session <id>` on accept).
+    AgentSessionPicker {
+        id: agentSessionPicker
+        onDismissed: root._restoreCentralFocus()
     }
 
     /// Shared focus dispatch: pull active focus into the visible central
@@ -1932,6 +1950,11 @@ Window {
         // re-asserts the modal's key catcher.
         if (agentSpawnMenu.visible) {
             agentSpawnMenu.open();
+            return;
+        }
+        if (agentSessionPicker.visible) {
+            // reassert(), not open() — open() re-fetches the session list.
+            agentSessionPicker.reassert();
             return;
         }
         if (controller.fmVisible && fmPaneLoader.item)
