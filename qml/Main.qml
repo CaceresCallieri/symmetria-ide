@@ -2144,32 +2144,51 @@ Window {
         //     closeModal() (where the tree's callLater is registered),
         //     so ours is registered later and runs later in the same
         //     drain — it wins, with no extra-frame flicker.
-        //   - cancel: the tree wins, which is correct when cancelling
-        //     from the tree; for cancel-from-central we re-assert below.
+        //   - cancel: a tree-origin cancel lets the tree's own grab win
+        //     (correct, no action from us); a central-origin cancel
+        //     double-defers to land after that grab and reclaim the
+        //     central surface (see the cancel branch below).
         // A cleaner long-term fix is a dedicated WindowState for the
         // finder (the tree handler would never fire), but that needs the
         // tree's bare-`f` key — hardwired to its own WindowState — to be
         // redirected, which the installed FM module doesn't expose.
         onActiveChanged: {
             if (active) {
+                // Reset per open. _activationHandled gates the cancel
+                // settle below; its reset relies on every reopen passing
+                // through modalNone first (the active false→true edge).
+                // The Ctrl+F toggle and Esc both closeModal() before any
+                // reopen, so that edge always fires.
                 returnFocusToTree = treeScope.activeFocus;
                 _activationHandled = false;
                 return;
             }
-            // CANCEL path. Deferred so it lands after the tree's grab;
-            // _settleCancelFocus stands down if this close was actually
-            // an activation (onActivated runs before the drain and flips
-            // _activationHandled true).
-            Qt.callLater(_settleCancelFocus);
+            // CANCEL path (Esc/scrim). The sidebar tree shares this
+            // WindowState and re-grabs focus to ITSELF on modal→none via
+            // its own deferred Qt.callLater (FileTreeView.qml
+            // onActiveModalChanged), so a cancel that ORIGINATED from the
+            // tree needs nothing from us — the tree self-restores. A
+            // central-origin cancel must OVERRIDE that grab; the two
+            // single callLaters are scheduled off the same activeModal
+            // change in UNSPECIFIED relative order, so a single defer
+            // could lose the race. DOUBLE-defer instead: the inner
+            // callLater is scheduled during the first drain and therefore
+            // runs in the NEXT drain, strictly after the tree's single
+            // callLater. Cost: one transient frame where the sidebar
+            // holds focus before the central surface reclaims it.
+            if (!returnFocusToTree)
+                Qt.callLater(() => Qt.callLater(_settleCancelFocus));
         }
 
         function _settleCancelFocus(): void {
+            // active: the finder was reopened before this deferred settle
+            //   drained — leave its focus alone. _activationHandled: a
+            //   file/dir was picked, so onActivated owns focus.
+            // (returnFocusToTree is already excluded at the scheduling
+            //   site above — a tree-origin cancel never schedules this.)
             if (active || _activationHandled)
                 return;
-            if (returnFocusToTree && controller.treeVisible)
-                controller.focus_tree();
-            else
-                root._restoreCentralFocus();
+            root._restoreCentralFocus();
         }
 
         // Fires AFTER closeModal() — so a Qt.callLater scheduled here is

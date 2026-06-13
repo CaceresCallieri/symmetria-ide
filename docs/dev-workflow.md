@@ -47,7 +47,9 @@ if [ -n "$pid" ] \
 fi
 ```
 
-The two-clause verification is the interlock: clause 1 confirms the tracked PID is still a `symmetria_ide` process (guards PID reuse); clause 2 confirms it is NOT stable (the prime directive — never signal a stable instance). Do NOT substitute a `cwd` or `SYMMETRIA_IDE_APP_ID` check — both fail as shown in the table. If the pidfile is stale (user restarted manually), clause 1 fails and nothing is killed — re-launch fresh instead.
+The two-clause verification is the interlock: clause 1 confirms the tracked PID is still a `symmetria_ide` process (guards PID reuse); clause 2 confirms it is NOT stable (the prime directive — never signal a stable instance). Note clause 2 also passes when `PYTHONPATH` is absent entirely — that is safe, because stable *always* sets `PYTHONPATH` to its worktree and clause 1 has already confirmed the PID is a `symmetria_ide` process. Do NOT substitute a `cwd` or `SYMMETRIA_IDE_APP_ID` check — both fail as shown in the table. If the pidfile is stale (user restarted manually), clause 1 fails and nothing is killed — re-launch fresh instead.
+
+`kill "$pid"` sends SIGTERM, which triggers the IDE's graceful nvim `qa!` shutdown (shada/swap written cleanly) — so allow a moment before relaunching, or the new instance may race a still-shutting-down one. If an instance is wedged and ignores SIGTERM, escalate with `kill -9 "$pid"` **after re-running the same two-clause guard** on that PID. Never hardcode `-9` into the routine restart — it skips nvim's clean shutdown.
 
 Note: most dev iteration doesn't need a kill at all — the screenshot harness (`SYMMETRIA_IDE_SCREENSHOT=…`) launches an ephemeral instance that exits on its own after grabbing. Reserve the launch+pidfile pattern for leaving an interactive instance running for the user.
 
