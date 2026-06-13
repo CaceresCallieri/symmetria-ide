@@ -1085,9 +1085,7 @@ Window {
                     // content mutation repaints the silhouette.
                     model: minimapModel
                     // Above the central panes so the ribbon visibly sits
-                    // on top of the editor's right edge; below
-                    // mainContentFocusBorder (z: 50) so the focus
-                    // hairline still wraps the whole mainContent slot.
+                    // on top of the editor's right edge.
                     z: 10
 
                     // Phase 3 click + drag scrubber. Routes mouse position
@@ -1181,61 +1179,17 @@ Window {
                     }
                 }
 
-                // Active-pane focus border. Renders a 1px accent hairline
-                // around the visible central surface when the agent pane
-                // or the FM is the active surface. The editor and the
-                // terminal deliberately do NOT light the hairline — they
-                // are the dominant, full-bleed surfaces and the border
-                // read as visual noise there; the existing 1px static
-                // separator between mainContent and treeScope remains as
-                // the always-visible delineator, so the layout never
-                // gains visual weight in the idle state.
-                //
-                // Why a sibling Rectangle (not Rectangle.border on each
-                // pane): the editor + shell are QMLTermWidget items (no
-                // `border` grouped property) and AgentPane is a QML
-                // composite that already has its own internal Rectangle
-                // chrome we don't want to wrap. A sibling overlay with
-                // `anchors.fill: parent` covers all three panes
-                // uniformly via the parent Item's geometry — one
-                // binding, one place to tune.
-                //
-                // Why `color: "transparent"` + conditional border.color
-                // (not `border.width: focused ? 1 : 0`): keeps the
-                // Rectangle's geometry stable across focus transitions
-                // — Qt re-computes anchor children when the bordering
-                // item's width/height changes, and a flickering 1px
-                // resize would cost a paint round-trip per chord. The
-                // transparent-when-inactive approach paints either an
-                // accent line or a fully transparent line; the layout
-                // never moves.
-                //
-                // z-order: above the pane siblings in mainContent
-                // (editor / terminalView / agentPane / fmPaneLoader are
-                // all z: 0 by default, so z: 50 guarantees the border draws
-                // on top of their outermost pixel). WhichKeyOverlay is z: 20
-                // inside editor, a different stacking context, so no
-                // interference there.
-                Rectangle {
-                    id: mainContentFocusBorder
-                    anchors.fill: parent
-                    color: "transparent"
-                    // FM is treated like a regular central surface for the
-                    // focus hairline: when fmVisible is true and the side
-                    // panel doesn't own the focus, the FM is the active
-                    // pane by elimination (editor/terminal/agent are all
-                    // gated off by !fmVisible). Using fmVisible directly
-                    // — rather than walking the focus chain into the FM's
-                    // internal ListView — keeps the binding declarative
-                    // and matches the XOR shape that already governs the
-                    // other panes.
-                    border.color: (agentPane.paneActive
-                                   || (controller.fmVisible && !treeScope.activeFocus))
-                                  ? Theme.color.accent.focus
-                                  : "transparent"
-                    border.width: 1
-                    z: 50
-                }
+                // NOTE: there is deliberately NO active-pane focus border
+                // around the central surface. A `mainContentFocusBorder`
+                // Rectangle used to paint a 1px accent hairline
+                // (Theme.color.accent.focus, white @ ~40% alpha) around the
+                // FM and agent panes when they were active. It was removed
+                // by design: focus-status borders belong only to the SIDE
+                // panels (the per-sub-pane FocusBars below), never to the
+                // central/main surface. Do not re-introduce a full-envelope
+                // focus border here — the side-panel FocusBars are the sole
+                // "where is focus" affordance, and a central envelope reads
+                // as visual noise over the dominant full-bleed surfaces.
 
                 // File manager — central-pane surface (not an overlay).
                 // Was a Window-root Loader at z:100 with a dim scrim
@@ -1267,18 +1221,29 @@ Window {
                     anchors.fill: parent
                     active: controller.fmVisible
 
-                    // Start picker mode when the panel first opens. The
-                    // panel reuses its existing picker infrastructure
-                    // (built for the XDG portal) as a clean "select a
-                    // file" affordance: confirming a selection emits
-                    // FileManagerService.pickerCompleted; cancelling
-                    // emits pickerCancelled. We connect to both below —
-                    // no fifoPath is passed, so the panel's
+                    // Start picker mode when the panel first opens. We ride
+                    // the panel's picker infrastructure (built for the XDG
+                    // portal) for its open/cancel routing: confirming a
+                    // selection emits FileManagerService.pickerCompleted
+                    // (→ pick_in_nvim, opens in the editor + dismisses);
+                    // cancelling emits pickerCancelled. We connect to both
+                    // below — no fifoPath is passed, so the panel's
                     // standalone-host FIFO writer is dormant.
+                    //
+                    // `fileOps: true` makes this a FULL file manager rather
+                    // than a bare file chooser: it opts out of picker mode's
+                    // default clipboard/multi-select suppression
+                    // (FileOpsHandler.js gates the suppression on
+                    // !pickerFileOps), so yank/cut/paste, space-marking, and
+                    // tabs all work — while Enter→open-in-nvim and Esc→dismiss
+                    // stay wired through the picker signals. The flag is opt-in
+                    // and defaults false, so the standalone FM and the XDG
+                    // portal picker are unaffected (they never pass it).
                     onLoaded: {
                         FmUi.FileManagerService.startPickerMode({
                             title: "Open File",
-                            acceptLabel: "Open"
+                            acceptLabel: "Open",
+                            fileOps: true
                         });
                     }
 
@@ -1482,11 +1447,14 @@ Window {
                 // WHICH sub-pane (changes vs main tree) had focus, which
                 // mattered once Ctrl+J/Ctrl+K subdivided the side panel
                 // into two independently-navigable regions. The per-pane
-                // FocusBars share `mainContentFocusBorder`'s color-flip
-                // contract (accent.focus ↔ transparent on color, never
-                // on geometry) but render as a left-edge bar rather
-                // than a full envelope — subtler, and clear of the
-                // scrollbar.
+                // FocusBars follow a color-flip contract (accent.focus ↔
+                // transparent on color, never on geometry — so focus
+                // transitions cost no layout round-trip) but render as a
+                // left-edge bar rather than a full envelope — subtler, and
+                // clear of the scrollbar. These side-panel bars are now the
+                // ONLY focus-status affordance; the central surface has no
+                // equivalent border by design (see the note above
+                // fmPaneLoader).
 
                 // Three-section composition inside the side panel:
                 //   1. LocationHeader — current displayedRoot + anchor
