@@ -71,15 +71,6 @@ Rectangle {
     // directly. No intermediate mouse step, matches non-negotiable #1.
     onVisibleChanged: if (visible) composer.forceActiveFocus()
 
-    // True when any focusable descendant of this pane has active keyboard
-    // focus. Mirrors what `FocusScope.activeFocus` provides for free — but
-    // AgentPane's root is a plain Rectangle, not a FocusScope, so `root.activeFocus`
-    // reflects only the Rectangle itself (almost always false once `composer`
-    // is forceActiveFocus'd). External callers (Main.qml's focus-border binding)
-    // use this instead of `agentPane.activeFocus` to correctly detect that the
-    // central surface owns the keyboard.
-    readonly property bool paneActive: composer.activeFocus || events.activeFocus
-
     // Cycle the SDK permission mode. Wired to Shift+Tab on both `root`
     // (when focus is on the events ListView or chrome) and `composer`
     // (when the user is typing). Centralised here so the two key
