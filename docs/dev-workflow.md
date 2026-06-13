@@ -10,6 +10,47 @@ cd ~/projects/symmetria-ide && PYTHONPATH=src python -m symmetria_ide
 
 Runtime deps (on Arch): `sudo pacman -S --needed pyside6 python-pynvim`. The app picks up the user's real `~/.config/nvim` config by default — plugins, colorscheme, keymaps all load. Pass `clean=True` to `NvimBackend(...)` to bypass user config for isolation testing.
 
+## Restarting the dev instance safely (NEVER pattern-kill)
+
+**The hazard is real and live:** stable is the user's daily driver — it hosts their work across other projects AND the terminal pane this Claude session runs in. Dev and stable launch with a *byte-identical* command line (both `~/.local/bin/symmetria-ide` and `~/.local/bin/symmetria-ide-stable` end in `exec env … python -m symmetria_ide`), so `pkill -f symmetria_ide`, `pkill -f "python -m symmetria_ide"`, or `kill $(pgrep -f symmetria_ide)` **match every instance** — stable (taking down the session's own host and the user's other-project work) and every dev instance across all workspaces. This has happened; it nukes the user's entire desktop session. There is no safe command-line pattern.
+
+**`PYTHONPATH` is the ONLY bulletproof dev/stable discriminator.** The others each fail:
+
+| signal | stable | dev | reliable? |
+|---|---|---|---|
+| `PYTHONPATH` | `…/symmetria-ide-stable/src` | `src` / `…/symmetria-ide/src` (never `-stable`) | **YES** |
+| `cwd` | usually `$HOME` | usually `~/projects/symmetria-ide` | **NO** — a stable instance launched from a terminal sitting in the dev dir has `cwd=repo` too (observed) |
+| `SYMMETRIA_IDE_APP_ID` | `symmetria-ide-stable` | `symmetria-ide` *if set* | **NO** — leaks from the host stable IDE into every shell you spawn (`echo $SYMMETRIA_IDE_APP_ID` → `symmetria-ide-stable`), so dev launches inherit it unless you override |
+
+So a dev launch must set `SYMMETRIA_IDE_APP_ID=symmetria-ide` explicitly (to override the leak — needed for the `class:^(symmetria-ide)$` workspace-6 rule and correct labelling), and any kill must gate on `PYTHONPATH` not containing `symmetria-ide-stable`.
+
+**The safe pattern — track the PID you launched, kill only that, gated on PYTHONPATH:**
+
+```sh
+# Launch an interactive dev instance for the user to test. Set
+# SYMMETRIA_IDE_APP_ID=symmetria-ide to override the leaked stable value
+# (workspace 6 + correct label); record its PID:
+cd ~/projects/symmetria-ide && \
+  PYTHONPATH=src SYMMETRIA_IDE_APP_ID=symmetria-ide nohup python -m symmetria_ide \
+  >/tmp/symmetria-ide-dev.log 2>&1 &
+echo $! >/tmp/symmetria-ide-dev.pid
+
+# Restart it later — kill ONLY the tracked PID, and ONLY if it is still a
+# symmetria_ide process whose PYTHONPATH is NOT the stable worktree. This
+# can never hit stable (even one launched from the dev dir) and never hits
+# a non-IDE process that reused the PID:
+pid=$(cat /tmp/symmetria-ide-dev.pid 2>/dev/null)
+if [ -n "$pid" ] \
+   && tr '\0' ' ' </proc/$pid/cmdline 2>/dev/null | grep -q 'symmetria_ide' \
+   && ! tr '\0' '\n' </proc/$pid/environ 2>/dev/null | grep -qE '^PYTHONPATH=.*symmetria-ide-stable'; then
+  kill "$pid"
+fi
+```
+
+The two-clause verification is the interlock: clause 1 confirms the tracked PID is still a `symmetria_ide` process (guards PID reuse); clause 2 confirms it is NOT stable (the prime directive — never signal a stable instance). Do NOT substitute a `cwd` or `SYMMETRIA_IDE_APP_ID` check — both fail as shown in the table. If the pidfile is stale (user restarted manually), clause 1 fails and nothing is killed — re-launch fresh instead.
+
+Note: most dev iteration doesn't need a kill at all — the screenshot harness (`SYMMETRIA_IDE_SCREENSHOT=…`) launches an ephemeral instance that exits on its own after grabbing. Reserve the launch+pidfile pattern for leaving an interactive instance running for the user.
+
 ## Agent-friendly smoke testing
 
 The app supports a headless-ish test mode driven by env vars. It bypasses the compositor's screen-capture permissions entirely by grabbing from Qt's scene graph.
