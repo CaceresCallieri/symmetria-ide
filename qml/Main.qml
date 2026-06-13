@@ -2119,39 +2119,76 @@ Window {
         // Loader's `active` flips synchronously with activeModal (the
         // popup body loads async after), so at this instant the
         // pre-open owner still holds activeFocus and the capture is
-        // race-free. On close we route focus back accordingly — Esc
-        // from the tree returns to the tree, Esc from a central
-        // surface returns there via _restoreCentralFocus.
+        // race-free. Drives ONLY the cancel path (Esc/scrim) — on
+        // activation the onActivated handler owns focus instead.
         property bool returnFocusToTree: false
+
+        // Set by onActivated so the deferred cancel-focus settle below
+        // knows an activation already claimed focus and stands down.
+        property bool _activationHandled: false
 
         anchors.fill: parent
         windowState: treeOpsWindowState
         externalActivation: true
 
+        // FOCUS-ORDERING HAZARD (shared WindowState). The sidebar tree
+        // rides this same treeOpsWindowState, and the FM's FileTreeView
+        // re-grabs focus on EVERY modal→none transition via its own
+        // DEFERRED Qt.callLater (FileTreeView.qml onActiveModalChanged:
+        // "Any modal closing returns focus to the view"). Because that
+        // grab is deferred, any focus we set SYNCHRONOUSLY while the
+        // finder closes is stomped one tick later by the tree. The fix
+        // is to also defer our focus grant via Qt.callLater, scheduling
+        // it from a point that out-orders the tree's:
+        //   - activation: scheduled in onActivated, which fires AFTER
+        //     closeModal() (where the tree's callLater is registered),
+        //     so ours is registered later and runs later in the same
+        //     drain — it wins, with no extra-frame flicker.
+        //   - cancel: the tree wins, which is correct when cancelling
+        //     from the tree; for cancel-from-central we re-assert below.
+        // A cleaner long-term fix is a dedicated WindowState for the
+        // finder (the tree handler would never fire), but that needs the
+        // tree's bare-`f` key — hardwired to its own WindowState — to be
+        // redirected, which the installed FM module doesn't expose.
         onActiveChanged: {
             if (active) {
                 returnFocusToTree = treeScope.activeFocus;
+                _activationHandled = false;
                 return;
             }
+            // CANCEL path. Deferred so it lands after the tree's grab;
+            // _settleCancelFocus stands down if this close was actually
+            // an activation (onActivated runs before the drain and flips
+            // _activationHandled true).
+            Qt.callLater(_settleCancelFocus);
+        }
+
+        function _settleCancelFocus(): void {
+            if (active || _activationHandled)
+                return;
             if (returnFocusToTree && controller.treeVisible)
                 controller.focus_tree();
             else
                 root._restoreCentralFocus();
         }
 
-        // Fires AFTER closeModal() (so after the onActiveChanged focus
-        // restore above) — both run synchronously inside the confirm,
-        // and the explicit grants here have the final word.
+        // Fires AFTER closeModal() — so a Qt.callLater scheduled here is
+        // registered after the tree's modal-close refocus and runs after
+        // it, giving our grant the final word (see the hazard note above).
         onActivated: (path, isDir) => {
+            _activationHandled = true;
             if (isDir) {
                 // Directories aren't editor material — hand off to the
                 // FM central surface navigated there. The FM's FileList
                 // claims focus itself on construction (see the no-
-                // forceActiveFocus comment on fmPane).
-                controller.show_fm(path);
+                // forceActiveFocus comment on fmPane), so deferring the
+                // surface swap past the tree's grab is enough.
+                Qt.callLater(() => controller.show_fm(path));
             } else {
+                // Open immediately (surface swap + :edit), but defer the
+                // focus grant so it beats the tree's deferred grab.
                 controller.open_in_nvim(path);
-                editor.forceActiveFocus();
+                Qt.callLater(() => editor.forceActiveFocus());
             }
         }
     }
