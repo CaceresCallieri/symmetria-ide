@@ -497,6 +497,29 @@ Window {
         }
     }
 
+    // IDE-wide fuzzy file finder. ApplicationShortcut so it fires from
+    // EVERY surface — editor, terminal, agent, FM, tree — replacing
+    // fff.nvim's in-editor Ctrl+F with the native overlay (same Rust
+    // fff engine; fff.nvim keeps working in standalone nvim, where this
+    // chord layer doesn't exist). Cost, same shape as the Ctrl+H/L
+    // tradeoff above: terminal Ctrl+F (readline forward-char) and
+    // nvim's Ctrl+F (page-forward / fff.nvim) are unreachable inside
+    // the IDE — accepted per the IDE-owns-the-keybind-layer doctrine.
+    Shortcut {
+        sequences: ["Ctrl+F"]
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            const ws = treeOpsWindowState;
+            // Toggle when already open; refuse to stomp a DIFFERENT
+            // in-flight modal (rename/create/delete hold typed input —
+            // requestFuzzyFinder would discard it unconditionally).
+            if (ws.activeModal === ws.modalFuzzyFinder)
+                ws.closeModal();
+            else if (ws.activeModal === ws.modalNone)
+                ws.requestFuzzyFinder();
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -1786,6 +1809,13 @@ Window {
                 // fuzzy finder (f). Zoxide + context-menu are Miller-only
                 // — intentionally not hosted.
                 //
+                // The fuzzy finder (f, and IDE-wide Ctrl+F) is hosted at
+                // WINDOW scope (ideFuzzyFinder, after the root layout) —
+                // it shares this WindowState, so the tree's `f` key still
+                // opens it, but the dialog centers over the whole window
+                // and works from every central surface, sidebar hidden
+                // included.
+                //
                 // Scoped to the MAIN tree only: GitStatusPanel's embedded
                 // tree stays navigation-only (no windowState), which lets
                 // RenamePopup's positional bindings assume fileTreeView
@@ -1846,10 +1876,6 @@ Window {
                     targetItemY: mainTreeScope.y + fileTreeView.currentItemBottomY
                     targetColumnX: mainTreeScope.x + fileTreeView.currentColumnX
                     targetColumnWidth: fileTreeView.currentColumnWidth
-                }
-                FmUi.FuzzyFinderPopup {
-                    anchors.fill: parent
-                    windowState: treeOpsWindowState
                 }
                 // Chord hints (g/c/, which-key). Non-modal — opacity-
                 // gated internally; renders only while a chord prefix
@@ -2072,6 +2098,64 @@ Window {
         onDismissed: root._restoreCentralFocus()
     }
 
+    // === IDE-wide fuzzy file finder (Ctrl+F, or `f` in the tree) ===
+    //
+    // The FM's FuzzyFinderPopup hosted at WINDOW scope — the same fff
+    // engine the user's fff.nvim binds to Ctrl+F in standalone nvim,
+    // surfaced as a native overlay that works from every central
+    // surface (editor, terminal, agent, FM). Rides treeOpsWindowState:
+    //   - search root = currentPath = controller.displayedRoot (the
+    //     anchored project root; the Connections block in treeScope
+    //     keeps it pinned across re-roots), and
+    //   - the tree's `f` key (TreeKeyHandler → requestFuzzyFinder on
+    //     this same WindowState) opens this instance too — one popup,
+    //     two entry points.
+    // externalActivation replaces the FM-native "navigate + focus in
+    // list" confirm flow with the activated() signal handled below.
+    FmUi.FuzzyFinderPopup {
+        id: ideFuzzyFinder
+
+        // Captured at open: was the sidebar tree the focus owner? The
+        // Loader's `active` flips synchronously with activeModal (the
+        // popup body loads async after), so at this instant the
+        // pre-open owner still holds activeFocus and the capture is
+        // race-free. On close we route focus back accordingly — Esc
+        // from the tree returns to the tree, Esc from a central
+        // surface returns there via _restoreCentralFocus.
+        property bool returnFocusToTree: false
+
+        anchors.fill: parent
+        windowState: treeOpsWindowState
+        externalActivation: true
+
+        onActiveChanged: {
+            if (active) {
+                returnFocusToTree = treeScope.activeFocus;
+                return;
+            }
+            if (returnFocusToTree && controller.treeVisible)
+                controller.focus_tree();
+            else
+                root._restoreCentralFocus();
+        }
+
+        // Fires AFTER closeModal() (so after the onActiveChanged focus
+        // restore above) — both run synchronously inside the confirm,
+        // and the explicit grants here have the final word.
+        onActivated: (path, isDir) => {
+            if (isDir) {
+                // Directories aren't editor material — hand off to the
+                // FM central surface navigated there. The FM's FileList
+                // claims focus itself on construction (see the no-
+                // forceActiveFocus comment on fmPane).
+                controller.show_fm(path);
+            } else {
+                controller.open_in_nvim(path);
+                editor.forceActiveFocus();
+            }
+        }
+    }
+
     /// Shared focus dispatch: pull active focus into the visible central
     /// surface. Used by Window.onActiveChanged and modal dismissals.
     function _restoreCentralFocus() {
@@ -2087,6 +2171,14 @@ Window {
         if (agentSessionPicker.visible) {
             // reassert(), not open() — open() re-fetches the session list.
             agentSessionPicker.reassert();
+            return;
+        }
+        if (ideFuzzyFinder.active && ideFuzzyFinder.item) {
+            // Same deafness hazard as the spawn menu: Alt-Tab back must
+            // not yank focus out of the open finder. The loaded item is
+            // a FocusScope whose TextInput holds `focus: true`, so the
+            // grant lands back on the search field.
+            ideFuzzyFinder.item.forceActiveFocus();
             return;
         }
         if (controller.fmVisible && fmPaneLoader.item)
