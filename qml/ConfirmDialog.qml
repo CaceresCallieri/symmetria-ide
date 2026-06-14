@@ -123,16 +123,17 @@ ModalOverlay {
         anchors.horizontalCenter: parent.horizontalCenter
         spacing: Theme.spacing.md
 
-        // Confirm (index 0) — destructive accent (editor "stop" red) so
-        // the consequence reads at a glance; Cancel (index 1) — neutral
-        // white. The highlighted (keyboard-selected) button glows with its
-        // accent as both border and text over a subtle raised surface;
-        // the unselected one stays a hairline ghost. A calm tint, not a
-        // loud fill — on-brand with the Symmetria aesthetic.
+        // The two buttons are peer clay pills; the CLAYMORPHISM alone signals
+        // which is active — the highlighted (Enter-target) button raises into
+        // an elevated, filled pill while the other stays a flat hairline
+        // ghost. No accent-colour glow, no bold weight: the depth does the
+        // work, so the dialog reads calm. The label only gains a slight
+        // neutral brightness lift when highlighted (strong vs normal), never
+        // a colour shift.
         Repeater {
             model: [
-                { idx: 0, label: root.confirmText, accent: Theme.color.mode.replace },
-                { idx: 1, label: root.cancelText, accent: Theme.color.text.selected },
+                { idx: 0, label: root.confirmText },
+                { idx: 1, label: root.cancelText },
             ]
 
             delegate: Item {
@@ -144,35 +145,38 @@ ModalOverlay {
                 height: buttonLabel.implicitHeight + Theme.spacing.sm * 2
 
                 // The highlighted (keyboard-selected / hovered) button raises
-                // into a clay pill — matte fill + its accent as the border +
-                // convex depth — so the Enter target reads as physically
-                // pressed-forward; the other stays a flat hairline ghost. Same
-                // PillSurface primitive + `elevated` toggle as the surface
-                // switcher and the agent bubbles, so the dialog buttons carry
-                // the same clay language. Declared first (background) so the
-                // label + MouseArea paint on top.
+                // into a clay pill — matte fill + hairline border + convex
+                // depth — so the Enter target reads as physically pressed-
+                // forward; the other stays a flat ghost. Same PillSurface
+                // primitive + `elevated` toggle as the surface switcher and
+                // the agent bubbles, so the dialog buttons carry the same clay
+                // language. Declared first (background) so the label +
+                // MouseArea paint on top.
                 PillSurface {
                     anchors.fill: parent
-                    radius: Theme.radius.sm
+                    radius: height / 2 // full capsule — matches the chip / bubble pills
                     elevated: button.highlighted
+                    // Active = raised, filled clay pill; inactive = flat,
+                    // transparent ghost. The elevation + fill ARE the active
+                    // cue; the border stays a constant hairline on both so no
+                    // accent glow competes with the depth.
                     color: button.highlighted ? Theme.color.bg.selected : "transparent"
-                    borderColor: button.highlighted ? button.modelData.accent : Theme.color.border.hairline
+                    borderColor: Theme.color.border.hairline
                 }
 
                 Text {
                     id: buttonLabel
                     anchors.centerIn: parent
                     text: button.modelData.label
-                    // Highlighted: glow with the button's accent. Otherwise
-                    // the normal chrome foreground.
+                    // Subtle neutral brightness lift when highlighted (strong
+                    // vs normal) — NOT an accent glow; weight stays constant.
+                    // The clay raise is the real active cue.
                     color: button.highlighted
-                           ? button.modelData.accent
+                           ? Theme.color.text.strong
                            : Theme.color.text.normal
                     font.family: Theme.font.family
                     font.pixelSize: Theme.font.size.xs
-                    font.weight: button.highlighted
-                                 ? Theme.font.weight.bold
-                                 : Theme.font.weight.medium
+                    font.weight: Theme.font.weight.medium
                     renderType: Text.NativeRendering
                 }
 
