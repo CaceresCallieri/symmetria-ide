@@ -2216,10 +2216,11 @@ Window {
         // Modal guard: window re-activation (Alt-Tab away and back) must
         // not yank focus out of an open spawn menu — that left the menu
         // visible but deaf, with every key falling through to the surface
-        // underneath and no way to dismiss it. open() is idempotent and
-        // re-asserts the modal's key catcher.
+        // underneath and no way to dismiss it. reassert() — NOT open() —
+        // re-grabs the key catcher without resetting harness to Claude
+        // (see AgentSpawnMenu.reassert). Mirrors the session-picker branch.
         if (agentSpawnMenu.visible) {
-            agentSpawnMenu.open();
+            agentSpawnMenu.reassert();
             return;
         }
         if (agentSessionPicker.visible) {

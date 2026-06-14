@@ -108,7 +108,7 @@ Item {
         color: Theme.color.bg.chrome
         border.color: Theme.color.border.hairline
         border.width: 1
-        radius: Theme.radius.md
+        radius: Theme.radius.lg
 
         Column {
             id: column

@@ -520,7 +520,33 @@ QtObject {
     readonly property QtObject radius: QtObject {
         readonly property int sm: 3
         readonly property int md: 5
+        // Floating popup panels (agent spawn menu, session picker,
+        // which-key overlay). Mirrors the File Manager's
+        // `FmTheme.rounding.lg` (== 16, in
+        // symmetria-file-manager/.../services/FmTheme.qml) so the IDE's
+        // modal surfaces carry the same soft corner the FM uses for its
+        // Miller columns + dialogs — one shared popup-corner language
+        // across the Symmetria toolkit. Thin input chrome (the cmdline
+        // box) deliberately stays at `md` — `lg` reads as a pill on a
+        // ~34px-tall bar.
+        readonly property int lg: 16
         // Badge pills use `radius: height / 2` directly — no token needed.
+    }
+
+    // ─── Animation ───────────────────────────────────────────────
+    // Popup entrance motion — mirrors the File Manager's `Anim` component
+    // + scale-pop (FmTheme.animDuration / animCurveStandard, plus the
+    // Easing.OutBack overshoot FuzzyFinderPopup/ZoxidePopup use). Shared so
+    // EVERY IDE popup gets the same signature "pop in": a quick scale from
+    // small with a slight overshoot, paired with an opacity fade on the
+    // standard curve. New popup surfaces should bind these rather than
+    // hand-rolling per-component durations — keeps the toolkit's motion
+    // language coherent with the FM.
+    readonly property QtObject anim: QtObject {
+        readonly property int duration: 400                                // == FmTheme.animDuration
+        readonly property var standardCurve: [0.2, 0, 0, 1, 1, 1]   // == FmTheme.animCurveStandard
+        readonly property real popFromScale: 0.1                           // entrance start scale
+        readonly property real popOvershoot: 1.5                           // Easing.OutBack overshoot
     }
 
     // ─── Component sizing ────────────────────────────────────────

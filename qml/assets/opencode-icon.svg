@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="128" height="128" fill="none">
+  <title>OpenCode</title>
+  <!-- Static 3×3 grid — the OpenCode identity, matching modules/agentbar/OpenCodeGrid.qml.
+       Geometry mirrors that component: gap = 14% of the box, square cells (radius 0),
+       cell = (24 − 2·gap)/3 = 5.76, column/row offsets 0 / 9.12 / 18.24.
+       Colour #6f9bd6 is the OpenCode azure accent (AgentChip._accentColor). -->
+  <g fill="#6f9bd6">
+    <rect x="0"     y="0"     width="5.76" height="5.76"/>
+    <rect x="9.12"  y="0"     width="5.76" height="5.76"/>
+    <rect x="18.24" y="0"     width="5.76" height="5.76"/>
+    <rect x="0"     y="9.12"  width="5.76" height="5.76"/>
+    <rect x="9.12"  y="9.12"  width="5.76" height="5.76"/>
+    <rect x="18.24" y="9.12"  width="5.76" height="5.76"/>
+    <rect x="0"     y="18.24" width="5.76" height="5.76"/>
+    <rect x="9.12"  y="18.24" width="5.76" height="5.76"/>
+    <rect x="18.24" y="18.24" width="5.76" height="5.76"/>
+  </g>
+</svg>
