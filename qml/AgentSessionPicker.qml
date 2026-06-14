@@ -10,19 +10,20 @@
 // fills the list → j/k/arrows move, Enter spawns
 // `opencode --session <id>`, Esc cancels.
 //
-// Placeholder-discipline styling (minimal panel, Theme tokens only);
-// richer treatment lands once the picker has real usage cadence.
+// The scrim + centered panel + FM scale-pop entrance + keyboard-modal
+// focus-self-heal all come from ModalOverlay (this is the root element);
+// see that file. Placeholder-discipline styling otherwise (minimal panel,
+// Theme tokens only); richer treatment lands once the picker has real
+// usage cadence.
 
 import QtQuick
 
 import "design"
 
-Item {
+ModalOverlay {
     id: root
 
-    anchors.fill: parent
-    visible: false
-    z: 40 // same modal layer as AgentSpawnMenu (never open simultaneously)
+    panelWidth: 420
 
     // Polarity chosen with the case of the `r` keypress in the spawn
     // menu — carried through to the eventual spawn_agent call.
@@ -32,28 +33,16 @@ Item {
     property var sessions: []
     property int selectedIndex: 0
 
-    signal dismissed()
-
+    // Override the base open() to (re)fetch the session list. reassert()
+    // (Main.qml's modal guard on window re-activation) is INHERITED — it
+    // must NOT re-fetch, only re-grab focus, which the base _show() does.
     function open(dangerous) {
         root.dangerous = dangerous;
         root.sessions = [];
         root.selectedIndex = 0;
         root.state_ = "loading";
-        root.visible = true;
-        keyCatcher.forceActiveFocus();
+        _show();
         controller.request_opencode_sessions();
-    }
-
-    function dismiss() {
-        root.visible = false;
-        root.dismissed();
-    }
-
-    // Idempotent focus re-assert for Main.qml's modal guard in
-    // _restoreCentralFocus — open() is NOT idempotent (it re-fetches
-    // the session list), so window re-activation uses this instead.
-    function reassert() {
-        keyCatcher.forceActiveFocus();
     }
 
     function _accept() {
@@ -78,6 +67,30 @@ Item {
         sessionList.positionViewAtIndex(root.selectedIndex, ListView.Contain);
     }
 
+    // Esc is handled by ModalOverlay (→ dismiss); the rest lands here
+    // already accepted (the modal swallows it).
+    onKeyPressed: function (event) {
+        switch (event.key) {
+        case Qt.Key_J:
+        case Qt.Key_Down:
+            root._move(1);
+            break;
+        case Qt.Key_K:
+        case Qt.Key_Up:
+            root._move(-1);
+            break;
+        case Qt.Key_Return:
+        case Qt.Key_Enter:
+            root._accept();
+            break;
+        default:
+            // Swallow everything else — modal.
+            break;
+        }
+    }
+
+    // Non-visual: lands in the content Column's data but is ignored for
+    // layout (Column only positions Item children).
     Connections {
         target: controller
         function onOpencodeSessionsReady(payload) {
@@ -93,151 +106,90 @@ Item {
         }
     }
 
-    // Dim the surface behind the panel so the modal state is legible.
-    Rectangle {
-        anchors.fill: parent
-        color: Theme.color.bg.scrim
+    // ---- Panel content (dropped into ModalOverlay's content Column) ----
+
+    Text {
+        text: "Resume OpenCode session"
+              + (root.dangerous ? "  ⚠" : "")
+        color: Theme.color.text.strong
+        font.family: Theme.font.family
+        font.pixelSize: Theme.font.size.sm
+        font.weight: Theme.font.weight.bold
+        renderType: Text.NativeRendering
     }
 
-    Rectangle {
-        id: panel
-        anchors.centerIn: parent
-        width: 420
-        implicitHeight: column.implicitHeight + Theme.spacing.lg * 2
-        height: implicitHeight
-        color: Theme.color.bg.chrome
-        border.color: Theme.color.border.hairline
-        border.width: 1
-        radius: Theme.radius.lg
+    Text {
+        visible: root.state_ !== "ready"
+        text: root.state_ === "loading" ? "Loading sessions…"
+            : root.state_ === "empty" ? "No sessions found for this project"
+            : "Could not list sessions (see log)"
+        color: Theme.color.text.dim
+        font.family: Theme.font.family
+        font.pixelSize: Theme.font.size.xs
+        renderType: Text.NativeRendering
+    }
 
-        Column {
-            id: column
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.margins: Theme.spacing.lg
-            spacing: Theme.spacing.sm
+    ListView {
+        id: sessionList
+        visible: root.state_ === "ready"
+        width: parent.width
+        // Cap the panel: ~10 rows, then scroll (positionViewAtIndex
+        // keeps the selection in view). The estimate mirrors the
+        // delegate height: rowText implicitHeight (≈ font size) +
+        // a single spacing.sm.
+        height: Math.min(contentHeight, 10 * (Theme.font.size.xs + Theme.spacing.sm))
+        interactive: false
+        model: root.sessions
+        reuseItems: true
 
-            Text {
-                text: "Resume OpenCode session"
-                      + (root.dangerous ? "  ⚠" : "")
-                color: Theme.color.text.strong
-                font.family: Theme.font.family
-                font.pixelSize: Theme.font.size.sm
-                font.weight: Theme.font.weight.bold
-                renderType: Text.NativeRendering
-            }
+        delegate: Rectangle {
+            id: sessionRow
+            required property var modelData
+            required property int index
+            readonly property bool selected: index === root.selectedIndex
 
-            Text {
-                visible: root.state_ !== "ready"
-                text: root.state_ === "loading" ? "Loading sessions…"
-                    : root.state_ === "empty" ? "No sessions found for this project"
-                    : "Could not list sessions (see log)"
-                color: Theme.color.text.dim
-                font.family: Theme.font.family
-                font.pixelSize: Theme.font.size.xs
-                renderType: Text.NativeRendering
-            }
+            width: sessionList.width
+            height: rowText.implicitHeight + Theme.spacing.sm
+            radius: Theme.radius.sm
+            color: selected ? Theme.color.bg.selected : "transparent"
 
-            ListView {
-                id: sessionList
-                visible: root.state_ === "ready"
-                width: parent.width
-                // Cap the panel: ~10 rows, then scroll (positionViewAtIndex
-                // keeps the selection in view). The estimate mirrors the
-                // delegate height: rowText implicitHeight (≈ font size) +
-                // a single spacing.sm.
-                height: Math.min(contentHeight, 10 * (Theme.font.size.xs + Theme.spacing.sm))
-                interactive: false
-                model: root.sessions
-                reuseItems: true
+            Row {
+                id: rowText
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.left: parent.left
+                anchors.leftMargin: Theme.spacing.sm
+                anchors.right: parent.right
+                anchors.rightMargin: Theme.spacing.sm
+                spacing: Theme.spacing.sm
 
-                delegate: Rectangle {
-                    id: sessionRow
-                    required property var modelData
-                    required property int index
-                    readonly property bool selected: index === root.selectedIndex
-
-                    width: sessionList.width
-                    height: rowText.implicitHeight + Theme.spacing.sm
-                    radius: Theme.radius.sm
-                    color: selected ? Theme.color.bg.selected : "transparent"
-
-                    Row {
-                        id: rowText
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.left: parent.left
-                        anchors.leftMargin: Theme.spacing.sm
-                        anchors.right: parent.right
-                        anchors.rightMargin: Theme.spacing.sm
-                        spacing: Theme.spacing.sm
-
-                        Text {
-                            width: rowText.width - whenText.implicitWidth - Theme.spacing.sm
-                            text: sessionRow.modelData.title
-                            elide: Text.ElideRight
-                            color: sessionRow.selected
-                                   ? Theme.color.text.selected
-                                   : Theme.color.text.normal
-                            font.family: Theme.font.family
-                            font.pixelSize: Theme.font.size.xs
-                            renderType: Text.NativeRendering
-                        }
-                        Text {
-                            id: whenText
-                            text: sessionRow.modelData.when
-                            color: Theme.color.text.dim
-                            font.family: Theme.font.family
-                            font.pixelSize: Theme.font.size.xs
-                            renderType: Text.NativeRendering
-                        }
-                    }
+                Text {
+                    width: rowText.width - whenText.implicitWidth - Theme.spacing.sm
+                    text: sessionRow.modelData.title
+                    elide: Text.ElideRight
+                    color: sessionRow.selected
+                           ? Theme.color.text.selected
+                           : Theme.color.text.normal
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                    renderType: Text.NativeRendering
+                }
+                Text {
+                    id: whenText
+                    text: sessionRow.modelData.when
+                    color: Theme.color.text.dim
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                    renderType: Text.NativeRendering
                 }
             }
-
-            Text {
-                text: "j/k move · Enter resume · Esc cancel"
-                color: Theme.color.text.dim
-                font.family: Theme.font.family
-                font.pixelSize: Theme.font.size.xs
-                renderType: Text.NativeRendering
-            }
         }
     }
 
-    Item {
-        id: keyCatcher
-        // Modal key routing + focus self-heal — same contract as
-        // AgentSpawnMenu's keyCatcher (see the comment there).
-        onActiveFocusChanged: {
-            if (!activeFocus && root.visible)
-                Qt.callLater(() => {
-                    if (root.visible)
-                        keyCatcher.forceActiveFocus();
-                });
-        }
-        Keys.onPressed: function (event) {
-            event.accepted = true;
-            switch (event.key) {
-            case Qt.Key_Escape:
-                root.dismiss();
-                break;
-            case Qt.Key_J:
-            case Qt.Key_Down:
-                root._move(1);
-                break;
-            case Qt.Key_K:
-            case Qt.Key_Up:
-                root._move(-1);
-                break;
-            case Qt.Key_Return:
-            case Qt.Key_Enter:
-                root._accept();
-                break;
-            default:
-                // Swallow everything else — modal.
-                break;
-            }
-        }
+    Text {
+        text: "j/k move · Enter resume · Esc cancel"
+        color: Theme.color.text.dim
+        font.family: Theme.font.family
+        font.pixelSize: Theme.font.size.xs
+        renderType: Text.NativeRendering
     }
 }

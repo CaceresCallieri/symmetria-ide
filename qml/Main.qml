@@ -662,9 +662,12 @@ Window {
                         shellProgramArgs: editorArgs
                         initialWorkingDirectory: controller.displayedRoot
                         // nvim exiting (`:qa`) tears down the IDE — same
-                        // semantics as the old `backend.closed → app.quit`
-                        // wire, which still fires when the RPC socket drops.
-                        onFinished: Qt.quit()
+                        // semantics as the `backend.closed` wire, which also
+                        // fires when the RPC socket drops. Route through the
+                        // quit choke point (NOT Qt.quit) so the window-close
+                        // guard treats it as authorized and does NOT prompt
+                        // the confirm dialog over an already-dead editor.
+                        onFinished: controller.authorize_and_quit()
                     }
 
                     // Spawn nvim once the widget exists; grab focus if shown.
@@ -2096,6 +2099,21 @@ Window {
         onDismissed: root._restoreCentralFocus()
     }
 
+    // Window-close confirmation (Hyprland Super+Q / WM close). Closing the
+    // IDE reaps every terminal-agent + the editor session at once, so the
+    // close request is vetoed in `onClosing` below and routed here first —
+    // a deliberate Enter (or click) confirms; Esc/Cancel returns to work.
+    ConfirmDialog {
+        id: closeConfirmDialog
+        title: "Close this session?"
+        message: "This window's agents and editor will be closed."
+        confirmText: "Close"
+        // Route through the choke point (NOT Qt.quit) so onClosing's guard
+        // sees an authorized teardown on the re-entrant `closing`.
+        onConfirmed: controller.authorize_and_quit()
+        onCancelled: root._restoreCentralFocus()
+    }
+
     // === IDE-wide fuzzy file finder (Ctrl+F, or `f` in the tree) ===
     //
     // The FM's FuzzyFinderPopup hosted at WINDOW scope — the same fff
@@ -2219,6 +2237,13 @@ Window {
         // underneath and no way to dismiss it. reassert() — NOT open() —
         // re-grabs the key catcher without resetting harness to Claude
         // (see AgentSpawnMenu.reassert). Mirrors the session-picker branch.
+        if (closeConfirmDialog.visible) {
+            // Same deafness hazard as the spawn menu: Alt-Tab back must
+            // not yank focus out of the open close-confirm, leaving it
+            // visible but unable to accept Enter/Esc.
+            closeConfirmDialog.reassert();
+            return;
+        }
         if (agentSpawnMenu.visible) {
             agentSpawnMenu.reassert();
             return;
@@ -2252,6 +2277,35 @@ Window {
         if (!active)
             return;
         root._restoreCentralFocus();
+    }
+
+    // Window-close guard. Hyprland's Super+Q (`killactive`) — and any WM
+    // close button — closes the Wayland toplevel, which Qt surfaces as
+    // this `closing` signal. Veto it (`close.accepted = false`) and raise
+    // the confirm dialog instead, so a stray kill chord can't tear down
+    // the whole workspace (every terminal-agent + the editor session) in
+    // one keystroke.
+    //
+    // Re-entrancy: on Qt-for-Wayland here, quit() ITSELF re-emits `closing`
+    // as it tears the toplevel down — so a naive unconditional veto reopens
+    // the dialog forever and the app never quits (observed). The fix is a
+    // single quit choke point: every PROGRAMMATIC quit goes through
+    // controller.authorize_and_quit(), which sets controller.quitAuthorized
+    // BEFORE quitting. The genuine WM/Super+Q close reaches here DIRECTLY
+    // (no prior quit() call), so quitAuthorized is still false → we prompt.
+    // The re-entrant `closing` from the subsequent quit sees it true →
+    // passes through (quitOnLastWindowClosed default-true then ends the
+    // app → aboutToQuit → shutdown).
+    //
+    // This also correctly NON-prompts the nvim-quit paths (`:qa` →
+    // editorSession.onFinished, and the RPC `backend.closed` wire): both
+    // route through authorize_and_quit, so they tear down without a dialog
+    // over an already-dead editor (which a cancel would otherwise strand).
+    onClosing: function (close) {
+        if (controller.quitAuthorized)
+            return; // accepted stays true → let the close proceed
+        close.accepted = false;
+        closeConfirmDialog.open();
     }
 
     // Responsive-sidebar focus recovery. When `treeVisible` flips to false

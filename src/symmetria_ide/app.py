@@ -409,6 +409,12 @@ class AppController(QObject):
         # the trace emits exactly once each per launch.
         self._first_capsule_seen = False
         self._first_displayed_root_traced = False
+        # Quit-authorization latch — see authorize_and_quit / quitAuthorized.
+        # False until a programmatic quit path (confirmed close, nvim :qa,
+        # RPC socket drop) authorizes teardown; the window-close guard in
+        # Main.qml reads it to tell a genuine WM/Super+Q close apart from
+        # the re-entrant `closing` that Qt.quit() raises on Wayland.
+        self._quit_authorized = False
         # NeoVim runs as a TUI inside a QMLTermWidget editor surface (spawned
         # by the QMLTermSession in Main.qml with `nvim --listen <sock>`).
         # `_backend` is an RPC-only connection to that socket: control
@@ -2930,6 +2936,28 @@ class AppController(QObject):
             self.spawn_agent(spawn_type, True, harness or "claude")
         self.backendReady.emit()
 
+    @Property(bool)  # noqa: pyright-ignore  (imperative read in QML, never bound)
+    def quitAuthorized(self) -> bool:
+        """Read imperatively by Main.qml's onClosing guard. True once a
+        programmatic quit has been authorized (see authorize_and_quit), so
+        the re-entrant `closing` that Qt.quit() raises on Wayland is let
+        through instead of re-prompting the confirm dialog."""
+        return self._quit_authorized
+
+    @Slot()
+    def authorize_and_quit(self) -> None:
+        """The single quit choke point. Sets the authorization latch THEN
+        quits, so Main.qml's onClosing guard only prompts for the genuine
+        WM/Super+Q close — which reaches onClosing DIRECTLY, without first
+        calling quit(). Every programmatic quit routes here: the confirm
+        dialog's Confirm, nvim :qa (editorSession.onFinished), and the
+        backend.closed RPC-socket-drop wire. The subsequent quit re-emits
+        `closing`; onClosing sees the latch set and accepts it, the window
+        closes, and quitOnLastWindowClosed (default true) ends the app —
+        firing aboutToQuit → shutdown for the graceful nvim teardown."""
+        self._quit_authorized = True
+        QGuiApplication.quit()
+
     def shutdown(self) -> None:
         # Tell the shell bridge we're going away (goodbye removes this
         # IDE's agents from the dashboard) and join the reader thread
@@ -3386,8 +3414,14 @@ def run() -> int:
     app.aboutToQuit.connect(controller.shutdown)
     # If nvim exits on its own (user typed `:q`), close the window too
     # — otherwise the grid freezes on whatever was last rendered and
-    # the user has no way to exit except killing the process.
-    controller.backend.closed.connect(app.quit, Qt.ConnectionType.QueuedConnection)
+    # the user has no way to exit except killing the process. Route through
+    # authorize_and_quit (not app.quit directly) so the window-close guard
+    # in Main.qml treats this as an authorized teardown and does NOT prompt
+    # the confirm dialog over an already-dead nvim (which would strand the
+    # IDE on cancel). See AppController.authorize_and_quit.
+    controller.backend.closed.connect(
+        controller.authorize_and_quit, Qt.ConnectionType.QueuedConnection
+    )
 
     shot_path = os.environ.get("SYMMETRIA_IDE_SCREENSHOT")
     test_keys = os.environ.get("SYMMETRIA_IDE_TEST_KEYS")
