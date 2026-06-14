@@ -116,7 +116,12 @@ def configure_headless_mode(
                     ok = img.save(shot_path)
                     log.info("screenshot saved to %s: %s", shot_path, ok)
                     break
-        app.quit()
+        # Route through the authorized-quit choke point, NOT bare app.quit():
+        # the window's `onClosing` guard (close-confirm feature) vetoes any
+        # close where `controller.quitAuthorized` is false, so a bare app.quit()
+        # is silently refused and the harness never exits (hangs forever on the
+        # hidden workspace). authorize_and_quit sets the latch then quits.
+        controller.authorize_and_quit()
 
     QTimer.singleShot(warmup_ms, _send_keys)
     QTimer.singleShot(warmup_ms + settle_ms, _grab_and_exit)

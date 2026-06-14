@@ -179,11 +179,12 @@ def test_window_activation_considers_terminal_visible(main_qml: str):
     # surface branch, which routes through focus_agent).
     dispatch_idx = main_qml.find("function _restoreCentralFocus()")
     assert dispatch_idx >= 0
-    # 1600-char window: the modal-guard comment block (spawn menu, session
-    # picker, fuzzy finder) precedes the surface branches inside the function
-    # body; the terminal branch lands ~1440 chars in, so the window must
-    # comfortably clear the whole body (~1520 chars).
-    dispatch_block = main_qml[dispatch_idx : dispatch_idx + 1600]
+    # 2200-char window: the modal-guard comment block (spawn menu, session
+    # picker, fuzzy finder, AND the close-confirm dialog added in 3d86e31)
+    # precedes the surface branches inside the function body; the terminal
+    # branch now lands ~1860 chars in, so the window must comfortably clear
+    # the whole body. Bump this if more modal guards are prepended.
+    dispatch_block = main_qml[dispatch_idx : dispatch_idx + 2200]
     assert "terminalView.forceActiveFocus()" in dispatch_block
     assert "controller.focus_agent(controller.focusedAgent)" in dispatch_block
     # Modal guard: re-activation must NOT yank focus out of an open spawn
