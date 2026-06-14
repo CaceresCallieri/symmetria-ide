@@ -9,10 +9,18 @@ It must also pass Qt flags through untouched and never abort on a bad path.
 from __future__ import annotations
 
 import os
+import socket
+import tempfile
+import time
 
 import pytest
 
-from symmetria_ide.app import _apply_project_arg
+from symmetria_ide.app import (
+    _apply_project_arg,
+    _reap_orphan_nvim_sockets,
+    _resolve_launch_dir,
+    _socket_is_live,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +76,148 @@ def test_tilde_is_expanded(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     _apply_project_arg(["symmetria-ide", "~"])
     assert os.path.realpath(os.getcwd()) == os.path.realpath(str(tmp_path))
+
+
+def test_no_arg_from_home_redirects_to_scratch(tmp_path, monkeypatch):
+    """The thermal-bug guard: launching with no arg from $HOME must NOT keep
+    $HOME as the cwd (fff.nvim would recursively watch the whole home tree).
+    `_apply_project_arg` chdir's into an inert scratch dir and creates it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    state = tmp_path / "state"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    os.chdir(home)  # launch cwd == $HOME
+
+    _apply_project_arg(["symmetria-ide"])
+
+    expected = state / "symmetria-ide" / "scratch"
+    assert os.path.realpath(os.getcwd()) == os.path.realpath(str(expected))
+    assert expected.is_dir()
+
+
+class TestResolveLaunchDir:
+    """Pure decision helper behind `_apply_project_arg` — no chdir side effect."""
+
+    def test_valid_path_arg_returns_abspath(self, tmp_path):
+        assert _resolve_launch_dir(
+            cwd="/anywhere", home="/home/u", path_arg=str(tmp_path)
+        ) == os.path.abspath(str(tmp_path))
+
+    def test_invalid_path_arg_returns_none(self):
+        assert (
+            _resolve_launch_dir(
+                cwd="/anywhere", home="/home/u", path_arg="/no/such/dir/xyz123"
+            )
+            is None
+        )
+
+    def test_home_cwd_no_arg_returns_scratch(self, tmp_path, monkeypatch):
+        state = tmp_path / "state"
+        monkeypatch.setenv("XDG_STATE_HOME", str(state))
+        home = str(tmp_path / "home")
+        os.makedirs(home, exist_ok=True)
+        result = _resolve_launch_dir(cwd=home, home=home, path_arg=None)
+        assert result == str(state / "symmetria-ide" / "scratch")
+
+    def test_filesystem_root_cwd_no_arg_returns_scratch(self, tmp_path, monkeypatch):
+        state = tmp_path / "state"
+        monkeypatch.setenv("XDG_STATE_HOME", str(state))
+        result = _resolve_launch_dir(cwd="/", home=str(tmp_path), path_arg=None)
+        assert result == str(state / "symmetria-ide" / "scratch")
+
+    def test_normal_project_cwd_no_arg_returns_none(self, tmp_path):
+        proj = str(tmp_path / "proj")
+        os.makedirs(proj, exist_ok=True)
+        assert (
+            _resolve_launch_dir(cwd=proj, home=str(tmp_path / "home"), path_arg=None)
+            is None
+        )
+
+    def test_scratch_falls_back_to_local_state_when_xdg_unset(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        home = str(tmp_path / "home")
+        os.makedirs(home, exist_ok=True)
+        result = _resolve_launch_dir(cwd=home, home=home, path_arg=None)
+        assert result == os.path.join(
+            home, ".local", "state", "symmetria-ide", "scratch"
+        )
+
+
+class TestSocketIsLive:
+    """`_socket_is_live` probes whether an AF_UNIX socket has a live listener."""
+
+    def test_live_listener_is_detected(self):
+        base = tempfile.mkdtemp(prefix="reap-")
+        sock_path = os.path.join(base, "nvim.sock")
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            srv.bind(sock_path)
+            srv.listen(1)
+            assert _socket_is_live(sock_path) is True
+        finally:
+            srv.close()
+            _rmtree(base)
+
+    def test_missing_socket_file_is_not_live(self):
+        base = tempfile.mkdtemp(prefix="reap-")
+        try:
+            assert _socket_is_live(os.path.join(base, "nvim.sock")) is False
+        finally:
+            _rmtree(base)
+
+    def test_stale_socket_file_without_listener_is_not_live(self):
+        # A bound-then-closed socket leaves the FILE behind, but connect()
+        # gets ECONNREFUSED — exactly the dead-owner case the reaper targets.
+        base = tempfile.mkdtemp(prefix="reap-")
+        sock_path = os.path.join(base, "nvim.sock")
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(sock_path)
+        s.close()  # leaves sock_path on disk, no listener
+        try:
+            assert _socket_is_live(sock_path) is False
+        finally:
+            _rmtree(base)
+
+
+class TestReapOrphanNvimSockets:
+    """Startup sweep of leaked `symmetria-nvim-*` socket dirs."""
+
+    def test_reaps_dead_spares_live_and_fresh(self, monkeypatch):
+        base = tempfile.mkdtemp(prefix="reap-base-")
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: base)
+        old = time.time() - 120.0
+
+        dead = os.path.join(base, "symmetria-nvim-dead")
+        os.makedirs(dead)
+        os.utime(dead, (old, old))  # aged out, no socket → orphan
+
+        live = os.path.join(base, "symmetria-nvim-live")
+        os.makedirs(live)
+        os.utime(live, (old, old))  # aged out BUT a live listener spares it
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(os.path.join(live, "nvim.sock"))
+        srv.listen(1)
+
+        fresh = os.path.join(base, "symmetria-nvim-fresh")
+        os.makedirs(fresh)  # < 60s old → spared by the age guard
+
+        try:
+            _reap_orphan_nvim_sockets()
+            assert not os.path.exists(dead), "dead orphan should be reaped"
+            assert os.path.isdir(live), "live instance dir must be spared"
+            assert os.path.isdir(fresh), "mid-launch (fresh) dir must be spared"
+        finally:
+            srv.close()
+            _rmtree(base)
+
+
+def _rmtree(path: str) -> None:
+    import shutil
+
+    shutil.rmtree(path, ignore_errors=True)
 
 
 class TestConfigureRenderLoopForScreenshot:

@@ -199,9 +199,13 @@ The editor + shell are forked `QMLTermWidget` panes, so nvim's grid is rendered 
 2. Font fallback — `editor_font.py`'s `default_font()` builds the per-glyph Nerd-Font + emoji cascade once; a missing primary family forces a slower system fallback.
 3. The chrome relays — heavy `vim.rpcnotify` traffic (e.g. capsules firing on every `CursorMoved`) crossing the `--listen` channel can show up as input latency rather than render lag.
 
-## Shutdown hygiene (known nit)
+## Shutdown hygiene
 
-When the app exits, nvim sometimes shows `process_exited return_code = -9` in stderr. The clean-shutdown handshake (`aboutToQuit` → `controller.shutdown` → `async_call("qa!")` → worker join) has a race where the Python process exits before nvim processes its quit message, so nvim dies via SIGKILL-on-parent-exit. Cosmetic — no data loss, nvim had no active buffers to save — but worth fixing eventually.
+When the app exits, nvim sometimes shows `process_exited return_code = -9` in stderr. The clean-shutdown handshake (`aboutToQuit` → `controller.shutdown` → `async_call("qa!")` → worker join) has a race where the Python process exits before nvim processes its quit message, so nvim dies via SIGKILL-on-parent-exit. Cosmetic — no data loss, nvim had no active buffers to save.
+
+**SIGTERM is now graceful** (`run()` installs `signal.signal(SIGTERM, lambda: app.quit())` + a no-op `QTimer` to wake the interpreter out of `app.exec()`). The restart recipe above sends SIGTERM, so it now runs the same `aboutToQuit → shutdown` teardown as a window close — the editor nvim gets its `qa!` and the per-instance `/tmp/symmetria-nvim-*` socket dir is `rmtree`d. Before this, SIGTERM bypassed `aboutToQuit` entirely, leaking one socket dir per restart (a long dev session had accumulated ~900). SIGINT stays `SIG_DFL` so Ctrl+C still hard-kills a wedged GUI (it does NOT clean up — use the SIGTERM path for a clean exit). As a backstop, `_reap_orphan_nvim_sockets()` sweeps dead-owner socket dirs at startup (live sockets + dirs <60s old are spared, safe under the multi-instance topology).
+
+**Launch cwd is guarded against `$HOME`.** Launching with no project arg from `$HOME` (or `/`) would root the embedded nvim's cwd there, and fff.nvim (user-global config) recursively `notify`-watches its cwd with no ignore-glob config → it indexes the whole home tree → ~6 pinned cores at 88 °C (relay 20260614). `_resolve_launch_dir` redirects that degenerate case to an inert scratch dir under `$XDG_STATE_HOME/symmetria-ide/scratch`; a normal project cwd or an explicit `symmetria-ide <dir>` arg is unaffected. The companion fix lives in `~/.dotfiles/.config/nvim/lua/jc/plugins/fff.lua` (`base_path` = git-root search with a non-`$HOME` fallback), which also protects standalone nvim.
 
 ## QML notes
 

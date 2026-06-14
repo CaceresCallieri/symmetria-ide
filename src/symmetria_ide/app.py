@@ -19,10 +19,12 @@ from typing import ClassVar
 
 import argparse
 import gc
+import glob
 import logging
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import shutil
@@ -37,6 +39,7 @@ from PySide6.QtCore import (
     QObject,
     Qt,
     QtMsgType,
+    QTimer,
     QUrl,
     Signal,
     Slot,
@@ -3267,18 +3270,56 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     return engine
 
 
+def _resolve_launch_dir(cwd: str, home: str, path_arg: str | None) -> str | None:
+    """Decide which directory the IDE should `chdir` into at launch.
+
+    Returns the absolute directory to enter, or ``None`` to stay in ``cwd``.
+    Pure except for read-only filesystem probes (``isdir`` / ``realpath``), so
+    it is unit-testable without spawning the app.
+
+    Three cases:
+      - An explicit ``path_arg`` (``symmetria-ide <dir>``) → that directory, or
+        ``None`` (stay + the caller warns) when it is not a real directory.
+      - No arg and ``cwd`` is ``$HOME`` or filesystem root → an inert scratch
+        dir under ``$XDG_STATE_HOME/symmetria-ide/``. This is the thermal-bug
+        guard: EVERYTHING downstream derives the project root from the process
+        cwd (``AppController._cwd`` ← ``os.getcwd()`` → ``displayedRoot`` → the
+        QMLTermSessions' ``initialWorkingDirectory`` → the embedded nvim's cwd),
+        and fff.nvim's Rust ``notify`` watcher roots its recursive watch at
+        nvim's cwd with no ignore-glob config. A ``$HOME`` cwd therefore makes
+        it index/watch the entire home tree (``.cache``/``.steam``/browser
+        profiles) → ~6 pinned cores, 88 °C (relay 20260614). An empty scratch
+        dir is watched for ~nothing.
+      - No arg and ``cwd`` is a normal directory → ``None`` (open the project
+        the user launched from, as before).
+    """
+    if path_arg:
+        target = os.path.abspath(os.path.expanduser(path_arg))
+        return target if os.path.isdir(target) else None
+    if os.path.realpath(cwd) in (os.path.realpath(home), "/"):
+        state_home = os.environ.get("XDG_STATE_HOME") or os.path.join(
+            home, ".local", "state"
+        )
+        return os.path.join(state_home, "symmetria-ide", "scratch")
+    return None
+
+
 def _apply_project_arg(argv: list[str]) -> list[str]:
     """Resolve an optional project-directory argument and `chdir` into it.
 
-    `symmetria-ide [PATH]` opens the IDE on PATH (like `code <dir>`); with no
-    arg it stays in the launch cwd (the documented default — Hyprland hands us
-    `$HOME`, a terminal hands us wherever you ran it). We `os.chdir` rather than
-    threading the path through AppController because EVERYTHING downstream
-    derives the project root from the process cwd: `AppController._cwd` reads
-    `os.getcwd()`, `controller.displayedRoot` flows from that, and the
-    QMLTermSessions launch nvim + the shell with
+    `symmetria-ide [PATH]` opens the IDE on PATH (like `code <dir>`). We
+    `os.chdir` rather than threading the path through AppController because
+    EVERYTHING downstream derives the project root from the process cwd:
+    `AppController._cwd` reads `os.getcwd()`, `controller.displayedRoot` flows
+    from that, and the QMLTermSessions launch nvim + the shell with
     `initialWorkingDirectory: controller.displayedRoot`. One chdir, and the
     editor, shell, file tree, and git pane all open on the right project.
+
+    With NO arg the directory is chosen by `_resolve_launch_dir`: a normal
+    launch cwd is kept, but `$HOME` / filesystem root is redirected to an inert
+    scratch dir so a recursive file-watcher rooted at cwd can't recurse over
+    the whole home tree (see `_resolve_launch_dir` for the full thermal-bug
+    rationale; relay 20260614).
 
     Uses `parse_known_args` so any Qt flags (e.g. `-platform`) pass straight
     through to QGuiApplication; returns the argv with the project path removed
@@ -3297,13 +3338,15 @@ def _apply_project_arg(argv: list[str]) -> list[str]:
         help="Project directory to open (defaults to the current directory).",
     )
     ns, qt_rest = parser.parse_known_args(argv[1:])
-    if ns.path:
-        target = os.path.abspath(os.path.expanduser(ns.path))
-        if os.path.isdir(target):
-            os.chdir(target)
-            log.info("opening project: %s", target)
-        else:
-            log.warning("project path %r is not a directory — using cwd", ns.path)
+    target = _resolve_launch_dir(os.getcwd(), os.path.expanduser("~"), ns.path)
+    if target is not None:
+        # makedirs is a no-op for an existing project dir (exist_ok) and
+        # creates the scratch dir on first $HOME-launch.
+        os.makedirs(target, exist_ok=True)
+        os.chdir(target)
+        log.info("launch dir: %s", target)
+    elif ns.path:
+        log.warning("project path %r is not a directory — using cwd", ns.path)
     return [argv[0], *qt_rest]
 
 
@@ -3367,6 +3410,53 @@ def _export_host_window_pid() -> None:
     os.environ["SYMMETRIA_HOST_WINDOW_PID"] = str(os.getpid())
 
 
+def _socket_is_live(sock_path: str) -> bool:
+    """True iff a process is actively listening on the AF_UNIX socket.
+
+    A bare connect()+close on nvim's msgpack `--listen` socket is harmless (no
+    bytes are sent). A dead owner leaves the socket FILE behind but the kernel
+    refuses the connect (ECONNREFUSED); a never-bound dir has no file at all
+    (ENOENT). Either way the connect raises OSError → not live.
+    """
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(0.2)
+            s.connect(sock_path)
+        return True
+    except OSError:
+        return False
+
+
+def _reap_orphan_nvim_sockets() -> None:
+    """Remove leftover `symmetria-nvim-*` socket dirs whose owner is gone.
+
+    Each launch mkdtemp()s a `symmetria-nvim-*` dir to hold the editor nvim's
+    `--listen` socket; it is rmtree'd in `AppController.shutdown`, but only on a
+    clean (aboutToQuit) exit. A SIGKILL/crash skips that and leaks the dir; so
+    did the documented SIGTERM restart recipe before the handler installed in
+    `run()` routed SIGTERM through the graceful path. This sweeps the orphans at
+    startup (a long-running dev session had leaked ~900).
+
+    Two guards keep it safe under the deliberate multi-instance topology
+    (several IDEs alive at once):
+      - live sockets are spared (`_socket_is_live`), so a running instance's dir
+        is never touched;
+      - dirs younger than 60s are spared, so a sibling that is mid-launch but
+        whose nvim has not bound its socket yet is not mistaken for an orphan.
+    Must run before this process mkdtemp()s its own dir.
+    """
+    cutoff = time.time() - 60.0
+    for d in glob.glob(os.path.join(tempfile.gettempdir(), "symmetria-nvim-*")):
+        try:
+            if os.path.getmtime(d) > cutoff:
+                continue
+        except OSError:
+            continue
+        if _socket_is_live(os.path.join(d, "nvim.sock")):
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def run() -> int:
     trace("run_entered")
     configure_logging()
@@ -3407,6 +3497,10 @@ def run() -> int:
     app.setDesktopFileName(os.environ.get("SYMMETRIA_IDE_APP_ID", "symmetria-ide"))
     trace("qgui_created")
 
+    # Sweep socket dirs leaked by past hard-kills BEFORE AppController mkdtemp()s
+    # this launch's own dir (so we never reap ourselves). See _reap_orphan_nvim_sockets.
+    _reap_orphan_nvim_sockets()
+
     _register_qml_types()
     trace("qml_registered")
     controller = AppController()
@@ -3429,6 +3523,26 @@ def run() -> int:
     controller.backend.closed.connect(
         controller.authorize_and_quit, Qt.ConnectionType.QueuedConnection
     )
+
+    # Graceful SIGTERM. The documented restart recipe (and any `kill <pid>`)
+    # sends SIGTERM, which by default terminates the process WITHOUT firing
+    # `aboutToQuit` — so `controller.shutdown` never ran, the editor nvim never
+    # got its `qa!`, and the per-instance socket dir leaked (one per restart;
+    # ~900 had accumulated; `_reap_orphan_nvim_sockets` above now sweeps them).
+    # Route through `authorize_and_quit` (NOT bare app.quit): the window's
+    # `onClosing` guard vetoes any close where `quitAuthorized` is false, so a
+    # bare app.quit() would be silently refused. authorize_and_quit sets the
+    # latch then quits → onClosing accepts → aboutToQuit → shutdown (qa! +
+    # rmtree). SIGINT stays SIG_DFL (set above) so Ctrl+C still hard-kills a
+    # wedged GUI. The no-op QTimer is load-bearing: while blocked in
+    # `app.exec()` (C++), the interpreter never returns to Python to run the
+    # signal handler, so Python defers it indefinitely; the timer wakes the
+    # interpreter ~3×/s so the handler actually fires. Parented to `app` (kept
+    # alive, freed on teardown).
+    signal.signal(signal.SIGTERM, lambda *_: controller.authorize_and_quit())
+    _sigterm_pump = QTimer(app)
+    _sigterm_pump.timeout.connect(lambda: None)
+    _sigterm_pump.start(300)
 
     shot_path = os.environ.get("SYMMETRIA_IDE_SCREENSHOT")
     test_keys = os.environ.get("SYMMETRIA_IDE_TEST_KEYS")

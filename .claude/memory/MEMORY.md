@@ -27,6 +27,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 ## Reference — host — `reference/host/` (Hyprland, QuickShell, OS-level)
 
 - [Notification system is Symmetria Shell, not swaync](reference/host/notification_system.md) — do not invoke swaync-client or makoctl
+- [fff.nvim watches nvim's cwd](reference/host/fff_watcher_roots_at_cwd.md) — never root embedded nvim at $HOME; recursive Rust watch → thermal runaway. Fix spans IDE + dotfiles
 
 ## Reference — nvim-rpc — `reference/nvim-rpc/` (NeoVim `--listen` socket, pynvim RPC-only, msgpack)
 
