@@ -135,17 +135,29 @@ ModalOverlay {
                 { idx: 1, label: root.cancelText, accent: Theme.color.text.selected },
             ]
 
-            delegate: Rectangle {
+            delegate: Item {
                 id: button
                 required property var modelData
                 readonly property bool highlighted: root._highlight === modelData.idx
 
                 width: buttonLabel.implicitWidth + Theme.spacing.lg * 2
                 height: buttonLabel.implicitHeight + Theme.spacing.sm * 2
-                radius: Theme.radius.sm
-                color: highlighted ? Theme.color.bg.selected : "transparent"
-                border.width: 1
-                border.color: highlighted ? modelData.accent : Theme.color.border.hairline
+
+                // The highlighted (keyboard-selected / hovered) button raises
+                // into a clay pill — matte fill + its accent as the border +
+                // convex depth — so the Enter target reads as physically
+                // pressed-forward; the other stays a flat hairline ghost. Same
+                // PillSurface primitive + `elevated` toggle as the surface
+                // switcher and the agent bubbles, so the dialog buttons carry
+                // the same clay language. Declared first (background) so the
+                // label + MouseArea paint on top.
+                PillSurface {
+                    anchors.fill: parent
+                    radius: Theme.radius.sm
+                    elevated: button.highlighted
+                    color: button.highlighted ? Theme.color.bg.selected : "transparent"
+                    borderColor: button.highlighted ? button.modelData.accent : Theme.color.border.hairline
+                }
 
                 Text {
                     id: buttonLabel

@@ -76,16 +76,28 @@ Rectangle {
                 { surface: "agent", label: "agents" },
             ]
 
-            delegate: Rectangle {
+            delegate: Item {
                 id: segment
 
                 required property var modelData
                 readonly property bool isCurrent: controller.centralSurface === segment.modelData.surface
 
                 height: Theme.size.modeBadgeHeight
-                radius: height / 2
-                color: segment.isCurrent ? Theme.color.bg.selected : "transparent"
                 implicitWidth: segmentLabel.implicitWidth + Theme.spacing.md * 2
+
+                // The current surface raises into a clay capsule (matte fill +
+                // hairline border + convex depth); inactive segments stay
+                // fully flat — transparent fill AND border, no shadow — so
+                // only the active surface reads as a raised chip. This is the
+                // FM TabBar active-tab pattern; `elevated` gates the depth and
+                // the whole transition eases via PillSurface's quick fades.
+                PillSurface {
+                    anchors.fill: parent
+                    radius: height / 2
+                    elevated: segment.isCurrent
+                    color: segment.isCurrent ? Theme.color.bg.selected : "transparent"
+                    borderColor: segment.isCurrent ? Theme.color.border.hairline : "transparent"
+                }
 
                 Text {
                     id: segmentLabel
@@ -137,7 +149,7 @@ Rectangle {
                 // + the bridge identity) used for state lookups + focus.
                 model: controller.agentOrder
 
-                delegate: Rectangle {
+                delegate: Item {
                     id: chip
 
                     required property int index        // 0-based display position
@@ -163,9 +175,22 @@ Rectangle {
                     // chip grows with title length; ElideRight on the
                     // inner Text is the visual fallback if chrome shrinks.
                     height: Theme.size.modeBadgeHeight
-                    radius: height / 2
-                    color: Theme.color.bg.selected
                     implicitWidth: chipContent.implicitWidth + Theme.spacing.md * 2
+
+                    // Every bubble is a clay pill (matte fill + hairline
+                    // border); the FOCUSED bubble additionally raises into
+                    // full claymorphism (shadows + rim highlight) via
+                    // `elevated`, so the active agent floats above the rest —
+                    // depth reinforcing the existing text-brightness focus
+                    // cue. Declared first (background) so the sparkle / number
+                    // / title Row + the focus MouseArea paint on top untouched.
+                    PillSurface {
+                        anchors.fill: parent
+                        radius: height / 2
+                        elevated: chip.isFocused
+                        color: Theme.color.bg.selected
+                        borderColor: Theme.color.border.hairline
+                    }
 
                     Row {
                         id: chipContent

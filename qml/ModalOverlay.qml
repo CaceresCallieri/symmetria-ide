@@ -123,16 +123,20 @@ Item {
         opacity: 0
     }
 
-    Rectangle {
+    // Claymorphism panel — matte fill + hairline border + convex depth (two
+    // shadows + rim highlight + faint bottom inner-shadow), the FM/Shell
+    // dialog language, via the shared PillCard primitive. fill/border/radius
+    // come from PillCard's defaults (bg.chrome / hairline / radius.lg) — the
+    // same values the old inline Rectangle set, now sourced from the one clay
+    // recipe so a toolkit-wide retune carries through here for free. The
+    // shadows ride the scale-pop below (they're children of `panel`), so the
+    // whole clay card inflates on entrance.
+    PillCard {
         id: panel
         anchors.centerIn: parent
         width: overlayRoot.panelWidth
         implicitHeight: contentColumn.implicitHeight + Theme.spacing.lg * 2
         height: implicitHeight
-        color: Theme.color.bg.chrome
-        border.color: Theme.color.border.hairline
-        border.width: 1
-        radius: Theme.radius.lg
 
         // Hidden-state defaults — the root "shown" state animates these to
         // scale 1 / opacity 1 on open via the FM-style transition above.

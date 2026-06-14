@@ -551,6 +551,75 @@ QtObject {
         readonly property var standardCurve: [0.2, 0, 0, 1, 1, 1]   // == FmTheme.animCurveStandard
         readonly property real popFromScale: 0.1                           // entrance start scale
         readonly property real popOvershoot: 1.5                           // Easing.OutBack overshoot
+        // State-transition duration — elevation / hover / focus eases inside
+        // PillSurface (the clay shadow + fill + border fades). Deliberately
+        // much shorter than `duration` (the 400ms entrance pop): raising a
+        // chip when focus lands on it should feel responsive, not laggy. A
+        // 400ms fade on the surface switcher read sluggish on a rapid tap.
+        readonly property int quick: 150
+    }
+
+    // ─── Depth (claymorphism) ────────────────────────────────────
+    // The "clay" recipe — the Symmetria toolkit's shared depth language,
+    // ported from the File Manager / Symmetria Shell `PillSurface`. A matte
+    // fill + hairline border is raised off the surface by TWO opposing outer
+    // shadows (a dark SE drop + a light NW lift) plus a top rim-highlight
+    // gradient. Together they fake an overhead light so the surface reads as
+    // a physically extruded chip rather than a flat rect — the same look the
+    // Shell's bar pills and the FM's active tab / dialogs use.
+    //
+    // Consumed ONLY by `qml/PillSurface.qml` (chip preset) and
+    // `qml/PillCard.qml` (card preset). Surfaces bind those components, never
+    // these constants directly — the recipe stays in one place so a retune
+    // here propagates to every clay surface at once.
+    //
+    // Provenance: symmetria-file-manager/.../components/PillSurface.qml
+    // (chip defaults) + PillCard.qml (card overrides). Offsets/blur are
+    // nudged ~tighter than the FM's because most IDE clay sits on compact
+    // 24px chrome bars (see the typography "~20% smaller" note above), where
+    // the FM's wider blur would bleed past the bar's margins; the FM's own
+    // values are roomier surfaces.
+    readonly property QtObject depth: QtObject {
+        // Top rim highlight — the "lit-from-above" warmth shared by both
+        // presets. White at low alpha along the top edge, fading out by
+        // mid-height. The single cue that most distinguishes clay from a
+        // flat matte capsule.
+        readonly property real highlightAlpha: 0.08
+
+        // Chip preset — raised capsules on compact chrome: the surface
+        // switcher segment, the agent bubbles, the dialog buttons. Tight
+        // offsets + modest blur so the shadow stays mostly within a 24px
+        // bar's vertical margins instead of bleeding onto the content below.
+        readonly property QtObject chip: QtObject {
+            readonly property real darkOffsetX: 1
+            readonly property real darkOffsetY: 2
+            readonly property real darkBlur: 8
+            readonly property real darkAlpha: 0.40
+            readonly property real lightOffsetX: -1
+            readonly property real lightOffsetY: -1
+            readonly property real lightBlur: 6
+            readonly property real lightAlpha: 0.10
+            // Bottom inner-shadow off for chips (a heavy bottom-inner band
+            // makes a small chip feel dated); cards turn it on.
+            readonly property real innerShadowAlpha: 0.0
+        }
+
+        // Card preset — framed surfaces: the modal panels (agent spawn menu,
+        // session picker, close-confirm dialog). Wider, softer shadows for
+        // an "embedded panel" feel + a faint bottom inner-shadow. Modals are
+        // centered in the full window with ample room around them, so the
+        // larger blur reads as depth rather than bleeding into neighbours.
+        readonly property QtObject card: QtObject {
+            readonly property real darkOffsetX: 2
+            readonly property real darkOffsetY: 4
+            readonly property real darkBlur: 14
+            readonly property real darkAlpha: 0.28
+            readonly property real lightOffsetX: -2
+            readonly property real lightOffsetY: -3
+            readonly property real lightBlur: 11
+            readonly property real lightAlpha: 0.07
+            readonly property real innerShadowAlpha: 0.03
+        }
     }
 
     // ─── Component sizing ────────────────────────────────────────

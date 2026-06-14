@@ -7,6 +7,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Dev launches target workspace 6](feedback/dev_workspace.md) — open Symmetria IDE on Hyprland workspace 6 during iteration
 - [New UI surfaces start as placeholders](feedback/ui_surface_discipline.md) — minimal delegate, Theme tokens, defer aesthetic decisions until real data exists
 - [Popups use the FM scale-pop entrance](feedback/popup_animation.md) — bind scale/opacity off visible + Theme.anim tokens; never hand-roll durations
+- [Clay chrome surfaces](feedback/clay_chrome_surfaces.md) — new chrome uses PillSurface/PillCard + Theme.depth, gate depth via `elevated`; no flat Rectangles
 
 ## Project — meta — `project/meta/` (identity, governance, key decisions)
 
