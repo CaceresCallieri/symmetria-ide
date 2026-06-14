@@ -544,6 +544,10 @@ QtObject {
     // language coherent with the FM.
     readonly property QtObject anim: QtObject {
         readonly property int duration: 400                                // == FmTheme.animDuration
+        // `var`, not `list<real>`: a typed `list<real>` literal here crashes
+        // qmllint (exit 255) on the BezierSpline consumer — the CI/pre-commit
+        // qmllint hook would fail. `easing.bezierCurve` accepts the var array
+        // identically at runtime. Do NOT "fix" this back to list<real>.
         readonly property var standardCurve: [0.2, 0, 0, 1, 1, 1]   // == FmTheme.animCurveStandard
         readonly property real popFromScale: 0.1                           // entrance start scale
         readonly property real popOvershoot: 1.5                           // Easing.OutBack overshoot

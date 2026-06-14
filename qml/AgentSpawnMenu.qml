@@ -92,19 +92,47 @@ Item {
         root._spawn("resume", dangerous);
     }
 
+    // Entrance motion (FM-style scale-pop + opacity fade) is expressed as a
+    // single root "shown" state + a to-only Transition, NOT as Behaviors on
+    // visible-bound properties. A `to: "shown"` transition animates only the
+    // way IN — leaving the state (dismiss) has no transition, so panel/scrim
+    // snap straight to their hidden values. That (a) makes a rapid
+    // open→dismiss→reopen always start the next pop from the full
+    // popFromScale (no half-scaled, overshoot-less entrance), and (b) never
+    // runs an exit animation against the already-hidden root Item. Only the
+    // pop-IN is animated. (Behaviors with `enabled: root.visible` can't do
+    // this safely — the enabled binding races the scale binding on open.)
+    states: State {
+        name: "shown"
+        when: root.visible
+        PropertyChanges { target: panel; scale: 1; opacity: 1 }
+        PropertyChanges { target: scrim; opacity: 1 }
+    }
+    transitions: Transition {
+        to: "shown"
+        NumberAnimation {
+            target: panel
+            property: "scale"
+            duration: Theme.anim.duration
+            easing.type: Easing.OutBack
+            easing.overshoot: Theme.anim.popOvershoot
+        }
+        NumberAnimation {
+            targets: [panel, scrim]
+            property: "opacity"
+            duration: Theme.anim.duration
+            easing.type: Easing.BezierSpline
+            easing.bezierCurve: Theme.anim.standardCurve
+        }
+    }
+
     // Dim the surface behind the panel so the modal state is legible.
-    // Fades in with the panel pop so the backdrop doesn't snap on.
+    // Hidden-state default; the "shown" state fades it in with the panel.
     Rectangle {
+        id: scrim
         anchors.fill: parent
         color: Theme.color.bg.scrim
-        opacity: root.visible ? 1 : 0
-        Behavior on opacity {
-            NumberAnimation {
-                duration: Theme.anim.duration
-                easing.type: Easing.BezierSpline
-                easing.bezierCurve: Theme.anim.standardCurve
-            }
-        }
+        opacity: 0
     }
 
     Rectangle {
@@ -118,30 +146,13 @@ Item {
         border.width: 1
         radius: Theme.radius.lg
 
-        // FM-style entrance: a scale-pop with a slight overshoot plus an
-        // opacity fade, driven off root.visible so it replays on every
-        // open. The exit (visible→false) animates while the root Item is
-        // already hidden, so only the pop-IN is ever seen — matching the
-        // FM popups' signature motion (Theme.anim mirrors FmTheme's
-        // scale-pop). Origin is Center so the panel grows from its middle
+        // Hidden-state defaults — the root "shown" state animates these to
+        // scale 1 / opacity 1 on open via the FM-style transition above.
+        // transformOrigin Center so the pop grows from the panel's middle
         // (it's anchored centerIn parent).
         transformOrigin: Item.Center
-        scale: root.visible ? 1 : Theme.anim.popFromScale
-        opacity: root.visible ? 1 : 0
-        Behavior on scale {
-            NumberAnimation {
-                duration: Theme.anim.duration
-                easing.type: Easing.OutBack
-                easing.overshoot: Theme.anim.popOvershoot
-            }
-        }
-        Behavior on opacity {
-            NumberAnimation {
-                duration: Theme.anim.duration
-                easing.type: Easing.BezierSpline
-                easing.bezierCurve: Theme.anim.standardCurve
-            }
-        }
+        scale: Theme.anim.popFromScale
+        opacity: 0
 
         Column {
             id: column
