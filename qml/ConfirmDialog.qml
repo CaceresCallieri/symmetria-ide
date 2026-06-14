@@ -55,7 +55,12 @@ ModalOverlay {
         if (root._highlight === 1) {
             root.dismiss();          // → dismissed → cancelled
         } else {
-            root.visible = false;    // confirm path emits no dismissed
+            // Confirm path: hide directly, do NOT call dismiss(). dismiss()
+            // emits dismissed → onDismissed → cancelled() → the host's
+            // _restoreCentralFocus(), which would race the authorize_and_quit
+            // teardown that onConfirmed kicks off. Keep these two channels
+            // separate — only the cancel branch is a "dismissal".
+            root.visible = false;
             root.confirmed();
         }
     }
@@ -76,6 +81,8 @@ ModalOverlay {
             break;
         case Qt.Key_Tab:
         case Qt.Key_Backtab:
+            // Only two targets, so forward (Tab) and reverse (Backtab) are
+            // the same toggle — both just flip to the other button.
             root._highlight = root._highlight === 0 ? 1 : 0;
             break;
         default:

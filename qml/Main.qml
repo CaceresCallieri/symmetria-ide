@@ -2305,6 +2305,20 @@ Window {
         if (controller.quitAuthorized)
             return; // accepted stays true → let the close proceed
         close.accepted = false;
+        // Make the close-confirm the ONLY modal. A spawn menu / session
+        // picker left open when Super+Q fires would fight it for focus:
+        // both are ModalOverlays whose keyCatcher self-heals (re-grabs
+        // focus on the next tick while still visible), so two stacked ones
+        // ping-pong focus every tick and the close dialog never reliably
+        // receives Enter/Esc. Dismissing them first (their dismissed →
+        // _restoreCentralFocus is harmless here — open() re-grabs focus
+        // immediately after) leaves a single live modal. The fuzzy finder
+        // has no such per-tick self-heal, so it can't ping-pong and is
+        // left as-is.
+        if (agentSpawnMenu.visible)
+            agentSpawnMenu.dismiss();
+        if (agentSessionPicker.visible)
+            agentSessionPicker.dismiss();
         closeConfirmDialog.open();
     }
 

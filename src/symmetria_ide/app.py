@@ -2936,7 +2936,7 @@ class AppController(QObject):
             self.spawn_agent(spawn_type, True, harness or "claude")
         self.backendReady.emit()
 
-    @Property(bool)  # noqa: pyright-ignore  (imperative read in QML, never bound)
+    @Property(bool)  # imperative read in Main.qml's onClosing — never bound
     def quitAuthorized(self) -> bool:
         """Read imperatively by Main.qml's onClosing guard. True once a
         programmatic quit has been authorized (see authorize_and_quit), so
@@ -2954,7 +2954,14 @@ class AppController(QObject):
         backend.closed RPC-socket-drop wire. The subsequent quit re-emits
         `closing`; onClosing sees the latch set and accepts it, the window
         closes, and quitOnLastWindowClosed (default true) ends the app —
-        firing aboutToQuit → shutdown for the graceful nvim teardown."""
+        firing aboutToQuit → shutdown for the graceful nvim teardown.
+
+        Invariant: this is the ONLY writer of `_quit_authorized`, and it
+        quits immediately after setting it — so the latch is never left
+        true without the app actually going down. It is deliberately
+        never reset: once authorized, the process is committed to exiting.
+        Do not add a second setter, or a genuine WM close could silently
+        skip the confirm dialog."""
         self._quit_authorized = True
         QGuiApplication.quit()
 
