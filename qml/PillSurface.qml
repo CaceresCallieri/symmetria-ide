@@ -63,7 +63,7 @@ Item {
     property color color: Theme.color.bg.chrome
     property color borderColor: Theme.color.border.hairline
     property real borderWidth: 1
-    property real radius: Theme.radius.md
+    property real radius: Theme.radius.md // neutral fallback — every consumer sets radius explicitly (chips: height/2, cards: radius.lg)
 
     // Master on/off for the clay DEPTH (both shadows + the rim highlight).
     // The matte fill + border stay regardless. See the header note.
@@ -87,6 +87,13 @@ Item {
     // Default slot: children reparent into the body and overlay the rim
     // highlight (declared after it, so they paint on top).
     default property alias content: contentHolder.data
+
+    // Sanctioned literal-colour exemption: the shadow black and the rim
+    // highlight white below are intrinsic to the clay recipe (an overhead
+    // light is white, a cast shadow is black) — physical constants, NOT
+    // theme colours, so they stay `Qt.rgba` literals here. Only their ALPHAS
+    // are Theme-tokened (Theme.depth.*). Don't "fix" these into Theme colour
+    // tokens — they would never vary with the palette.
 
     // Dark shadow (bottom-right) — declared FIRST so it renders furthest back
     // (paint order is declaration order for items without explicit z).
@@ -141,13 +148,21 @@ Item {
 
         // Inner rim/contact gradient — top rim highlight by default; bottom
         // band off (innerShadowAlpha 0 on the chip preset, faint on cards).
-        // Always instantiated so per-instance alpha changes take effect
-        // without a Loader; hidden when flat (not elevated).
+        // Fades with the two shadows on the `elevated` toggle (opacity eased
+        // over Theme.anim.quick) instead of snapping via `visible`, so the
+        // whole clay raise eases as one. `visible` stays STATIC — it only
+        // gates out presets with no rim AND no inner-shadow, so a flat-only
+        // pill never instantiates the layer.
         Rectangle {
             anchors.fill: parent
             radius: pillBody.radius
             color: "transparent"
-            visible: root.elevated && (root.highlightAlpha > 0 || root.innerShadowAlpha > 0)
+            visible: root.highlightAlpha > 0 || root.innerShadowAlpha > 0
+            opacity: root.elevated ? 1 : 0
+
+            Behavior on opacity {
+                NumberAnimation { duration: Theme.anim.quick }
+            }
 
             gradient: Gradient {
                 GradientStop { position: 0.00; color: Qt.rgba(1, 1, 1, root.highlightAlpha) }
