@@ -8,6 +8,7 @@ It must also pass Qt flags through untouched and never abort on a bad path.
 
 from __future__ import annotations
 
+import errno
 import os
 import socket
 import tempfile
@@ -180,6 +181,29 @@ class TestSocketIsLive:
             assert _socket_is_live(sock_path) is False
         finally:
             _rmtree(base)
+
+    def test_ambiguous_connect_error_is_treated_as_live(self, monkeypatch):
+        # A transient connect failure (EAGAIN/timeout under load) must NOT be
+        # classified dead — reaping a live instance's dir on a hiccup would
+        # unlink its --listen socket. Only ECONNREFUSED/ENOENT mean dead.
+        class _EagainSock:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def settimeout(self, _t):
+                pass
+
+            def connect(self, _p):
+                raise OSError(errno.EAGAIN, "resource temporarily unavailable")
+
+        monkeypatch.setattr("symmetria_ide.app.socket.socket", _EagainSock)
+        assert _socket_is_live("/whatever/nvim.sock") is True
 
 
 class TestReapOrphanNvimSockets:

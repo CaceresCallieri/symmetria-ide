@@ -157,6 +157,42 @@ def test_focus_terminal_requested_handler(main_qml: str):
     assert "terminalView.forceActiveFocus()" in main_qml
 
 
+def _extract_braced_body(text: str, decl_start: int) -> str:
+    """Return the `{...}` body of the declaration at ``decl_start``, brace-matched.
+
+    Resilient to braces inside ``//`` line comments and string literals (', ",
+    `), which QML/JS bodies contain — a naive depth counter would miscount on
+    those. Replaces brittle fixed-offset windows into QML source that break on
+    unrelated edits. Raises AssertionError if the braces never balance.
+    """
+    open_idx = text.index("{", decl_start)
+    depth = 0
+    j = open_idx
+    in_str: str | None = None
+    while j < len(text):
+        c = text[j]
+        if in_str is not None:
+            if c == "\\":
+                j += 2
+                continue
+            if c == in_str:
+                in_str = None
+        elif c in "'\"`":
+            in_str = c
+        elif c == "/" and j + 1 < len(text) and text[j + 1] == "/":
+            nl = text.find("\n", j)
+            j = len(text) if nl == -1 else nl
+            continue
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx : j + 1]
+        j += 1
+    raise AssertionError("unbalanced braces from declaration at index %d" % decl_start)
+
+
 def test_window_activation_considers_terminal_visible(main_qml: str):
     """Window.onActiveChanged must route to terminalView when the
     terminal is the current central surface. Without this, alt-tabbing
@@ -179,12 +215,11 @@ def test_window_activation_considers_terminal_visible(main_qml: str):
     # surface branch, which routes through focus_agent).
     dispatch_idx = main_qml.find("function _restoreCentralFocus()")
     assert dispatch_idx >= 0
-    # 2200-char window: the modal-guard comment block (spawn menu, session
-    # picker, fuzzy finder, AND the close-confirm dialog added in 3d86e31)
-    # precedes the surface branches inside the function body; the terminal
-    # branch now lands ~1860 chars in, so the window must comfortably clear
-    # the whole body. Bump this if more modal guards are prepended.
-    dispatch_block = main_qml[dispatch_idx : dispatch_idx + 2200]
+    # Scope the assertions to the function's actual `{...}` body via brace
+    # matching rather than a fixed character window — the body grows whenever a
+    # modal guard is prepended (it has been bumped twice), and a too-small
+    # window silently passes/fails on unrelated edits.
+    dispatch_block = _extract_braced_body(main_qml, dispatch_idx)
     assert "terminalView.forceActiveFocus()" in dispatch_block
     assert "controller.focus_agent(controller.focusedAgent)" in dispatch_block
     # Modal guard: re-activation must NOT yank focus out of an open spawn

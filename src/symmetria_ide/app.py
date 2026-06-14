@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 import argparse
+import errno
 import gc
 import glob
 import logging
@@ -3297,9 +3298,13 @@ def _resolve_launch_dir(cwd: str, home: str, path_arg: str | None) -> str | None
         target = os.path.abspath(os.path.expanduser(path_arg))
         return target if os.path.isdir(target) else None
     if os.path.realpath(cwd) in (os.path.realpath(home), "/"):
-        state_home = os.environ.get("XDG_STATE_HOME") or os.path.join(
-            home, ".local", "state"
-        )
+        # Ignore a non-absolute XDG_STATE_HOME (the spec requires absolute): a
+        # relative value would resolve the scratch dir under the current cwd —
+        # which is $HOME here — re-rooting the watch inside the very tree we are
+        # escaping.
+        state_home = os.environ.get("XDG_STATE_HOME")
+        if not state_home or not os.path.isabs(state_home):
+            state_home = os.path.join(home, ".local", "state")
         return os.path.join(state_home, "symmetria-ide", "scratch")
     return None
 
@@ -3414,17 +3419,21 @@ def _socket_is_live(sock_path: str) -> bool:
     """True iff a process is actively listening on the AF_UNIX socket.
 
     A bare connect()+close on nvim's msgpack `--listen` socket is harmless (no
-    bytes are sent). A dead owner leaves the socket FILE behind but the kernel
-    refuses the connect (ECONNREFUSED); a never-bound dir has no file at all
-    (ENOENT). Either way the connect raises OSError → not live.
+    bytes are sent). Fail SAFE toward "live": only a refused connection
+    (ECONNREFUSED — socket file present but no listener) or a missing file
+    (ENOENT — never bound) unambiguously means the owner is gone. Any other
+    error — a connect timeout, EAGAIN, or EINTR under load — is ambiguous, so we
+    treat it as live and spare the dir. The reaper rmtree's whatever this
+    reports dead; a false "dead" on a running instance would unlink its live
+    `--listen` socket, so the asymmetry is deliberate.
     """
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.settimeout(0.2)
+            s.settimeout(1.0)
             s.connect(sock_path)
         return True
-    except OSError:
-        return False
+    except OSError as exc:
+        return exc.errno not in (errno.ECONNREFUSED, errno.ENOENT)
 
 
 def _reap_orphan_nvim_sockets() -> None:
@@ -3455,6 +3464,7 @@ def _reap_orphan_nvim_sockets() -> None:
         if _socket_is_live(os.path.join(d, "nvim.sock")):
             continue
         shutil.rmtree(d, ignore_errors=True)
+        log.debug("reaped orphan nvim socket dir: %s", d)
 
 
 def run() -> int:
@@ -3537,12 +3547,21 @@ def run() -> int:
     # wedged GUI. The no-op QTimer is load-bearing: while blocked in
     # `app.exec()` (C++), the interpreter never returns to Python to run the
     # signal handler, so Python defers it indefinitely; the timer wakes the
-    # interpreter ~3×/s so the handler actually fires. Parented to `app` (kept
-    # alive, freed on teardown).
-    signal.signal(signal.SIGTERM, lambda *_: controller.authorize_and_quit())
+    # interpreter ~1×/s so the handler fires within ~1s of the signal (a no-op
+    # tick that idle CPU batches cheaply). Parented to `app` (kept alive, freed
+    # on teardown).
+    def _request_quit(*_: object) -> None:
+        # Reset to SIG_DFL first: a SECOND SIGTERM during the (possibly slow)
+        # qa! + thread-join + rmtree teardown then hard-kills instead of
+        # re-entering this handler — also the user's escape hatch if shutdown
+        # ever wedges.
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        controller.authorize_and_quit()
+
+    signal.signal(signal.SIGTERM, _request_quit)
     _sigterm_pump = QTimer(app)
     _sigterm_pump.timeout.connect(lambda: None)
-    _sigterm_pump.start(300)
+    _sigterm_pump.start(1000)
 
     shot_path = os.environ.get("SYMMETRIA_IDE_SCREENSHOT")
     test_keys = os.environ.get("SYMMETRIA_IDE_TEST_KEYS")
