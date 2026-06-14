@@ -166,7 +166,12 @@ def test_window_activation_considers_terminal_visible(main_qml: str):
     (also used by modal dismissals like AgentSpawnMenu's Esc) —
     onActiveChanged delegates to it.
     """
-    on_active_idx = main_qml.find("onActiveChanged:")
+    # rfind, not find: a child element (the agent spawn menu, ~line 2132)
+    # also declares `onActiveChanged:`. The Window-level handler under test
+    # is the LAST occurrence — same disambiguation the sibling
+    # test_startup_focus_routes_to_terminal_when_visible uses for
+    # Component.onCompleted.
+    on_active_idx = main_qml.rfind("onActiveChanged:")
     assert on_active_idx >= 0
     on_active_block = main_qml[on_active_idx : on_active_idx + 200]
     assert "_restoreCentralFocus()" in on_active_block
@@ -174,9 +179,11 @@ def test_window_activation_considers_terminal_visible(main_qml: str):
     # surface branch, which routes through focus_agent).
     dispatch_idx = main_qml.find("function _restoreCentralFocus()")
     assert dispatch_idx >= 0
-    # 1400-char window: the modal-guard comment block precedes the surface
-    # branches inside the function body.
-    dispatch_block = main_qml[dispatch_idx : dispatch_idx + 1400]
+    # 1600-char window: the modal-guard comment block (spawn menu, session
+    # picker, fuzzy finder) precedes the surface branches inside the function
+    # body; the terminal branch lands ~1440 chars in, so the window must
+    # comfortably clear the whole body (~1520 chars).
+    dispatch_block = main_qml[dispatch_idx : dispatch_idx + 1600]
     assert "terminalView.forceActiveFocus()" in dispatch_block
     assert "controller.focus_agent(controller.focusedAgent)" in dispatch_block
     # Modal guard: re-activation must NOT yank focus out of an open spawn

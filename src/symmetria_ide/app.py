@@ -244,6 +244,19 @@ class CapsuleModel(QAbstractListModel):
         self.endInsertRows()
 
 
+# Below this IDE window width (in px) the file-tree sidebar auto-hides so a
+# narrow viewport hands its whole width to the central surface (editor /
+# terminal / agent / FM); at or above it the sidebar returns. This is a
+# responsive layout decision, not a visual style token, so it lives here in
+# Python (where `treeVisible` is derived) rather than in `Theme.qml`. The
+# Window's own `minimumWidth` is 800 (Main.qml), so the threshold MUST exceed
+# 800 to ever fire. The value is a feel decision — 1000 cleanly hides a
+# half-tiled 1920 monitor (~960px) while keeping the sidebar on a half-tiled
+# 1440p monitor (~1280px). Raise it if the sidebar should persist only on
+# wider layouts.
+SIDEBAR_MIN_WINDOW_WIDTH: float = 1000.0
+
+
 class AppController(QObject):
     """Glue object exposed to QML as `controller`.
 
@@ -636,11 +649,21 @@ class AppController(QObject):
         # if `displayedRoot` is about to change. Loading is keyed off
         # `displayedRoot`; saving is keyed off this captured root.
         self._expanded_paths_cache_root: str = ""
-        # Always-on by default per the "visualization-first" decision —
-        # toggle keybind deferred (no `<leader>tt` in v1). Property
-        # exists so QML's `visible: controller.treeVisible` binding has
-        # something to read, and so a v2 toggle is a one-line addition.
-        self._tree_visible: bool = True
+        # Sidebar visibility (`treeVisible`) is the AND of two independent
+        # inputs:
+        #   1. `_tree_user_visible` — the user's intent. Always-on by default
+        #      per the "visualization-first" decision; a future `<leader>tt`
+        #      toggle flips THIS bool (the v2 one-liner the property comment
+        #      below anticipates).
+        #   2. `_window_width` vs SIDEBAR_MIN_WINDOW_WIDTH — a responsive gate
+        #      that auto-hides the sidebar on narrow windows. QML pushes the
+        #      live width via `set_window_width` (Main.qml `onWidthChanged`).
+        # Keeping the two inputs separate means the future toggle and the
+        # width responsiveness compose cleanly instead of fighting over one
+        # bool. Initialised to the Window's declared startup width (Main.qml
+        # `width: 1280`) so the default is honest before QML reports for real.
+        self._tree_user_visible: bool = True
+        self._window_width: float = 1280.0
         # ----- Git status provider (status badges + Active Changes panel) -
         # The GitController watches `.git/index` + co. via QFileSystemWatcher
         # and exposes `statusForPath(absolute_path)` to QML. It's the single
@@ -1451,14 +1474,57 @@ class AppController(QObject):
 
     @Property(bool, notify=treeVisibleChanged)
     def treeVisible(self) -> bool:
-        """Sidebar visibility — true by default.
+        """Sidebar visibility — the single source of truth.
 
-        Bound to the sidebar's QML `visible` property. No toggle
-        keybind exists in v1 (the "visualization-first" decision); the
-        property exists so a future `<leader>tt` is a one-line addition
-        without restructuring the binding shape.
+        Bound by every sidebar consumer: the editor/tree separator and the
+        FocusScope (Main.qml), the StatusBar's sidebar-matched column
+        (StatusBar.qml), and the Ctrl+L focus guard that must not target a
+        hidden panel (Main.qml). Derived from the AND of the user's intent
+        (`_tree_user_visible`, flipped by a future `<leader>tt`) and the
+        responsive width gate (`_window_width >= SIDEBAR_MIN_WINDOW_WIDTH`),
+        so a narrow window auto-hides the sidebar for ALL consumers at once.
         """
-        return self._tree_visible
+        return (
+            self._tree_user_visible and self._window_width >= SIDEBAR_MIN_WINDOW_WIDTH
+        )
+
+    @Slot(float)
+    def set_window_width(self, width: float) -> None:
+        """Receive the live IDE window width from QML (Main.qml
+        `onWidthChanged` + startup `Component.onCompleted`).
+
+        Drives the responsive auto-hide: below SIDEBAR_MIN_WINDOW_WIDTH the
+        sidebar collapses, at/above it returns. We recompute `treeVisible`
+        and emit `treeVisibleChanged` ONLY when the derived boolean actually
+        flips — a window drag fires `onWidthChanged` per pixel, but the four
+        QML bindings only need re-evaluation when visibility crosses the
+        threshold, not on every intermediate width.
+        """
+        if width == self._window_width:
+            return
+        was_visible = self.treeVisible
+        self._window_width = width
+        if self.treeVisible != was_visible:
+            self.treeVisibleChanged.emit()
+
+    @Slot()
+    def toggle_tree(self) -> None:
+        """Manual sidebar toggle (Ctrl+S) — flips the user-intent input.
+
+        Flips `_tree_user_visible` only; the responsive width gate still
+        ANDs on top (see `treeVisible`). So when the window is below
+        SIDEBAR_MIN_WINDOW_WIDTH the auto-hide overrides this toggle and the
+        sidebar stays hidden regardless of how many times Ctrl+S is pressed
+        — an intentional precedence for now (a future settings panel may
+        make it configurable). The `treeVisible != was_visible` guard means
+        a toggle that doesn't change the *derived* visibility (because the
+        width gate is already forcing hidden) emits nothing and triggers no
+        spurious focus recovery.
+        """
+        was_visible = self.treeVisible
+        self._tree_user_visible = not self._tree_user_visible
+        if self.treeVisible != was_visible:
+            self.treeVisibleChanged.emit()
 
     @Property(QObject, constant=True)
     def gitController(self) -> QObject:

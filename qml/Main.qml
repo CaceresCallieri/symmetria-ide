@@ -33,6 +33,15 @@ Window {
     minimumWidth: 800
     minimumHeight: 400
 
+    // Responsive sidebar: report live window width to the controller so it
+    // can auto-hide the file-tree sidebar on narrow layouts (Hyprland tiling
+    // a half-monitor column, etc.). The controller folds this into
+    // `treeVisible` (SIDEBAR_MIN_WINDOW_WIDTH in app.py) and only flips the
+    // bound bindings when visibility crosses the threshold. The initial
+    // width is reported from the startup `Component.onCompleted` below —
+    // `onWidthChanged` does not fire for the construction-time value.
+    onWidthChanged: controller.set_window_width(width)
+
     // Side-panel sub-pane focus memory. 0 = main fileTreeView, 1 =
     // gitStatusPanel (Active Changes). Updated by the Ctrl+J / Ctrl+K
     // chords below; read by `onFocusTreeRequested` so re-entering the
@@ -132,6 +141,24 @@ Window {
         sequences: ["Ctrl+E"]
         context: Qt.ApplicationShortcut
         onActivated: controller.toggle_fm()
+    }
+
+    // Manual file-tree sidebar toggle. Flips the *user-intent* half of
+    // `treeVisible` (AppController.toggle_tree); the responsive width gate
+    // still ANDs on top, so when the window is below SIDEBAR_MIN_WINDOW_WIDTH
+    // the auto-hide overrides this toggle and the sidebar stays hidden. That
+    // precedence is intentional for now (a future settings panel may make it
+    // configurable).
+    //
+    // Application-scope, same as the surface-toggle chords above: it fires
+    // from any pane, including nvim insert mode. Trade-off (accepted): in a
+    // terminal Ctrl+S is XOFF (flow-control freeze) and some nvim configs map
+    // it to `:w` — intercepting here means neither reaches the editor pane.
+    // Repurposing Ctrl+S for the sidebar toggle is the user's explicit choice.
+    Shortcut {
+        sequences: ["Ctrl+S"]
+        context: Qt.ApplicationShortcut
+        onActivated: controller.toggle_tree()
     }
 
     // Terminal-agent chord family — the IDE-native orchestrator runtime.
@@ -2223,6 +2250,24 @@ Window {
         root._restoreCentralFocus();
     }
 
+    // Responsive-sidebar focus recovery. When `treeVisible` flips to false
+    // (window tiled narrow below SIDEBAR_MIN_WINDOW_WIDTH), the FocusScope
+    // it gates becomes invisible — if the user was navigating the tree at
+    // that moment, Qt drops active focus and keystrokes fall into a focus
+    // black-hole. Hand focus back to the active central surface. Safe to
+    // call unconditionally on hide: `_restoreCentralFocus()` re-asserts any
+    // open modal and is a no-op when the central surface already holds
+    // focus, so an ordinary resize while the editor is focused costs
+    // nothing. Guarded to the hide direction only — on show we leave focus
+    // wherever the user left it.
+    Connections {
+        target: controller
+        function onTreeVisibleChanged() {
+            if (!controller.treeVisible)
+                root._restoreCentralFocus();
+        }
+    }
+
     // Startup focus override. Component.onCompleted fires
     // bottom-up: child handlers run before parent handlers, so by
     // the time THIS handler fires every child Component.onCompleted
@@ -2257,5 +2302,14 @@ Window {
             terminalView.forceActiveFocus();
         else
             editor.forceActiveFocus();
+
+        // Seed the controller with the real startup width so the responsive
+        // sidebar gate (treeVisible) is correct on first paint — onWidthChanged
+        // never fires for the construction-time value, so without this the
+        // sidebar would use the Python-side default (1280) until the first
+        // user resize. Cheap and idempotent (the slot no-ops on equal width).
+        // Placed AFTER the focus dispatch so a future grep-window test keyed
+        // on the dispatch block isn't pushed off the end by this comment.
+        controller.set_window_width(width);
     }
 }
