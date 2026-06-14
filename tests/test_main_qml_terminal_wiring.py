@@ -212,6 +212,24 @@ def test_startup_focus_routes_to_terminal_when_visible(main_qml: str):
     assert "terminalView.forceActiveFocus()" in body
 
 
+def test_responsive_sidebar_focus_recovery_is_hide_only(main_qml: str):
+    """The responsive-sidebar `Connections` handler must restore central
+    focus ONLY when the sidebar hides. If a future edit drops the
+    `if (!controller.treeVisible)` guard, focus recovery would also fire on
+    SHOW — stealing focus from the editor every time the window widens past
+    the threshold. Pin the hide-only guard and its ordering before the
+    `_restoreCentralFocus()` call."""
+    handler_idx = main_qml.find("function onTreeVisibleChanged()")
+    assert handler_idx >= 0, "responsive-sidebar focus-recovery handler missing"
+    # The handler body is a few lines; a 200-char window covers it.
+    handler_block = main_qml[handler_idx : handler_idx + 200]
+    guard_idx = handler_block.find("if (!controller.treeVisible)")
+    restore_idx = handler_block.find("_restoreCentralFocus()")
+    assert guard_idx >= 0, "hide-only guard missing — recovery would fire on show too"
+    assert restore_idx >= 0
+    assert guard_idx < restore_idx, "guard must precede the focus-recovery call"
+
+
 def test_fm_overlay_restore_considers_terminal(main_qml: str):
     """When the FM overlay closes, restoration must consider terminalVisible
     alongside agentVisible — otherwise FM dismiss while terminal-visible

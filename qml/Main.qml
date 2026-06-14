@@ -1403,8 +1403,9 @@ Window {
             }
 
             // 1px vertical separator between editor and sidebar.
-            // Visibility tracks the sidebar so a future hide-tree
-            // toggle reclaims the pixel cleanly.
+            // Visibility tracks `treeVisible`, so the pixel is reclaimed
+            // cleanly whenever the sidebar hides — via the responsive
+            // width gate or the Ctrl+S toggle (controller.toggle_tree).
             Rectangle {
                 Layout.fillHeight: true
                 implicitWidth: 1
@@ -1435,8 +1436,10 @@ Window {
             // See the startup focus override comment at
             // Window.Component.onCompleted below.
             //
-            // Visibility defaults to true; no toggle keybind in v1
-            // per the "visualization-first" decision.
+            // Visibility is `controller.treeVisible` — visible by default
+            // (the "visualization-first" decision), but now driven by the
+            // responsive width gate (auto-hide below SIDEBAR_MIN_WINDOW_WIDTH)
+            // and the manual Ctrl+S toggle (controller.toggle_tree).
             FocusScope {
                 id: treeScope
                 Layout.minimumWidth: 280
@@ -2260,6 +2263,14 @@ Window {
     // focus, so an ordinary resize while the editor is focused costs
     // nothing. Guarded to the hide direction only — on show we leave focus
     // wherever the user left it.
+    //
+    // Startup interaction: if the IDE launches below the threshold (a
+    // Hyprland rule tiling it into a narrow column), the width seed in the
+    // startup Component.onCompleted flips `treeVisible` false and fires this
+    // handler during construction. That is harmless — `_restoreCentralFocus`
+    // routes to the same central surface the startup focus dispatch targets,
+    // so the two agree regardless of order. (The seed runs AFTER that
+    // dispatch anyway; see the seed comment below.)
     Connections {
         target: controller
         function onTreeVisibleChanged() {
@@ -2304,12 +2315,13 @@ Window {
             editor.forceActiveFocus();
 
         // Seed the controller with the real startup width so the responsive
-        // sidebar gate (treeVisible) is correct on first paint — onWidthChanged
-        // never fires for the construction-time value, so without this the
-        // sidebar would use the Python-side default (1280) until the first
-        // user resize. Cheap and idempotent (the slot no-ops on equal width).
-        // Placed AFTER the focus dispatch so a future grep-window test keyed
-        // on the dispatch block isn't pushed off the end by this comment.
+        // sidebar gate (treeVisible) is correct on first paint — the
+        // `onWidthChanged` comment on the Window root explains why the live
+        // handler misses the construction-time value. Placed AFTER the focus
+        // dispatch so a future grep-window test keyed on the dispatch block
+        // isn't pushed off the end by this comment (and, per the Connections
+        // handler above, so any sub-threshold-startup focus recovery runs
+        // after the dispatch).
         controller.set_window_width(width);
     }
 }

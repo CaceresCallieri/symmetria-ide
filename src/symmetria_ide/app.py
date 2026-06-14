@@ -652,13 +652,12 @@ class AppController(QObject):
         # Sidebar visibility (`treeVisible`) is the AND of two independent
         # inputs:
         #   1. `_tree_user_visible` — the user's intent. Always-on by default
-        #      per the "visualization-first" decision; a future `<leader>tt`
-        #      toggle flips THIS bool (the v2 one-liner the property comment
-        #      below anticipates).
+        #      per the "visualization-first" decision; `toggle_tree` (Ctrl+S)
+        #      flips THIS bool. A future `<leader>tt` could bind it too.
         #   2. `_window_width` vs SIDEBAR_MIN_WINDOW_WIDTH — a responsive gate
         #      that auto-hides the sidebar on narrow windows. QML pushes the
         #      live width via `set_window_width` (Main.qml `onWidthChanged`).
-        # Keeping the two inputs separate means the future toggle and the
+        # Keeping the two inputs separate means the manual toggle and the
         # width responsiveness compose cleanly instead of fighting over one
         # bool. Initialised to the Window's declared startup width (Main.qml
         # `width: 1280`) so the default is honest before QML reports for real.
@@ -1480,7 +1479,7 @@ class AppController(QObject):
         FocusScope (Main.qml), the StatusBar's sidebar-matched column
         (StatusBar.qml), and the Ctrl+L focus guard that must not target a
         hidden panel (Main.qml). Derived from the AND of the user's intent
-        (`_tree_user_visible`, flipped by a future `<leader>tt`) and the
+        (`_tree_user_visible`, flipped by `toggle_tree`/Ctrl+S) and the
         responsive width gate (`_window_width >= SIDEBAR_MIN_WINDOW_WIDTH`),
         so a narrow window auto-hides the sidebar for ALL consumers at once.
         """
@@ -1488,24 +1487,35 @@ class AppController(QObject):
             self._tree_user_visible and self._window_width >= SIDEBAR_MIN_WINDOW_WIDTH
         )
 
+    def _emit_tree_visible_if_changed(self, was_visible: bool) -> None:
+        """Emit `treeVisibleChanged` iff the derived visibility flipped.
+
+        Shared by the two `treeVisible` mutators (`set_window_width`,
+        `toggle_tree`). Both capture `was_visible = self.treeVisible` BEFORE
+        their mutation, then call this AFTER. Emitting only on an actual flip
+        is what keeps a per-pixel window drag (or a toggle the width gate
+        already overrides) from thrashing the four QML bindings or triggering
+        spurious focus recovery.
+        """
+        if self.treeVisible != was_visible:
+            self.treeVisibleChanged.emit()
+
     @Slot(float)
     def set_window_width(self, width: float) -> None:
         """Receive the live IDE window width from QML (Main.qml
         `onWidthChanged` + startup `Component.onCompleted`).
 
         Drives the responsive auto-hide: below SIDEBAR_MIN_WINDOW_WIDTH the
-        sidebar collapses, at/above it returns. We recompute `treeVisible`
-        and emit `treeVisibleChanged` ONLY when the derived boolean actually
-        flips — a window drag fires `onWidthChanged` per pixel, but the four
-        QML bindings only need re-evaluation when visibility crosses the
-        threshold, not on every intermediate width.
+        sidebar collapses, at/above it returns. Emits only on a visibility
+        flip (via `_emit_tree_visible_if_changed`) — a window drag fires
+        `onWidthChanged` per pixel, but the four QML bindings only need
+        re-evaluation when visibility crosses the threshold.
         """
         if width == self._window_width:
             return
         was_visible = self.treeVisible
         self._window_width = width
-        if self.treeVisible != was_visible:
-            self.treeVisibleChanged.emit()
+        self._emit_tree_visible_if_changed(was_visible)
 
     @Slot()
     def toggle_tree(self) -> None:
@@ -1516,15 +1526,14 @@ class AppController(QObject):
         SIDEBAR_MIN_WINDOW_WIDTH the auto-hide overrides this toggle and the
         sidebar stays hidden regardless of how many times Ctrl+S is pressed
         — an intentional precedence for now (a future settings panel may
-        make it configurable). The `treeVisible != was_visible` guard means
-        a toggle that doesn't change the *derived* visibility (because the
-        width gate is already forcing hidden) emits nothing and triggers no
-        spurious focus recovery.
+        make it configurable). Emitting only on a derived-visibility flip
+        (via `_emit_tree_visible_if_changed`) means a toggle the width gate
+        already overrides emits nothing and triggers no spurious focus
+        recovery.
         """
         was_visible = self.treeVisible
         self._tree_user_visible = not self._tree_user_visible
-        if self.treeVisible != was_visible:
-            self.treeVisibleChanged.emit()
+        self._emit_tree_visible_if_changed(was_visible)
 
     @Property(QObject, constant=True)
     def gitController(self) -> QObject:
