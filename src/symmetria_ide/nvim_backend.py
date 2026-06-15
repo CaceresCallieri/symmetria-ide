@@ -373,3 +373,40 @@ class NvimBackend(QObject):
             nvim.async_call(_do)
         except Exception:  # noqa: BLE001
             log.exception("async_call(edit_file) failed")
+
+    @Slot()
+    def checktime(self) -> None:
+        """Re-stat loaded buffers; reload any changed on disk (autoread).
+
+        The IDE's real-time external-reload path. An agent (or the shell
+        pane) rewriting a file on disk does not touch nvim, so an open
+        buffer stays stale until something runs `:checktime`. The IDE
+        drives this off the recursive working-tree watcher
+        (`GitController.workingTreeChanged`), so agent edits reload the
+        visible buffer live — even while the editor surface is HIDDEN
+        (nvim redraws its grid; the user sees the fresh content the
+        instant they swap back).
+
+        `silent!` keeps the grid quiet for the conflict case: when a
+        buffer has UNSAVED local edits AND its file also changed on disk,
+        `autoread` deliberately declines to reload (preserving the user's
+        in-flight work) and nvim prints a non-blocking W12 warning —
+        which we suppress. `autoread` itself is asserted in
+        `runtime/init.lua`; without it `:checktime` would pop an
+        interactive (O)K/(L)oad prompt instead of reloading silently.
+
+        Marshalled via async_call (gotcha #1); no-op before attach."""
+        nvim = self._nvim
+        if nvim is None:
+            return
+
+        def _do() -> None:
+            try:
+                nvim.command("silent! checktime")
+            except Exception:  # noqa: BLE001
+                log.exception("nvim checktime failed")
+
+        try:
+            nvim.async_call(_do)
+        except Exception:  # noqa: BLE001
+            log.exception("async_call(checktime) failed")

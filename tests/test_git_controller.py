@@ -462,6 +462,23 @@ def test_controller_constructs_and_stops_cleanly() -> None:
     assert not controller._worker.is_alive()
 
 
+def test_working_tree_changed_fires_on_debounce_timeout() -> None:
+    """Every change path (worktree inotify, `gitpoke` save, `.git` state)
+    funnels through `_debounce`; its timeout must re-emit the public
+    `workingTreeChanged` edge that AppController routes to
+    NvimBackend.checktime(). Emit the timeout directly rather than wait
+    out the real 200ms single-shot timer — we're guarding the wire, not
+    the QTimer."""
+    controller = GitController()
+    try:
+        received: list = []
+        controller.workingTreeChanged.connect(lambda: received.append(True))
+        controller._debounce.timeout.emit()
+        assert received == [True]
+    finally:
+        controller.stop()
+
+
 def test_controller_status_for_path_returns_empty_when_no_repo() -> None:
     controller = GitController()
     try:

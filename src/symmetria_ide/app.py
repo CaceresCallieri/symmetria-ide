@@ -685,6 +685,21 @@ class AppController(QObject):
         # the panel's ListView. Auto-refreshes on the controller's
         # statusChanged via a queued connection (handled internally).
         self._git_status_list = GitStatusListModel(self._git_controller, self)
+        # Real-time external-reload: when the working tree settles after a
+        # change (agent Edit/Write picked up by the recursive watcher, a
+        # shell-pane append, an editor-save poke, or a branch switch), tell
+        # the editor nvim to re-stat its buffers. With `autoread` on (set in
+        # runtime/init.lua), any OPEN, UNMODIFIED buffer whose file changed
+        # on disk reloads silently — so a file the agent rewrote is already
+        # fresh the instant the user swaps back to the editor surface. This
+        # is the headline path; runtime/init.lua's FocusGained/BufEnter/
+        # CursorHold checktime autocmds are the backstop for when the
+        # working-tree watcher has degraded (watchdog missing / inotify
+        # exhaustion). Coalesced through GitController's 200ms debounce.
+        # Same-thread: workingTreeChanged fires on the GUI thread
+        # (QTimer.timeout) and checktime() marshals to nvim's loop via
+        # async_call itself, so no QueuedConnection is needed here.
+        self._git_controller.workingTreeChanged.connect(self._backend.checktime)
         # Drive `repoRoot` from `displayedRoot` (NOT raw `cwd`). This is
         # the ONE place where the anchor concept leaks below the pure
         # view-transformation line into actual behavior: when anchored,

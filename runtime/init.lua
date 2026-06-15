@@ -380,6 +380,39 @@ vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
   end,
 })
 
+-- --- External-change auto-reload ------------------------------------
+--
+-- In an agent workflow the file open in this editor is constantly
+-- rewritten OUT from under nvim (a Claude/OpenCode pane runs `Edit`,
+-- the shell pane appends, a branch switch rewrites the tree). nvim does
+-- not poll the filesystem; it only notices an external change when
+-- something runs `:checktime`. `autoread` then decides what happens on
+-- that notice: for an OPEN, UNMODIFIED buffer it reloads silently; for a
+-- buffer with UNSAVED edits it deliberately declines (preserving the
+-- user's work) and prints a non-blocking W12 warning. `autoread` is
+-- therefore load-bearing for safety, not convenience — without it
+-- `:checktime` would pop an interactive (O)K/(L)oad prompt in the grid.
+vim.opt.autoread = true
+
+-- The PRIMARY :checktime trigger is the IDE itself: AppController routes
+-- GitController.workingTreeChanged → NvimBackend.checktime() over RPC, so
+-- agent edits reload the buffer live even while this editor surface is
+-- HIDDEN. These autocmds are the BACKSTOP for when that watcher degraded
+-- (watchdog missing / inotify watch exhaustion). Note FocusGained barely
+-- fires inside the IDE — switching editor/terminal/agent surfaces is a
+-- QML visibility flip, NOT an OS window-focus change, so the nvim process
+-- keeps focus throughout; these mainly earn their keep on plain buffer
+-- re-entry (BufEnter) and idle dwell (CursorHold).
+local autoreload_grp = vim.api.nvim_create_augroup("SymmetriaIdeAutoreload", { clear = true })
+vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter", "CursorHold", "CursorHoldI" }, {
+  group = autoreload_grp,
+  callback = function()
+    -- silent! + pcall: :checktime can error on special buffers (terminal,
+    -- prompt, quickfix). A backstop poll must never surface noise.
+    pcall(vim.cmd, "silent! checktime")
+  end,
+})
+
 -- --- Cmdline completion pipeline ------------------------------------
 --
 -- We emit our own completion list via `getcompletion()` on every

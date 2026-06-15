@@ -100,12 +100,32 @@ def test_channel_to_signal_table_matches_real_signals(backend):
 
 
 def test_control_methods_noop_before_attach(backend):
-    """input/edit_file/set_current_dir are called from the GUI thread and
-    may fire before the worker has attached (self._nvim is None) — they
-    must no-op, not raise."""
+    """input/edit_file/set_current_dir/checktime are called from the GUI
+    thread and may fire before the worker has attached (self._nvim is
+    None) — they must no-op, not raise."""
     backend.input("ihello")
     backend.edit_file("/tmp/foo.txt")
     backend.set_current_dir("/tmp")
+    backend.checktime()
+
+
+def test_checktime_runs_silent_checktime_via_async_call(backend):
+    """When attached, checktime() marshals onto the loop thread via
+    async_call (gotcha #1) and issues `silent! checktime` — the
+    external-reload path that lets agent edits refresh open buffers
+    without the W12 warning surfacing in the grid."""
+    from unittest.mock import MagicMock
+
+    nvim = MagicMock()
+    # Run the marshalled callback inline so we can observe the command it
+    # would have issued on the loop thread.
+    nvim.async_call.side_effect = lambda fn: fn()
+    backend._nvim = nvim
+
+    backend.checktime()
+
+    nvim.async_call.assert_called_once()
+    nvim.command.assert_called_once_with("silent! checktime")
 
 
 def test_stop_before_start_is_noop(backend):

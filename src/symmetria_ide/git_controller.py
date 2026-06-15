@@ -541,6 +541,15 @@ class GitController(QObject):
     statusChanged = Signal()
     statsChanged = Signal()
     repoRootChanged = Signal()
+    # Fired (on the GUI thread) once per debounce window whenever the
+    # working tree or `.git` state settles after a change — i.e. the same
+    # coalesced moment a git re-scan is triggered. Distinct from
+    # `statusChanged` (which fires LATER, after the worker's scan completes)
+    # because consumers that only need "files on disk may have changed"
+    # shouldn't wait on the git scan. AppController routes this to
+    # `NvimBackend.checktime()` so open editor buffers reload when an agent
+    # rewrites their files. See the wire in `AppController.__init__`.
+    workingTreeChanged = Signal()
     # Internal worker→GUI signal that asks the GUI thread to rebuild the
     # QFileSystemWatcher entries for a newly-resolved repo root. Connected
     # with explicit QueuedConnection in __init__ — the watcher is GUI-thread-
@@ -607,6 +616,14 @@ class GitController(QObject):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(_DEBOUNCE_MS)
         self._debounce.timeout.connect(self._wake_worker)
+        # Re-emit the debounce timeout as a public `workingTreeChanged`
+        # edge. Signal-to-signal connection: every path that calls
+        # `_debounce.start()` (worktree inotify events, the `gitpoke`
+        # editor-save poke, AND `.git` trigger-file changes like a branch
+        # switch) thus notifies external-reload consumers, coalesced to one
+        # emit per window. No extra per-slot code — they all already funnel
+        # through this one timer. Fires on the GUI thread (QTimer.timeout).
+        self._debounce.timeout.connect(self.workingTreeChanged)
 
         # Worker→GUI marshaling for watcher rebuild. Explicit QueuedConnection
         # is the project-standards §4 P2 pattern — worker emits, GUI slot runs.
