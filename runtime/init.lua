@@ -402,13 +402,18 @@ vim.opt.autoread = true
 -- fires inside the IDE — switching editor/terminal/agent surfaces is a
 -- QML visibility flip, NOT an OS window-focus change, so the nvim process
 -- keeps focus throughout; these mainly earn their keep on plain buffer
--- re-entry (BufEnter) and idle dwell (CursorHold).
+-- re-entry (BufEnter) and idle dwell (CursorHold / CursorHoldI). The
+-- insert-mode dwell (CursorHoldI) is intentional and safe: autoread never
+-- clobbers a modified buffer, so a reload mid-insert can only happen on a
+-- buffer the user has not actually edited yet.
 local autoreload_grp = vim.api.nvim_create_augroup("SymmetriaIdeAutoreload", { clear = true })
 vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter", "CursorHold", "CursorHoldI" }, {
   group = autoreload_grp,
   callback = function()
-    -- silent! + pcall: :checktime can error on special buffers (terminal,
-    -- prompt, quickfix). A backstop poll must never surface noise.
+    -- silent! and pcall are complementary, not redundant: `silent!`
+    -- suppresses the W12/echo noise, while `pcall` is the actual guard for
+    -- the rare special buffer (terminal, prompt, quickfix) where
+    -- `:checktime` raises. A backstop poll must never surface either.
     pcall(vim.cmd, "silent! checktime")
   end,
 })

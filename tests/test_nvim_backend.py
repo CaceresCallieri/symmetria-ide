@@ -109,22 +109,33 @@ def test_control_methods_noop_before_attach(backend):
     backend.checktime()
 
 
-def test_checktime_runs_silent_checktime_via_async_call(backend):
-    """When attached, checktime() marshals onto the loop thread via
-    async_call (gotcha #1) and issues `silent! checktime` — the
-    external-reload path that lets agent edits refresh open buffers
-    without the W12 warning surfacing in the grid."""
+def test_checktime_marshals_through_async_call(backend):
+    """checktime() must reach nvim ONLY via async_call — never directly
+    from the calling (GUI) thread (gotcha #1: pynvim is not thread-safe
+    off the loop thread). Capture the marshalled callback WITHOUT running
+    it, prove `command` was not issued synchronously, then run the
+    callback (what nvim does on its loop thread) and prove THAT is what
+    issues `silent! checktime` — the external-reload path that refreshes
+    open buffers without the W12 warning surfacing in the grid."""
     from unittest.mock import MagicMock
 
     nvim = MagicMock()
-    # Run the marshalled callback inline so we can observe the command it
-    # would have issued on the loop thread.
-    nvim.async_call.side_effect = lambda fn: fn()
+    captured: list = []
+    # Capture, do NOT run — so we can assert nothing touched nvim.command
+    # synchronously on the calling thread before the marshal hop.
+    nvim.async_call.side_effect = lambda fn: captured.append(fn)
     backend._nvim = nvim
 
     backend.checktime()
 
     nvim.async_call.assert_called_once()
+    # gotcha #1: the command must not run off the loop thread. If a refactor
+    # called nvim.command directly from the GUI thread, this fails here.
+    nvim.command.assert_not_called()
+    assert len(captured) == 1
+
+    # Running the marshalled callback is what issues the checktime.
+    captured[0]()
     nvim.command.assert_called_once_with("silent! checktime")
 
 

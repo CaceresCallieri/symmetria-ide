@@ -543,8 +543,11 @@ class GitController(QObject):
     repoRootChanged = Signal()
     # Fired (on the GUI thread) once per debounce window whenever the
     # working tree or `.git` state settles after a change — i.e. the same
-    # coalesced moment a git re-scan is triggered. Distinct from
-    # `statusChanged` (which fires LATER, after the worker's scan completes)
+    # coalesced moment a DEBOUNCED git re-scan is triggered. (The direct
+    # `_wake_worker()` call in `_reset_state` deliberately does NOT emit
+    # this: a repo-root reset implies no on-disk buffer change to reload.)
+    # Distinct from `statusChanged` (which fires LATER, after the worker's
+    # scan completes)
     # because consumers that only need "files on disk may have changed"
     # shouldn't wait on the git scan. AppController routes this to
     # `NvimBackend.checktime()` so open editor buffers reload when an agent

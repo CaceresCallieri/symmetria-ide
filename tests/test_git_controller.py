@@ -463,18 +463,34 @@ def test_controller_constructs_and_stops_cleanly() -> None:
 
 
 def test_working_tree_changed_fires_on_debounce_timeout() -> None:
-    """Every change path (worktree inotify, `gitpoke` save, `.git` state)
-    funnels through `_debounce`; its timeout must re-emit the public
+    """The debounce timer's timeout must re-emit the public
     `workingTreeChanged` edge that AppController routes to
-    NvimBackend.checktime(). Emit the timeout directly rather than wait
-    out the real 200ms single-shot timer — we're guarding the wire, not
-    the QTimer."""
+    NvimBackend.checktime(). Guards the signal-to-signal wire only;
+    `test_poke_funnels_through_debounce` covers that change paths actually
+    reach the debounce. Emit the timeout directly rather than wait out the
+    real 200ms single-shot timer — we're guarding the wire, not the QTimer."""
     controller = GitController()
     try:
         received: list = []
         controller.workingTreeChanged.connect(lambda: received.append(True))
         controller._debounce.timeout.emit()
         assert received == [True]
+    finally:
+        controller.stop()
+
+
+def test_poke_funnels_through_debounce() -> None:
+    """`poke()` (the `gitpoke` editor-save path) routes through the shared
+    `_debounce`, which is what couples it to the `workingTreeChanged` edge
+    via the timeout wire. Backs the "every change path funnels through
+    `_debounce`" claim for the public poke path. The real 200ms timer
+    never fires in-test (no running event loop), so `isActive()` after
+    `poke()` is a deterministic check."""
+    controller = GitController()
+    try:
+        assert not controller._debounce.isActive()
+        controller.poke()
+        assert controller._debounce.isActive()
     finally:
         controller.stop()
 
