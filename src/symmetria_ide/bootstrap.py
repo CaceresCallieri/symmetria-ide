@@ -82,12 +82,21 @@ def configure_headless_mode(
     without compositor capture permissions).
     `SYMMETRIA_IDE_TEST_KEYS=<keys>` — injects a keycode string before
     the screenshot is taken.
+    `SYMMETRIA_IDE_INITIAL_SURFACE=<terminal|editor|agent|git>` — switches
+    the central surface during warmup, so the screenshot harness can capture
+    a surface other than the first-launch terminal (e.g. the git-history
+    viewer). No effect unless set; routes through the validating
+    `set_central_surface` slot.
     `SYMMETRIA_IDE_WARMUP_MS` / `SYMMETRIA_IDE_SETTLE_MS` — tune timing.
     """
     warmup_ms = int(os.environ.get("SYMMETRIA_IDE_WARMUP_MS", "1500"))
     settle_ms = int(os.environ.get("SYMMETRIA_IDE_SETTLE_MS", "800"))
 
     def _send_keys() -> None:
+        initial_surface = os.environ.get("SYMMETRIA_IDE_INITIAL_SURFACE", "").strip()
+        if initial_surface:
+            log.info("setting initial central surface: %r", initial_surface)
+            controller.set_central_surface(initial_surface)
         if test_keys:
             log.info("injecting test keys: %r", test_keys)
             controller.backend.input(test_keys)

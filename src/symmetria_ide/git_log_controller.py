@@ -1,0 +1,639 @@
+"""Git *history* parsing + the GitLogController Qt facade.
+
+The read-only counterpart to ``git_controller.py``. Where ``GitController``
+answers "what is uncommitted right now" (working-tree status, watcher-driven),
+this module answers "how did the repo get here" (committed history,
+request-driven) — the surface that matters most in an agent-driven workflow
+where agents keep the working tree clean by committing, so comprehension has
+to be reconstructed from the log.
+
+Three layers, top-down:
+
+  1. ``parse_git_log(blob: bytes) -> list[CommitRow]`` — a pure parser for the
+     NUL-separated ``git log -z --pretty=format:<...>`` stdout we emit below.
+     No subprocess, no Qt, no I/O. Feed it bytes, get an ordered commit list.
+
+  2. ``CommitRow`` — one commit, normalized for the list model. Carries the
+     ``agent_id`` (parsed from a ``Symmetria-Agent-Id`` commit trailer) and
+     ``seen`` fields NOW, rendered nowhere yet — the seams for the two north
+     stars (agent-session correlation + a tracked review frontier). v0 leaves
+     both unpopulated/unpersisted.
+
+  3. ``GitLogController(QObject)`` + ``GitLogListModel(QAbstractListModel)`` —
+     the Qt facade. A daemon worker thread drains a ``queue.Queue`` of typed
+     requests (load a log page, append the next page, load one commit's diff),
+     mirroring ``GitController``'s threading/subprocess/emit discipline:
+     ``daemon=True`` worker owning a ``_stop_event`` (project-standards §1 P0),
+     ``gc.disable()`` around every cross-thread signal emit (gotcha #10), and a
+     parameterless ``Changed`` signal whose receivers hop the GUI thread via
+     ``Qt.QueuedConnection`` (§4 P2).
+
+Distinct from ``GitController`` by design: history is one-shot-per-request, so
+there is no file watcher and no debounce. The request carries the repo root and
+the apply step is guarded against ``req_root == self._repo_root`` so a slow scan
+from a previously-anchored repo never lands in the model after a project switch.
+"""
+
+from __future__ import annotations
+
+import gc
+import logging
+import queue
+import subprocess
+import threading
+from dataclasses import dataclass
+
+from PySide6.QtCore import (
+    Property,
+    QAbstractListModel,
+    QModelIndex,
+    QObject,
+    Qt,
+    Signal,
+    Slot,
+)
+
+log = logging.getLogger(__name__)
+
+# Subprocess timeouts (seconds). `git show` gets the longest budget — an agent
+# commit touching many files produces a large patch that takes a beat to emit.
+_RESOLVE_TIMEOUT_SEC = 5.0
+_LOG_TIMEOUT_SEC = 10.0
+_SHOW_TIMEOUT_SEC = 20.0
+
+# How many commits one page request loads. "Load more" appends the next page.
+_PAGE_SIZE = 100
+
+# Soft cap on a single commit's rendered diff. A pathological commit (a vendored
+# dependency drop, a generated-file churn) can produce megabytes of patch text
+# that would stall the QML text layout. We truncate with a visible notice rather
+# than freeze the detail pane. Raise if real commits hit it legitimately.
+_DIFF_CHAR_CAP = 400_000
+
+# Field separator (US, 0x1f) between the formatted fields of one commit, and
+# the record separator git itself inserts between commits when `-z` is passed
+# (NUL, 0x00). Both are control characters that cannot appear in commit
+# metadata, so the parse needs no quoting/escaping dance.
+_FIELD_SEP = b"\x1f"
+_RECORD_SEP = b"\x00"
+
+# The 11 fields we request, in order. Kept as a module constant so the parser's
+# unpacking and the format string below can't drift apart.
+#   %H  full hash        %h  abbrev hash      %P  parent hashes (space-sep)
+#   %an author name      %ae author email     %aI author date (strict ISO)
+#   %ar relative date    %s  subject          %b  body
+#   %D  ref names        <trailers: Symmetria-Agent-Id value(s)>
+_LOG_FIELD_COUNT = 11
+_LOG_FORMAT = (
+    "%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%ar%x1f%s%x1f%b%x1f%D%x1f"
+    "%(trailers:key=Symmetria-Agent-Id,valueonly,separator=%x20)"
+)
+
+
+@dataclass(slots=True, frozen=True)
+class CommitRow:
+    """One commit, normalized for the history list model.
+
+    ``additions``/``deletions`` default to 0 and are NOT populated in v0 — the
+    log listing carries metadata only; per-commit line counts are shown in the
+    detail view (from ``git show``) and the list-level totals are a deferred
+    enhancement. The roles exist so the model schema is forward-compatible.
+
+    ``agent_id`` is the value of a ``Symmetria-Agent-Id`` commit trailer when
+    present (empty otherwise) — the agent-correlation seam. ``seen`` is the
+    review-frontier flag, always ``False`` in v0 (no persistence yet).
+    """
+
+    hash: str
+    abbrev_hash: str
+    parents: tuple[str, ...]
+    author_name: str
+    author_email: str
+    author_date_iso: str
+    relative_date: str
+    subject: str
+    body: str
+    refs: str
+    agent_id: str = ""
+    additions: int = 0
+    deletions: int = 0
+    seen: bool = False
+
+
+def parse_git_log(blob: bytes) -> list[CommitRow]:
+    """Parse ``git log -z --pretty=format:<_LOG_FORMAT>`` stdout into rows.
+
+    Pure function — no subprocess, no Qt. Commits are NUL-separated; fields
+    within a commit are 0x1f-separated. Malformed records (wrong field count)
+    are skipped with a warning rather than crashing the scan.
+    """
+    rows: list[CommitRow] = []
+    for record in blob.split(_RECORD_SEP):
+        if not record:
+            # Trailing empty chunk after the final separator, or a stray NUL.
+            continue
+        fields = record.split(_FIELD_SEP)
+        if len(fields) < _LOG_FIELD_COUNT:
+            log.warning(
+                "git log record had %d fields, expected %d — skipped",
+                len(fields),
+                _LOG_FIELD_COUNT,
+            )
+            continue
+        text = [f.decode("utf-8", errors="replace") for f in fields[:_LOG_FIELD_COUNT]]
+        (
+            full_hash,
+            abbrev,
+            parents_raw,
+            an,
+            ae,
+            aiso,
+            ar,
+            subject,
+            body,
+            refs,
+            trailer,
+        ) = text
+        rows.append(
+            CommitRow(
+                hash=full_hash,
+                abbrev_hash=abbrev,
+                parents=tuple(p for p in parents_raw.split(" ") if p),
+                author_name=an,
+                author_email=ae,
+                author_date_iso=aiso,
+                relative_date=ar,
+                subject=subject,
+                body=body.rstrip("\n"),
+                refs=refs,
+                agent_id=trailer.strip(),
+            )
+        )
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Worker request shapes. A small typed tuple is enough — the queue carries
+# ("log", asked_root, skip) and ("diff", resolved_root, commit_hash). The repo
+# root travels WITH the request so the worker never reads mutable GUI state mid-
+# scan, and the apply step can compare it against the live root (race guard).
+# ---------------------------------------------------------------------------
+_REQ_LOG = "log"
+_REQ_DIFF = "diff"
+_STOP = None  # sentinel pushed by stop() to unblock the worker's queue.get()
+
+
+class GitLogController(QObject):
+    """Async, read-only git-history provider for the history surface.
+
+    Threading model (mirrors ``GitController``):
+      - The GUI thread constructs this, calls ``set_repo_root`` / ``reload`` /
+        ``load_more`` / ``request_diff``, and reads the exposed properties.
+      - A daemon worker thread drains ``_queue`` running ``git rev-parse`` +
+        ``git log`` + ``git show`` so the GUI never blocks on git.
+      - The worker stores results under ``_lock`` and emits a parameterless
+        ``logChanged`` / ``commitDiffChanged``; receivers use
+        ``Qt.QueuedConnection`` to hop onto the GUI thread (§4 P2).
+
+    Lifecycle: construct on the GUI thread, bind ``set_repo_root`` to the
+    project anchor (same source that drives ``GitController``), call ``stop()``
+    at teardown (sets ``_stop_event``, pushes the sentinel, joins ≤1s).
+    """
+
+    repoRootChanged = Signal()
+    logChanged = Signal()
+    hasMoreChanged = Signal()
+    commitDiffChanged = Signal()
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+
+        # `_repo_root` is the path we're ASKED to show history for (the project
+        # anchor). `_resolved_root` is what `git rev-parse --show-toplevel`
+        # returned — they differ when the anchor is a subdir/worktree. The
+        # worker resolves; `repoRoot` exposes the resolved value to QML.
+        self._repo_root: str = ""
+        self._resolved_root: str = ""
+
+        self._commits: list[CommitRow] = []
+        self._has_more: bool = False
+        self._current_diff_hash: str = ""
+        self._current_diff_text: str = ""
+
+        # Guards `_commits`, `_resolved_root`, `_has_more`, and the diff fields
+        # against the worker mutating them while the GUI thread reads.
+        self._lock = threading.Lock()
+
+        # Worker lifecycle: a request queue + a stop event. The sentinel pushed
+        # by stop() is what unblocks the worker's blocking `_queue.get()`.
+        self._queue: queue.Queue = queue.Queue()
+        self._stop_event = threading.Event()
+        self._worker = threading.Thread(
+            target=self._run_loop,
+            daemon=True,
+            name="git-log-worker",
+        )
+        self._worker.start()
+
+    # -- QML-facing properties --------------------------------------------
+
+    @Property(str, notify=repoRootChanged)
+    def repoRoot(self) -> str:
+        """The RESOLVED repo root (``git rev-parse --show-toplevel``)."""
+        with self._lock:
+            return self._resolved_root
+
+    @Property(bool, notify=hasMoreChanged)
+    def hasMore(self) -> bool:
+        """True when ``load_more`` would fetch additional older commits."""
+        with self._lock:
+            return self._has_more
+
+    @Property(str, notify=commitDiffChanged)
+    def currentDiffHash(self) -> str:
+        """Hash of the commit whose diff ``currentDiffText`` currently holds."""
+        with self._lock:
+            return self._current_diff_hash
+
+    @Property(str, notify=commitDiffChanged)
+    def currentDiffText(self) -> str:
+        """Unified-diff text of the selected commit (patch only, no header)."""
+        with self._lock:
+            return self._current_diff_text
+
+    def commits(self) -> list[CommitRow]:
+        """Snapshot the commit list for the model (GUI thread, under lock)."""
+        with self._lock:
+            return list(self._commits)
+
+    # -- QML-facing slots --------------------------------------------------
+
+    def set_repo_root(self, value: str) -> None:
+        """Switch the repo whose history is shown. Idempotent on equal values.
+
+        Clears the commit list synchronously (so the UI doesn't show the
+        previous project's history for the window before the worker responds)
+        and enqueues a fresh page-0 load.
+        """
+        if value == self._repo_root:
+            return
+        self._repo_root = value
+        self.repoRootChanged.emit()
+        with self._lock:
+            self._commits = []
+            self._has_more = False
+            self._current_diff_hash = ""
+            self._current_diff_text = ""
+        self.logChanged.emit()
+        self.commitDiffChanged.emit()
+        self.hasMoreChanged.emit()
+        if value:
+            self._queue.put((_REQ_LOG, value, 0))
+
+    @Slot()
+    def reload(self) -> None:
+        """Re-fetch page 0 for the current repo (replace the commit list)."""
+        if self._repo_root:
+            self._queue.put((_REQ_LOG, self._repo_root, 0))
+
+    @Slot()
+    def load_more(self) -> None:
+        """Fetch the next page of older commits and append it.
+
+        No-op when a load is unnecessary (no repo, or the last page already
+        returned fewer than ``_PAGE_SIZE`` rows). ``skip`` is the current
+        commit count, read under the lock on the GUI thread.
+        """
+        with self._lock:
+            if not self._has_more:
+                return
+            skip = len(self._commits)
+        if self._repo_root:
+            self._queue.put((_REQ_LOG, self._repo_root, skip))
+
+    @Slot(str)
+    def request_diff(self, commit_hash: str) -> None:
+        """Load one commit's diff into ``currentDiffText`` (async)."""
+        if not commit_hash:
+            return
+        with self._lock:
+            resolved = self._resolved_root
+        if resolved:
+            self._queue.put((_REQ_DIFF, resolved, commit_hash))
+
+    # -- Lifecycle ---------------------------------------------------------
+
+    def stop(self) -> None:
+        """Signal the worker to exit and join it (≤1s).
+
+        Sets ``_stop_event`` and pushes the ``_STOP`` sentinel so the worker's
+        blocking ``_queue.get()`` returns and the loop sees the stop flag.
+        """
+        self._stop_event.set()
+        self._queue.put(_STOP)
+        self._worker.join(timeout=1.0)
+
+    # -- Worker thread -----------------------------------------------------
+
+    def _run_loop(self) -> None:
+        """Worker main: drain the request queue until stopped. Never raises."""
+        while not self._stop_event.is_set():
+            request = self._queue.get()
+            if request is _STOP or self._stop_event.is_set():
+                return
+            try:
+                kind = request[0]
+                if kind == _REQ_LOG:
+                    self._do_log(asked_root=request[1], skip=request[2])
+                elif kind == _REQ_DIFF:
+                    self._do_diff(resolved_root=request[1], commit_hash=request[2])
+            except Exception:  # noqa: BLE001
+                # The worker must NEVER crash — a dead daemon thread would
+                # leave every future request stuck in the queue forever.
+                log.exception("git-log worker request failed: %r", request)
+
+    def _do_log(self, *, asked_root: str, skip: int) -> None:
+        """Resolve the repo, fetch one page, apply it under the race guard."""
+        resolved = self._resolve_repo_root(asked_root)
+        rows = self._run_log(resolved, skip=skip) if resolved else []
+        has_more = len(rows) == _PAGE_SIZE
+
+        with self._lock:
+            # Race guard: a project switch may have landed while this scan ran.
+            # Dropping the stale result keeps another repo's commits out of the
+            # model. (`set_repo_root` already cleared + re-enqueued the new one.)
+            if asked_root != self._repo_root:
+                return
+            self._resolved_root = resolved
+            if skip == 0:
+                self._commits = rows
+            else:
+                self._commits = [*self._commits, *rows]
+            old_has_more = self._has_more
+            self._has_more = has_more
+
+        # gc.disable around the cross-thread emits — gotcha #10 (Python 3.14
+        # cyclic GC racing the Qt receiver-side wrapper allocation while the
+        # worker is mid signal-dispatch). One window covers all three.
+        gc.disable()
+        try:
+            self.repoRootChanged.emit()
+            self.logChanged.emit()
+            if old_has_more != has_more:
+                self.hasMoreChanged.emit()
+        finally:
+            gc.enable()
+
+    def _do_diff(self, *, resolved_root: str, commit_hash: str) -> None:
+        """Fetch one commit's patch and publish it to the diff properties."""
+        text = self._run_show(resolved_root, commit_hash)
+
+        with self._lock:
+            if resolved_root != self._resolved_root:
+                return
+            self._current_diff_hash = commit_hash
+            self._current_diff_text = text
+
+        gc.disable()
+        try:
+            self.commitDiffChanged.emit()
+        finally:
+            gc.enable()
+
+    # -- Subprocess shells (worker thread only) ----------------------------
+
+    def _resolve_repo_root(self, asked: str) -> str:
+        """Run ``git rev-parse --show-toplevel``. Empty string = not a repo."""
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=asked,
+                capture_output=True,
+                timeout=_RESOLVE_TIMEOUT_SEC,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            log.debug("git rev-parse failed for %s: %s", asked, exc)
+            return ""
+        if proc.returncode != 0:
+            return ""
+        return proc.stdout.decode("utf-8", errors="replace").strip()
+
+    def _run_log(self, cwd: str, *, skip: int) -> list[CommitRow]:
+        """Run ``git log -z`` for one page and parse it. ``[]`` on failure."""
+        try:
+            proc = subprocess.run(
+                [
+                    "git",
+                    "log",
+                    "-z",
+                    "--no-color",
+                    f"--max-count={_PAGE_SIZE}",
+                    f"--skip={skip}",
+                    f"--pretty=format:{_LOG_FORMAT}",
+                ],
+                cwd=cwd,
+                capture_output=True,
+                timeout=_LOG_TIMEOUT_SEC,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            log.warning("git log failed for %s: %s", cwd, exc)
+            return []
+        if proc.returncode != 0:
+            log.warning(
+                "git log exited %d for %s: %s",
+                proc.returncode,
+                cwd,
+                proc.stderr.decode("utf-8", errors="replace").strip(),
+            )
+            return []
+        return parse_git_log(proc.stdout)
+
+    def _run_show(self, cwd: str, commit_hash: str) -> str:
+        """Run ``git show <hash>`` and return the patch text only.
+
+        ``--format=%x00`` emits a single NUL where the commit header would be,
+        so everything after the first NUL is the raw patch — a robust way to
+        strip git's default decorated header without an empty-format edge case.
+        Truncated at ``_DIFF_CHAR_CAP`` with a visible notice.
+        """
+        try:
+            proc = subprocess.run(
+                [
+                    "git",
+                    "show",
+                    "--no-color",
+                    "--format=%x00",
+                    "--patch",
+                    commit_hash,
+                ],
+                cwd=cwd,
+                capture_output=True,
+                timeout=_SHOW_TIMEOUT_SEC,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            log.warning("git show failed for %s @ %s: %s", commit_hash, cwd, exc)
+            return ""
+        if proc.returncode != 0:
+            log.warning(
+                "git show exited %d for %s @ %s: %s",
+                proc.returncode,
+                commit_hash,
+                cwd,
+                proc.stderr.decode("utf-8", errors="replace").strip(),
+            )
+            return ""
+        out = proc.stdout.decode("utf-8", errors="replace")
+        _, sep, patch = out.partition("\x00")
+        text = (patch if sep else out).lstrip("\n")
+        if len(text) > _DIFF_CHAR_CAP:
+            text = (
+                text[:_DIFF_CHAR_CAP]
+                + f"\n\n… diff truncated at {_DIFF_CHAR_CAP:,} characters …"
+            )
+        return text
+
+
+# ---------------------------------------------------------------------------
+
+
+class GitLogListModel(QAbstractListModel):
+    """Flat list of commits, projected from ``GitLogController``.
+
+    Auto-refreshes on the controller's ``logChanged`` signal. A page-0 load
+    (or repo switch) is a full ``modelReset``; a "load more" append that simply
+    extends the existing prefix uses ``beginInsertRows`` so the ListView keeps
+    its scroll position instead of snapping to the top.
+
+    Roles (kebab-case bytes for QML):
+      ``hash`` ``abbrevHash`` ``parents`` ``authorName`` ``authorEmail``
+      ``dateIso`` ``relativeDate`` ``subject`` ``body`` ``refs`` ``agentId``
+      ``additions`` ``deletions`` ``seen``
+    """
+
+    HashRole = Qt.ItemDataRole.UserRole + 1
+    AbbrevHashRole = Qt.ItemDataRole.UserRole + 2
+    ParentsRole = Qt.ItemDataRole.UserRole + 3
+    AuthorNameRole = Qt.ItemDataRole.UserRole + 4
+    AuthorEmailRole = Qt.ItemDataRole.UserRole + 5
+    DateIsoRole = Qt.ItemDataRole.UserRole + 6
+    RelativeDateRole = Qt.ItemDataRole.UserRole + 7
+    SubjectRole = Qt.ItemDataRole.UserRole + 8
+    BodyRole = Qt.ItemDataRole.UserRole + 9
+    RefsRole = Qt.ItemDataRole.UserRole + 10
+    AgentIdRole = Qt.ItemDataRole.UserRole + 11
+    AdditionsRole = Qt.ItemDataRole.UserRole + 12
+    DeletionsRole = Qt.ItemDataRole.UserRole + 13
+    SeenRole = Qt.ItemDataRole.UserRole + 14
+
+    countChanged = Signal()
+
+    def __init__(
+        self,
+        controller: GitLogController,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._controller = controller
+        self._rows: list[CommitRow] = []
+        # The controller emits `logChanged` on the worker thread (the emit is
+        # gc.disable-guarded per gotcha #10). Receivers MUST use QueuedConnection
+        # to hop onto the GUI thread before mutating the model — a direct
+        # connection would call begin/endResetModel from the worker and crash
+        # Qt's model/view invariants.
+        # queued: GitLogController worker → GitLogListModel GUI (§4 P2)
+        self._controller.logChanged.connect(
+            self._refresh,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    def roleNames(self) -> dict[int, bytes]:
+        return {
+            self.HashRole: b"hash",
+            self.AbbrevHashRole: b"abbrevHash",
+            self.ParentsRole: b"parents",
+            self.AuthorNameRole: b"authorName",
+            self.AuthorEmailRole: b"authorEmail",
+            self.DateIsoRole: b"dateIso",
+            self.RelativeDateRole: b"relativeDate",
+            self.SubjectRole: b"subject",
+            self.BodyRole: b"body",
+            self.RefsRole: b"refs",
+            self.AgentIdRole: b"agentId",
+            self.AdditionsRole: b"additions",
+            self.DeletionsRole: b"deletions",
+            self.SeenRole: b"seen",
+        }
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: B008 — QModelIndex() default required by Qt; ARG002 — parent unused per QAbstractListModel contract
+        return len(self._rows)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or index.row() >= len(self._rows):
+            return None
+        row = self._rows[index.row()]
+        if role == self.HashRole:
+            return row.hash
+        if role == self.AbbrevHashRole:
+            return row.abbrev_hash
+        if role == self.ParentsRole:
+            return list(row.parents)
+        if role == self.AuthorNameRole:
+            return row.author_name
+        if role == self.AuthorEmailRole:
+            return row.author_email
+        if role == self.DateIsoRole:
+            return row.author_date_iso
+        if role == self.RelativeDateRole:
+            return row.relative_date
+        if role == self.SubjectRole:
+            return row.subject
+        if role == self.BodyRole:
+            return row.body
+        if role == self.RefsRole:
+            return row.refs
+        if role == self.AgentIdRole:
+            return row.agent_id
+        if role == self.AdditionsRole:
+            return row.additions
+        if role == self.DeletionsRole:
+            return row.deletions
+        if role == self.SeenRole:
+            return row.seen
+        return None
+
+    @Property(int, notify=countChanged)
+    def count(self) -> int:
+        """Row count as a bindable property (`visible: model.count > 0`)."""
+        return len(self._rows)
+
+    @Slot()
+    def _refresh(self) -> None:
+        """Rebuild rows from the controller. Append-aware to preserve scroll.
+
+        Runs on the GUI thread (the controller's signal is queued). When the new
+        list strictly extends the current one (a "load more" append), we splice
+        in only the tail via ``beginInsertRows`` so the ListView's contentY is
+        undisturbed. Any other change (fresh load, repo switch, clear) is a full
+        ``modelReset``.
+        """
+        new_rows = self._controller.commits()
+        old_len = len(self._rows)
+        new_len = len(new_rows)
+        is_pure_append = (
+            new_len > old_len and old_len > 0 and new_rows[:old_len] == self._rows
+        )
+        if is_pure_append:
+            self.beginInsertRows(QModelIndex(), old_len, new_len - 1)
+            self._rows = new_rows
+            self.endInsertRows()
+        else:
+            if new_rows == self._rows:
+                return
+            self.beginResetModel()
+            self._rows = new_rows
+            self.endResetModel()
+        if new_len != old_len:
+            self.countChanged.emit()

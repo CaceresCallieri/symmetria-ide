@@ -58,6 +58,7 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
     CompletionModel,
 )
 from .git_controller import GitController, GitStatusListModel
+from .git_log_controller import GitLogController, GitLogListModel
 from .minimap_model import MinimapModel
 from .minimap_view import MinimapView  # noqa: F401 — side-effect: @QmlElement registration
 from .editor_font import DEFAULT_FONT_POINT_SIZE, default_font
@@ -685,6 +686,15 @@ class AppController(QObject):
         # the panel's ListView. Auto-refreshes on the controller's
         # statusChanged via a queued connection (handled internally).
         self._git_status_list = GitStatusListModel(self._git_controller, self)
+        # ----- Git HISTORY provider (read-only comprehension surface) ------
+        # The read-only counterpart to GitController: where the status
+        # controller answers "what is uncommitted right now", this answers
+        # "how did the repo get here" (committed log + per-commit diffs).
+        # Request-driven (no watcher/debounce); shares the same anchored
+        # root via `_sync_git_repo_root` below. Backs the "git" central
+        # surface (the history viewer) — see qml/githistory/.
+        self._git_log_controller = GitLogController(self)
+        self._git_log_model = GitLogListModel(self._git_log_controller, self)
         # Real-time external-reload: when the working tree settles after a
         # change (agent Edit/Write picked up by the recursive watcher, a
         # shell-pane append, an editor-save poke, or a branch switch), tell
@@ -1595,6 +1605,22 @@ class AppController(QObject):
         """
         return self._git_status_list
 
+    @Property(QObject, constant=True)
+    def gitLogController(self) -> QObject:
+        """The read-only `GitLogController` exposed to QML.
+
+        Backs the "git" central surface (the history viewer in
+        qml/githistory/). Identity-stable like `gitController` — the
+        anchored root and commit list change internally, the object
+        doesn't.
+        """
+        return self._git_log_controller
+
+    @Property(QObject, constant=True)
+    def gitLogModel(self) -> QObject:
+        """Flat list model of commits for the history viewer's list pane."""
+        return self._git_log_model
+
     @Property(list, notify=expandedPathsCacheChanged)
     def expandedPathsCache(self) -> list[str]:
         """Saved expanded-paths list for the current displayed root.
@@ -1669,6 +1695,9 @@ class AppController(QObject):
         path costs one comparison.
         """
         self._git_controller.set_repo_root(self.displayedRoot)
+        # The history viewer tracks the SAME anchored root — one anchor, both
+        # the status badges and the log. Also idempotent on equal values.
+        self._git_log_controller.set_repo_root(self.displayedRoot)
 
     @Slot()
     def _sync_nvim_cwd(self) -> None:
@@ -1758,16 +1787,26 @@ class AppController(QObject):
         """
         return self._central_surface == "agent"
 
+    @Property(bool, notify=centralSurfaceChanged)
+    def gitVisible(self) -> bool:
+        """True when the git-history viewer owns the central area.
+
+        The read-only comprehension surface (qml/githistory/) — a sibling
+        of editor/terminal/agent under `mainContent`, gated on the same
+        single `centralSurfaceChanged` notify so the booleans stay XOR.
+        """
+        return self._central_surface == "git"
+
     @Slot(str)
     def set_central_surface(self, surface: str) -> None:
-        """Make `surface` ("terminal" | "editor" | "agent") the central one.
+        """Make `surface` ("terminal" | "editor" | "agent" | "git") central.
 
         Idempotent (no signal on no-op) and validating — the generic
         primitive behind the StatusBar switcher segments and
         `focus_agent`'s auto-switch. The dedicated `swap_to_*` slots
         remain as chord-facing wrappers.
         """
-        if surface not in ("terminal", "editor", "agent"):
+        if surface not in ("terminal", "editor", "agent", "git"):
             log.warning("set_central_surface: unknown surface %r — no-op", surface)
             return
         if self._central_surface == surface:
@@ -1818,6 +1857,25 @@ class AppController(QObject):
             self.swap_to_terminal()
         else:
             self.swap_to_editor()
+
+    @Slot()
+    def swap_to_git(self) -> None:
+        """Make the git-history viewer the visible central surface."""
+        self.set_central_surface("git")
+
+    @Slot()
+    def toggle_git_history(self) -> None:
+        """Flip the central surface between the git viewer and the terminal.
+
+        Bound to `Ctrl+Shift+G`. Same asymmetry as `toggle_editor_terminal`:
+        'G' names the history viewer, so the chord always lands you there
+        unless you were already on it, in which case it returns you to the
+        terminal. Always emits exactly one `centralSurfaceChanged`.
+        """
+        if self._central_surface == "git":
+            self.swap_to_terminal()
+        else:
+            self.swap_to_git()
 
     @Slot()
     def focus_terminal(self) -> None:
@@ -3020,6 +3078,8 @@ class AppController(QObject):
         # we want it joined before the event loop tears down so its
         # cross-thread emit can't fire into a half-destroyed receiver.
         self._git_controller.stop()
+        # Same join-before-teardown rationale for the history worker.
+        self._git_log_controller.stop()
         # Ask nvim to quit GRACEFULLY over the RPC socket (`_backend.stop()`
         # sends `qa!` + closes the client) so it writes shada/swap cleanly.
         # The terminal widgets (editor nvim + shell) are owned by their
@@ -3195,6 +3255,13 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # changes identity, whereas a context property is rebound implicitly.
     ctx.setContextProperty("gitController", controller.gitController)
     ctx.setContextProperty("gitStatusList", controller.gitStatusList)
+    # Git HISTORY provider — backs the "git" central surface (the read-only
+    # history viewer). Same binding-friendly context-property rationale as the
+    # status provider above; the QML githistory views inject these as their
+    # `logController` / `logModel` rather than reaching for globals (so the
+    # subtree stays extraction-ready for a future Symmetria.Git.UI module).
+    ctx.setContextProperty("gitLogController", controller.gitLogController)
+    ctx.setContextProperty("gitLogModel", controller.gitLogModel)
     # NB: previously this block also exposed `sessionHost` and
     # `sessionModel` as context properties pointing at the focused
     # slot. Those have been removed for two reasons:

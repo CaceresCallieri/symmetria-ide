@@ -74,6 +74,7 @@ Rectangle {
                 { surface: "terminal", label: "terminal" },
                 { surface: "editor", label: "editor" },
                 { surface: "agent", label: "agents" },
+                { surface: "git", label: "history" },
             ]
 
             delegate: Item {

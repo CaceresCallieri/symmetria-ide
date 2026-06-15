@@ -17,6 +17,7 @@ import QMLTermWidget 2.0
 import Symmetria.Ide 1.0
 import Symmetria.FileManager.UI as FmUi
 import "design"
+import "githistory"
 
 Window {
     id: root
@@ -122,6 +123,17 @@ Window {
         sequences: ["Ctrl+Shift+E"]
         context: Qt.ApplicationShortcut
         onActivated: controller.toggle_editor_terminal()
+    }
+
+    // Git-history viewer toggle. 'G' names the history surface, so this
+    // always lands you there unless you were already on it, in which case
+    // it returns you to the terminal (same asymmetry as Ctrl+Shift+E). The
+    // viewer is the read-only comprehension surface for catching up on
+    // agent-authored commits — see qml/githistory/.
+    Shortcut {
+        sequences: ["Ctrl+Shift+G"]
+        context: Qt.ApplicationShortcut
+        onActivated: controller.toggle_git_history()
     }
 
     // IDE-wide file-manager toggle. Promoted out of the nvim layer
@@ -428,6 +440,8 @@ Window {
                 // slot — the delegate's onFocusAgentRequested handler lands
                 // it on the visible agent terminal.
                 controller.focus_agent(controller.focusedAgent);
+            else if (controller.gitVisible)
+                gitHistoryView.focusContent();
             else if (controller.terminalVisible)
                 terminalView.forceActiveFocus();
             else
@@ -1033,6 +1047,23 @@ Window {
                             }
                         }
                     }
+                }
+
+                // Git-history viewer — sibling central surface (read-only
+                // comprehension surface). Gated on the same XOR as the editor/
+                // terminal/agent siblings; `gitVisible` is derived from
+                // `centralSurface == "git"`. Injects the history controller +
+                // model (context properties) rather than reaching for globals,
+                // so the subtree extracts cleanly into a future
+                // Symmetria.Git.UI module. Ctrl+Shift+G toggles it.
+                GitHistoryView {
+                    id: gitHistoryView
+                    anchors.fill: parent
+                    visible: !controller.agentVisible && !controller.fmVisible && controller.gitVisible
+                    focus: visible
+                    logController: gitLogController
+                    logModel: gitLogModel
+                    onVisibleChanged: if (visible) focusContent()
                 }
 
                 // REGRESSION NOTE: a 2026-05-23 experiment wrapped AgentPane
