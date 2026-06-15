@@ -660,7 +660,11 @@ Window {
                         id: editorSession
                         shellProgram: editorProgram
                         shellProgramArgs: editorArgs
-                        initialWorkingDirectory: controller.displayedRoot
+                        // `editorRoot`, NOT `displayedRoot`: nvim's cwd is held
+                        // off $HOME (fff.nvim recursive-watch thermal bug). The
+                        // shell pane below deliberately keeps `displayedRoot` so
+                        // it starts at $HOME and `workspace_autocd` fires.
+                        initialWorkingDirectory: controller.editorRoot
                         // nvim exiting (`:qa`) tears down the IDE — same
                         // semantics as the `backend.closed` wire, which also
                         // fires when the RPC socket drops. Route through the

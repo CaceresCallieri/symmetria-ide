@@ -18,8 +18,10 @@ import pytest
 
 from symmetria_ide.app import (
     _apply_project_arg,
+    _clamp_editor_root,
     _reap_orphan_nvim_sockets,
     _resolve_launch_dir,
+    _scratch_dir,
     _socket_is_live,
 )
 
@@ -79,70 +81,88 @@ def test_tilde_is_expanded(tmp_path, monkeypatch):
     assert os.path.realpath(os.getcwd()) == os.path.realpath(str(tmp_path))
 
 
-def test_no_arg_from_home_redirects_to_scratch(tmp_path, monkeypatch):
-    """The thermal-bug guard: launching with no arg from $HOME must NOT keep
-    $HOME as the cwd (fff.nvim would recursively watch the whole home tree).
-    `_apply_project_arg` chdir's into an inert scratch dir and creates it."""
+def test_no_arg_from_home_stays_at_home(tmp_path, monkeypatch):
+    """Launching with no arg from $HOME must KEEP $HOME as the process cwd — the
+    shell pane starts there so `workspace_autocd` (gated on `$PWD == $HOME`)
+    fires. The fff.nvim thermal guard is applied at the nvim seam instead
+    (`_clamp_editor_root`), not by redirecting the process cwd."""
     home = tmp_path / "home"
     home.mkdir()
-    state = tmp_path / "state"
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_STATE_HOME", str(state))
     os.chdir(home)  # launch cwd == $HOME
 
     _apply_project_arg(["symmetria-ide"])
 
-    expected = state / "symmetria-ide" / "scratch"
-    assert os.path.realpath(os.getcwd()) == os.path.realpath(str(expected))
-    assert expected.is_dir()
+    assert os.path.realpath(os.getcwd()) == os.path.realpath(str(home))
 
 
 class TestResolveLaunchDir:
-    """Pure decision helper behind `_apply_project_arg` — no chdir side effect."""
+    """Pure decision helper behind `_apply_project_arg` — no chdir side effect.
+
+    Post-fix it only resolves an explicit path arg; the no-arg $HOME thermal
+    redirect moved to `_clamp_editor_root` (see `TestClampEditorRoot`)."""
 
     def test_valid_path_arg_returns_abspath(self, tmp_path):
-        assert _resolve_launch_dir(
-            cwd="/anywhere", home="/home/u", path_arg=str(tmp_path)
-        ) == os.path.abspath(str(tmp_path))
+        assert _resolve_launch_dir(str(tmp_path)) == os.path.abspath(str(tmp_path))
 
     def test_invalid_path_arg_returns_none(self):
-        assert (
-            _resolve_launch_dir(
-                cwd="/anywhere", home="/home/u", path_arg="/no/such/dir/xyz123"
-            )
-            is None
-        )
+        assert _resolve_launch_dir("/no/such/dir/xyz123") is None
 
-    def test_home_cwd_no_arg_returns_scratch(self, tmp_path, monkeypatch):
+    def test_no_arg_returns_none(self):
+        # No arg → stay in the launch cwd (the caller does not chdir).
+        assert _resolve_launch_dir(None) is None
+
+
+class TestClampEditorRoot:
+    """`_clamp_editor_root` holds the embedded nvim's cwd off $HOME / `/`."""
+
+    def test_home_is_redirected_to_scratch(self, tmp_path, monkeypatch):
         state = tmp_path / "state"
         monkeypatch.setenv("XDG_STATE_HOME", str(state))
         home = str(tmp_path / "home")
         os.makedirs(home, exist_ok=True)
-        result = _resolve_launch_dir(cwd=home, home=home, path_arg=None)
+        result = _clamp_editor_root(home, home)
         assert result == str(state / "symmetria-ide" / "scratch")
+        assert os.path.isdir(result), "scratch dir is created on demand"
 
-    def test_filesystem_root_cwd_no_arg_returns_scratch(self, tmp_path, monkeypatch):
+    def test_filesystem_root_is_redirected_to_scratch(self, tmp_path, monkeypatch):
         state = tmp_path / "state"
         monkeypatch.setenv("XDG_STATE_HOME", str(state))
-        result = _resolve_launch_dir(cwd="/", home=str(tmp_path), path_arg=None)
+        result = _clamp_editor_root("/", str(tmp_path))
         assert result == str(state / "symmetria-ide" / "scratch")
 
-    def test_normal_project_cwd_no_arg_returns_none(self, tmp_path):
+    def test_real_project_passes_through(self, tmp_path):
         proj = str(tmp_path / "proj")
         os.makedirs(proj, exist_ok=True)
-        assert (
-            _resolve_launch_dir(cwd=proj, home=str(tmp_path / "home"), path_arg=None)
-            is None
-        )
+        assert _clamp_editor_root(proj, str(tmp_path / "home")) == proj
 
-    def test_scratch_falls_back_to_local_state_when_xdg_unset(
-        self, tmp_path, monkeypatch
-    ):
+    def test_empty_root_passes_through(self, tmp_path):
+        # Pre-first-cwd-capsule window — empty string is left untouched so the
+        # `if not root` guards downstream still short-circuit.
+        assert _clamp_editor_root("", str(tmp_path)) == ""
+
+
+class TestScratchDir:
+    """`_scratch_dir` resolves the inert nvim parking directory."""
+
+    def test_uses_xdg_state_home_when_absolute(self, tmp_path, monkeypatch):
+        state = tmp_path / "state"
+        monkeypatch.setenv("XDG_STATE_HOME", str(state))
+        assert _scratch_dir(str(tmp_path)) == str(state / "symmetria-ide" / "scratch")
+
+    def test_falls_back_to_local_state_when_xdg_unset(self, tmp_path, monkeypatch):
         monkeypatch.delenv("XDG_STATE_HOME", raising=False)
         home = str(tmp_path / "home")
-        os.makedirs(home, exist_ok=True)
-        result = _resolve_launch_dir(cwd=home, home=home, path_arg=None)
-        assert result == os.path.join(
+        assert _scratch_dir(home) == os.path.join(
+            home, ".local", "state", "symmetria-ide", "scratch"
+        )
+
+    def test_ignores_relative_xdg_state_home(self, tmp_path, monkeypatch):
+        # A relative XDG_STATE_HOME would resolve under the (escaped) cwd — the
+        # helper must ignore it and fall back to ~/.local/state.
+        monkeypatch.setenv("XDG_STATE_HOME", "relative/state")
+        home = str(tmp_path / "home")
+        assert _scratch_dir(home) == os.path.join(
             home, ".local", "state", "symmetria-ide", "scratch"
         )
 

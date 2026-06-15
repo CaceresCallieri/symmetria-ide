@@ -13,10 +13,9 @@ The embedded editor nvim loads the user's real `~/.config/nvim`, which includes
 `vim.fn.getcwd()` (`conf.lua`) and has **no ignore-glob config** (only
 `max_results`; it honors `.gitignore` only when rooted inside a repo).
 
-The IDE feeds nvim its cwd through ONE chokepoint: `_apply_project_arg`
-(`os.chdir`) → `os.getcwd()` → `AppController._cwd` → `displayedRoot` →
-`initialWorkingDirectory` on the QMLTermSessions. So if the IDE is launched from
-`$HOME` with no project arg, nvim's cwd is `$HOME`, and the first fff picker use
+nvim's cwd comes from `displayedRoot` (← `os.getcwd()` ← `AppController._cwd`,
+then updated by shell/`:cd` cwd-sync). So if the IDE is launched from `$HOME`
+with no project arg, nvim's cwd would be `$HOME`, and the first fff picker use
 (`<leader>ff`) makes its Rust backend recursively index/watch the entire home
 tree (`.cache`/`.steam`/browser profiles) → inotify event storm → ~6 pinned
 cores, 88 °C (relay 20260614-04*). It is NOT a regression in `runtime/` (that
@@ -27,12 +26,19 @@ git-gated and declines `$HOME` since it is not a repo).
 "watcher" and find only `WorktreeWatcher` — the real culprit lives in the
 **dotfiles** repo (`~/.dotfiles/.config/nvim/lua/jc/plugins/fff.lua`), not here.
 
-**How to apply:** the fix is two-repo. IDE side: `_resolve_launch_dir`
-(`app.py`) redirects a `$HOME`/`/` launch cwd to an inert
-`$XDG_STATE_HOME/symmetria-ide/scratch`. Dotfiles side: `fff.lua` sets
-`base_path` via an upward `.git` search with a non-`$HOME` scratch fallback
-(also protects standalone nvim). Do NOT revert either to plain `getcwd()`. fff's
-`DirChanged` autocmd re-roots to the RAW new cwd on `:cd`, so never `:cd` the
-embedded nvim to `$HOME` either. See also
+**How to apply:** the fix is two-repo. **IDE side: clamp ONLY nvim's cwd, NOT
+the process.** `_clamp_editor_root` (`app.py`) redirects a `$HOME`/`/` root to
+`$XDG_STATE_HOME/symmetria-ide/scratch`; the editor pane binds
+`initialWorkingDirectory: controller.editorRoot` (clamped) and `_sync_nvim_cwd`
+pushes the clamped value, so nvim is held off `$HOME` at launch AND on cwd-sync.
+The shell/file-tree/git panes keep `displayedRoot` — the shell MUST start at
+`$HOME` for `~/.dotfiles/.zshrc`'s `workspace_autocd` (gated on `$PWD == $HOME`)
+to fire. **Do NOT redirect the whole process cwd** (`os.chdir` away from
+`$HOME`): commit `d91539b` did exactly that and silently broke `workspace_autocd`
+(shell stuck in `…/scratch`); reverted in the follow-up that added `editorRoot`.
+Dotfiles side: `fff.lua` sets `base_path` via an upward `.git` search with a
+non-`$HOME` scratch fallback (also protects standalone nvim). Do NOT revert
+either to plain `getcwd()`. fff's `DirChanged` autocmd re-roots to the RAW new
+cwd on `:cd`, so never `:cd` the embedded nvim to `$HOME` either. See also
 [notification system](./notification_system.md) for other host-config facts the
 IDE inherits.

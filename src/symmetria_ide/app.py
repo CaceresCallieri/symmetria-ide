@@ -1394,6 +1394,20 @@ class AppController(QObject):
         return self._cwd
 
     @Property(str, notify=displayedRootChanged)
+    def editorRoot(self) -> str:
+        """`displayedRoot` clamped off `$HOME` for the embedded nvim's cwd.
+
+        The editor's QMLTermSession binds `initialWorkingDirectory:
+        controller.editorRoot` and `_sync_nvim_cwd` pushes the same value, so
+        nvim's cwd is held off `$HOME` both at launch AND on every cwd-sync.
+        Only the editor pane binds this; the shell, file tree, and git pane all
+        bind `displayedRoot` (they're fine at `$HOME`, and the shell MUST start
+        there for `workspace_autocd` to fire). See `_clamp_editor_root` for the
+        thermal-bug rationale and why the clamp moved here from the process cwd.
+        """
+        return _clamp_editor_root(self.displayedRoot, self._home)
+
+    @Property(str, notify=displayedRootChanged)
     def displayedRootCompact(self) -> str:
         """`displayedRoot` rendered with `$HOME` collapsed to `~`.
 
@@ -1658,8 +1672,14 @@ class AppController(QObject):
         startup ordering shuffles around — `_sync_nvim_cwd` will simply
         miss the very first emission and the next one (or the explicit
         cwd capsule push that always follows VimEnter) will land.
+
+        The root is run through `_clamp_editor_root` so a shell that settles at
+        `$HOME` (a non-project Hyprland workspace, where `workspace_autocd`
+        bails) cannot push `$HOME` into nvim via cwd-sync and re-arm the
+        fff.nvim thermal runaway. nvim lands in the scratch dir instead; every
+        other pane still tracks the real `$HOME` via `displayedRoot`.
         """
-        root = self.displayedRoot
+        root = _clamp_editor_root(self.displayedRoot, self._home)
         if not root:
             return
         self._backend.set_current_dir(root)
@@ -3271,60 +3291,89 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     return engine
 
 
-def _resolve_launch_dir(cwd: str, home: str, path_arg: str | None) -> str | None:
-    """Decide which directory the IDE should `chdir` into at launch.
+def _scratch_dir(home: str) -> str:
+    """The inert, non-``$HOME`` directory the embedded nvim is parked in when
+    its project root would otherwise be ``$HOME``.
 
-    Returns the absolute directory to enter, or ``None`` to stay in ``cwd``.
-    Pure except for read-only filesystem probes (``isdir`` / ``realpath``), so
-    it is unit-testable without spawning the app.
-
-    Three cases:
-      - An explicit ``path_arg`` (``symmetria-ide <dir>``) → that directory, or
-        ``None`` (stay + the caller warns) when it is not a real directory.
-      - No arg and ``cwd`` is ``$HOME`` or filesystem root → an inert scratch
-        dir under ``$XDG_STATE_HOME/symmetria-ide/``. This is the thermal-bug
-        guard: EVERYTHING downstream derives the project root from the process
-        cwd (``AppController._cwd`` ← ``os.getcwd()`` → ``displayedRoot`` → the
-        QMLTermSessions' ``initialWorkingDirectory`` → the embedded nvim's cwd),
-        and fff.nvim's Rust ``notify`` watcher roots its recursive watch at
-        nvim's cwd with no ignore-glob config. A ``$HOME`` cwd therefore makes
-        it index/watch the entire home tree (``.cache``/``.steam``/browser
-        profiles) → ~6 pinned cores, 88 °C (relay 20260614). An empty scratch
-        dir is watched for ~nothing.
-      - No arg and ``cwd`` is a normal directory → ``None`` (open the project
-        the user launched from, as before).
+    Lives under ``$XDG_STATE_HOME/symmetria-ide/scratch``. A non-absolute
+    ``XDG_STATE_HOME`` is ignored (the spec requires absolute): a relative value
+    would resolve the scratch dir under the *current* cwd — which is ``$HOME``
+    in the very case we're escaping — re-rooting the watch inside the tree we
+    are trying to stay out of.
     """
-    if path_arg:
-        target = os.path.abspath(os.path.expanduser(path_arg))
-        return target if os.path.isdir(target) else None
-    if os.path.realpath(cwd) in (os.path.realpath(home), "/"):
-        # Ignore a non-absolute XDG_STATE_HOME (the spec requires absolute): a
-        # relative value would resolve the scratch dir under the current cwd —
-        # which is $HOME here — re-rooting the watch inside the very tree we are
-        # escaping.
-        state_home = os.environ.get("XDG_STATE_HOME")
-        if not state_home or not os.path.isabs(state_home):
-            state_home = os.path.join(home, ".local", "state")
-        return os.path.join(state_home, "symmetria-ide", "scratch")
-    return None
+    state_home = os.environ.get("XDG_STATE_HOME")
+    if not state_home or not os.path.isabs(state_home):
+        state_home = os.path.join(home, ".local", "state")
+    return os.path.join(state_home, "symmetria-ide", "scratch")
+
+
+def _clamp_editor_root(root: str, home: str) -> str:
+    """Hold the embedded nvim's cwd off ``$HOME`` (and the filesystem root).
+
+    fff.nvim (user-global config) recursively ``notify``-watches nvim's cwd with
+    no ignore-glob; rooted at ``$HOME`` it indexes the entire home tree
+    (``.cache``/``.steam``/browser profiles) → ~6 pinned cores, 88 °C (relay
+    20260614). Crucially, ONLY nvim has this problem — the shell, file tree, and
+    git pane are all fine at ``$HOME`` — so we clamp here, at the nvim seam, and
+    leave the process cwd alone.
+
+    An earlier fix (d91539b) redirected the whole *process* cwd to the scratch
+    dir, which fixed the thermal bug but silently broke the shell's
+    ``workspace_autocd`` (``~/.dotfiles/.zshrc``), whose first line is
+    ``[[ "$PWD" == "$HOME" ]] || return`` — once the shell pane no longer
+    started at ``$HOME`` the per-workspace zoxide ``cd`` never ran. Parking only
+    nvim leaves the shell at ``$HOME`` so that logic fires again; when it then
+    ``cd``s into a project, the existing cwd-sync drives nvim to that (non-home)
+    dir too, so nvim only ever sits in the scratch dir or a real project, never
+    ``$HOME``.
+
+    Returns ``root`` unchanged unless it resolves to ``$HOME`` or ``/``, in
+    which case it returns the scratch dir (created on demand). An empty ``root``
+    (pre-first-cwd-capsule window) passes through untouched.
+    """
+    if not root:
+        return root
+    if os.path.realpath(root) in (os.path.realpath(home), "/"):
+        scratch = _scratch_dir(home)
+        os.makedirs(scratch, exist_ok=True)
+        return scratch
+    return root
+
+
+def _resolve_launch_dir(path_arg: str | None) -> str | None:
+    """Resolve the explicit ``symmetria-ide <dir>`` argument to a chdir target.
+
+    Returns the absolute directory to enter, or ``None`` to stay in the launch
+    cwd — both when no arg was given (the default: open whatever dir the IDE was
+    launched from, exactly like ``code .``) and when the arg is not a real
+    directory (the caller warns). Pure except for read-only filesystem probes.
+
+    The embedded nvim's thermal guard does NOT live here anymore: rooting the
+    *process* off ``$HOME`` broke the shell's ``workspace_autocd`` (gated on
+    ``$PWD == $HOME``). nvim's cwd is now held off ``$HOME`` at the nvim seam
+    instead — see ``_clamp_editor_root`` and ``AppController.editorRoot``.
+    """
+    if not path_arg:
+        return None
+    target = os.path.abspath(os.path.expanduser(path_arg))
+    return target if os.path.isdir(target) else None
 
 
 def _apply_project_arg(argv: list[str]) -> list[str]:
     """Resolve an optional project-directory argument and `chdir` into it.
 
-    `symmetria-ide [PATH]` opens the IDE on PATH (like `code <dir>`). We
-    `os.chdir` rather than threading the path through AppController because
-    EVERYTHING downstream derives the project root from the process cwd:
-    `AppController._cwd` reads `os.getcwd()`, `controller.displayedRoot` flows
-    from that, and the QMLTermSessions launch nvim + the shell with
-    `initialWorkingDirectory: controller.displayedRoot`. One chdir, and the
-    editor, shell, file tree, and git pane all open on the right project.
+    `symmetria-ide [PATH]` opens the IDE on PATH (like `code <dir>`); with no
+    arg it stays in the launch cwd (Hyprland hands us `$HOME`, a terminal hands
+    us wherever you ran it). We `os.chdir` rather than threading the path through
+    AppController because EVERYTHING downstream derives the project root from the
+    process cwd: `AppController._cwd` reads `os.getcwd()`, `controller.displayedRoot`
+    flows from that, and the QMLTermSessions launch nvim + the shell with
+    `initialWorkingDirectory` bound to it. One chdir, and the editor, shell,
+    file tree, and git pane all open on the right project.
 
-    With NO arg the directory is chosen by `_resolve_launch_dir`: a normal
-    launch cwd is kept, but `$HOME` / filesystem root is redirected to an inert
-    scratch dir so a recursive file-watcher rooted at cwd can't recurse over
-    the whole home tree (see `_resolve_launch_dir` for the full thermal-bug
-    rationale; relay 20260614).
+    The embedded nvim's `$HOME` thermal guard is NOT applied here — it would
+    move the shell's cwd too and break `workspace_autocd`. nvim is clamped off
+    `$HOME` at its own seam (`_clamp_editor_root` / `AppController.editorRoot`).
 
     Uses `parse_known_args` so any Qt flags (e.g. `-platform`) pass straight
     through to QGuiApplication; returns the argv with the project path removed
@@ -3343,13 +3392,10 @@ def _apply_project_arg(argv: list[str]) -> list[str]:
         help="Project directory to open (defaults to the current directory).",
     )
     ns, qt_rest = parser.parse_known_args(argv[1:])
-    target = _resolve_launch_dir(os.getcwd(), os.path.expanduser("~"), ns.path)
+    target = _resolve_launch_dir(ns.path)
     if target is not None:
-        # makedirs is a no-op for an existing project dir (exist_ok) and
-        # creates the scratch dir on first $HOME-launch.
-        os.makedirs(target, exist_ok=True)
         os.chdir(target)
-        log.info("launch dir: %s", target)
+        log.info("opening project: %s", target)
     elif ns.path:
         log.warning("project path %r is not a directory — using cwd", ns.path)
     return [argv[0], *qt_rest]
