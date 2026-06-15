@@ -12,9 +12,12 @@ order (`_LOG_FORMAT`).
 
 from __future__ import annotations
 
+from PySide6.QtCore import QObject, Signal
+
 from symmetria_ide.git_log_controller import (
     _LOG_FIELD_COUNT,
     CommitRow,
+    GitLogListModel,
     parse_git_log,
 )
 
@@ -227,3 +230,129 @@ def test_record_with_too_few_fields_is_skipped() -> None:
     rows = parse_git_log(blob)
     assert len(rows) == 1
     assert rows[0].subject == "survives"
+
+
+# ---------------------------------------------------------------------------
+# GitLogListModel._refresh — the append-vs-reset splice logic (the risk area:
+# off-by-one in beginInsertRows, prefix-equality, the no-op short-circuit). We
+# drive _refresh directly with a stub controller and observe which model
+# signal it emits (rowsInserted for a pure append, modelReset otherwise).
+# ---------------------------------------------------------------------------
+
+
+class _StubLogController(QObject):
+    """Minimal stand-in: the `logChanged` signal the model connects to in its
+    constructor, plus a settable `commits()` snapshot. We never emit
+    `logChanged` — tests call `model._refresh()` directly."""
+
+    logChanged = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._rows: list[CommitRow] = []
+
+    def set_rows(self, rows: list[CommitRow]) -> None:
+        self._rows = rows
+
+    def commits(self) -> list[CommitRow]:
+        return list(self._rows)
+
+
+def _row(h: str) -> CommitRow:
+    """A CommitRow keyed by hash — enough for identity/equality in the model."""
+    return CommitRow(
+        hash=h,
+        abbrev_hash=h[:7],
+        parents=(),
+        author_name="x",
+        author_email="x@example.com",
+        author_date_iso="",
+        relative_date="",
+        subject=h,
+        body="",
+        refs="",
+    )
+
+
+def _make_model() -> tuple[GitLogListModel, _StubLogController, dict]:
+    """Build a model over a stub, wired with signal spies for inserts/resets."""
+    ctrl = _StubLogController()
+    model = GitLogListModel(ctrl)
+    spy: dict = {"inserted": [], "resets": 0}
+    model.rowsInserted.connect(
+        lambda _parent, first, last: spy["inserted"].append((first, last))
+    )
+    model.modelReset.connect(lambda: spy.__setitem__("resets", spy["resets"] + 1))
+    return model, ctrl, spy
+
+
+def test_refresh_fresh_load_is_a_reset() -> None:
+    # First populate from empty → full reset (not an append: old_len == 0).
+    model, ctrl, spy = _make_model()
+    ctrl.set_rows([_row("a"), _row("b"), _row("c")])
+    model._refresh()
+    assert model.rowCount() == 3
+    assert spy["resets"] == 1
+    assert spy["inserted"] == []
+
+
+def test_refresh_pure_append_uses_insert_rows() -> None:
+    # Extending the existing prefix → beginInsertRows over the new tail only,
+    # so the ListView keeps its scroll position. Range must be [old_len, new-1].
+    model, ctrl, spy = _make_model()
+    ctrl.set_rows([_row("a"), _row("b"), _row("c")])
+    model._refresh()
+    spy["resets"] = 0
+    spy["inserted"].clear()
+
+    ctrl.set_rows([_row("a"), _row("b"), _row("c"), _row("d"), _row("e")])
+    model._refresh()
+    assert model.rowCount() == 5
+    assert spy["inserted"] == [(3, 4)]  # off-by-one guard: rows 3 and 4 inserted
+    assert spy["resets"] == 0
+
+
+def test_refresh_identical_list_is_a_noop() -> None:
+    # Same content → no signal at all (the equality short-circuit).
+    model, ctrl, spy = _make_model()
+    rows = [_row("a"), _row("b")]
+    ctrl.set_rows(rows)
+    model._refresh()
+    spy["resets"] = 0
+    spy["inserted"].clear()
+
+    ctrl.set_rows(list(rows))  # equal-but-distinct list
+    model._refresh()
+    assert model.rowCount() == 2
+    assert spy["inserted"] == []
+    assert spy["resets"] == 0
+
+
+def test_refresh_divergent_prefix_is_a_reset() -> None:
+    # New list does not extend the old prefix → full reset, not an append.
+    model, ctrl, spy = _make_model()
+    ctrl.set_rows([_row("a"), _row("b"), _row("c")])
+    model._refresh()
+    spy["resets"] = 0
+    spy["inserted"].clear()
+
+    ctrl.set_rows([_row("x"), _row("y")])  # different repo / reload
+    model._refresh()
+    assert model.rowCount() == 2
+    assert spy["resets"] == 1
+    assert spy["inserted"] == []
+
+
+def test_refresh_shorter_list_is_a_reset() -> None:
+    # A shrink (e.g. switch to a repo with fewer commits) can't be an append.
+    model, ctrl, spy = _make_model()
+    ctrl.set_rows([_row("a"), _row("b"), _row("c"), _row("d")])
+    model._refresh()
+    spy["resets"] = 0
+    spy["inserted"].clear()
+
+    ctrl.set_rows([_row("a"), _row("b")])
+    model._refresh()
+    assert model.rowCount() == 2
+    assert spy["resets"] == 1
+    assert spy["inserted"] == []

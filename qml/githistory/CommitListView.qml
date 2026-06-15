@@ -15,6 +15,7 @@
 // subtree stays extraction-ready for a future Symmetria.Git.UI module.
 
 import QtQuick
+import QtQuick.Layouts
 import "../design"
 
 FocusScope {
@@ -30,16 +31,16 @@ FocusScope {
     // ListView's currentItem swaps, which fires `currentCommitChanged`.
     readonly property var currentCommit: view.currentItem
         ? ({
-            hash: view.currentItem.cHash,
-            abbrevHash: view.currentItem.cAbbrev,
-            subject: view.currentItem.cSubject,
-            body: view.currentItem.cBody,
-            authorName: view.currentItem.cAuthor,
-            authorEmail: view.currentItem.cEmail,
-            dateIso: view.currentItem.cDateIso,
-            relativeDate: view.currentItem.cRelative,
-            refs: view.currentItem.cRefs,
-            agentId: view.currentItem.cAgentId,
+            hash: view.currentItem.hash,
+            abbrevHash: view.currentItem.abbrevHash,
+            subject: view.currentItem.subject,
+            body: view.currentItem.body,
+            authorName: view.currentItem.authorName,
+            authorEmail: view.currentItem.authorEmail,
+            dateIso: view.currentItem.dateIso,
+            relativeDate: view.currentItem.relativeDate,
+            refs: view.currentItem.refs,
+            agentId: view.currentItem.agentId,
         })
         : null
 
@@ -48,8 +49,11 @@ FocusScope {
         view.forceActiveFocus();
     }
 
+    // Fixed delegate row height — shared by the delegate and the Ctrl+D/U
+    // half-page math so the two can't drift out of sync.
+    readonly property int rowHeight: 30
     // Half-page jump distance for Ctrl+D / Ctrl+U, derived from the viewport.
-    readonly property int _halfPage: Math.max(1, Math.floor(view.height / (2 * 30)))
+    readonly property int _halfPage: Math.max(1, Math.floor(view.height / (2 * root.rowHeight)))
     // `gg` pending flag — set by the first `g`, consumed by the second, and
     // cleared after a short window so a lone `g` doesn't arm forever.
     property bool _gPending: false
@@ -78,6 +82,11 @@ FocusScope {
         Connections {
             target: root.model
             function onCountChanged(): void {
+                // `currentIndex < 0` is the reset-vs-append discriminator: a
+                // beginResetModel clears currentIndex to -1 (so we re-seed to
+                // the newest commit), whereas a beginInsertRows "load more"
+                // append preserves it (>= 0), so the guard leaves the user's
+                // selection untouched. Do not "simplify" this condition away.
                 if (view.count > 0 && view.currentIndex < 0)
                     view.currentIndex = 0;
             }
@@ -92,6 +101,13 @@ FocusScope {
         }
 
         Keys.onPressed: function (event) {
+            // Any key other than a bare `g` cancels a pending `gg` (vim
+            // semantics — an interleaved motion must not let a later `g`
+            // complete a stale `gg` jump).
+            if (event.key !== Qt.Key_G || (event.modifiers & Qt.ShiftModifier)) {
+                root._gPending = false;
+                gReset.stop();
+            }
             switch (event.key) {
             case Qt.Key_J:
                 view.incrementCurrentIndex();
@@ -134,8 +150,8 @@ FocusScope {
 
         delegate: Rectangle {
             id: rowItem
-            // Role bindings (a C++ model exposes roles as required properties).
-            // The `c`-prefixed aliases below are what `currentCommit` reads.
+            // Role bindings — a C++ model exposes roles as required properties.
+            // `currentCommit` reads these directly off `view.currentItem`.
             required property string hash
             required property string abbrevHash
             required property string subject
@@ -149,21 +165,10 @@ FocusScope {
             // Model index — used for click selection.
             required property int index
 
-            readonly property string cHash: hash
-            readonly property string cAbbrev: abbrevHash
-            readonly property string cSubject: subject
-            readonly property string cBody: body
-            readonly property string cAuthor: authorName
-            readonly property string cEmail: authorEmail
-            readonly property string cDateIso: dateIso
-            readonly property string cRelative: relativeDate
-            readonly property string cRefs: refs
-            readonly property string cAgentId: agentId
-
             readonly property bool isCurrent: ListView.isCurrentItem
 
             width: ListView.view.width
-            height: 30
+            height: root.rowHeight
             color: isCurrent ? Theme.color.bg.selected : "transparent"
 
             // Left accent bar marks the selected row (calm, not a full fill).
@@ -181,7 +186,11 @@ FocusScope {
                 }
             }
 
-            Row {
+            // RowLayout (not a manual-width Row): the subject takes the
+            // remaining space via fillWidth and elides — it can never be
+            // computed to a negative width and vanish, which the old
+            // arithmetic risked when a long ref list met a narrow pane.
+            RowLayout {
                 anchors.left: parent.left
                 anchors.leftMargin: Theme.spacing.md
                 anchors.right: parent.right
@@ -190,57 +199,62 @@ FocusScope {
                 spacing: Theme.spacing.sm
 
                 Text {
-                    width: 58
+                    Layout.preferredWidth: 58
+                    Layout.alignment: Qt.AlignVCenter
                     text: rowItem.abbrevHash
                     color: Theme.color.accent.primary
                     font.family: Theme.font.family
                     font.pixelSize: Theme.font.size.sm
                     elide: Text.ElideRight
                     renderType: Text.NativeRendering
-                    anchors.verticalCenter: parent.verticalCenter
                 }
 
-                // Ref badge (branch / tag pointers) — only when present.
+                // Ref badge (branch / tag pointers) — only when present. Capped
+                // so a long ref list can't crowd out the subject; the label
+                // elides inside the cap.
                 Rectangle {
                     visible: rowItem.refs.length > 0
-                    width: refLabel.implicitWidth + Theme.spacing.sm
-                    height: refLabel.implicitHeight + Theme.spacing.xxs * 2
+                    Layout.preferredWidth: visible ? refLabel.implicitWidth + Theme.spacing.sm : 0
+                    Layout.maximumWidth: 160
+                    Layout.preferredHeight: refLabel.implicitHeight + Theme.spacing.xxs * 2
+                    Layout.alignment: Qt.AlignVCenter
                     radius: Theme.radius.sm
                     color: "transparent"
                     border.color: Theme.color.accent.bright
                     border.width: 1
-                    anchors.verticalCenter: parent.verticalCenter
                     Text {
                         id: refLabel
-                        anchors.centerIn: parent
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.spacing.xs
+                        anchors.rightMargin: Theme.spacing.xs
+                        verticalAlignment: Text.AlignVCenter
                         text: rowItem.refs
                         color: Theme.color.accent.bright
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.xs
+                        elide: Text.ElideRight
                         renderType: Text.NativeRendering
                     }
                 }
 
                 Text {
-                    width: parent.width - 58 - relDate.width - Theme.spacing.sm * 3
-                           - (rowItem.refs.length > 0 ? refLabel.implicitWidth + Theme.spacing.sm * 2 : 0)
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
                     text: rowItem.subject
                     color: rowItem.isCurrent ? Theme.color.text.strong : Theme.color.text.normal
                     font.family: Theme.font.family
                     font.pixelSize: Theme.font.size.sm
                     elide: Text.ElideRight
                     renderType: Text.NativeRendering
-                    anchors.verticalCenter: parent.verticalCenter
                 }
 
                 Text {
-                    id: relDate
+                    Layout.alignment: Qt.AlignVCenter
                     text: rowItem.relativeDate
                     color: Theme.color.text.dim
                     font.family: Theme.font.family
                     font.pixelSize: Theme.font.size.xs
                     renderType: Text.NativeRendering
-                    anchors.verticalCenter: parent.verticalCenter
                 }
             }
 

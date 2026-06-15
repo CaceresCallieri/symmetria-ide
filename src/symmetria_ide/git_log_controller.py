@@ -274,16 +274,26 @@ class GitLogController(QObject):
         Clears the commit list synchronously (so the UI doesn't show the
         previous project's history for the window before the worker responds)
         and enqueues a fresh page-0 load.
+
+        ``_resolved_root`` is cleared under the lock too — not just for the
+        ``repoRoot`` property to read empty during the switch, but because
+        ``request_diff`` keys its race guard off ``_resolved_root``: leaving
+        the old value live would let an in-flight diff request for the old
+        repo (or a stale `git show` cwd) slip through. The worker repopulates
+        it on the next ``_do_log``. ``_repo_root`` is written under the lock
+        as well so the worker's race-guard read in ``_do_log`` never sees a
+        torn update — keeps every access to the guarded fields lock-consistent.
         """
         if value == self._repo_root:
             return
-        self._repo_root = value
-        self.repoRootChanged.emit()
         with self._lock:
+            self._repo_root = value
+            self._resolved_root = ""
             self._commits = []
             self._has_more = False
             self._current_diff_hash = ""
             self._current_diff_text = ""
+        self.repoRootChanged.emit()
         self.logChanged.emit()
         self.commitDiffChanged.emit()
         self.hasMoreChanged.emit()
@@ -328,7 +338,11 @@ class GitLogController(QObject):
 
         Sets ``_stop_event`` and pushes the ``_STOP`` sentinel so the worker's
         blocking ``_queue.get()`` returns and the loop sees the stop flag.
+        Idempotent — a second call (or a double shutdown path) returns early
+        rather than pushing another sentinel and re-joining a dead thread.
         """
+        if self._stop_event.is_set():
+            return
         self._stop_event.set()
         self._queue.put(_STOP)
         self._worker.join(timeout=1.0)
@@ -364,6 +378,7 @@ class GitLogController(QObject):
             # model. (`set_repo_root` already cleared + re-enqueued the new one.)
             if asked_root != self._repo_root:
                 return
+            old_resolved = self._resolved_root
             self._resolved_root = resolved
             if skip == 0:
                 self._commits = rows
@@ -374,10 +389,14 @@ class GitLogController(QObject):
 
         # gc.disable around the cross-thread emits — gotcha #10 (Python 3.14
         # cyclic GC racing the Qt receiver-side wrapper allocation while the
-        # worker is mid signal-dispatch). One window covers all three.
+        # worker is mid signal-dispatch). One window covers all the emits.
         gc.disable()
         try:
-            self.repoRootChanged.emit()
+            # Gate each notify on an actual change — a `load_more` append leaves
+            # the resolved root (and often hasMore) untouched, so only `logChanged`
+            # fires for it.
+            if old_resolved != resolved:
+                self.repoRootChanged.emit()
             self.logChanged.emit()
             if old_has_more != has_more:
                 self.hasMoreChanged.emit()
