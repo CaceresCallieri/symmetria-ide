@@ -63,10 +63,19 @@ FocusScope {
     signal fileActivated(string absolutePath)
 
     // Which sub-view is active. Initial value "changes" (working tree first)
-    // per the surface's "what's uncommitted" framing; Tab toggles to "history".
-    // NOTE: this is only the pre-first-show value — `enterSurface()` re-picks
-    // the default on every entry based on whether the tree is actually dirty.
+    // per the surface's "what's uncommitted" framing; Tab toggles between the
+    // two while the surface stays open. NOTE: "changes" is only the pre-first-
+    // show value — `enterSurface()` re-picks the default on EVERY entry from the
+    // live worktree state, so a sub-view the user toggled to in one visit is NOT
+    // persisted across a leave/re-enter; the per-entry auto-pick wins instead.
     property string mode: "changes"
+
+    // Is there uncommitted work to review? Single source of truth for "the tree
+    // is dirty", bound by both `enterSurface()` (entry default) and the tab
+    // header's file-count badge. statusModel is `property var … : null`, so the
+    // null guard is load-bearing (it can be unset before the host injects it).
+    readonly property bool hasPendingChanges: root.statusModel != null
+                                              && root.statusModel.count > 0
 
     // Move focus into the active sub-view's list (host calls this when the
     // surface becomes visible so j/k navigation is live immediately). On the
@@ -122,8 +131,7 @@ FocusScope {
     // the Ctrl+H focus-restore path, which calls focusContent() directly so it
     // re-homes focus WITHOUT re-picking the mode the user may have toggled to.
     function enterSurface(): void {
-        setMode(root.statusModel && root.statusModel.count > 0
-                ? "changes" : "history");
+        setMode(root.hasPendingChanges ? "changes" : "history");
     }
 
     // Re-home keyboard focus whenever the active sub-view changes, so the focus
@@ -184,8 +192,7 @@ FocusScope {
                         id: segLabel
                         anchors.centerIn: parent
                         text: seg.modelData.label
-                              + (seg.modelData.mode === "changes"
-                                 && root.statusModel && root.statusModel.count > 0
+                              + (seg.modelData.mode === "changes" && root.hasPendingChanges
                                  ? " · " + root.statusModel.count : "")
                         color: seg.isCurrent ? Theme.color.text.strong : Theme.color.text.dim
                         font.family: Theme.font.family
