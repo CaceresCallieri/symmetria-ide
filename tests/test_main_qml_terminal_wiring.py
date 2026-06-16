@@ -64,7 +64,15 @@ def test_direct_terminal_chord_present(main_qml: str):
     """
     chord_idx = main_qml.find('sequences: ["Ctrl+Shift+T"]')
     assert chord_idx >= 0, "Ctrl+Shift+T Shortcut block not found in Main.qml"
-    chord_block = main_qml[chord_idx : chord_idx + 200]
+    # Brace-match the enclosing Shortcut block via the shared helper rather
+    # than a fixed-size window — a future `enabled:` guard or extra comment
+    # inside the block could push the assertions past a hard char window and
+    # silently false-negative (same robustness rationale as
+    # test_window_activation_considers_terminal_visible). `sequences:` sits
+    # inside the block, so rewind to the `Shortcut` decl first.
+    shortcut_decl = main_qml.rfind("Shortcut", 0, chord_idx)
+    assert shortcut_decl >= 0
+    chord_block = _extract_braced_body(main_qml, shortcut_decl)
     assert "controller.swap_to_terminal()" in chord_block
     assert "Qt.ApplicationShortcut" in chord_block
 
@@ -72,10 +80,14 @@ def test_direct_terminal_chord_present(main_qml: str):
 def test_swap_chord_uses_application_shortcut_context(main_qml: str):
     """The editor↔terminal toggle chord must use Qt.ApplicationShortcut,
     not the default Qt.WindowShortcut — without that, NvimView's key
-    handler captures the chord before it can fire. We assert a floor
-    on total ApplicationShortcut blocks (anchor, FM toggle, this toggle,
-    etc.) to catch a regression that silently demotes a chord."""
-    assert main_qml.count("Qt.ApplicationShortcut") >= 3
+    handler captures the chord before it can fire. We assert a floor on
+    total ApplicationShortcut blocks (anchor, surface toggles, the agent
+    chord family, paste, etc.) to catch a regression that silently demotes
+    chords wholesale. The floor (20) sits below the real count (~25) with
+    headroom for a few legitimate chord removals; per-chord context is
+    verified by the individual chord tests, so this is only a bulk-demotion
+    backstop, not a per-chord guard."""
+    assert main_qml.count("Qt.ApplicationShortcut") >= 20
 
 
 # ---------------------------------------------------------------------------

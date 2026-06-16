@@ -110,15 +110,18 @@ Window {
     // above documents the QApplication::notify ordering rationale in
     // full; the same reasoning applies here.
     //
-    // Single toggle, not two distinct chords. Earlier iteration shipped
+    // A toggle, not a one-way chord. Earlier iteration shipped
     // Ctrl+Shift+T (→ terminal) + Ctrl+Shift+E (→ editor) under the
     // "each IDE concept is its own chord" precedent, but day-to-day
-    // ergonomics didn't bear it out for a binary swap. Now: Ctrl+Shift+E
-    // flips between editor and terminal — pressing from a non-editor
-    // surface lands you on the editor; pressing from the editor returns
-    // you to the terminal. See AppController.toggle_editor_terminal for
-    // the asymmetry rationale (chord names the editor, so non-editor →
-    // editor is the dominant direction).
+    // ergonomics didn't bear out two distinct chords for a binary swap.
+    // Now: Ctrl+Shift+E flips between editor and terminal — pressing from
+    // a non-editor surface lands you on the editor; pressing from the
+    // editor returns you to the terminal. See
+    // AppController.toggle_editor_terminal for the asymmetry rationale
+    // (chord names the editor, so non-editor → editor is the dominant
+    // direction). (Ctrl+Shift+T was later re-added as a one-way "home to
+    // terminal" jump — see its block just below — once the multi-surface
+    // world made a direct terminal chord non-redundant.)
     Shortcut {
         sequences: ["Ctrl+Shift+E"]
         context: Qt.ApplicationShortcut
@@ -128,14 +131,15 @@ Window {
     // Direct "home to terminal" chord. Unlike the toggles above, this is a
     // one-way jump, not a flip: it ALWAYS lands you on the terminal and
     // no-ops if you're already there (swap_to_terminal is idempotent). The
-    // terminal is the IDE's home base — every surface toggle (E/G/Ctrl+E)
-    // returns here as its "off" direction — but the terminal itself had no
-    // direct chord, so reaching it from a non-toggle surface (e.g. the agent
-    // pane) took two presses. This restores the symmetry: every central
-    // surface now has a direct chord. (Ctrl+Shift+T shipped once for the
-    // binary editor/terminal swap and was retired as redundant there — see
-    // the Ctrl+Shift+E comment above; the multi-surface world it was retired
-    // in no longer applies.)
+    // terminal is the IDE's home base — the editor↔terminal and git↔terminal
+    // toggles (Ctrl+Shift+E/G) return here as their "off" direction (the FM
+    // is an overlay, not a terminal-returning toggle) — but the terminal
+    // itself had no direct chord, so reaching it from a non-toggle surface
+    // (e.g. the agent pane) took two presses. This restores the symmetry:
+    // every central surface now has a direct chord. (Ctrl+Shift+T shipped
+    // once for the binary editor/terminal swap and was retired as redundant
+    // there — see the Ctrl+Shift+E comment above; the binary-swap world it
+    // was retired in is gone, so that redundancy rationale no longer holds.)
     Shortcut {
         sequences: ["Ctrl+Shift+T"]
         context: Qt.ApplicationShortcut
