@@ -27,6 +27,12 @@ FocusScope {
     // Injected controller — used only for `load_more` / `hasMore` paging.
     property var controller: null
 
+    // Emitted when the user presses Tab/Backtab — the host (GitHistoryView)
+    // toggles between this commit-history view and the uncommitted-files view.
+    // Captured in the ListView's Keys.onPressed (Tab is Qt's focus-traversal
+    // key, so it must be intercepted and accepted at the focus point).
+    signal toggleRequested()
+
     // The highlighted row's data, surfaced for the detail pane. Null when the
     // list is empty (clean reset / no repo). Re-evaluates whenever the
     // ListView's currentItem swaps, which fires `currentCommitChanged`.
@@ -109,6 +115,13 @@ FocusScope {
         }
 
         Keys.onPressed: function (event) {
+            // Tab / Backtab → ask the host to switch sub-views. Accept the
+            // event so Qt's focus traversal doesn't also fire.
+            if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                root.toggleRequested();
+                event.accepted = true;
+                return;
+            }
             // Any key other than a bare `g` cancels a pending `gg` (vim
             // semantics — an interleaved motion must not let a later `g`
             // complete a stale `gg` jump).

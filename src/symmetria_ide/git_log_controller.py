@@ -21,7 +21,8 @@ Three layers, top-down:
 
   3. ``GitLogController(QObject)`` + ``GitLogListModel(QAbstractListModel)`` —
      the Qt facade. A daemon worker thread drains a ``queue.Queue`` of typed
-     requests (load a log page, append the next page, load one commit's diff),
+     requests (load a log page, append the next page, load one commit's diff,
+     or load one uncommitted file's working-tree diff for the changes sub-view),
      mirroring ``GitController``'s threading/subprocess/emit discipline:
      ``daemon=True`` worker owning a ``_stop_event`` (project-standards §1 P0),
      ``gc.disable()`` around every cross-thread signal emit (gotcha #10), and a
@@ -60,6 +61,10 @@ log = logging.getLogger(__name__)
 _RESOLVE_TIMEOUT_SEC = 5.0
 _LOG_TIMEOUT_SEC = 10.0
 _SHOW_TIMEOUT_SEC = 20.0
+# A single file's `git diff HEAD -- <path>` is bounded to that file, so it's
+# cheaper than a whole-commit `git show`; a tighter budget keeps a wedged diff
+# from holding the worker.
+_FILE_DIFF_TIMEOUT_SEC = 10.0
 
 # How many commits one page request loads. "Load more" appends the next page.
 _PAGE_SIZE = 100
@@ -180,6 +185,7 @@ def parse_git_log(blob: bytes) -> list[CommitRow]:
 # ---------------------------------------------------------------------------
 _REQ_LOG = "log"
 _REQ_DIFF = "diff"
+_REQ_FILE_DIFF = "file_diff"  # one uncommitted file's working-tree diff
 _STOP = None  # sentinel pushed by stop() to unblock the worker's queue.get()
 
 
@@ -204,6 +210,11 @@ class GitLogController(QObject):
     logChanged = Signal()
     hasMoreChanged = Signal()
     commitDiffChanged = Signal()
+    # Emitted when the working-tree per-file diff fields change. Kept separate
+    # from `commitDiffChanged` so the working-tree detail pane and the commit
+    # detail pane each bind only the diff they render — a commit-diff fetch
+    # never re-binds the file-diff pane and vice versa.
+    fileDiffChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -219,6 +230,12 @@ class GitLogController(QObject):
         self._has_more: bool = False
         self._current_diff_hash: str = ""
         self._current_diff_text: str = ""
+        # Working-tree per-file diff (the uncommitted-files sub-view). Keyed by
+        # the file's repo-relative path — the same string QML passes to
+        # `request_working_diff` and compares against `currentFileDiffPath` to
+        # gate "is this diff current for the selected row?".
+        self._current_file_diff_path: str = ""
+        self._current_file_diff_text: str = ""
 
         # Guards `_commits`, `_resolved_root`, `_has_more`, and the diff fields
         # against the worker mutating them while the GUI thread reads.
@@ -261,6 +278,18 @@ class GitLogController(QObject):
         with self._lock:
             return self._current_diff_text
 
+    @Property(str, notify=fileDiffChanged)
+    def currentFileDiffPath(self) -> str:
+        """Repo-relative path whose diff ``currentFileDiffText`` currently holds."""
+        with self._lock:
+            return self._current_file_diff_path
+
+    @Property(str, notify=fileDiffChanged)
+    def currentFileDiffText(self) -> str:
+        """Working-tree unified-diff of the selected uncommitted file (vs HEAD)."""
+        with self._lock:
+            return self._current_file_diff_text
+
     def commits(self) -> list[CommitRow]:
         """Snapshot the commit list for the model (GUI thread, under lock)."""
         with self._lock:
@@ -293,9 +322,12 @@ class GitLogController(QObject):
             self._has_more = False
             self._current_diff_hash = ""
             self._current_diff_text = ""
+            self._current_file_diff_path = ""
+            self._current_file_diff_text = ""
         self.repoRootChanged.emit()
         self.logChanged.emit()
         self.commitDiffChanged.emit()
+        self.fileDiffChanged.emit()
         self.hasMoreChanged.emit()
         if value:
             self._queue.put((_REQ_LOG, value, 0))
@@ -331,6 +363,24 @@ class GitLogController(QObject):
         if resolved:
             self._queue.put((_REQ_DIFF, resolved, commit_hash))
 
+    @Slot(str, bool)
+    def request_working_diff(self, rel_path: str, untracked: bool) -> None:
+        """Load one uncommitted file's working-tree diff (vs HEAD), async.
+
+        ``rel_path`` is repo-relative (the status model's ``displayName`` role).
+        ``untracked`` selects the diff command: a tracked file diffs against
+        HEAD, while an untracked file has no HEAD blob so it is rendered as an
+        all-additions ``git diff --no-index`` against ``/dev/null`` (see
+        ``_run_working_diff``). The path doubles as the race-guard key so a
+        stale result for a previously-selected file is dropped on apply.
+        """
+        if not rel_path:
+            return
+        with self._lock:
+            resolved = self._resolved_root
+        if resolved:
+            self._queue.put((_REQ_FILE_DIFF, resolved, rel_path, untracked))
+
     # -- Lifecycle ---------------------------------------------------------
 
     def stop(self) -> None:
@@ -361,6 +411,12 @@ class GitLogController(QObject):
                     self._do_log(asked_root=request[1], skip=request[2])
                 elif kind == _REQ_DIFF:
                     self._do_diff(resolved_root=request[1], commit_hash=request[2])
+                elif kind == _REQ_FILE_DIFF:
+                    self._do_file_diff(
+                        resolved_root=request[1],
+                        rel_path=request[2],
+                        untracked=request[3],
+                    )
             except Exception:  # noqa: BLE001
                 # The worker must NEVER crash — a dead daemon thread would
                 # leave every future request stuck in the queue forever.
@@ -416,6 +472,27 @@ class GitLogController(QObject):
         gc.disable()
         try:
             self.commitDiffChanged.emit()
+        finally:
+            gc.enable()
+
+    def _do_file_diff(
+        self, *, resolved_root: str, rel_path: str, untracked: bool
+    ) -> None:
+        """Fetch one uncommitted file's working-tree diff and publish it."""
+        text = self._run_working_diff(resolved_root, rel_path, untracked)
+
+        with self._lock:
+            # Same race guard as `_do_diff`: a project switch may have landed
+            # while git ran. Dropping the stale result keeps another repo's
+            # file diff out of the pane.
+            if resolved_root != self._resolved_root:
+                return
+            self._current_file_diff_path = rel_path
+            self._current_file_diff_text = text
+
+        gc.disable()
+        try:
+            self.fileDiffChanged.emit()
         finally:
             gc.enable()
 
@@ -507,6 +584,65 @@ class GitLogController(QObject):
         out = proc.stdout.decode("utf-8", errors="replace")
         _, sep, patch = out.partition("\x00")
         text = (patch if sep else out).lstrip("\n")
+        if len(text) > _DIFF_CHAR_CAP:
+            text = (
+                text[:_DIFF_CHAR_CAP]
+                + f"\n\n… diff truncated at {_DIFF_CHAR_CAP:,} characters …"
+            )
+        return text
+
+    def _run_working_diff(self, cwd: str, rel_path: str, untracked: bool) -> str:
+        """Run the working-tree diff for one file. ``""`` on failure.
+
+        Tracked files diff against HEAD (``git diff HEAD -- <path>``), which
+        combines staged AND unstaged changes into one "what's different from the
+        last commit" patch — the comprehension frame the uncommitted-files view
+        is built around. Untracked files have no HEAD blob, so ``git diff``
+        would emit nothing; we render them as an all-additions diff via
+        ``--no-index`` against ``/dev/null`` instead.
+
+        ``--no-index`` returns exit code 1 when the files differ (which is
+        always, for a non-empty new file) — that is success, not failure, so we
+        accept returncodes 0 and 1 for both forms (plain ``git diff`` without
+        ``--exit-code`` returns 0 regardless). Output is truncated at
+        ``_DIFF_CHAR_CAP`` with a visible notice, matching ``_run_show``.
+        """
+        if untracked:
+            cmd = [
+                "git",
+                "diff",
+                "--no-color",
+                "--no-index",
+                "--",
+                "/dev/null",
+                rel_path,
+            ]
+        else:
+            cmd = ["git", "diff", "--no-color", "HEAD", "--", rel_path]
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                timeout=_FILE_DIFF_TIMEOUT_SEC,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            log.warning("git diff failed for %s @ %s: %s", rel_path, cwd, exc)
+            return ""
+        # 0 = no differences (clean path / fully-staged-and-identical), 1 =
+        # differences found (the `--no-index` and `--exit-code`-style result).
+        # Both are valid; anything else is a real error worth logging.
+        if proc.returncode not in (0, 1):
+            log.warning(
+                "git diff exited %d for %s @ %s: %s",
+                proc.returncode,
+                rel_path,
+                cwd,
+                proc.stderr.decode("utf-8", errors="replace").strip(),
+            )
+            return ""
+        text = proc.stdout.decode("utf-8", errors="replace").lstrip("\n")
         if len(text) > _DIFF_CHAR_CAP:
             text = (
                 text[:_DIFF_CHAR_CAP]

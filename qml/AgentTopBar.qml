@@ -74,7 +74,11 @@ Rectangle {
                 { surface: "terminal", label: "terminal" },
                 { surface: "editor", label: "editor" },
                 { surface: "agent", label: "agents" },
-                { surface: "git", label: "history" },
+                // "git" not "history": the surface is now dual-mode (a
+                // Tab-toggled "changes" working-tree view + the commit log),
+                // and it opens on changes — labelling it "history" would
+                // mis-name where the chip lands.
+                { surface: "git", label: "git" },
             ]
 
             delegate: Item {

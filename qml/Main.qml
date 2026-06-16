@@ -1063,6 +1063,10 @@ Window {
                     focus: visible
                     logController: gitLogController
                     logModel: gitLogModel
+                    // Live working-tree file list for the "changes" sub-view —
+                    // the same GitStatusListModel the Active Changes side panel
+                    // renders, reused rather than re-scanned.
+                    statusModel: gitStatusList
                     onVisibleChanged: if (visible) focusContent()
                 }
 
