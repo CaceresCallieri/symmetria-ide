@@ -79,6 +79,8 @@ Rectangle {
                 // and it opens on changes — labelling it "history" would
                 // mis-name where the chip lands.
                 { surface: "git", label: "git" },
+                // Embedded browser pool (QtWebEngine) — Ctrl+Shift+B toggles it.
+                { surface: "browser", label: "browser" },
             ]
 
             delegate: Item {

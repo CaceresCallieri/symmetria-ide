@@ -110,15 +110,22 @@ Each phase ends with a go/no-go checkpoint. If a phase's deliverable does not fe
 
 ## Phase 4 — Agentic browser
 
-**Goal:** an embedded browser the agent can drive, avoiding the Hyprland workspace escape problem.
+**Pulled forward (2026-06-16); split into two stages.** The motivating pain — agent-spawned browsers escaping into Hyprland (the IDE can't track them) — was acute enough to bring this ahead of Phase 3. Decision context: the AskUserQuestion choices recorded in the plan; staged so the one real unknown (QtWebEngine on Hyprland/Wayland) is de-risked before the larger MCP plumbing.
 
-**Deliverables:**
+**Goal:** an embedded browser the agent can drive, avoiding the Hyprland workspace escape problem. Containment principle: a browser escapes iff it creates a top-level OS window; embedding QtWebEngine as a QML `WebEngineView` *item* means it renders into the IDE's own window and never creates one. (On Wayland there is no reparenting/window-grab escape hatch, so embedding — or headless+screencast — is the only path.)
 
-- `QtWebEngineView` pane.
-- cmux-inspired control surface: agent sends `navigate`, `click`, `fill`, `eval_js`, `snapshot_accessibility_tree`.
+**Stage 1 — embedded browser surface (SHIPPED 2026-06-16):**
+
+- A `"browser"` central surface (`qml/BrowserSurface.qml`) with embedded `WebEngineView`s, usable manually. Pool-of-views mirroring the agent pool 1:1 (fixed `Repeater` of `maxBrowserSlots` Loaders; ≤5 windows; one visible at a time; tab-chip strip; persistent `WebEngineProfile` so logins survive restart). `Ctrl+Shift+B` toggles it; the `AgentTopBar` switcher gained a `browser` entry.
+- Pool state/API on `AppController` (`open_browser`/`focus_browser`/`cycle_browser_focus`/`close_browser`/`on_browser_title`/`on_browser_url`); see `src/symmetria_ide/app.py` "Embedded browser pool".
+- Solves the escape problem for *manual* browsing already.
+
+**Stage 2 — agent control via IDE-hosted MCP (deferred):**
+
+- cmux-inspired control surface: the IDE serves browser tools (`navigate`, `click`, `fill`, `eval_js`, `snapshot_accessibility_tree`) over local HTTP/SSE; spawned agents pointed at it via per-harness `--mcp-config` injection in `agent_harness.py`. Automation drives the `WebEngineView` via `runJavaScript`, marshaled to the GUI thread (gotcha #1 inverted).
 - Agent pane and browser pane share state — screenshots flow into agent history automatically.
 
-**Checkpoint:** can an agent complete a browser task end-to-end without spawning an external browser?
+**Checkpoint (Stage 2):** can an agent complete a browser task end-to-end without spawning an external browser?
 
 ## Far future
 

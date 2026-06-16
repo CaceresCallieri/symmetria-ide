@@ -48,6 +48,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QGuiApplication, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine, QmlElement
+from PySide6.QtWebEngineQuick import QtWebEngineQuick
 
 from . import agent_harness
 from .agent_bridge import AgentBridgeClient, emit_gc_safe
@@ -355,6 +356,16 @@ class AppController(QObject):
     # slot N was already the visible agent). Sibling of
     # focusTreeRequested / focusEditorRequested / focusTerminalRequested.
     focusAgentRequested = Signal(int)
+    # Embedded browser pool (the agentic-browser surface — QtWebEngine
+    # WebEngineViews on the "browser" central surface). Mirrors the
+    # terminal-agent pool's signal shape: `browserTabsChanged` covers slot
+    # occupancy AND titles/urls (one notify keeps the chip strip's bindings
+    # in lockstep); `focusedBrowserChanged` is the focused-slot notify;
+    # `focusBrowserRequested` carries the slot so the matching WebEngineView
+    # delegate can forceActiveFocus (sibling of focusAgentRequested).
+    browserTabsChanged = Signal()
+    focusedBrowserChanged = Signal()
+    focusBrowserRequested = Signal(int)
     # Bridge-mediated STT injection into an agent pane: (slot, text,
     # submit, request_id). Python cannot drive QMLTermSession (KSession is
     # not Python-wrappable — see "The terminal panes" in CLAUDE.md), so the
@@ -525,6 +536,14 @@ class AppController(QObject):
         # spawns append, closes remove — chip numbers and the Ctrl+N
         # chords address POSITIONS in this list, never internal slots.
         self._agent_order: list[int] = []
+        # Embedded browser pool (agentic-browser surface). Per-slot record:
+        # {url, title}. No subprocess/bridge — a "window" is a WebEngineView
+        # the QML Loader owns. Slot numbering is 1-based (1.._MAX_INSTANCES),
+        # _browser_order is the dense DISPLAY order (spawns append, closes
+        # compact), _focused_browser is 0 when the pool is empty.
+        self._browser_tabs: dict[int, dict] = {}
+        self._browser_order: list[int] = []
+        self._focused_browser: int = 0
         # Publish/subscribe client to Symmetria Shell's agent-bridge hub.
         # Publishes this pool's spawns/focus/titles so the shell dashboard
         # shows IDE agents; subscribes to consolidated snapshots so the
@@ -1797,16 +1816,29 @@ class AppController(QObject):
         """
         return self._central_surface == "git"
 
+    @Property(bool, notify=centralSurfaceChanged)
+    def browserSurfaceVisible(self) -> bool:
+        """True when the embedded browser pool owns the central area.
+
+        The agentic-browser surface (qml/BrowserSurface.qml) — embedded
+        QtWebEngine views, a sibling of editor/terminal/agent/git under
+        `mainContent`, gated on the same single `centralSurfaceChanged`
+        notify so the booleans stay XOR. Embedding (vs an agent-spawned
+        Chromium) is what keeps the browser from creating a top-level
+        Hyprland window — see CLAUDE.md "The browser panes".
+        """
+        return self._central_surface == "browser"
+
     @Slot(str)
     def set_central_surface(self, surface: str) -> None:
-        """Make `surface` ("terminal" | "editor" | "agent" | "git") central.
+        """Make `surface` ("terminal"|"editor"|"agent"|"git"|"browser") central.
 
         Idempotent (no signal on no-op) and validating — the generic
         primitive behind the StatusBar switcher segments and
-        `focus_agent`'s auto-switch. The dedicated `swap_to_*` slots
-        remain as chord-facing wrappers.
+        `focus_agent`'s / `focus_browser`'s auto-switch. The dedicated
+        `swap_to_*` slots remain as chord-facing wrappers.
         """
-        if surface not in ("terminal", "editor", "agent", "git"):
+        if surface not in ("terminal", "editor", "agent", "git", "browser"):
             log.warning("set_central_surface: unknown surface %r — no-op", surface)
             return
         if self._central_surface == surface:
@@ -1878,6 +1910,25 @@ class AppController(QObject):
             self.swap_to_terminal()
         else:
             self.swap_to_git()
+
+    @Slot()
+    def swap_to_browser(self) -> None:
+        """Make the embedded browser pool the visible central surface."""
+        self.set_central_surface("browser")
+
+    @Slot()
+    def toggle_browser_terminal(self) -> None:
+        """Flip the central surface between the browser and the terminal.
+
+        Bound to `Ctrl+Shift+B`. Same asymmetry as `toggle_git_history`:
+        'B' names the browser, so the chord always lands you there unless
+        you were already on it, in which case it returns you to the
+        terminal. Always emits exactly one `centralSurfaceChanged`.
+        """
+        if self._central_surface == "browser":
+            self.swap_to_terminal()
+        else:
+            self.swap_to_browser()
 
     @Slot()
     def focus_terminal(self) -> None:
@@ -2227,6 +2278,205 @@ class AppController(QObject):
         self._term_agents[slot]["title"] = title
         self.termAgentsChanged.emit()
         self._agent_bridge.notify_title(slot, title)
+
+    # ------------------------------------------------------------------
+    # Embedded browser pool (agentic-browser surface)
+    # ------------------------------------------------------------------
+    #
+    # Mirrors the terminal-agent pool, minus the subprocess/argv/bridge
+    # machinery: a "browser window" is just a QtWebEngine WebEngineView
+    # pointed at a URL, embedded in our own window so it never creates a
+    # top-level Hyprland surface (the containment principle — see CLAUDE.md
+    # "The browser panes"). The QML side (qml/BrowserSurface.qml) holds a
+    # FIXED Repeater of `maxBrowserSlots` Loaders; each Loader's `active`
+    # binds to `browserSlotActive[index]` and instantiates a WebEngineView
+    # that reads its initial URL from `browserUrls[index]` ONCE at load.
+    # open/close are state flips the Loaders react to — Python never touches
+    # the view (navigation, title, back/forward are all QML-local).
+
+    @Property(int, constant=True)
+    def maxBrowserSlots(self) -> int:
+        return self._MAX_INSTANCES
+
+    @Property("QVariantList", notify=browserTabsChanged)
+    def browserOrder(self) -> list:
+        """Internal slots in DISPLAY order — the BrowserSurface chip model.
+
+        Same dense, position-based numbering as `agentOrder`: the chip
+        number is the 1-based POSITION here, not the internal slot. Closing
+        a window compacts the numbering while internal slots stay frozen
+        (they key the Loader delegates, which must not churn).
+        """
+        return list(self._browser_order)
+
+    @Property("QVariantList", notify=browserTabsChanged)
+    def browserSlotActive(self) -> list:
+        """Per-slot occupancy, indexed `slot - 1` (len == maxBrowserSlots).
+
+        The Loaders' `active` binding — a stable-length list so the fixed
+        Repeater never churns delegates (delegate teardown destroys a live
+        WebEngineView and its navigation history; see BrowserSurface.qml).
+        """
+        return [
+            slot in self._browser_tabs for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
+    @Property("QVariantList", notify=browserTabsChanged)
+    def browserTitles(self) -> list:
+        """Per-slot page titles, indexed `slot - 1`; "" = no title yet."""
+        return [
+            self._browser_tabs.get(slot, {}).get("title", "")
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
+    @Property("QVariantList", notify=browserTabsChanged)
+    def browserUrls(self) -> list:
+        """Per-slot URLs, indexed `slot - 1`.
+
+        Each delegate reads its slot's entry ONCE at creation to set the
+        WebEngineView's initial URL — it is NOT a live binding (a live
+        binding would fight user navigation). `on_browser_url` keeps the
+        value current for chip display only; the view is never re-driven
+        from it, so there is no navigation feedback loop.
+        """
+        return [
+            self._browser_tabs.get(slot, {}).get("url", "")
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
+    @Property(int, notify=focusedBrowserChanged)
+    def focusedBrowser(self) -> int:
+        """1-based focused slot; 0 = none (empty pool)."""
+        return self._focused_browser
+
+    @Slot()
+    @Slot(str)
+    def open_browser(self, url: str = "about:blank") -> None:
+        """Allocate the lowest free slot for a browser window and focus it.
+
+        The QML Loader reacting to `browserSlotActive` instantiates the
+        WebEngineView and loads `url`. New windows APPEND in display order
+        (newest = highest chip number), matching the agent pool.
+        """
+        slot = self._next_free_browser_slot()
+        if slot is None:
+            log.warning("open_browser: pool full (%d slots)", self._MAX_INSTANCES)
+            return
+        self._browser_tabs[slot] = {"url": url or "about:blank", "title": ""}
+        self._browser_order.append(slot)
+        self.browserTabsChanged.emit()
+        log.info("open_browser: slot %d → %s", slot, url)
+        self.focus_browser(slot)
+
+    @Slot(int)
+    def focus_browser(self, slot: int) -> None:
+        """Focus the slot's view and bring the browser surface forward.
+
+        Mirrors `focus_agent`: focusing from ANY surface lands on the
+        browser surface with that window visible, so chip clicks / chords
+        double as surface switchers. No-op (with log) on empty slots.
+        """
+        if slot not in self._browser_tabs:
+            log.info("focus_browser: slot %d empty — no-op", slot)
+            return
+        if self._focused_browser != slot:
+            self._focused_browser = slot
+            self.focusedBrowserChanged.emit()
+        self.set_central_surface("browser")
+        self.focusBrowserRequested.emit(slot)
+
+    @Slot(int)
+    def cycle_browser_focus(self, direction: int) -> None:
+        """Move focus to the next/previous window in DISPLAY order (wraps)."""
+        order = self._browser_order
+        if not order:
+            return
+        if self._focused_browser not in order:
+            self.focus_browser(order[0])
+            return
+        idx = order.index(self._focused_browser)
+        self.focus_browser(order[(idx + direction) % len(order)])
+
+    @Slot(int)
+    def close_browser(self, slot: int) -> None:
+        """Drop the slot — the QML Loader deactivates and frees the view.
+
+        Display numbering compacts (survivors renumber via `browserOrder`).
+        Refocus goes to the PREVIOUS window in display order; closing the
+        last window falls back to the terminal (the home surface), exactly
+        as `close_agent` does.
+        """
+        if slot not in self._browser_tabs:
+            log.warning("close_browser: slot %d not in pool — no-op", slot)
+            return
+        if slot not in self._browser_order:
+            # Defensive: _browser_tabs and _browser_order should stay in sync.
+            # A desync (double-close race) would raise ValueError from index();
+            # log and recover rather than crash.
+            log.error(
+                "close_browser: slot %d in _browser_tabs but not _browser_order "
+                "— pool desync; removing from tabs only",
+                slot,
+            )
+            del self._browser_tabs[slot]
+            self.browserTabsChanged.emit()
+            return
+        closed_position = self._browser_order.index(slot)
+        self._browser_order.remove(slot)
+        del self._browser_tabs[slot]
+        self.browserTabsChanged.emit()
+        log.info("close_browser: slot %d closed", slot)
+        if self._focused_browser == slot:
+            if not self._browser_order:
+                self._focused_browser = 0
+                self.focusedBrowserChanged.emit()
+                if self._central_surface == "browser":
+                    self.set_central_surface("terminal")
+            else:
+                self.focus_browser(self._browser_order[max(0, closed_position - 1)])
+
+    @Slot()
+    def close_focused_browser(self) -> None:
+        """Close the focused browser window (chip close button / chord)."""
+        if self._focused_browser:
+            self.close_browser(self._focused_browser)
+
+    @Slot(int, str)
+    def on_browser_title(self, slot: int, title: str) -> None:
+        """QML callback for WebEngineView.titleChanged."""
+        if slot not in self._browser_tabs:
+            return
+        title = (title or "").strip()
+        if self._browser_tabs[slot]["title"] == title:
+            return
+        self._browser_tabs[slot]["title"] = title
+        self.browserTabsChanged.emit()
+
+    @Slot(int, str)
+    def on_browser_url(self, slot: int, url: str) -> None:
+        """QML callback for WebEngineView.urlChanged (display state only).
+
+        Records the live URL for chip display; the value is NEVER fed back
+        to the view (the delegate reads `browserUrls` once at creation), so
+        this cannot create a navigation feedback loop.
+        """
+        if slot not in self._browser_tabs:
+            return
+        if self._browser_tabs[slot]["url"] == url:
+            return
+        self._browser_tabs[slot]["url"] = url
+        self.browserTabsChanged.emit()
+
+    def _next_free_browser_slot(self) -> int | None:
+        """Lowest unoccupied browser slot, or None when full.
+
+        Mirrors `_next_free_term_slot` — fill-from-the-bottom so the first
+        window is the lowest chip position.
+        """
+        for slot in range(1, self._MAX_INSTANCES + 1):
+            if slot not in self._browser_tabs:
+                return slot
+        return None
 
     @Slot()
     def request_opencode_sessions(self) -> None:
@@ -3622,6 +3872,15 @@ def run() -> int:
     _configure_freetype_interpreter()
     # Must run before the engine spawns the terminal panes — see _export_host_window_pid().
     _export_host_window_pid()
+
+    # QtWebEngine MUST initialize before QGuiApplication: it installs the
+    # shared OpenGL context (AA_ShareOpenGLContexts) the Chromium compositor
+    # needs to paint the embedded browser surface into our scene graph.
+    # Calling it after the QML engine loads `import QtWebEngine` is too late
+    # and throws. Placed after the QSurfaceFormat block above so the shared
+    # context inherits the alpha-buffer request. See qml/BrowserSurface.qml
+    # and CLAUDE.md "The browser panes".
+    QtWebEngineQuick.initialize()
 
     # Resolve `symmetria-ide [PATH]` and chdir before QGuiApplication +
     # AppController (which reads os.getcwd() in __init__). The path is stripped

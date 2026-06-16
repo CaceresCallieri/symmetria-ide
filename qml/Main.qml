@@ -157,6 +157,17 @@ Window {
         onActivated: controller.toggle_git_history()
     }
 
+    // Embedded-browser surface toggle. 'B' names the browser, so this always
+    // lands you there unless you were already on it, in which case it returns
+    // you to the terminal (same asymmetry as Ctrl+Shift+E/G). The browser is
+    // the agentic-browser pool — QtWebEngine views embedded so they never
+    // escape into a separate Hyprland window. See qml/BrowserSurface.qml.
+    Shortcut {
+        sequences: ["Ctrl+Shift+B"]
+        context: Qt.ApplicationShortcut
+        onActivated: controller.toggle_browser_terminal()
+    }
+
     // IDE-wide file-manager toggle. Promoted out of the nvim layer
     // (previously `<leader>e` / `<C-u>` via `runtime/init.lua`'s hijack)
     // so the FM opens uniformly from any pane — editor, agent, terminal,
@@ -1071,6 +1082,21 @@ Window {
                             }
                         }
                     }
+                }
+
+                // Embedded browser surface — sibling central surface (the
+                // agentic-browser pool). QtWebEngine WebEngineViews embedded
+                // so the browser renders into THIS window and never creates a
+                // top-level Hyprland surface (containment by construction).
+                // Gated on the same XOR as the other central surfaces;
+                // `browserSurfaceVisible` is derived from
+                // `centralSurface == "browser"`. Ctrl+Shift+B toggles it.
+                BrowserSurface {
+                    id: browserSurface
+                    anchors.fill: parent
+                    visible: controller.browserSurfaceVisible
+                        && !controller.fmVisible
+                        && !controller.agentVisible
                 }
 
                 // Git-history viewer — sibling central surface (read-only

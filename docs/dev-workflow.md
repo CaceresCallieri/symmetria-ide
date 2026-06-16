@@ -212,3 +212,25 @@ When the app exits, nvim sometimes shows `process_exited return_code = -9` in st
 - `@QmlElement` registration lives in `app.py`, `cmdline_models.py`, `whichkey_models.py`, `session_models.py`, and `minimap_view.py`. `QML_IMPORT_NAME = "Symmetria.Ide"`, `QML_IMPORT_MAJOR_VERSION = 1`.
 - QML files under `qml/` are loaded via `QUrl.fromLocalFile(str(_qml_dir() / "Main.qml"))`. Hot-reload would need `pyside6_live_coding`; not wired up yet.
 - Pyright warnings about relative imports not resolving and `QAbstractItemModel override` signatures are PySide6 stub mismatches, not real issues. Runtime works.
+
+## QtWebEngine / browser surface (Phase 4 Stage 1)
+
+- **Init ordering is load-bearing.** `QtWebEngineQuick.initialize()` runs in `run()` AFTER the `QSurfaceFormat` block and BEFORE `QGuiApplication` (it installs the shared GL context Chromium needs). Calling it after the QML engine loads `import QtWebEngine` throws.
+- **The embedded browser pool is pure-Python testable**, but a render smoke is NOT in the pytest suite: the session-scoped `QCoreApplication` fixture (conftest) can't coexist with the `QGuiApplication` QtWebEngine requires. Smoke it standalone instead:
+  ```sh
+  # minimal QtWebEngine QML instantiation (no full app):
+  QT_QPA_PLATFORM=offscreen python - <<'PY'
+  import sys
+  from PySide6.QtGui import QGuiApplication
+  from PySide6.QtQml import QQmlApplicationEngine
+  from PySide6.QtWebEngineQuick import QtWebEngineQuick
+  QtWebEngineQuick.initialize(); app = QGuiApplication(sys.argv)
+  e = QQmlApplicationEngine()
+  e.loadData(b'import QtQuick.Window\nimport QtWebEngine\nWindow{visible:true;WebEngineView{anchors.fill:parent;url:"about:blank"}}', "smoke.qml")
+  print("loaded:", bool(e.rootObjects()))
+  PY
+  # full-app engine load (exercises BrowserSurface.qml bindings):
+  QT_QPA_PLATFORM=offscreen SYMMETRIA_IDE_SCREENSHOT=/tmp/shot.png PYTHONPATH=src python -m symmetria_ide
+  ```
+  Under `offscreen` you'll see benign `Vulkan`/`GPUInfo not initialized` warnings — QtWebEngine falls back to software compositing and still renders a frame. The real GPU/Wayland behavior is only observable in a live Hyprland session (`PYTHONPATH=src python -m symmetria_ide`, then `Ctrl+Shift+B`); confirm `hyprctl clients` shows only the IDE window (no escaped Chromium).
+- **`WebEngineProfile` persistence quirk (regression-noted in `qml/BrowserSurface.qml`):** persistence needs `offTheRecord=false` WITH a `storageName`, but the inline declarative form (`storageName: "…"; offTheRecord: false`) logs `Storage name is empty…` because QtWebEngine evaluates `offTheRecord` before `storageName`. `storageName` alone is silent but leaves `offTheRecord=true` (NOT persistent). The warning-free + persistent form sets `offTheRecord` in `Component.onCompleted` (after `storageName`). Verified empirically on QtWebEngine 6.11. Do not inline it back.
