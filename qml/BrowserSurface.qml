@@ -117,6 +117,70 @@ Item {
         }
     }
 
+    // ---- Stage 2a: automation delivery (agent-driven, via runJavaScript) ----
+    // The BrowserAutomation bridge (Python) emits automationRequested; this is
+    // the ONLY side that touches the WebEngineView (Python can't drive it — see
+    // src/symmetria_ide/browser_automation.py). Each op runs on the target
+    // window's view and answers via on_result(request_id, <json string>).
+    // `eval_js` is the general primitive; navigate/snapshot/click/fill are
+    // conveniences. on_result is always called exactly once per request.
+    Connections {
+        target: controller.browserAutomation
+        function onAutomationRequested(requestId, slot, op, payload) {
+            var auto = controller.browserAutomation;
+            var loader = viewRepeater.itemAt(slot - 1);
+            var view = (loader && loader.item) ? loader.item : null;
+            if (!view) {
+                auto.on_result(requestId, JSON.stringify({ ok: false, error: "no-window" }));
+                return;
+            }
+            var args = {};
+            try {
+                args = JSON.parse(payload);
+            } catch (e) {}
+            if (op === "navigate") {
+                view.url = root.normalizeUrl(args.url || "");
+                auto.on_result(requestId, JSON.stringify({ ok: true, url: "" + view.url }));
+            } else if (op === "eval_js") {
+                view.runJavaScript(args.code || "", function (r) {
+                    auto.on_result(requestId, JSON.stringify({ ok: true, value: r }));
+                });
+            } else if (op === "snapshot") {
+                view.runJavaScript(root.snapshotJs(), function (r) {
+                    auto.on_result(requestId, JSON.stringify({ ok: true, snapshot: r }));
+                });
+            } else if (op === "click") {
+                view.runJavaScript(root.clickJs(args.ref || ""), function (r) {
+                    auto.on_result(requestId, JSON.stringify({ ok: r === true, ref: args.ref || "" }));
+                });
+            } else if (op === "fill") {
+                view.runJavaScript(root.fillJs(args.ref || "", args.text || ""), function (r) {
+                    auto.on_result(requestId, JSON.stringify({ ok: r === true, ref: args.ref || "" }));
+                });
+            } else {
+                auto.on_result(requestId, JSON.stringify({ ok: false, error: "unknown op" }));
+            }
+        }
+    }
+
+    // Injected-JS builders for snapshot/click/fill. v1 is an
+    // interactive-elements snapshot (links, buttons, form fields) tagged with
+    // a stable `data-sym-ref` the agent uses to address click/fill targets. A
+    // full a11y-tree snapshot (porting Vercel Labs agent-browser) is a Stage
+    // 2b refinement once it can be tested against the MCP tool surface.
+    function snapshotJs() {
+        return "(function(){var els=document.querySelectorAll('a,button,input,textarea,select,[role=button],[contenteditable=true]');var out=[];var n=0;for(var i=0;i<els.length;i++){var e=els[i];var rect=e.getBoundingClientRect();if(rect.width===0&&rect.height===0)continue;var ref='r'+(n++);e.setAttribute('data-sym-ref',ref);out.push({ref:ref,tag:e.tagName.toLowerCase(),type:(e.getAttribute('type')||''),text:((e.innerText||e.value||e.getAttribute('aria-label')||e.getAttribute('placeholder')||'')+'').trim().slice(0,120)});}return JSON.stringify(out);})()";
+    }
+    function clickJs(ref) {
+        var sel = '[data-sym-ref="' + ref + '"]';
+        return "(function(){var e=document.querySelector('" + sel + "');if(!e)return false;if(e.scrollIntoView)e.scrollIntoView({block:'center'});e.click();return true;})()";
+    }
+    function fillJs(ref, text) {
+        var sel = '[data-sym-ref="' + ref + '"]';
+        var val = JSON.stringify(text);
+        return "(function(){var e=document.querySelector('" + sel + "');if(!e)return false;e.focus();if('value' in e){e.value=" + val + ";}else{e.textContent=" + val + ";}e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return true;})()";
+    }
+
     // Small clickable glyph button for the nav row (back / forward / reload).
     component NavButton: Item {
         id: navRoot

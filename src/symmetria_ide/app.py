@@ -52,6 +52,7 @@ from PySide6.QtWebEngineQuick import QtWebEngineQuick
 
 from . import agent_harness
 from .agent_bridge import AgentBridgeClient, emit_gc_safe
+from .browser_automation import BrowserAutomation
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .trace import trace
 from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registration
@@ -544,6 +545,11 @@ class AppController(QObject):
         self._browser_tabs: dict[int, dict[str, str]] = {}
         self._browser_order: list[int] = []
         self._focused_browser: int = 0
+        # Phase 4 Stage 2a: drives the embedded WebEngineViews via
+        # QML-delivered runJavaScript (the views aren't Python-drivable).
+        # Exposed to QML as `controller.browserAutomation`; the Stage 2b MCP
+        # server wraps its `request()` API. See browser_automation.py.
+        self._browser_automation = BrowserAutomation(self)
         # Publish/subscribe client to Symmetria Shell's agent-bridge hub.
         # Publishes this pool's spawns/focus/titles so the shell dashboard
         # shows IDE agents; subscribes to consolidated snapshots so the
@@ -2297,6 +2303,13 @@ class AppController(QObject):
     @Property(int, constant=True)
     def maxBrowserSlots(self) -> int:
         return self._MAX_INSTANCES
+
+    @Property(QObject, constant=True)
+    def browserAutomation(self) -> QObject:
+        """The BrowserAutomation bridge (Stage 2a) — QML binds its delivery
+        Connections to `controller.browserAutomation.onAutomationRequested`
+        and answers via `on_result`."""
+        return self._browser_automation
 
     @Property("QVariantList", notify=browserTabsChanged)
     def browserOrder(self) -> list:
