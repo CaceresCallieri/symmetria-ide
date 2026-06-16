@@ -53,6 +53,7 @@ from PySide6.QtWebEngineQuick import QtWebEngineQuick
 from . import agent_harness
 from .agent_bridge import AgentBridgeClient, emit_gc_safe
 from .browser_automation import BrowserAutomation
+from .browser_mcp import BrowserMcpBridge, BrowserMcpServer
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .trace import trace
 from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registration
@@ -550,6 +551,16 @@ class AppController(QObject):
         # Exposed to QML as `controller.browserAutomation`; the Stage 2b MCP
         # server wraps its `request()` API. See browser_automation.py.
         self._browser_automation = BrowserAutomation(self)
+        # Stage 2b: the IDE-hosted browser MCP server. The bridge marshals
+        # agents' MCP tool calls (uvicorn thread) ONTO the GUI thread; the
+        # server runs FastMCP+uvicorn and is started in start() (unless
+        # SYMMETRIA_IDE_BROWSER_MCP=0). See browser_mcp.py.
+        self._browser_mcp_bridge = BrowserMcpBridge(
+            self._browser_automation, self._resolve_browser_window, self
+        )
+        self._browser_mcp_server = BrowserMcpServer(
+            self._browser_mcp_bridge, self._read_browser_windows
+        )
         # Publish/subscribe client to Symmetria Shell's agent-bridge hub.
         # Publishes this pool's spawns/focus/titles so the shell dashboard
         # shows IDE agents; subscribes to consolidated snapshots so the
@@ -2141,6 +2152,10 @@ class AppController(QObject):
             inst["dangerous"],
             f"{os.getpid()}_{slot}",
             inst["session_id"],
+            # Stage 2c: inject the IDE's browser MCP server so the agent gets
+            # the browser_* tools. Empty when the server isn't running (or the
+            # harness has no --mcp-config flag) → a no-op in spawn_argv.
+            self._browser_mcp_server.config_path,
         )
 
     @Slot(int)
@@ -2494,6 +2509,40 @@ class AppController(QObject):
             if slot not in self._browser_tabs:
                 return slot
         return None
+
+    def _resolve_browser_window(self, window: int) -> int:
+        """Map an MCP `window` arg → internal pool slot. GUI-thread only.
+
+        `window`: 0 = the focused window; N = the 1-based DISPLAY position
+        (what `browser_list_windows` reports). Returns the internal slot, or
+        0 when there's no such window (the bridge answers `no-window`). The
+        display/internal split mirrors the agent pool (chip number ≠ slot).
+        """
+        if window <= 0:
+            return self._focused_browser
+        if 1 <= window <= len(self._browser_order):
+            return self._browser_order[window - 1]
+        return 0
+
+    def _read_browser_windows(self) -> dict:
+        """The `browser_list_windows` MCP tool body. GUI-thread only.
+
+        Reports windows by DISPLAY position (the same numbering the other
+        tools' `window` arg takes) — never internal slots."""
+        windows = []
+        for position, slot in enumerate(self._browser_order, start=1):
+            tab = self._browser_tabs.get(slot, {})
+            windows.append(
+                {
+                    "window": position,
+                    "title": tab.get("title", ""),
+                    "url": tab.get("url", ""),
+                }
+            )
+        focused_position = 0
+        if self._focused_browser in self._browser_order:
+            focused_position = self._browser_order.index(self._focused_browser) + 1
+        return {"ok": True, "windows": windows, "focused": focused_position}
 
     @Slot()
     def request_opencode_sessions(self) -> None:
@@ -3224,6 +3273,10 @@ class AppController(QObject):
         # Non-blocking: the client's reader thread owns connect/retry, so
         # a missing bridge (shell down) just means silent backoff.
         self._agent_bridge.start()
+        # Start the browser MCP server (Stage 2b) so spawned agents can drive
+        # the embedded browser. Non-fatal on failure (Stage-1 manual browsing
+        # still works); writes the per-launch --mcp-config agents pick up.
+        self._browser_mcp_server.start()
         # Seed the GitController with the launch cwd by firing
         # `displayedRootChanged` once at startup. Without this, the very
         # first nvim cwd capsule arrives with a value equal to `_cwd`
@@ -3336,6 +3389,9 @@ class AppController(QObject):
         # IDE's agents from the dashboard) and join the reader thread
         # before the event loop tears down.
         self._agent_bridge.stop()
+        # Signal the browser MCP server to exit and drop its config file
+        # (daemon thread; reaped with the process either way).
+        self._browser_mcp_server.stop()
         # Stop every pooled session host first — the subprocesses are
         # the noisier of the two and we'd rather have their workers
         # joined before nvim's shutdown handshake owns the event loop.

@@ -39,6 +39,11 @@ class AgentHarness:
     # `-r` opens its own interactive picker instead.
     flags: dict[str, list[str]] = field(default_factory=dict)
     resume_requires_id: bool = False
+    # Flag this harness uses to load an extra MCP config file at spawn (Phase
+    # 4 Stage 2c — injecting the IDE's browser MCP server). claude takes
+    # `--mcp-config <path>`; opencode has no per-launch flag (its MCP lives in
+    # opencode.json), so it stays None until that path is wired.
+    mcp_config_flag: str | None = None
 
 
 HARNESSES: dict[str, AgentHarness] = {
@@ -48,6 +53,7 @@ HARNESSES: dict[str, AgentHarness] = {
         label="Claude",
         dangerous_flag="--dangerously-skip-permissions",
         flags={"fresh": [], "resume": ["-r"], "continue": ["-c"]},
+        mcp_config_flag="--mcp-config",
     ),
     "opencode": AgentHarness(
         name="opencode",
@@ -77,6 +83,7 @@ def spawn_argv(
     dangerous: bool,
     agent_id: str,
     session_id: str = "",
+    mcp_config_path: str = "",
 ) -> list[str]:
     """argv for a slot's QMLTermSession.
 
@@ -86,6 +93,11 @@ def spawn_argv(
     (symmetria-agent-hook.py) and opencode's plugin
     (~/.config/opencode/plugin/symmetria-agent.js) read it and report to
     the bridge under that id.
+
+    `mcp_config_path`, when set AND the harness declares `mcp_config_flag`,
+    appends `<flag> <path>` so the agent discovers the IDE's browser MCP
+    server (Stage 2c). Empty path or a harness without the flag (opencode
+    today) is a no-op.
     """
     argv = ["env", f"SYMMETRIA_AGENT_ID={agent_id}"]
     if dangerous:
@@ -93,6 +105,8 @@ def spawn_argv(
     argv.append(harness.executable)
     if dangerous and harness.dangerous_flag:
         argv.append(harness.dangerous_flag)
+    if mcp_config_path and harness.mcp_config_flag:
+        argv += [harness.mcp_config_flag, mcp_config_path]
     argv += harness.flags[spawn_type]
     if spawn_type == "resume" and harness.resume_requires_id:
         argv.append(session_id)

@@ -113,3 +113,46 @@ def test_parse_invalid_json_returns_none():
 
 def test_parse_non_list_json_returns_none():
     assert parse_opencode_sessions('{"not": "a list"}') is None
+
+
+# ---------------------------------------------------------------------------
+# spawn_argv — Stage 2c browser MCP --mcp-config injection
+# ---------------------------------------------------------------------------
+
+
+def test_claude_injects_mcp_config_when_path_given():
+    argv = spawn_argv(
+        HARNESSES["claude"], "fresh", True, "42_1", mcp_config_path="/tmp/cfg.json"
+    )
+    assert "--mcp-config" in argv
+    assert argv[argv.index("--mcp-config") + 1] == "/tmp/cfg.json"
+    # Injected after the executable (it's a claude CLI flag, not an env pair).
+    assert argv.index("--mcp-config") > argv.index("claude")
+
+
+def test_no_mcp_config_when_path_empty():
+    argv = spawn_argv(HARNESSES["claude"], "fresh", True, "42_1")
+    assert "--mcp-config" not in argv
+
+
+def test_opencode_ignores_mcp_config_path():
+    # opencode has no --mcp-config flag (mcp_config_flag is None) — the path
+    # is silently dropped until opencode MCP injection is wired.
+    argv = spawn_argv(
+        HARNESSES["opencode"], "fresh", True, "42_1", mcp_config_path="/tmp/cfg.json"
+    )
+    assert "--mcp-config" not in argv
+    assert "/tmp/cfg.json" not in argv
+
+
+def test_mcp_config_coexists_with_resume_session_id():
+    argv = spawn_argv(
+        HARNESSES["opencode"],
+        "resume",
+        True,
+        "42_1",
+        session_id="ses_abc",
+        mcp_config_path="/tmp/cfg.json",
+    )
+    # opencode drops the mcp flag but still appends the session id last.
+    assert argv[-1] == "ses_abc"

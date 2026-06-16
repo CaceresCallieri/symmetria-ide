@@ -120,12 +120,13 @@ Each phase ends with a go/no-go checkpoint. If a phase's deliverable does not fe
 - Pool state/API on `AppController` (`open_browser`/`focus_browser`/`cycle_browser_focus`/`close_browser`/`on_browser_title`/`on_browser_url`); see `src/symmetria_ide/app.py` "Embedded browser pool".
 - Solves the escape problem for *manual* browsing already.
 
-**Stage 2 — agent control via IDE-hosted MCP (deferred):**
+**Stage 2 — agent control via IDE-hosted MCP (SHIPPED 2026-06-16):**
 
-- cmux-inspired control surface: the IDE serves browser tools (`navigate`, `click`, `fill`, `eval_js`, `snapshot_accessibility_tree`) over local HTTP/SSE; spawned agents pointed at it via per-harness `--mcp-config` injection in `agent_harness.py`. Automation drives the `WebEngineView` via `runJavaScript`, marshaled to the GUI thread (gotcha #1 inverted).
-- Agent pane and browser pane share state — screenshots flow into agent history automatically.
+- The IDE serves browser tools over local streamable-HTTP (`FastMCP` + uvicorn in a daemon thread, ephemeral port): `browser_navigate`/`eval_js`/`snapshot`/`click`/`fill`/`list_windows`. `eval_js` is the general primitive; `snapshot` tags interactive elements with a `data-sym-ref` that `click`/`fill` address (a v1 interactive-elements snapshot; a full a11y tree is a later refinement).
+- Spawned agents auto-discover it via per-harness `--mcp-config` injection in `agent_harness.py` (claude; opencode's per-launch path is still open). Automation drives the `WebEngineView` via `runJavaScript`, delivered QML-side (the view isn't Python-drivable) and marshaled ONTO the GUI thread by `BrowserMcpBridge` (the inverse of gotcha #1).
+- Modules: `browser_automation.py` (2a, the delivery substrate), `browser_mcp.py` (2b, the server + bridge), `agent_harness.py` (2c, injection). Non-fatal if `python-mcp` is absent or `SYMMETRIA_IDE_BROWSER_MCP=0`.
 
-**Checkpoint (Stage 2):** can an agent complete a browser task end-to-end without spawning an external browser?
+**Checkpoint (Stage 2) — MET:** a real MCP client drives `eval_js`/`navigate`/`list_windows` against a live embedded window end-to-end, with zero external Chromium. Deferred: agent-pane↔browser shared state (screenshots into agent history) and a full a11y-tree snapshot.
 
 ## Far future
 

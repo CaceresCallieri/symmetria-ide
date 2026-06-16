@@ -307,3 +307,37 @@ def test_title_and_url_callbacks_ignore_empty_slots(controller):
     controller.on_browser_url(4, "https://ghost")
     assert controller.browserTitles[3] == ""
     assert controller.browserUrls[3] == ""
+
+
+# ---------------------------------------------------------------------------
+# MCP window addressing (Stage 2b) — display position ↔ internal slot.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_browser_window_maps_display_position_to_slot(controller):
+    controller.open_browser()  # slot 1
+    controller.open_browser()  # slot 2 (focused)
+    controller.close_browser(1)  # free slot 1; order now [2]
+    controller.open_browser()  # reuses internal slot 1; order [2, 1]
+    # window 0 = focused (internal slot 1, the newest).
+    assert controller._resolve_browser_window(0) == controller.focusedBrowser
+    # display positions map through _browser_order, not internal slot numbers.
+    assert controller._resolve_browser_window(1) == 2  # 1st displayed → slot 2
+    assert controller._resolve_browser_window(2) == 1  # 2nd displayed → slot 1
+    assert controller._resolve_browser_window(3) == 0  # out of range → no window
+
+
+def test_resolve_browser_window_empty_pool(controller):
+    assert controller._resolve_browser_window(0) == 0  # focused == 0
+    assert controller._resolve_browser_window(1) == 0
+
+
+def test_read_browser_windows_reports_display_positions(controller):
+    controller.open_browser("https://a.com")  # slot 1, display 1
+    controller.on_browser_title(1, "A")
+    controller.open_browser("https://b.com")  # slot 2, display 2 (focused)
+    info = controller._read_browser_windows()
+    assert info["ok"] is True
+    assert info["focused"] == 2  # display position, not internal slot
+    assert info["windows"][0] == {"window": 1, "title": "A", "url": "https://a.com"}
+    assert info["windows"][1] == {"window": 2, "title": "", "url": "https://b.com"}
