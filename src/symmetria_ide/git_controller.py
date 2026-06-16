@@ -841,6 +841,14 @@ class GitController(QObject):
             "char": status.char,
             "state": status.state,
             "tooltip": status.tooltip,
+            # Resolved-root-relative path (porcelain v2 emits paths relative
+            # to the repo TOPLEVEL, not the asked `repoRoot` — which may be a
+            # subdir/worktree/submodule). Identical to GitStatusListModel's
+            # `displayName` role. The git viewer's working-diff request keys
+            # on this, and `git diff` runs with cwd=_resolved_root, so the
+            # path MUST be resolved-relative — deriving it by stripping the
+            # asked `repoRoot` in QML breaks on the asked≠resolved case.
+            "path": status.path,
             "additions": status.additions,
             "deletions": status.deletions,
         }

@@ -480,7 +480,7 @@ Window {
     // the muscle memory is consistent.
     //
     // CRITICAL gating: `enabled: treeScope.activeFocus` — and for Ctrl+K
-    // ALSO `gitStatusPanel.visible`. When the side panel doesn't have
+    // ALSO `gitStatusPanel.reachable` (visible && !collapsed). When the side panel doesn't have
     // focus (e.g. focus is on editor, terminal, or agent pane), the
     // Shortcut is `enabled: false` and Qt does NOT consume the key —
     // it passes through the focus chain normally. That preserves:
@@ -2097,6 +2097,12 @@ Window {
                 char: s.char,
                 color: _colorForState(s.state),
                 tooltip: s.tooltip,
+                // Resolved-root-relative path (= GitStatusListModel.displayName).
+                // The git viewer's changes tree keys its working-diff request
+                // on this; it MUST be relative to the resolved repo toplevel
+                // (the `git diff` cwd), not the asked `repoRoot`. The FM tree
+                // ignores this extra field.
+                displayName: s.path,
                 adds: s.additions,
                 dels: s.deletions
             };

@@ -523,10 +523,15 @@ def test_controller_status_for_path_relative_conversion() -> None:
         # `additions`/`deletions` default to 0 on GitStatus and are
         # always present in the return dict so the QML adapter can
         # forward them as `adds`/`dels` without an absent-vs-zero check.
+        # `path` is the resolved-root-relative path (= GitStatusListModel's
+        # `displayName` role) — the git viewer's changes tree keys its
+        # working-diff request on it, so it must be relative to the resolved
+        # toplevel (the `git diff` cwd), not the asked `repoRoot`.
         assert result == {
             "char": "M",
             "state": STATE_UNSTAGED,
             "tooltip": "Modified",
+            "path": "src/foo.py",
             "additions": 0,
             "deletions": 0,
         }

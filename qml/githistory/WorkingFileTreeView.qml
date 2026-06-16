@@ -37,8 +37,9 @@ import "../design"
 FocusScope {
     id: root
 
-    // Absolute path to the git repo root — drives the FM tree's rootPath and
-    // the abs→repo-relative conversion the diff request needs.
+    // Absolute path the FM tree roots at (`rootPath`). The repo-relative diff
+    // key does NOT come from here — it's sourced from the status provider's
+    // resolved-relative `displayName` (see `currentFile`).
     property string repoRoot: ""
 
     // FM duck-typed status seam — `statusForPath(absPath) -> {char, color,
@@ -85,9 +86,10 @@ FocusScope {
     // WorkingFileDetailView needs no change.
     readonly property var currentFile: {
         // Dependency tap — read the revision so this binding re-evaluates on
-        // each scan (see `_statusRevision`). The read itself is the point; the
-        // value is unused.
-        root._statusRevision; // eslint-disable-line no-unused-expressions
+        // each scan (see `_statusRevision`). The `void` discards the value
+        // explicitly; the read itself is the point (it registers the binding's
+        // dependency on the counter).
+        void root._statusRevision;
 
         var row = tree.currentRow;
         if (!row || row.isDir)
@@ -97,7 +99,12 @@ FocusScope {
             return null;
         return ({
             path: row.path,
-            displayName: root._repoRelative(row.path),
+            // Resolved-root-relative path, sourced from the status provider
+            // (= GitStatusListModel.displayName) — NOT derived by stripping
+            // the asked `repoRoot`, which is wrong when asked≠resolved
+            // (subdir/worktree/submodule anchor). The working-diff request
+            // keys on this and `git diff` runs at the resolved root.
+            displayName: st.displayName,
             tooltip: st.tooltip,
             additions: st.adds || 0,
             deletions: st.dels || 0,
@@ -117,15 +124,6 @@ FocusScope {
         tree.focusInternal();
     }
 
-    // Strip the repo root so the diff request gets the same repo-relative path
-    // the flat GitStatusListModel exposed as `displayName` (the git_log
-    // controller keys its published diff by this string).
-    function _repoRelative(abs: string): string {
-        if (root.repoRoot !== "" && abs.indexOf(root.repoRoot + "/") === 0)
-            return abs.substring(root.repoRoot.length + 1);
-        return abs;
-    }
-
     // Tab / Backtab → ask the host to switch sub-views. The FM FileTreeView's
     // inner ListView handles j/k/h/l/etc. but NOT Tab, so an unhandled Tab
     // bubbles up the focus chain to THIS FocusScope's handler — where we
@@ -133,6 +131,14 @@ FocusScope {
     // fire. (WorkingFileListView intercepted Tab inside its own ListView
     // handler; here the handler lives one level up because we don't own the FM
     // ListView's Keys block.)
+    //
+    // REGRESSION NOTE: this bubbling relies on the FM tree having NO focusable
+    // descendant that claims Tab (no `activeFocusOnTab: true` child, no
+    // ListView Tab handler) — otherwise Qt's focus traversal would consume Tab
+    // before it reaches here. Verified true of the installed FmUi.FileTreeView
+    // as of this writing. If the Tab toggle ever silently stops working on the
+    // changes surface, a new Tab-claiming focusable inside the FM tree is the
+    // first suspect; the fix is `activeFocusOnTab: false` on the tree instance.
     Keys.onPressed: function (event) {
         if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
             root.toggleRequested();
