@@ -226,7 +226,7 @@ When the app exits, nvim sometimes shows `process_exited return_code = -9` in st
   from PySide6.QtWebEngineQuick import QtWebEngineQuick
   QtWebEngineQuick.initialize(); app = QGuiApplication(sys.argv)
   e = QQmlApplicationEngine()
-  e.loadData(b'import QtQuick.Window\nimport QtWebEngine\nWindow{visible:true;WebEngineView{anchors.fill:parent;url:"about:blank"}}', "smoke.qml")
+  e.loadData(b'import QtQuick\nimport QtQuick.Window\nimport QtWebEngine\nWindow{visible:true;WebEngineView{anchors.fill:parent;url:"about:blank"}}', "smoke.qml")
   print("loaded:", bool(e.rootObjects()))
   PY
   # full-app engine load (exercises BrowserSurface.qml bindings):

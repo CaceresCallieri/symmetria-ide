@@ -61,26 +61,60 @@ Item {
         return (loader && loader.item) ? loader.item : null;
     }
 
-    // Address-bar input → a navigable URL. A bare host with a dot becomes
-    // https://; anything with a space (or no dot) is treated as a search.
+    // Address-bar input → a navigable URL. Dev-IDE-friendly rules: an
+    // explicit scheme passes through; localhost / a bare IP / a host:port
+    // (the common local-dev case, e.g. `localhost:3000`) goes to http://;
+    // a dotted host goes to https://; anything else (spaces, or a single
+    // word with no dot and no port) is a web search.
     function normalizeUrl(input) {
         var s = ("" + input).trim();
         if (s.length === 0)
             return "";
         if (s.indexOf("://") !== -1)
             return s;
-        if (s.indexOf(" ") === -1 && s.indexOf(".") !== -1)
-            return "https://" + s;
+        if (s.indexOf(" ") === -1) {
+            // localhost[:port][/path], 127.x[:port], or any host:port → local dev (http)
+            if (/^(localhost|127(\.\d+){3})([:/]|$)/.test(s) || /^[^/\s]+:\d+/.test(s))
+                return "http://" + s;
+            if (s.indexOf(".") !== -1)
+                return "https://" + s;
+        }
         return "https://www.google.com/search?q=" + encodeURIComponent(s);
     }
 
-    // Re-grab page focus when the surface re-shows with an already-loaded
-    // view (the per-view onVisibleChanged / focusBrowserRequested paths cover
-    // the spawn + switch cases).
-    onVisibleChanged: if (visible) {
-        var v = focusedView();
-        if (v)
-            v.forceActiveFocus();
+    // Centralized focus (keyboard-first). A blank/new window lands focus in
+    // the address bar so the user can type a URL by keyboard; a loaded window
+    // focuses the page itself; an empty pool focuses nothing (open a window
+    // first via the + chip or Ctrl+T). This lives in ONE place — the
+    // per-view delegates deliberately do NOT grab focus themselves — so the
+    // address-bar-vs-page decision can't race between two handlers. Routed
+    // through Qt.callLater so it runs after the Loader has instantiated the
+    // target view. NOTE: focus behavior is not observable in offscreen
+    // headless runs — verify live (open a window → address bar focused; type
+    // + Enter → page focused; switch windows → page focused).
+    function focusActive() {
+        if (controller.focusedBrowser === 0)
+            return;
+        var u = controller.browserUrls[controller.focusedBrowser - 1] || "";
+        if (u === "" || u === "about:blank") {
+            urlField.forceActiveFocus();
+            urlField.selectAll();
+        } else {
+            var v = focusedView();
+            if (v)
+                v.forceActiveFocus();
+        }
+    }
+
+    onVisibleChanged: if (visible)
+        Qt.callLater(focusActive);
+
+    // Focus follows focus_browser (open / chip click / chord) — see focusActive.
+    Connections {
+        target: controller
+        function onFocusBrowserRequested(s) {
+            Qt.callLater(root.focusActive);
+        }
     }
 
     // Small clickable glyph button for the nav row (back / forward / reload).
@@ -217,9 +251,11 @@ Item {
                             }
                         }
 
-                        // Click anywhere else on the chip focuses the window.
-                        // Declared AFTER the close ✕ MouseArea so the close
-                        // target wins where they overlap (z-order = last wins).
+                        // Click anywhere on the chip (outside the ✕) focuses
+                        // the window. Pushed behind via explicit `z: -1` so the
+                        // nested close-✕ MouseArea (default z: 0) wins clicks in
+                        // the overlap region — it's the explicit z, not
+                        // declaration order, that decides the hit target.
                         MouseArea {
                             anchors.fill: parent
                             z: -1
@@ -363,7 +399,7 @@ Item {
             }
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: "press +  ·  Ctrl+Shift+B toggles this surface"
+                text: "press +  or  Ctrl+T to open a window  ·  Ctrl+Shift+B toggles this surface"
                 color: Theme.color.text.normal
                 font.family: Theme.font.family
                 font.pixelSize: Theme.font.size.sm
@@ -396,24 +432,11 @@ Item {
                         // One-shot initial-URL read (deliberately NOT a binding;
                         // a live binding would fight user navigation — see
                         // AppController.browserUrls). The WebEngineView owns its
-                        // url thereafter.
+                        // url thereafter. Focus is NOT grabbed here — the
+                        // surface's focusActive() owns the page-vs-address-bar
+                        // decision centrally (see the top of this file).
                         var u = controller.browserUrls[slotLoader.index];
                         view.url = (u && ("" + u).length > 0) ? ("" + u) : "about:blank";
-                        if (visible)
-                            forceActiveFocus();
-                    }
-                    onVisibleChanged: if (visible)
-                        forceActiveFocus();
-
-                    // Focus pull for the already-visible case (chord/chip
-                    // pressed while another widget held focus and this slot was
-                    // already showing) — mirrors the agent delegate.
-                    Connections {
-                        target: controller
-                        function onFocusBrowserRequested(s) {
-                            if (s === slotLoader.slot && view.visible)
-                                view.forceActiveFocus();
-                        }
                     }
                 }
             }

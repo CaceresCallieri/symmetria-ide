@@ -168,6 +168,18 @@ Window {
         onActivated: controller.toggle_browser_terminal()
     }
 
+    // New browser window — the standard browser "new tab" idiom, gated to the
+    // browser surface so nvim/terminal keep Ctrl+T elsewhere. The new (blank)
+    // window's address bar is focused (BrowserSurface.focusActive), so the
+    // keyboard loop is: Ctrl+T → type a URL → Enter. This is what makes the
+    // browser surface operable without a mouse (keyboard-first, non-neg #1).
+    Shortcut {
+        sequences: ["Ctrl+T"]
+        context: Qt.ApplicationShortcut
+        enabled: controller.browserSurfaceVisible
+        onActivated: controller.open_browser()
+    }
+
     // IDE-wide file-manager toggle. Promoted out of the nvim layer
     // (previously `<leader>e` / `<C-u>` via `runtime/init.lua`'s hijack)
     // so the FM opens uniformly from any pane — editor, agent, terminal,
@@ -274,25 +286,45 @@ Window {
         }
     }
 
+    // Close the focused slot. Shared between the agent and browser pools —
+    // whichever surface is visible owns the chord (the two are never visible
+    // together, so there is no ambiguity).
     Shortcut {
         sequences: ["Ctrl+Shift+Q"]
         context: Qt.ApplicationShortcut
-        enabled: controller.agentSurfaceVisible
-        onActivated: controller.close_focused_agent()
+        enabled: controller.agentSurfaceVisible || controller.browserSurfaceVisible
+        onActivated: {
+            if (controller.browserSurfaceVisible)
+                controller.close_focused_browser();
+            else
+                controller.close_focused_agent();
+        }
     }
 
-    // Cycle through occupied agent slots without reaching for the digit row.
+    // Cycle through occupied slots without reaching for the digit row —
+    // agent slots on the agent surface, browser windows on the browser
+    // surface (same dispatch-by-visible-surface pattern as Ctrl+Shift+Q).
     Shortcut {
         sequences: ["Ctrl+Shift+H"]
         context: Qt.ApplicationShortcut
-        enabled: controller.agentSurfaceVisible
-        onActivated: controller.cycle_agent_focus(-1)
+        enabled: controller.agentSurfaceVisible || controller.browserSurfaceVisible
+        onActivated: {
+            if (controller.browserSurfaceVisible)
+                controller.cycle_browser_focus(-1);
+            else
+                controller.cycle_agent_focus(-1);
+        }
     }
     Shortcut {
         sequences: ["Ctrl+Shift+L"]
         context: Qt.ApplicationShortcut
-        enabled: controller.agentSurfaceVisible
-        onActivated: controller.cycle_agent_focus(1)
+        enabled: controller.agentSurfaceVisible || controller.browserSurfaceVisible
+        onActivated: {
+            if (controller.browserSurfaceVisible)
+                controller.cycle_browser_focus(1);
+            else
+                controller.cycle_agent_focus(1);
+        }
     }
 
     // Half-page scrollback in the focused agent terminal. claude's TUI is
@@ -472,6 +504,13 @@ Window {
                 // slot — the delegate's onFocusAgentRequested handler lands
                 // it on the visible agent terminal.
                 controller.focus_agent(controller.focusedAgent);
+            else if (controller.browserSurfaceVisible)
+                // Embedded browser surface: focus_browser re-emits
+                // focusBrowserRequested → BrowserSurface.focusActive() lands
+                // focus on the page (or address bar for a blank window).
+                // No-ops on an empty pool. Without this branch the fall-through
+                // would focus the hidden editor.
+                controller.focus_browser(controller.focusedBrowser);
             else if (controller.gitVisible)
                 gitHistoryView.focusContent();
             else if (controller.terminalVisible)

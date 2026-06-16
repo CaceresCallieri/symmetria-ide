@@ -244,6 +244,38 @@ def test_reopen_after_close_fills_freed_slot(controller):
 
 
 # ---------------------------------------------------------------------------
+# Defensive branches — mirror the agent pool's recovery paths (silent rot
+# risk: these only fire on a desync/double-close race, so they need a test).
+# ---------------------------------------------------------------------------
+
+
+def test_close_browser_desync_removes_from_tabs_without_raising(controller):
+    """A slot present in _browser_tabs but missing from _browser_order
+    (a double-close race) must NOT raise on order.index() — close_browser
+    drops it from tabs and emits once, mirroring close_agent's guard."""
+    controller.open_browser()  # slot 1, properly tracked
+    # Force a desync: add slot 2 to tabs only (not to the order list).
+    controller._browser_tabs[2] = {"url": "about:blank", "title": ""}
+    emissions = _capture(controller.browserTabsChanged)
+    controller.close_browser(2)  # must not raise
+    assert 2 not in controller._browser_tabs
+    assert len(emissions) == 1
+    # The properly-tracked slot 1 is untouched.
+    assert list(controller.browserOrder) == [1]
+
+
+def test_cycle_browser_focus_recovers_from_stale_focus(controller):
+    """If _focused_browser points at a slot no longer in display order
+    (stale state), cycle_browser_focus recovers to the first window via the
+    `order[0]` path rather than raising on order.index()."""
+    controller.open_browser()  # slot 1
+    controller.open_browser()  # slot 2
+    controller._focused_browser = 99  # stale — not in _browser_order
+    controller.cycle_browser_focus(1)
+    assert controller.focusedBrowser == controller.browserOrder[0]
+
+
+# ---------------------------------------------------------------------------
 # Title / URL bookkeeping — dedup, no spurious emits.
 # ---------------------------------------------------------------------------
 

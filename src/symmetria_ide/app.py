@@ -541,7 +541,7 @@ class AppController(QObject):
         # the QML Loader owns. Slot numbering is 1-based (1.._MAX_INSTANCES),
         # _browser_order is the dense DISPLAY order (spawns append, closes
         # compact), _focused_browser is 0 when the pool is empty.
-        self._browser_tabs: dict[int, dict] = {}
+        self._browser_tabs: dict[int, dict[str, str]] = {}
         self._browser_order: list[int] = []
         self._focused_browser: int = 0
         # Publish/subscribe client to Symmetria Shell's agent-bridge hub.
@@ -2462,6 +2462,10 @@ class AppController(QObject):
         """
         if slot not in self._browser_tabs:
             return
+        # Stored verbatim (no strip, unlike on_browser_title): the QML side
+        # passes WebEngineView.url.toString(), which is already a normalized
+        # URL, and trailing/leading whitespace in a URL is meaningful — so
+        # there is nothing to trim and trimming could corrupt a valid URL.
         if self._browser_tabs[slot]["url"] == url:
             return
         self._browser_tabs[slot]["url"] = url
