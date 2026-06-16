@@ -27,9 +27,14 @@ FocusScope {
         commitList.focusList();
     }
 
+    // Two framed "columns" separated by a breathing gap — the File Manager's
+    // miller-column rhythm. The old hard hairline divider is replaced by a
+    // gap + per-pane rounded frame so the split reads as two calm surfaces
+    // rather than two flat halves butted together.
     RowLayout {
         anchors.fill: parent
-        spacing: 0
+        anchors.margins: Theme.spacing.sm
+        spacing: Theme.spacing.sm
 
         // --- Master: commit list ----------------------------------------
         Rectangle {
@@ -37,6 +42,9 @@ FocusScope {
             Layout.minimumWidth: 320
             Layout.fillHeight: true
             color: Theme.color.bg.chrome
+            radius: Theme.radius.md
+            border.width: 1
+            border.color: Theme.color.border.hairline
 
             CommitListView {
                 id: commitList
@@ -55,17 +63,16 @@ FocusScope {
             }
         }
 
-        // Vertical hairline divider between the panes.
-        Rectangle {
-            Layout.preferredWidth: 1
-            Layout.fillHeight: true
-            color: Theme.color.border.hairline
-        }
-
         // --- Detail: metadata + diff ------------------------------------
+        // Matching rounded frame — `radius`/`border` set on the instance
+        // (CommitDetailView's root is a Rectangle) so it pairs visually with
+        // the master column.
         CommitDetailView {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            radius: Theme.radius.md
+            border.width: 1
+            border.color: Theme.color.border.hairline
             commit: commitList.currentCommit
             diffText: root.logController ? root.logController.currentDiffText : ""
             diffHash: root.logController ? root.logController.currentDiffHash : ""

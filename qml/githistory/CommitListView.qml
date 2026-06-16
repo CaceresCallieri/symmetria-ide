@@ -16,6 +16,7 @@
 
 import QtQuick
 import QtQuick.Layouts
+import ".."
 import "../design"
 
 FocusScope {
@@ -50,8 +51,9 @@ FocusScope {
     }
 
     // Fixed delegate row height — shared by the delegate and the Ctrl+D/U
-    // half-page math so the two can't drift out of sync.
-    readonly property int rowHeight: 30
+    // half-page math so the two can't drift out of sync. Roomier than a
+    // terminal row so the inset clay selection pill breathes (FM rhythm).
+    readonly property int rowHeight: 34
     // Half-page jump distance for Ctrl+D / Ctrl+U, derived from the viewport.
     readonly property int _halfPage: Math.max(1, Math.floor(view.height / (2 * root.rowHeight)))
     // `gg` pending flag — set by the first `g`, consumed by the second, and
@@ -75,6 +77,12 @@ FocusScope {
         highlightMoveDuration: 0
         boundsBehavior: Flickable.StopAtBounds
         cacheBuffer: 600
+        // Small content inset inside the clipped viewport so the first/last
+        // selected clay pill has room for its shadow before the clip edge
+        // (the ListView clips; clay shadows render OUTSIDE the pill — see the
+        // PillSurface gotcha note).
+        topMargin: Theme.spacing.xs
+        bottomMargin: Theme.spacing.xs
 
         // After a reset (repo switch / fresh load) the model repopulates from
         // empty; point the selection back at the newest commit so its diff
@@ -148,7 +156,7 @@ FocusScope {
             }
         }
 
-        delegate: Rectangle {
+        delegate: Item {
             id: rowItem
             // Role bindings — a C++ model exposes roles as required properties.
             // `currentCommit` reads these directly off `view.currentItem`.
@@ -169,13 +177,26 @@ FocusScope {
 
             width: ListView.view.width
             height: root.rowHeight
-            color: isCurrent ? Theme.color.bg.selected : "transparent"
 
-            // Left accent bar marks the selected row (calm, not a full fill).
-            Rectangle {
-                width: 2
-                height: parent.height
-                color: rowItem.isCurrent ? Theme.color.accent.primary : "transparent"
+            // CLAY selection capsule — the current commit raises into a clay
+            // pill (matte fill + hairline border + convex depth), while every
+            // other row stays fully flat (transparent fill + border, no
+            // shadow). This is the File Manager active-tab / surface-switcher
+            // idiom: `elevated` gates the depth so only the focal commit
+            // floats, keeping the dense log readable. Inset a few px so the
+            // pill floats with breathing room and casts its shadow into the
+            // gap (matching the FM's spaced rows) rather than edge-to-edge.
+            // Declared FIRST so it renders behind the content Row + MouseArea.
+            PillSurface {
+                anchors.fill: parent
+                anchors.topMargin: 3
+                anchors.bottomMargin: 3
+                anchors.leftMargin: Theme.spacing.xs
+                anchors.rightMargin: Theme.spacing.xs
+                radius: Theme.radius.sm
+                elevated: rowItem.isCurrent
+                color: rowItem.isCurrent ? Theme.color.bg.selected : "transparent"
+                borderColor: rowItem.isCurrent ? Theme.color.border.hairline : "transparent"
             }
 
             MouseArea {
@@ -256,15 +277,6 @@ FocusScope {
                     font.pixelSize: Theme.font.size.xs
                     renderType: Text.NativeRendering
                 }
-            }
-
-            // Hairline separator between rows.
-            Rectangle {
-                anchors.bottom: parent.bottom
-                anchors.left: parent.left
-                anchors.right: parent.right
-                height: 1
-                color: Theme.color.border.hairline
             }
         }
     }

@@ -14,6 +14,7 @@
 
 import QtQuick
 import QtQuick.Layouts
+import ".."
 import "../design"
 
 Rectangle {
@@ -50,10 +51,20 @@ Rectangle {
         visible: root.hasCommit
         spacing: 0
 
-        // --- Metadata header --------------------------------------------
-        Rectangle {
+        // --- Metadata header (clay card) --------------------------------
+        // The commit's identity floats as a clay PillCard above the diff —
+        // the File Manager's framed-header read. Inset with margins so the
+        // card's convex shadow has room (it renders OUTSIDE the rect) and its
+        // downward drop lifts the header off the changes below. The header
+        // Column reparents into the card body (PillCard's default content slot).
+        PillCard {
             Layout.fillWidth: true
+            Layout.leftMargin: Theme.spacing.sm
+            Layout.rightMargin: Theme.spacing.sm
+            Layout.topMargin: Theme.spacing.sm
             Layout.preferredHeight: headerCol.implicitHeight + Theme.spacing.md * 2
+            radius: Theme.radius.md
+            elevated: true
             color: Theme.color.bg.selected
 
             Column {
