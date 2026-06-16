@@ -37,25 +37,36 @@ def test_editor_terminal_toggle_chord_exists(main_qml: str):
     `toggle_editor_terminal` slot, bound at QApplicationShortcut scope
     so it wins over NvimView's keyboard capture even in insert mode.
 
-    Earlier iteration had a separate Ctrl+Shift+T chord targeting
-    swap_to_terminal; that was retired in favor of the single toggle.
+    Distinct from the direct Ctrl+Shift+T "home to terminal" jump
+    (see test_direct_terminal_chord_present): E is the binary
+    editor↔terminal flip, T is the unconditional one-way return.
     """
     assert "Ctrl+Shift+E" in main_qml
     assert "controller.toggle_editor_terminal()" in main_qml
 
 
-def test_old_terminal_summon_chord_retired(main_qml: str):
-    """Ctrl+Shift+T was retired when the editor↔terminal toggle landed.
-    If a future PR resurrects it as a chord, that's likely a regression
-    (the toggle is meant to be the single user-facing entry point);
-    `swap_to_terminal` remains as a Python primitive callable from
-    other slots, so the assertion targets the chord BINDING (i.e. a
-    `sequences: ["Ctrl+Shift+T"]` line, which is what would re-mount
-    the chord) — not the bare substring, which legitimately appears
-    in retirement-history comments throughout the file.
+def test_direct_terminal_chord_present(main_qml: str):
+    """Ctrl+Shift+T must be a direct "home to terminal" jump, calling
+    `swap_to_terminal` (a one-way, idempotent landing — NOT a toggle).
+
+    The terminal is the IDE's home base: every surface toggle (E/G,
+    Ctrl+E) returns here as its "off" direction, but the terminal
+    itself lacked a direct chord, so reaching it from a non-toggle
+    surface (e.g. the agent pane) took two presses. This chord restores
+    the symmetry — every central surface now has a direct entry point.
+
+    (Ctrl+Shift+T shipped once for the binary editor/terminal swap and
+    was retired there as redundant; re-added 2026-06-16 now that the
+    multi-surface world makes a direct terminal chord non-redundant.
+    Scope the wiring assertion to the chord BLOCK so the bare
+    `swap_to_terminal` substring — which legitimately appears in toggle
+    slots — can't false-positive.)
     """
-    assert 'sequences: ["Ctrl+Shift+T"]' not in main_qml
-    assert "controller.swap_to_terminal()" not in main_qml
+    chord_idx = main_qml.find('sequences: ["Ctrl+Shift+T"]')
+    assert chord_idx >= 0, "Ctrl+Shift+T Shortcut block not found in Main.qml"
+    chord_block = main_qml[chord_idx : chord_idx + 200]
+    assert "controller.swap_to_terminal()" in chord_block
+    assert "Qt.ApplicationShortcut" in chord_block
 
 
 def test_swap_chord_uses_application_shortcut_context(main_qml: str):

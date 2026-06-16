@@ -1819,9 +1819,11 @@ class AppController(QObject):
         """Make the terminal pane the visible central surface.
 
         Idempotent: if terminal is already visible, no signal fires.
-        Internal primitive called by `toggle_editor_terminal`; the
-        user-facing chord is `Ctrl+Shift+E` (the earlier `Ctrl+Shift+T`
-        was retired when the toggle landed).
+        Called by `toggle_editor_terminal`/`toggle_git_history` as their
+        "off" direction, and bound directly to `Ctrl+Shift+T` as the
+        "home to terminal" chord (a one-way jump, not a toggle — the
+        terminal is the IDE's home base, so reaching it should be
+        unconditional from any surface).
         """
         self.set_central_surface("terminal")
 

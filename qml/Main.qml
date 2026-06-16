@@ -125,6 +125,23 @@ Window {
         onActivated: controller.toggle_editor_terminal()
     }
 
+    // Direct "home to terminal" chord. Unlike the toggles above, this is a
+    // one-way jump, not a flip: it ALWAYS lands you on the terminal and
+    // no-ops if you're already there (swap_to_terminal is idempotent). The
+    // terminal is the IDE's home base — every surface toggle (E/G/Ctrl+E)
+    // returns here as its "off" direction — but the terminal itself had no
+    // direct chord, so reaching it from a non-toggle surface (e.g. the agent
+    // pane) took two presses. This restores the symmetry: every central
+    // surface now has a direct chord. (Ctrl+Shift+T shipped once for the
+    // binary editor/terminal swap and was retired as redundant there — see
+    // the Ctrl+Shift+E comment above; the multi-surface world it was retired
+    // in no longer applies.)
+    Shortcut {
+        sequences: ["Ctrl+Shift+T"]
+        context: Qt.ApplicationShortcut
+        onActivated: controller.swap_to_terminal()
+    }
+
     // Git-history viewer toggle. 'G' names the history surface, so this
     // always lands you there unless you were already on it, in which case
     // it returns you to the terminal (same asymmetry as Ctrl+Shift+E). The
