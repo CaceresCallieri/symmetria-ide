@@ -93,6 +93,7 @@ def _server(auto):
     return BrowserMcpServer(
         BrowserMcpBridge(auto, slot_resolver=lambda w: w),
         windows_reader=lambda: {"ok": True, "windows": []},
+        window_opener=lambda url: {"ok": True, "window": 1},
     )
 
 

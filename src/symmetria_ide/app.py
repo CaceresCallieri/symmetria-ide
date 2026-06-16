@@ -559,7 +559,9 @@ class AppController(QObject):
             self._browser_automation, self._resolve_browser_window, self
         )
         self._browser_mcp_server = BrowserMcpServer(
-            self._browser_mcp_bridge, self._read_browser_windows
+            self._browser_mcp_bridge,
+            self._read_browser_windows,
+            self._open_browser_for_mcp,
         )
         # Publish/subscribe client to Symmetria Shell's agent-bridge hub.
         # Publishes this pool's spawns/focus/titles so the shell dashboard
@@ -2543,6 +2545,20 @@ class AppController(QObject):
         if self._focused_browser in self._browser_order:
             focused_position = self._browser_order.index(self._focused_browser) + 1
         return {"ok": True, "windows": windows, "focused": focused_position}
+
+    def _open_browser_for_mcp(self, url: str) -> dict:
+        """The `browser_open` MCP tool body. GUI-thread only.
+
+        Opens a new window so an agent has an autonomous entry point (the
+        other tools only drive EXISTING windows). Returns the new window's
+        DISPLAY number, or a pool-full error. NB: open_browser switches the
+        central surface to the browser — an agent opening a window pulls the
+        user there, which is the intended "watch the agent work" behavior."""
+        before = len(self._browser_order)
+        self.open_browser(url or "about:blank")
+        if len(self._browser_order) > before:
+            return {"ok": True, "window": len(self._browser_order)}
+        return {"ok": False, "error": "pool-full"}
 
     @Slot()
     def request_opencode_sessions(self) -> None:

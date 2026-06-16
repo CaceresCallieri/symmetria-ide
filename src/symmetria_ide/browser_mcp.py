@@ -143,10 +143,14 @@ class BrowserMcpServer:
     """
 
     def __init__(
-        self, bridge: BrowserMcpBridge, windows_reader: Callable[[], dict]
+        self,
+        bridge: BrowserMcpBridge,
+        windows_reader: Callable[[], dict],
+        window_opener: Callable[[str], dict],
     ) -> None:
         self._bridge = bridge
         self._windows_reader = windows_reader
+        self._window_opener = window_opener
         self._server = None  # uvicorn.Server
         self._thread: threading.Thread | None = None
         self._port = 0
@@ -191,14 +195,23 @@ class BrowserMcpServer:
 
         bridge = self._bridge
         windows_reader = self._windows_reader
+        window_opener = self._window_opener
         server = FastMCP(
             SERVER_NAME, host="127.0.0.1", port=self._port, log_level="WARNING"
         )
 
         @server.tool()
+        async def browser_open(url: str = "about:blank") -> dict:
+            """Open a NEW browser window at `url` (the autonomous entry point —
+            the other tools only drive existing windows). Returns the new
+            window's number for use as the `window` arg of the other tools."""
+            return await bridge.read(lambda: window_opener(url))
+
+        @server.tool()
         async def browser_navigate(url: str, window: int = 0) -> dict:
-            """Navigate a browser window to a URL (bare hosts/localhost are
-            resolved). `window`: 1-based window number, 0 = the focused one."""
+            """Navigate an EXISTING browser window to a URL (bare hosts/
+            localhost are resolved; use browser_open for a new window).
+            `window`: 1-based window number, 0 = the focused one."""
             return await bridge.op(window, "navigate", {"url": url})
 
         @server.tool()

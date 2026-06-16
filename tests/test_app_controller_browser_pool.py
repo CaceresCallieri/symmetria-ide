@@ -341,3 +341,21 @@ def test_read_browser_windows_reports_display_positions(controller):
     assert info["focused"] == 2  # display position, not internal slot
     assert info["windows"][0] == {"window": 1, "title": "A", "url": "https://a.com"}
     assert info["windows"][1] == {"window": 2, "title": "", "url": "https://b.com"}
+
+
+def test_open_browser_for_mcp_returns_display_number(controller):
+    assert controller._open_browser_for_mcp("https://x.com") == {
+        "ok": True,
+        "window": 1,
+    }
+    assert controller.browserUrls[0] == "https://x.com"
+    # Second open appends as display position 2.
+    assert controller._open_browser_for_mcp("about:blank") == {"ok": True, "window": 2}
+
+
+def test_open_browser_for_mcp_pool_full(controller):
+    for _ in range(controller.maxBrowserSlots):
+        controller._open_browser_for_mcp("about:blank")
+    result = controller._open_browser_for_mcp("about:blank")
+    assert result["ok"] is False
+    assert result["error"] == "pool-full"
