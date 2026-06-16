@@ -62,8 +62,10 @@ FocusScope {
     // swap so "I've read this diff, take me to edit it" is one keystroke.
     signal fileActivated(string absolutePath)
 
-    // Which sub-view is active. Default "changes" (working tree first) per the
-    // surface's "what's uncommitted" framing; Tab toggles to "history".
+    // Which sub-view is active. Initial value "changes" (working tree first)
+    // per the surface's "what's uncommitted" framing; Tab toggles to "history".
+    // NOTE: this is only the pre-first-show value — `enterSurface()` re-picks
+    // the default on every entry based on whether the tree is actually dirty.
     property string mode: "changes"
 
     // Move focus into the active sub-view's list (host calls this when the
@@ -107,6 +109,21 @@ FocusScope {
 
     function toggleMode(): void {
         setMode(root.mode === "changes" ? "history" : "changes");
+    }
+
+    // Called by the host every time the surface becomes visible. Picks the most
+    // useful default sub-view for THIS entry: "changes" when there's
+    // uncommitted work to review, else "history". A clean working tree has
+    // nothing to show in the changes view, so landing there would strand the
+    // user on an empty pane — the committed log is the actionable thing to read
+    // instead. Tab still toggles freely once inside. Re-evaluated on every entry
+    // (not just first open) so the default tracks the live worktree state, and
+    // routes through setMode so focus lands on the chosen list. Distinct from
+    // the Ctrl+H focus-restore path, which calls focusContent() directly so it
+    // re-homes focus WITHOUT re-picking the mode the user may have toggled to.
+    function enterSurface(): void {
+        setMode(root.statusModel && root.statusModel.count > 0
+                ? "changes" : "history");
     }
 
     // Re-home keyboard focus whenever the active sub-view changes, so the focus

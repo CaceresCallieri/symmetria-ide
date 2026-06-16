@@ -1098,7 +1098,10 @@ Window {
                     repoRoot: gitController.repoRoot
                     statusProvider: gitProviderAdapter
                     pathFilter: gitController.changedPathSet
-                    onVisibleChanged: if (visible) focusContent()
+                    // On show, pick the default sub-view by worktree state —
+                    // "changes" if dirty, else "history" (a clean tree's changes
+                    // view is empty, so the committed log is the useful landing).
+                    onVisibleChanged: if (visible) enterSurface()
                     // Activating a file row in the changes tree opens it in
                     // nvim and swaps to the editor — "I've read this diff, take
                     // me to edit it" in one keystroke. Same open path the side
