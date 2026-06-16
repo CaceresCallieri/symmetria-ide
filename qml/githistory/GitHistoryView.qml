@@ -69,6 +69,33 @@ FocusScope {
         setMode(root.mode === "changes" ? "history" : "changes");
     }
 
+    // Re-home keyboard focus whenever the active sub-view changes, so the focus
+    // invariant ("the visible list owns the keys") holds no matter how `mode`
+    // was mutated — not just via setMode/toggleMode. setMode still calls
+    // focusContent() directly so a click on the ALREADY-active tab also re-homes
+    // focus (a no-op mode set fires no onModeChanged); the double-call when mode
+    // does change is an idempotent forceActiveFocus.
+    onModeChanged: focusContent()
+
+    // Keep the "changes" diff live as the working tree changes under us. The
+    // status model fully resets on every worktree scan; `onCurrentFileChanged`
+    // already re-fetches when the selection moves OR a numstat role shifts, but
+    // an edit that leaves the file's add/del counts identical wouldn't move any
+    // role, so the open diff would go stale. Re-requesting the selected file's
+    // diff on each reset closes that gap. Gated on the changes view actually
+    // being on screen so background scans (while editing, on another surface)
+    // don't spawn idle single-file `git diff`s for a hidden pane.
+    Connections {
+        target: root.statusModel
+        function onModelReset(): void {
+            if (root.visible && root.mode === "changes"
+                    && root.logController && workingList.currentFile)
+                root.logController.request_working_diff(
+                    workingList.currentFile.displayName,
+                    workingList.currentFile.untracked);
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: Theme.spacing.sm

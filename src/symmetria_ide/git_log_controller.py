@@ -179,9 +179,10 @@ def parse_git_log(blob: bytes) -> list[CommitRow]:
 
 # ---------------------------------------------------------------------------
 # Worker request shapes. A small typed tuple is enough — the queue carries
-# ("log", asked_root, skip) and ("diff", resolved_root, commit_hash). The repo
-# root travels WITH the request so the worker never reads mutable GUI state mid-
-# scan, and the apply step can compare it against the live root (race guard).
+# ("log", asked_root, skip), ("diff", resolved_root, commit_hash), and
+# ("file_diff", resolved_root, rel_path, untracked). The repo root travels WITH
+# the request so the worker never reads mutable GUI state mid-scan, and the
+# apply step can compare it against the live root (race guard).
 # ---------------------------------------------------------------------------
 _REQ_LOG = "log"
 _REQ_DIFF = "diff"
@@ -630,9 +631,11 @@ class GitLogController(QObject):
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             log.warning("git diff failed for %s @ %s: %s", rel_path, cwd, exc)
             return ""
-        # 0 = no differences (clean path / fully-staged-and-identical), 1 =
-        # differences found (the `--no-index` and `--exit-code`-style result).
-        # Both are valid; anything else is a real error worth logging.
+        # Accepted exit codes differ by form: `git diff HEAD` (tracked path,
+        # no `--exit-code`) always returns 0, even when there are changes; the
+        # `--no-index` (untracked) form returns 1 on differences — its normal
+        # success case. So 0 and 1 are both valid here (1 only ever from the
+        # untracked form); anything else is a real error worth logging.
         if proc.returncode not in (0, 1):
             log.warning(
                 "git diff exited %d for %s @ %s: %s",

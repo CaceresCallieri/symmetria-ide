@@ -114,10 +114,18 @@ FocusScope {
         // The status model fully resets on each worktree scan. Re-seed the
         // selection to the first row whenever it lands on an invalid index
         // (Qt clears currentIndex to -1 across some resets) so a diff
-        // auto-loads without the user pressing anything.
+        // auto-loads without the user pressing anything. We watch BOTH signals:
+        // `onModelReset` fires on every scan (including a content-only change
+        // that leaves the file count identical — `onCountChanged` would miss
+        // that one and leave the detail pane blank), and `onCountChanged` is
+        // kept as the cheap fast-path for the add/remove case.
         Connections {
             target: root.model
             function onCountChanged(): void {
+                if (view.count > 0 && view.currentIndex < 0)
+                    view.currentIndex = 0;
+            }
+            function onModelReset(): void {
                 if (view.count > 0 && view.currentIndex < 0)
                     view.currentIndex = 0;
             }
