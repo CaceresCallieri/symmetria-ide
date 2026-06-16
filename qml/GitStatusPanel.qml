@@ -114,6 +114,24 @@ FocusScope {
     // the panel was actually granted, not its content-fit ideal).
     property real maxHeight: -1
 
+    // When true, the panel folds away (height → 0, opacity → 0) even though
+    // the working tree is dirty — the host sets this while the dedicated git
+    // "changes" central surface is on screen, since that surface already shows
+    // the full changes tree and this side mini-panel would just duplicate it.
+    // The fold/unfold is animated (see the Layout.preferredHeight + opacity
+    // Behaviors below) so the main file tree below glides up to claim the
+    // space and back down on return — "the changes rise away, then settle
+    // back" rather than a jarring pop.
+    property bool collapsed: false
+
+    // Whether the panel is actually reachable for keyboard focus — visible AND
+    // not collapsed. The host's focus-routing chords (Ctrl+K, Ctrl+L re-entry)
+    // gate on this instead of bare `visible`, because a collapsed panel is
+    // still `visible: true` (it animates rather than hard-hiding) but can no
+    // longer hold focus. The matching `reachableChanged` drives the host's
+    // focus-release fallback.
+    readonly property bool reachable: visible && !collapsed
+
     // Emitted when the user clicks a file row. Carries the ABSOLUTE
     // filesystem path of the activated file. Main.qml connects this to
     // `controller.open_in_nvim(path)` and then re-focuses the editor.
@@ -142,12 +160,40 @@ FocusScope {
     implicitHeight: visible
         ? content.implicitHeight + Theme.spacing.sm * 2
         : 0
-    Layout.preferredHeight: implicitHeight
+    // Collapsed → 0 height so the ColumnLayout reclaims the space for the
+    // main file tree below; the Behavior eases the fold/unfold. The clean-tree
+    // case (visible:false) already collapses implicitHeight to 0, so this
+    // multiplexes both reasons the panel can occupy no space.
+    Layout.preferredHeight: collapsed ? 0 : implicitHeight
+    Behavior on Layout.preferredHeight {
+        NumberAnimation {
+            duration: Theme.anim.duration
+            easing.type: Easing.BezierSpline
+            easing.bezierCurve: Theme.anim.standardCurve
+        }
+    }
     // `-1` is Qt's "no cap" sentinel for Layout.maximumHeight, matching
     // the property's own default. Binding rather than gating keeps the
     // expression reactive when maxHeight changes (e.g. window resize).
     Layout.maximumHeight: maxHeight > 0 ? maxHeight : -1
     Layout.fillWidth: true
+
+    // Fade in concert with the height fold so the panel "dissolves" upward
+    // rather than just shrinking. Same curve/duration as the height Behavior
+    // so the two read as one motion.
+    opacity: collapsed ? 0 : 1
+    Behavior on opacity {
+        NumberAnimation {
+            duration: Theme.anim.duration
+            easing.type: Easing.BezierSpline
+            easing.bezierCurve: Theme.anim.standardCurve
+        }
+    }
+    // Clip during the fold so the content (chrome + tree) is cropped to the
+    // shrinking height instead of bleeding past it mid-animation.
+    clip: true
+    // Inert while collapsed — no stray clicks land on the invisible tree.
+    enabled: !collapsed
 
     // Chrome — same matte tone the status bar and which-key overlay use.
     // Drops slightly darker than the (transparent) main file tree below

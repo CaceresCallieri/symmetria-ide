@@ -2,7 +2,7 @@
 //
 // The Tab-toggle counterpart to CommitDetailView. Shows the selected
 // uncommitted file's identity (path + status + ±counts, from the injected
-// `file` object surfaced by WorkingFileListView.currentFile) plus its
+// `file` object surfaced by WorkingFileTreeView.currentFile) plus its
 // working-tree diff. The diff is loaded asynchronously by GitLogController via
 // `request_working_diff`; we render it only once `diffPath === file.displayName`
 // so a stale diff for the previously-selected file never shows during the
@@ -100,7 +100,7 @@ Rectangle {
 
                     Text {
                         text: root.hasFile ? root.file.tooltip : ""
-                        // Badge colour resolved once by WorkingFileListView and
+                        // Badge colour resolved once by WorkingFileTreeView and
                         // carried on `currentFile` — no duplicate state→colour map.
                         color: root.hasFile ? root.file.stateColor : Theme.color.text.dim
                         font.family: Theme.font.family

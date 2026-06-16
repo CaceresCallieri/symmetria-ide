@@ -501,16 +501,19 @@ Window {
     // as the Ctrl+H Shortcut comment block above; the precedent is
     // already canonical here.
     //
-    // gitStatusPanel.visible gate on Ctrl+K is important: when the
-    // working tree is clean the changes pane is `visible: false` and
-    // its inner items can't accept focus. Without the gate, Ctrl+K
-    // would land focus on an invisible item — focus would silently
-    // disappear and the user couldn't navigate anywhere with keys
-    // until they clicked or pressed Ctrl+H back to a central pane.
+    // gitStatusPanel.reachable gate on Ctrl+K is important: when the
+    // working tree is clean the changes pane is `visible: false`, and
+    // while the git "changes" surface is up it is `collapsed` (visible
+    // but folded to 0 height) — in either case its inner items can't
+    // accept focus. `reachable` (visible && !collapsed) covers both.
+    // Without the gate, Ctrl+K would land focus on an unfocusable item —
+    // focus would silently disappear and the user couldn't navigate
+    // anywhere with keys until they clicked or pressed Ctrl+H back to a
+    // central pane.
     Shortcut {
         sequences: ["Ctrl+K"]
         context: Qt.ApplicationShortcut
-        enabled: treeScope.activeFocus && gitStatusPanel.visible
+        enabled: treeScope.activeFocus && gitStatusPanel.reachable
         onActivated: {
             // Optimistic update — onActiveFocusChanged (gitStatusPanel) also writes
             // this property, but we set it here as a defensive fallback in case
@@ -1067,7 +1070,22 @@ Window {
                     // the same GitStatusListModel the Active Changes side panel
                     // renders, reused rather than re-scanned.
                     statusModel: gitStatusList
+                    // FM file-tree inputs for the "changes" master pane — the
+                    // SAME three the Active Changes side panel (gitStatusPanel)
+                    // binds, so the central changes tree and the side mini-tree
+                    // render the identical changeset from one source of truth.
+                    repoRoot: gitController.repoRoot
+                    statusProvider: gitProviderAdapter
+                    pathFilter: gitController.changedPathSet
                     onVisibleChanged: if (visible) focusContent()
+                    // Activating a file row in the changes tree opens it in
+                    // nvim and swaps to the editor — "I've read this diff, take
+                    // me to edit it" in one keystroke. Same open path the side
+                    // panel + main tree use.
+                    onFileActivated: function (absolutePath) {
+                        controller.open_in_nvim(absolutePath);
+                        controller.set_central_surface("editor");
+                    }
                 }
 
                 // REGRESSION NOTE: a 2026-05-23 experiment wrapped AgentPane
@@ -1643,6 +1661,14 @@ Window {
                         // once this pattern recurs (Theme token is the right
                         // escape hatch per project-standards §3 P2).
                         maxHeight: parent.height * 0.5
+                        // Fold away while the git "changes" surface is on
+                        // screen — that surface IS the full changes tree, so
+                        // this side mini-tree would just duplicate it. Only in
+                        // CHANGES mode, not history: when the central surface
+                        // shows commits, the side changes tree is a useful
+                        // at-a-glance reference again, so it slides back down.
+                        collapsed: controller.centralSurface === "git"
+                                   && gitHistoryView.mode === "changes"
                         model: gitStatusList
                         // Header-bucket aggregates (staged/unstaged/untracked
                         // adds/dels/files) — populated by the same worker
@@ -1949,7 +1975,7 @@ Window {
                 // reach the ListView. GitStatusPanel forwards through
                 // the same `focusInternal()` surface so both sub-panes
                 // are structurally symmetric.
-                if (root.activeTreeSubPane === 1 && gitStatusPanel.visible)
+                if (root.activeTreeSubPane === 1 && gitStatusPanel.reachable)
                     gitStatusPanel.focusInternal();
                 else
                     fileTreeView.focusInternal();
@@ -1995,19 +2021,25 @@ Window {
         // into a black hole. Resetting to 0 (main tree) keeps Ctrl+L
         // always landing on a reachable sub-pane. The Ctrl+K chord
         // that originally set activeTreeSubPane=1 is also gated on
-        // `gitStatusPanel.visible`, so the symmetric guard there
+        // `gitStatusPanel.reachable`, so the symmetric guard there
         // prevents the bad state from being re-entered while the
-        // pane is hidden.
+        // pane is hidden OR collapsed.
+        //
+        // Keyed on `reachable` (not `visible`) so this fires for BOTH
+        // ways the panel stops accepting focus: the clean-tree hard-hide
+        // (visible:false) AND the git-surface fold (collapsed:true, where
+        // visible stays true). Either transition orphans focus the same
+        // way, so they share one release path.
         Connections {
             target: gitStatusPanel
-            function onVisibleChanged(): void {
-                if (gitStatusPanel.visible || root.activeTreeSubPane !== 1)
+            function onReachableChanged(): void {
+                if (gitStatusPanel.reachable || root.activeTreeSubPane !== 1)
                     return;
                 root.activeTreeSubPane = 0;
                 // If the side panel currently has focus, the previously-
-                // active sub-pane is the one that just hid — its inner
-                // items can no longer hold activeFocus. Hand focus to
-                // the main tree so the user can keep navigating without
+                // active sub-pane is the one that just went away — its
+                // inner items can no longer hold activeFocus. Hand focus
+                // to the main tree so the user can keep navigating without
                 // having to round-trip through Ctrl+H+Ctrl+L.
                 if (treeScope.activeFocus)
                     fileTreeView.focusInternal();
