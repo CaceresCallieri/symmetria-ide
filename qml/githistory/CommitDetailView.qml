@@ -62,6 +62,11 @@ Rectangle {
             Layout.leftMargin: Theme.spacing.sm
             Layout.rightMargin: Theme.spacing.sm
             Layout.topMargin: Theme.spacing.sm
+            // Bottom margin too, so the card's downward (card-preset) shadow
+            // has clearance before the diff below — without it the next
+            // ColumnLayout sibling paints over the drop and the "floats above
+            // the changes" cue is lost. Symmetric with the other three sides.
+            Layout.bottomMargin: Theme.spacing.sm
             Layout.preferredHeight: headerCol.implicitHeight + Theme.spacing.md * 2
             radius: Theme.radius.md
             elevated: true

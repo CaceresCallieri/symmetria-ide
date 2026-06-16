@@ -180,17 +180,18 @@ FocusScope {
 
             // CLAY selection capsule — the current commit raises into a clay
             // pill (matte fill + hairline border + convex depth), while every
-            // other row stays fully flat (transparent fill + border, no
-            // shadow). This is the File Manager active-tab / surface-switcher
-            // idiom: `elevated` gates the depth so only the focal commit
-            // floats, keeping the dense log readable. Inset a few px so the
-            // pill floats with breathing room and casts its shadow into the
-            // gap (matching the FM's spaced rows) rather than edge-to-edge.
-            // Declared FIRST so it renders behind the content Row + MouseArea.
+            // other row stays fully flat (transparent fill + transparent
+            // border, no shadow). This is the File Manager active-tab /
+            // surface-switcher idiom: `elevated` gates the depth so only the
+            // focal commit floats, keeping the dense log readable. Inset a few
+            // px so the pill floats with breathing room and casts its shadow
+            // into the gap (matching the FM's spaced rows) rather than
+            // edge-to-edge. Declared FIRST so it renders behind the content
+            // Row + MouseArea.
             PillSurface {
                 anchors.fill: parent
-                anchors.topMargin: 3
-                anchors.bottomMargin: 3
+                anchors.topMargin: Theme.spacing.xxs
+                anchors.bottomMargin: Theme.spacing.xxs
                 anchors.leftMargin: Theme.spacing.xs
                 anchors.rightMargin: Theme.spacing.xs
                 radius: Theme.radius.sm
