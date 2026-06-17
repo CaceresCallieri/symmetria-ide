@@ -120,3 +120,62 @@ def test_convenience_wrappers(auto, method, args, exp_op, exp_payload):
 def test_ops_constant_matches_wrappers():
     # Guard: every convenience wrapper's op is in OPS (so request() accepts it).
     assert set(OPS) == {"navigate", "eval_js", "snapshot", "click", "fill"}
+
+
+# ---------------------------------------------------------------------------
+# Security + robustness — ref allowlist, payload guard, request timeout.
+# ---------------------------------------------------------------------------
+
+
+def test_click_rejects_non_mint_ref(auto):
+    """A click ref that isn't `r<n>` is rejected BEFORE it reaches QML — closes
+    the page-side selector-injection vector."""
+    emitted = _capture_signal(auto)
+    got = []
+    rid = auto.request(1, "click", {"ref": '"]); alert(1); ("'}, got.append)
+    assert rid == ""
+    assert emitted == []  # never delivered to the page
+    assert got == [{"ok": False, "error": "bad-ref"}]
+    assert auto.pending_count() == 0
+
+
+def test_fill_rejects_non_mint_ref(auto):
+    got = []
+    rid = auto.request(1, "fill", {"ref": "notaref", "text": "x"}, got.append)
+    assert rid == ""
+    assert got == [{"ok": False, "error": "bad-ref"}]
+
+
+def test_click_accepts_mint_shaped_ref(auto):
+    emitted = _capture_signal(auto)
+    rid = auto.request(1, "click", {"ref": "r3"}, lambda r: None)
+    assert rid != ""
+    assert len(emitted) == 1
+
+
+def test_request_rejects_unserializable_payload(auto):
+    """A non-serializable payload errors out without leaving a stranded
+    pending callback (its future would otherwise never resolve)."""
+    emitted = _capture_signal(auto)
+    got = []
+    rid = auto.request(1, "eval_js", {"code": object()}, got.append)
+    assert rid == ""
+    assert emitted == []
+    assert got == [{"ok": False, "error": "bad-payload"}]
+    assert auto.pending_count() == 0
+
+
+def test_timeout_resolves_pending_request(auto):
+    """_on_timeout resolves a still-pending request to a timeout error and
+    pops it; a late QML result afterwards is a harmless no-op."""
+    got = []
+    rid = auto.request(1, "eval_js", {"code": "1"}, got.append)
+    assert auto.pending_count() == 1 and got == []  # awaiting QML
+
+    auto._on_timeout(rid)  # simulate the QTimer firing
+    assert got == [{"ok": False, "error": "timeout"}]
+    assert auto.pending_count() == 0
+
+    # A result arriving after the timeout must not double-invoke the callback.
+    auto.on_result(rid, json.dumps({"ok": True, "value": 1}))
+    assert got == [{"ok": False, "error": "timeout"}]

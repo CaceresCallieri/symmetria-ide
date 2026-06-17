@@ -31,16 +31,33 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Callable
 
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 log = logging.getLogger(__name__)
 
 # Op vocabulary. Every op is ultimately a `runJavaScript` variant (or a
 # native nav assignment) on the target WebEngineView — see the delivery
-# Connections in qml/BrowserSurface.qml.
+# Connections in qml/BrowserSurface.qml. The MCP layer (browser_mcp.py)
+# composes the agent-facing tools FROM these primitives — `browser_perf`
+# is an `eval_js` with a canned payload, and `open`/`list_windows` are
+# GUI-thread reads (bridge.read), not ops — so they don't appear here.
 OPS = ("navigate", "eval_js", "snapshot", "click", "fill")
+
+# Snapshot refs are minted only as `r<n>` (see snapshotJs in BrowserSurface).
+# click/fill refs are agent-supplied MCP args interpolated into a page-side
+# selector, so they MUST match this shape — otherwise a crafted ref could
+# break out of the selector string and inject arbitrary JS into a logged-in
+# page (the persistent profile). Validated in `request()` before delivery.
+_REF_RE = re.compile(r"^r\d+$")
+
+# Hard cap on how long a request may stay pending before it resolves to a
+# timeout error. Bounds the `_pending` leak when a runJavaScript callback
+# never fires (a destroyed/navigating view, or the documented offscreen
+# render stall) and turns an otherwise-hung MCP tool call into a clean error.
+_REQUEST_TIMEOUT_MS = 30000
 
 # Result callback shape: receives the parsed result dict (always carries
 # an "ok" bool; an error path adds "error").
@@ -83,10 +100,41 @@ class BrowserAutomation(QObject):
         if op not in OPS:
             on_result({"ok": False, "error": f"unknown op {op!r}"})
             return ""
+        # Security: click/fill refs are interpolated into a page-side selector
+        # in QML — reject anything that isn't a mint-shaped `r<n>` so a crafted
+        # ref can't break out and inject JS into a logged-in page.
+        if op in ("click", "fill"):
+            ref = payload.get("ref")
+            if not isinstance(ref, str) or not _REF_RE.match(ref):
+                on_result({"ok": False, "error": "bad-ref"})
+                return ""
+        # Guard serialization: a non-serializable payload must not leave a
+        # callback stranded in `_pending` with its future never resolving.
+        try:
+            payload_json = json.dumps(payload)
+        except (TypeError, ValueError):
+            on_result({"ok": False, "error": "bad-payload"})
+            return ""
         request_id = self._next_id()
         self._pending[request_id] = on_result
-        self.automationRequested.emit(request_id, slot, op, json.dumps(payload))
+        self.automationRequested.emit(request_id, slot, op, payload_json)
+        # Bound the pending lifetime: if QML never delivers (non-firing
+        # runJavaScript callback — destroyed view / offscreen stall), resolve
+        # to a timeout error so the awaiting MCP tool returns instead of hanging.
+        QTimer.singleShot(
+            _REQUEST_TIMEOUT_MS, lambda rid=request_id: self._on_timeout(rid)
+        )
         return request_id
+
+    def _on_timeout(self, request_id: str) -> None:
+        """Resolve a still-pending request to a timeout error (GUI thread).
+
+        A no-op if the request already resolved normally (the callback was
+        popped). A late QML result arriving after this fires hits the
+        unknown-id path in `on_result` and is harmlessly dropped."""
+        callback = self._pending.pop(request_id, None)
+        if callback is not None:
+            callback({"ok": False, "error": "timeout"})
 
     # -- Convenience wrappers (the Stage 2b MCP tools call these) --------
     def navigate(self, slot: int, url: str, on_result: ResultCallback) -> str:

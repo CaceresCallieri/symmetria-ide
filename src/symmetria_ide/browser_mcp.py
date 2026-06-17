@@ -72,8 +72,9 @@ var lcpE=performance.getEntriesByType('largest-contentful-paint');
 var lcp=lcpE.length?plaus(lcpE[lcpE.length-1].startTime):null;
 var cls=0,hasCls=false;performance.getEntriesByType('layout-shift').forEach(function(e){if(!e.hadRecentInput){cls+=e.value;hasCls=true;}});
 var res=performance.getEntriesByType('resource');var bytes=0,byType={};
-res.forEach(function(r){bytes+=(r.transferSize||0);byType[r.initiatorType]=(byType[r.initiatorType]||0)+1;});
-var slow=res.slice().sort(function(a,b){return b.duration-a.duration;}).slice(0,5).map(function(r){return{name:String(r.name).slice(0,100),ms:Math.round(r.duration),kb:Math.round((r.transferSize||0)/1024)};});
+function sz(r){return r.transferSize||r.encodedBodySize||0;}
+res.forEach(function(r){bytes+=sz(r);byType[r.initiatorType]=(byType[r.initiatorType]||0)+1;});
+var slow=res.slice().sort(function(a,b){return b.duration-a.duration;}).slice(0,5).map(function(r){return{name:String(r.name).slice(0,100),ms:Math.round(r.duration),kb:Math.round(sz(r)/1024)};});
 function d(a,b){return(nav[a]!=null&&nav[b]!=null)?Math.round(nav[a]-nav[b]):null;}
 function r2(v){return v!=null?Math.round(v):null;}
 return{
@@ -98,6 +99,9 @@ def reap_orphan_configs() -> None:
     filename encodes the writing IDE's pid, so a config whose pid is no longer
     alive is safe to remove. Mirrors `_reap_orphan_nvim_sockets` in app.py.
     Best-effort: per-file errors are ignored; the current pid is never touched.
+    (Liveness is a `/proc/<pid>` check, so the rare case of pid reuse by an
+    unrelated process keeps a stale config — harmless: at worst a client
+    connects to a refused port and retries, never to a wrong server.)
     """
     pattern = os.path.join(tempfile.gettempdir(), f"{_CONFIG_PREFIX}*.json")
     for path in glob.glob(pattern):
@@ -211,6 +215,7 @@ class BrowserMcpServer:
         self._window_opener = window_opener
         self._server = None  # uvicorn.Server
         self._thread: threading.Thread | None = None
+        self._sock: socket.socket | None = None  # held bound until uvicorn owns it
         self._port = 0
         self._config_path = ""
 
@@ -248,12 +253,16 @@ class BrowserMcpServer:
         # client discovery from latching onto a dead instance's port).
         reap_orphan_configs()
 
-        # Ephemeral port via bind-probe (each IDE instance gets its own — the
-        # multi-instance topology means a fixed port would collide).
-        probe = socket.socket()
-        probe.bind(("127.0.0.1", 0))
-        self._port = probe.getsockname()[1]
-        probe.close()
+        # Ephemeral port via bind-probe, HELD OPEN and handed to uvicorn (each
+        # IDE instance gets its own — the multi-instance topology rules out a
+        # fixed port). Closing the probe before uvicorn rebinds would open a
+        # TOCTOU window: another process/IDE could grab the port, uvicorn would
+        # fail to bind on its daemon thread (outside this try/except), and the
+        # config we write would point at a dead port. uvicorn.serve(sockets=[…])
+        # takes the pre-bound socket, so the port is reserved continuously.
+        self._sock = socket.socket()
+        self._sock.bind(("127.0.0.1", 0))
+        self._port = self._sock.getsockname()[1]
 
         bridge = self._bridge
         windows_reader = self._windows_reader
@@ -292,8 +301,13 @@ class BrowserMcpServer:
             DevTools/profiler needed for the common 'how does this page perform'
             question."""
             res = await bridge.op(window, "eval_js", {"code": _PERF_JS})
-            if isinstance(res, dict) and res.get("ok") and "value" in res:
-                return {"ok": True, "perf": res["value"]}
+            if isinstance(res, dict) and res.get("ok"):
+                value = res.get("value")
+                if value is None:
+                    # _PERF_JS evaluated to undefined/null (page error / blank
+                    # page) — don't report a hollow success.
+                    return {"ok": False, "error": "perf-eval-failed"}
+                return {"ok": True, "perf": value}
             return res  # propagate no-window / error shape unchanged
 
         @server.tool()
@@ -325,7 +339,7 @@ class BrowserMcpServer:
         )
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(
-            target=lambda: asyncio.run(self._server.serve()),
+            target=lambda: asyncio.run(self._server.serve(sockets=[self._sock])),
             daemon=True,
             name="browser-mcp",
         )

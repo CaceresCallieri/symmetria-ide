@@ -70,7 +70,9 @@ Item {
         var s = ("" + input).trim();
         if (s.length === 0)
             return "";
-        if (s.indexOf("://") !== -1)
+        // Explicit scheme (https://…) or an `about:` URL (about:blank) passes
+        // through untouched — never search-rewritten.
+        if (s.indexOf("://") !== -1 || s.indexOf("about:") === 0)
             return s;
         if (s.indexOf(" ") === -1) {
             // localhost[:port][/path], 127.x[:port], or any host:port → local dev (http)
@@ -139,11 +141,20 @@ Item {
                 args = JSON.parse(payload);
             } catch (e) {}
             if (op === "navigate") {
-                view.url = root.normalizeUrl(args.url || "");
+                var target = root.normalizeUrl(args.url || "");
+                if (target.length === 0) {
+                    auto.on_result(requestId, JSON.stringify({ ok: false, error: "empty-url" }));
+                    return;
+                }
+                view.url = target;
+                // view.url is read synchronously: it reflects the REQUESTED
+                // target, not necessarily a committed load (navigation is async).
                 auto.on_result(requestId, JSON.stringify({ ok: true, url: "" + view.url }));
             } else if (op === "eval_js") {
                 view.runJavaScript(args.code || "", function (r) {
-                    auto.on_result(requestId, JSON.stringify({ ok: true, value: r }));
+                    // undefined would drop the `value` key from JSON.stringify;
+                    // normalize to null so the key is always present.
+                    auto.on_result(requestId, JSON.stringify({ ok: true, value: (r === undefined ? null : r) }));
                 });
             } else if (op === "snapshot") {
                 view.runJavaScript(root.snapshotJs(), function (r) {
@@ -171,14 +182,19 @@ Item {
     function snapshotJs() {
         return "(function(){var els=document.querySelectorAll('a,button,input,textarea,select,[role=button],[contenteditable=true]');var out=[];var n=0;for(var i=0;i<els.length;i++){var e=els[i];var rect=e.getBoundingClientRect();if(rect.width===0&&rect.height===0)continue;var ref='r'+(n++);e.setAttribute('data-sym-ref',ref);out.push({ref:ref,tag:e.tagName.toLowerCase(),type:(e.getAttribute('type')||''),text:((e.innerText||e.value||e.getAttribute('aria-label')||e.getAttribute('placeholder')||'')+'').trim().slice(0,120)});}return JSON.stringify(out);})()";
     }
+    // The ref is matched by VALUE (querySelectorAll('[data-sym-ref]') + compare)
+    // rather than interpolated into a selector string, and is injected as a
+    // JSON literal — so a crafted ref cannot break out of the selector and
+    // inject JS into the page (BrowserAutomation also allowlists refs to `r<n>`;
+    // this is the in-page defense-in-depth). `text` is likewise a JSON literal.
     function clickJs(ref) {
-        var sel = '[data-sym-ref="' + ref + '"]';
-        return "(function(){var e=document.querySelector('" + sel + "');if(!e)return false;if(e.scrollIntoView)e.scrollIntoView({block:'center'});e.click();return true;})()";
+        var refLit = JSON.stringify(ref);
+        return "(function(){var ref=" + refLit + ";var all=document.querySelectorAll('[data-sym-ref]');var e=null;for(var i=0;i<all.length;i++){if(all[i].getAttribute('data-sym-ref')===ref){e=all[i];break;}}if(!e)return false;if(e.scrollIntoView)e.scrollIntoView({block:'center'});e.click();return true;})()";
     }
     function fillJs(ref, text) {
-        var sel = '[data-sym-ref="' + ref + '"]';
+        var refLit = JSON.stringify(ref);
         var val = JSON.stringify(text);
-        return "(function(){var e=document.querySelector('" + sel + "');if(!e)return false;e.focus();if('value' in e){e.value=" + val + ";}else{e.textContent=" + val + ";}e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return true;})()";
+        return "(function(){var ref=" + refLit + ";var all=document.querySelectorAll('[data-sym-ref]');var e=null;for(var i=0;i<all.length;i++){if(all[i].getAttribute('data-sym-ref')===ref){e=all[i];break;}}if(!e)return false;e.focus();if('value' in e){e.value=" + val + ";}else{e.textContent=" + val + ";}e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return true;})()";
     }
 
     // Small clickable glyph button for the nav row (back / forward / reload).
@@ -500,7 +516,11 @@ Item {
                         // surface's focusActive() owns the page-vs-address-bar
                         // decision centrally (see the top of this file).
                         var u = controller.browserUrls[slotLoader.index];
-                        view.url = (u && ("" + u).length > 0) ? ("" + u) : "about:blank";
+                        // Normalize so an agent-opened bare host (browser_open
+                        // "example.com") loads the same way the address bar
+                        // resolves it; about:* passes through, empty → blank.
+                        var target = u ? root.normalizeUrl("" + u) : "";
+                        view.url = target.length > 0 ? target : "about:blank";
                     }
                 }
             }
