@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import glob
 import json
 import logging
 import os
@@ -53,6 +54,33 @@ log = logging.getLogger(__name__)
 
 # Server identity in the agents' MCP config.
 SERVER_NAME = "symmetria-browser"
+
+# Per-launch MCP config files are named <prefix><pid>.json in the temp dir.
+_CONFIG_PREFIX = "symmetria-browser-mcp-"
+
+
+def reap_orphan_configs() -> None:
+    """Remove browser-MCP config files left by dead IDE instances.
+
+    The IDE unlinks its own config on graceful shutdown, but a hard-kill
+    (SIGKILL / crash) leaves it behind, which confuses external clients that
+    discover the server via these files (e.g. bench/browser_mcp_live.py). The
+    filename encodes the writing IDE's pid, so a config whose pid is no longer
+    alive is safe to remove. Mirrors `_reap_orphan_nvim_sockets` in app.py.
+    Best-effort: per-file errors are ignored; the current pid is never touched.
+    """
+    pattern = os.path.join(tempfile.gettempdir(), f"{_CONFIG_PREFIX}*.json")
+    for path in glob.glob(pattern):
+        try:
+            pid = int(os.path.basename(path)[len(_CONFIG_PREFIX) : -len(".json")])
+        except ValueError:
+            continue  # not a pid-named config — leave it alone
+        if pid == os.getpid() or os.path.exists(f"/proc/{pid}"):
+            continue  # ours, or the writing IDE is still alive
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 class BrowserMcpBridge(QObject):
@@ -186,6 +214,10 @@ class BrowserMcpServer:
         from mcp.server.fastmcp import FastMCP  # lazy: optional dependency
         import uvicorn
 
+        # Sweep configs left by hard-killed IDEs before writing our own (keeps
+        # client discovery from latching onto a dead instance's port).
+        reap_orphan_configs()
+
         # Ephemeral port via bind-probe (each IDE instance gets its own — the
         # multi-instance topology means a fixed port would collide).
         probe = socket.socket()
@@ -270,7 +302,7 @@ class BrowserMcpServer:
             }
         }
         path = os.path.join(
-            tempfile.gettempdir(), f"symmetria-browser-mcp-{os.getpid()}.json"
+            tempfile.gettempdir(), f"{_CONFIG_PREFIX}{os.getpid()}.json"
         )
         with open(path, "w") as handle:
             json.dump(config, handle)

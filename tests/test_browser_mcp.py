@@ -120,3 +120,23 @@ def test_config_file_shape(auto, tmp_path, monkeypatch):
     entry = config["mcpServers"][SERVER_NAME]
     assert entry["type"] == "http"
     assert entry["url"] == "http://127.0.0.1:12345/mcp"
+
+
+def test_reap_orphan_configs(tmp_path, monkeypatch):
+    """Configs from dead pids are removed; live-pid and non-pid files survive
+    (so a hard-killed IDE doesn't leave discovery-poisoning leftovers)."""
+    from symmetria_ide.browser_mcp import _CONFIG_PREFIX, reap_orphan_configs
+
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    dead = tmp_path / f"{_CONFIG_PREFIX}9999999.json"  # ~certainly not a live pid
+    dead.write_text("{}")
+    live = tmp_path / f"{_CONFIG_PREFIX}1.json"  # pid 1 (init) is always alive
+    live.write_text("{}")
+    junk = tmp_path / f"{_CONFIG_PREFIX}notapid.json"  # non-numeric → left alone
+    junk.write_text("{}")
+
+    reap_orphan_configs()
+
+    assert not dead.exists()
+    assert live.exists()
+    assert junk.exists()
