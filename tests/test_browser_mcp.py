@@ -140,3 +140,17 @@ def test_reap_orphan_configs(tmp_path, monkeypatch):
     assert not dead.exists()
     assert live.exists()
     assert junk.exists()
+
+
+def test_perf_js_payload_shape():
+    """The browser_perf payload reads the reliable Performance APIs and keeps
+    the process-relative-paint guard (validated live against a real page)."""
+    from symmetria_ide.browser_mcp import _PERF_JS
+
+    assert "getEntriesByType('navigation')" in _PERF_JS
+    assert "getEntriesByType('resource')" in _PERF_JS
+    for key in ("timing", "webVitals", "transferKB", "resourceCount", "jsHeapMB"):
+        assert key in _PERF_JS
+    # The plaus() guard drops QtWebEngine's leaked process-relative paint
+    # timestamp — must survive refactors (see the 512660ms artifact).
+    assert "plaus" in _PERF_JS

@@ -55,6 +55,36 @@ log = logging.getLogger(__name__)
 # Server identity in the agents' MCP config.
 SERVER_NAME = "symmetria-browser"
 
+# `browser_perf` payload — a query-time read of the page's performance APIs.
+# QtWebEngine reliably populates Navigation Timing + Resource Timing +
+# performance.memory, but does NOT buffer paint/LCP/layout-shift the way real
+# Chrome does (getEntriesByType returns them empty), so those fields are
+# best-effort (null when absent). The `plaus()` guard drops the implausible
+# process-relative paint timestamp QtWebEngine occasionally leaks across
+# in-place navigations. Full Core Web Vitals would need a PerformanceObserver
+# injected at document creation — a follow-up, not reachable from a query-time
+# eval. See CLAUDE.md "The browser panes".
+_PERF_JS = r"""(function(){
+var nav=performance.getEntriesByType('navigation')[0]||{};
+var paint={};performance.getEntriesByType('paint').forEach(function(p){paint[p.name]=Math.round(p.startTime);});
+function plaus(v){return (v!=null&&v>=0&&v<120000)?Math.round(v):null;}
+var lcpE=performance.getEntriesByType('largest-contentful-paint');
+var lcp=lcpE.length?plaus(lcpE[lcpE.length-1].startTime):null;
+var cls=0,hasCls=false;performance.getEntriesByType('layout-shift').forEach(function(e){if(!e.hadRecentInput){cls+=e.value;hasCls=true;}});
+var res=performance.getEntriesByType('resource');var bytes=0,byType={};
+res.forEach(function(r){bytes+=(r.transferSize||0);byType[r.initiatorType]=(byType[r.initiatorType]||0)+1;});
+var slow=res.slice().sort(function(a,b){return b.duration-a.duration;}).slice(0,5).map(function(r){return{name:String(r.name).slice(0,100),ms:Math.round(r.duration),kb:Math.round((r.transferSize||0)/1024)};});
+function d(a,b){return(nav[a]!=null&&nav[b]!=null)?Math.round(nav[a]-nav[b]):null;}
+function r2(v){return v!=null?Math.round(v):null;}
+return{
+url:location.href,
+timing:{dns:d('domainLookupEnd','domainLookupStart'),tcp:d('connectEnd','connectStart'),ttfb:d('responseStart','requestStart'),response:d('responseEnd','responseStart'),domInteractive:r2(nav.domInteractive),domContentLoaded:r2(nav.domContentLoadedEventEnd),load:r2(nav.loadEventEnd)},
+webVitals:{fcpMs:plaus(paint['first-contentful-paint']),lcpMs:lcp,cls:hasCls?Math.round(cls*1000)/1000:null},
+transferKB:Math.round(bytes/1024),resourceCount:res.length,resourcesByType:byType,slowestResources:slow,
+jsHeapMB:(performance.memory?Math.round(performance.memory.usedJSHeapSize/1048576*10)/10:null)
+};
+})()"""
+
 # Per-launch MCP config files are named <prefix><pid>.json in the temp dir.
 _CONFIG_PREFIX = "symmetria-browser-mcp-"
 
@@ -251,6 +281,20 @@ class BrowserMcpServer:
             """Evaluate JavaScript in a browser window and return its value.
             The general-purpose primitive — read or manipulate the page."""
             return await bridge.op(window, "eval_js", {"code": code})
+
+        @server.tool()
+        async def browser_perf(window: int = 0) -> dict:
+            """Report the page's load performance — navigation timing (DNS, TCP,
+            TTFB, DOMContentLoaded, load), a resource summary (count, transfer
+            KB, slowest requests), JS heap size, and best-effort Core Web Vitals
+            (FCP/LCP/CLS — often null in this engine, which doesn't buffer paint
+            timing like Chrome). Reads the Performance API via JS; no external
+            DevTools/profiler needed for the common 'how does this page perform'
+            question."""
+            res = await bridge.op(window, "eval_js", {"code": _PERF_JS})
+            if isinstance(res, dict) and res.get("ok") and "value" in res:
+                return {"ok": True, "perf": res["value"]}
+            return res  # propagate no-window / error shape unchanged
 
         @server.tool()
         async def browser_snapshot(window: int = 0) -> dict:
