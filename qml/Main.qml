@@ -1836,15 +1836,67 @@ Window {
                         FmUi.FileTreeView {
                             id: fileTreeView
                             anchors.fill: parent
-                            // `displayedRoot` (NOT raw `cwd`) so the tree pins
-                            // to the anchored project root when the user has
-                            // anchored. When unanchored, `displayedRoot` is
-                            // identical to `cwd` — no behavior change from the
-                            // pre-anchor world. The Ctrl+Shift+P application-
-                            // scope Shortcut at the Window root toggles the
-                            // anchor; `:SymmetriaAnchor` / `:SymmetriaUnanchor`
-                            // are the scripted surface for the same Slots.
-                            rootPath: controller.displayedRoot
+                            // rootPath + restoreExpandedPaths are assigned
+                            // TOGETHER, imperatively, by `_applyTreeMount()` —
+                            // deliberately NOT two independent declarative
+                            // bindings. With separate bindings (rootPath ←
+                            // displayedRoot, restoreExpandedPaths ←
+                            // expandedPathsCache) on the same controller, QML
+                            // does not guarantee which one is applied first when
+                            // displayedRoot changes. Under the THREADED render
+                            // loop the rootPath update can reach the FM's
+                            // onRootPathChanged → beginMount BEFORE the
+                            // restoreExpandedPaths update is applied, so
+                            // beginMount reads an empty set and falls through to
+                            // lazyExpand — the whole tree mounts COLLAPSED.
+                            // The bug was intermittent and only surfaced on real
+                            // (threaded-loop) launches with a CLEAN working tree:
+                            // when the tree is dirty the Active Changes panel
+                            // mounts its own inner FileTreeView, and that extra
+                            // instantiation work delays the main tree's rootPath
+                            // update until after the cache update lands, masking
+                            // the race. Assigning both in ONE synchronous
+                            // function, restore-set FIRST, makes beginMount
+                            // always observe the fresh set.
+                            //
+                            // `displayedRoot` (NOT raw `cwd`): the tree pins to
+                            // the anchored project root when anchored; identical
+                            // to `cwd` when not. Ctrl+Shift+P toggles the anchor
+                            // (`:SymmetriaAnchor`/`:SymmetriaUnanchor` scripted).
+                            //
+                            // `rootPath` is a REQUIRED property on the FM's
+                            // FileTreeView, so it must be initialized
+                            // declaratively at the instantiation site (a purely
+                            // imperative Component.onCompleted assignment is too
+                            // late and fails component creation). Seed it empty —
+                            // beginMount short-circuits on an empty rootPath, so
+                            // no mount fires here — then `_applyTreeMount()` does
+                            // the real ordered assignment below.
+                            rootPath: ""
+                            function _applyTreeMount() {
+                                // Order is load-bearing: restore set BEFORE root
+                                // so the FM's beginMount (fired synchronously by
+                                // the rootPath write below) reads the right list.
+                                fileTreeView.restoreExpandedPaths = controller.expandedPathsCache;
+                                fileTreeView.rootPath = controller.displayedRoot;
+                            }
+                            // Initial mount (engine.load): the cache was already
+                            // populated in AppController.__init__ before the QML
+                            // loaded, so pull the current values directly.
+                            Component.onCompleted: fileTreeView._applyTreeMount()
+                            // Every later displayedRoot change (cwd move, anchor
+                            // toggle, the synthetic emit at the end of start())
+                            // routes through the same ordered apply. Registered
+                            // during engine.load — AFTER the Python
+                            // `_sync_expanded_paths_cache` slot connects in
+                            // __init__ — so by the time it runs the controller's
+                            // expandedPathsCache already holds the new root's set.
+                            Connections {
+                                target: controller
+                                function onDisplayedRootChanged() {
+                                    fileTreeView._applyTreeMount();
+                                }
+                            }
                             respectGitignore: true
                             // Pre-computed ignored-path set from the IDE's
                             // GitController. Lets the FM short-circuit its
@@ -1884,20 +1936,16 @@ Window {
                             // pathFilter already narrows it to the
                             // changeset.
                             lazyExpand: true
-                            // Per-project expanded-state cache (option 6). The
-                            // controller loads the saved set from disk
-                            // synchronously on every `displayedRootChanged` —
-                            // BEFORE the FM's `onRootPathChanged` cascade
-                            // runs — so this binding holds the right list
-                            // by the time the FM decides which expansion
-                            // mode to use. Empty list (no cache yet) =>
-                            // falls through to `lazyExpand`. Non-empty =>
-                            // restores the saved tree shape, bypassing the
-                            // lazy cascade for this mount. See
-                            // `tree_state_cache.py` + AppController's
-                            // `_sync_expanded_paths_cache` for the
-                            // load/save contract.
-                            restoreExpandedPaths: controller.expandedPathsCache
+                            // Per-project expanded-state cache (option 6).
+                            // restoreExpandedPaths is assigned imperatively in
+                            // `_applyTreeMount()` above (NOT bound here) — see
+                            // that function for why the declarative-binding form
+                            // raced the rootPath binding and collapsed the tree
+                            // on clean-working-tree mounts. The saved set comes
+                            // from `tree_state_cache.py` via AppController's
+                            // `_sync_expanded_paths_cache`; empty list (no cache
+                            // yet) => the FM falls through to `lazyExpand`,
+                            // non-empty => the FM restores the saved tree shape.
                             // Persist every user-driven expand/collapse so
                             // the next session restores the same shape.
                             // The signal is SUPPRESSED during a restore
