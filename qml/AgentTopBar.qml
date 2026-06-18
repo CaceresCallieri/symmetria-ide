@@ -89,6 +89,23 @@ Rectangle {
                 required property var modelData
                 readonly property bool isCurrent: controller.centralSurface === segment.modelData.surface
 
+                // The browser segment is hidden from the switcher until a
+                // browser window actually exists — opened by the user (Ctrl+T)
+                // or by an agent via the browser_* MCP tools (open_browser).
+                // This mirrors agentic browsers that only surface the browser
+                // tab when something is using it: zero windows → no chrome
+                // clutter. It stays visible while it's the CURRENT surface so
+                // reaching an empty browser via Ctrl+Shift+B doesn't leave the
+                // switcher with no active chip (the user can then Ctrl+T to
+                // open the first window). `browserOrder` is a PySide
+                // QVariantList — use the `!= null && .length` idiom, not
+                // Array.isArray (fails on QVariantList in Qt 6.11). Row skips
+                // invisible delegates, so the strip just has one fewer segment.
+                visible: segment.modelData.surface !== "browser"
+                         || segment.isCurrent
+                         || (controller.browserOrder != null
+                             && controller.browserOrder.length > 0)
+
                 height: Theme.size.modeBadgeHeight
                 implicitWidth: segmentLabel.implicitWidth + Theme.spacing.md * 2
 
