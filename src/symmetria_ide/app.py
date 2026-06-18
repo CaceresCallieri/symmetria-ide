@@ -312,6 +312,17 @@ class AppController(QObject):
     # itself is a list[str] of absolute paths; the FM treats null/empty
     # as "no restore, use lazyExpand cascade".
     expandedPathsCacheChanged = Signal()
+    # Combined tree-mount request: carries BOTH the new root AND its
+    # freshly-loaded expanded-paths cache in one payload, emitted from
+    # `_sync_expanded_paths_cache` after the load completes. QML's
+    # FileTreeView mount handler consumes THIS rather than reading
+    # `displayedRoot` + `expandedPathsCache` as two separate properties —
+    # those updates are driven by different connections and do not land in
+    # a guaranteed order, so a QML handler reacting to `displayedRootChanged`
+    # would read a STALE (previous-root) `expandedPathsCache` and restore the
+    # wrong set (→ empty prefix-filter → tree collapses on every cd-driven
+    # remount). Delivering both together makes the pair atomic by construction.
+    treeMountRequested = Signal(str, list)
     # QML-bound focus pull. Main.qml's Connections block listens for this
     # signal and calls `fileTreeView.forceActiveFocus()`. Emitted by the
     # `focus_tree()` Slot, which the Ctrl+J ApplicationShortcut in
@@ -1693,6 +1704,11 @@ class AppController(QObject):
         self._expanded_paths_cache_root = root
         self._expanded_paths_cache = load_expanded(root) if root else []
         self.expandedPathsCacheChanged.emit()
+        # Deliver the root + its just-loaded cache together so the QML tree
+        # mount can never pair a root with the wrong cache (see the
+        # `treeMountRequested` signal docstring). Emitted AFTER
+        # `_expanded_paths_cache` is set, so the payload is always consistent.
+        self.treeMountRequested.emit(root, list(self._expanded_paths_cache))
 
     @Slot(list)
     def saveExpandedPaths(self, paths: list[str]) -> None:
