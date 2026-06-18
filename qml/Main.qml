@@ -1891,6 +1891,16 @@ Window {
                                 // re-runs this with the same root right after
                                 // Component.onCompleted already mounted it; the
                                 // guard keeps it a clean single mount.
+                                // ASSUMPTION (safe for all current callers): a
+                                // same-root emit always carries an IDENTICAL
+                                // `expanded` set, because `_sync_expanded_paths_cache`
+                                // only reloads on `displayedRootChanged` (root
+                                // always differs across real switches). If a future
+                                // path ever emits treeMountRequested for the same
+                                // root with a DIFFERENT cache (a "reload tree"
+                                // command, external cache refresh), this guard would
+                                // silently drop the new set — it must then also
+                                // compare `expanded` against the last-applied set.
                                 if (root === fileTreeView.rootPath)
                                     return;
                                 // Order is load-bearing: restore set BEFORE root
@@ -1905,6 +1915,12 @@ Window {
                             // (this Connections didn't exist when __init__ called
                             // `_sync_expanded_paths_cache`), so pull the current
                             // values directly — they're consistent at startup.
+                            // The later synthetic startup emit re-fires this with
+                            // the SAME root (the unchanged-root guard absorbs it)
+                            // ONLY because `displayedRoot` is identical between now
+                            // and `start()`'s emit; if `start()` ever mutated the
+                            // root before that emit, the guard would (correctly)
+                            // permit a second mount.
                             Component.onCompleted: fileTreeView._applyTreeMount(
                                 controller.displayedRoot, controller.expandedPathsCache)
                             // Every later root change (cwd move, anchor toggle,

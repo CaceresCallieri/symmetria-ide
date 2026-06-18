@@ -307,10 +307,14 @@ class AppController(QObject):
     displayedRootChanged = Signal()
     treeVisibleChanged = Signal()
     # Per-project expanded-state cache. `expandedPathsCacheChanged` fires
-    # right after a project switch (in `_sync_expanded_paths_cache`) so
-    # QML can re-feed the FM's `restoreExpandedPaths` prop. The cache
-    # itself is a list[str] of absolute paths; the FM treats null/empty
-    # as "no restore, use lazyExpand cascade".
+    # right after a project switch (in `_sync_expanded_paths_cache`) as the
+    # change-notification for the `expandedPathsCache` read property. NOTE: the
+    # QML tree mount is driven by `treeMountRequested` (below), NOT by a binding
+    # on this property — the only QML reader of `expandedPathsCache` is the
+    # tree's `Component.onCompleted` one-time initial pull, which does not
+    # subscribe to this notify signal. Kept as the property's notify channel for
+    # any future reactive consumer. The cache itself is a list[str] of absolute
+    # paths; the FM treats null/empty as "no restore, use lazyExpand cascade".
     expandedPathsCacheChanged = Signal()
     # Combined tree-mount request: carries BOTH the new root AND its
     # freshly-loaded expanded-paths cache in one payload, emitted from
@@ -772,33 +776,29 @@ class AppController(QObject):
         # transitions, so the provider rebuilds at exactly the right
         # moments. Same-thread connection (anchor and capsule routing
         # both run on the GUI thread), no QueuedConnection needed.
-        # Load the per-project expanded-paths cache FIRST so the QML
-        # binding `restoreExpandedPaths: controller.expandedPathsCache`
-        # holds the new list before the FM's `onRootPathChanged`
-        # cascade runs. Connect order is load-bearing: Qt fires slots
-        # in registration order, and the FM's binding update is driven
-        # synchronously by `expandedPathsCacheChanged`, which fires
-        # inside `_sync_expanded_paths_cache`. If we registered this
-        # AFTER `_sync_git_repo_root`, the FM would see a stale cache
-        # on project switch and run the empty-cache lazyExpand cascade.
-        # Same-thread: `displayedRootChanged` fires on the GUI thread;
-        # `load_expanded` is a synchronous file read with no Qt deps.
+        # Reload the per-project expanded-paths cache whenever the displayed
+        # root changes. This slot ALSO emits `treeMountRequested(root, cache)`,
+        # which is what actually drives the QML file-tree mount (see that
+        # signal's docstring). Because the (root, cache) pair travels in one
+        # atomic payload — unlike the old `restoreExpandedPaths:
+        # controller.expandedPathsCache` binding this replaced — tree-mount
+        # correctness no longer depends on this slot being connected before
+        # `_sync_git_repo_root`; the registration order below is now incidental,
+        # not load-bearing. Same-thread: `displayedRootChanged` fires on the GUI
+        # thread; `load_expanded` is a synchronous file read with no Qt deps.
         self.displayedRootChanged.connect(self._sync_expanded_paths_cache)
 
-        # CRITICAL: also populate the cache RIGHT NOW so the QML
-        # binding `restoreExpandedPaths: controller.expandedPathsCache`
-        # holds the saved list on its FIRST evaluation. The FM mounts
-        # during `engine.load(Main.qml)`, which runs in `_build_engine`
-        # — BEFORE `start()`'s synthetic `displayedRootChanged` emit.
-        # Without this pre-population, the FM's `onRootPathChanged`
-        # fires once at QML instantiation with `restoreExpandedPaths`
-        # still at its initial empty value, the lazyExpand cascade
-        # runs, and the later `_sync_expanded_paths_cache` slot fires
-        # too late (rootPath has not changed, so the FM doesn't
-        # remount). Reading `self.displayedRoot` here works because
-        # `_anchored=False` at this point, so it equals `self._cwd`,
-        # which was set from `os.getcwd()` just above — the same
-        # value the FM will read when it mounts.
+        # CRITICAL: also populate the cache RIGHT NOW so the QML tree's
+        # `Component.onCompleted` — which reads `controller.expandedPathsCache`
+        # + `displayedRoot` DIRECTLY for its initial mount (no
+        # `treeMountRequested` has fired yet: this runs before
+        # `engine.load(Main.qml)` registers the QML `Connections` that listens
+        # for it) — sees the saved list rather than an empty one. Without this
+        # pre-population the first mount restores nothing and falls through to
+        # the lazyExpand cascade. Reading `self.displayedRoot` here works
+        # because `_anchored=False` at this point, so it equals `self._cwd`,
+        # set from `os.getcwd()` just above — the same value
+        # `Component.onCompleted` will read.
         self._sync_expanded_paths_cache()
 
         # same-thread: displayedRootChanged fires on the GUI thread; GitController.set_repo_root is GUI-only
@@ -1674,20 +1674,26 @@ class AppController(QObject):
     def expandedPathsCache(self) -> list[str]:
         """Saved expanded-paths list for the current displayed root.
 
-        QML binds the FM's `restoreExpandedPaths` to this property.
-        Empty list means "no cache yet" — the FM treats that as a
-        signal to use its `lazyExpand` cascade, identical to current
-        behaviour for first-time mounts. The list is refreshed by
-        `_sync_expanded_paths_cache` on every `displayedRootChanged`.
+        Read once by the QML tree's `Component.onCompleted` for its initial
+        mount; runtime remounts are driven by `treeMountRequested` (which
+        carries the cache as a payload), NOT by a binding on this property.
+        Empty list means "no cache yet" — the FM treats that as a signal to use
+        its `lazyExpand` cascade, identical to current behaviour for first-time
+        mounts. The list is refreshed by `_sync_expanded_paths_cache` on every
+        `displayedRootChanged`.
         """
         return self._expanded_paths_cache
 
     @Slot()
     def _sync_expanded_paths_cache(self) -> None:
-        """Reload the cache for the new displayed root.
+        """Reload the cache for the new displayed root AND emit the
+        `treeMountRequested(root, cache)` signal that drives the QML tree mount.
 
-        Connected to `displayedRootChanged` (BEFORE `_sync_git_repo_root`
-        in connect order, intentionally — see the connect site). The
+        Emit ordering is load-bearing: the cache is loaded before the emit, so
+        the signal payload always pairs the root with ITS cache (see the emit
+        site below). This is the sole emitter of `treeMountRequested`.
+
+        Connected to `displayedRootChanged`. The
         load is synchronous file I/O, typically <2ms even on cold disk:
         one open + one JSON parse + N stat calls (N = saved paths,
         capped by realistic UI use to a few hundred). If we ever see
