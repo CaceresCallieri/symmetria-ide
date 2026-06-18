@@ -330,7 +330,8 @@ Window {
     // Half-page scrollback in the focused agent terminal. claude's TUI is
     // an alternate-screen app, but its output history rides Konsole's
     // scrollback; Ctrl+U/D mirror vim's half-page motion. simulateWheel
-    // bypasses VT key encoding entirely (the fork has no kitty protocol),
+    // bypasses VT key encoding entirely (scrollback rides Konsole's buffer,
+    // not the key-event path — independent of any keyboard protocol),
     // and Qt's wheel handling converts 120 units → 3 lines, hence the
     // lines/6 notch math for a half page. Gated off while the sidebar
     // holds focus — the tree owns Ctrl+U/D for its own paging.
@@ -418,7 +419,8 @@ Window {
     // ESC[13;2u — which both decode as "insert newline" natively, with no stray
     // backslash. Removing this interception is what lets that reach the apps.
     // (Editor surface was already excluded — nvim owns its Shift+Enter; bare
-    // zsh, which doesn't negotiate kitty, now just gets the keytab default.)
+    // zsh, which doesn't negotiate kitty, now gets the keytab's legacy
+    // Return+Shift entry, \EOM — harmless, just no newline-on-Shift+Enter.)
 
     // IDE-wide horizontal pane navigation.
     //
