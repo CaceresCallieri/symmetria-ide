@@ -403,38 +403,22 @@ Window {
         }
     }
 
-    // Shift+Enter → newline in a claude prompt instead of submitting.
-    // Same VT-encoding gap as the paste chord above: the fork's legacy
-    // key encoding has no representation for Shift+Enter (no kitty
-    // CSI-u), so the widget sends a bare CR and claude submits the
-    // message. We intercept at the Window level and inject "\\\r" —
-    // backslash + CR, claude's documented line-continuation sequence
-    // (the exact text its own /terminal-setup binds Shift+Enter to in
-    // VSCode/iTerm). Scoped to the agent surface (focused agent's
-    // claude) and the shell pane (claude run by hand; in plain zsh the
-    // trailing backslash degrades gracefully to a continuation prompt).
-    // The editor surface is deliberately excluded — nvim owns its own
-    // Shift+Enter semantics.
-    Shortcut {
-        sequences: ["Shift+Return", "Shift+Enter"]
-        context: Qt.ApplicationShortcut
-        // The spawn-menu guard is needed precisely BECAUSE this is an
-        // ApplicationShortcut: Qt resolves it before the modal's key
-        // catcher ever sees the event, so without the guard Shift+Enter
-        // would inject text into the hidden terminal behind the menu.
-        enabled: (controller.agentSurfaceVisible || controller.terminalVisible)
-                 && !treeScope.activeFocus && !agentSpawnMenu.visible
-                 && !agentSessionPicker.visible
-        onActivated: {
-            if (controller.agentSurfaceVisible) {
-                var term = agentSurface.focusedTerminal();
-                if (term)
-                    term.session.sendText("\\\r");
-            } else {
-                shellSession.sendText("\\\r");
-            }
-        }
-    }
+    // Shift+Enter → newline: handled by the TERMINAL now, NOT an IDE shortcut.
+    //
+    // REGRESSION GUARD — do NOT re-add a Shift+Return ApplicationShortcut here.
+    // There used to be one that injected "\\\r" (backslash + CR, claude's
+    // line-continuation sequence) because the qmltermwidget fork's legacy key
+    // encoding had no representation for Shift+Enter (no kitty CSI-u). That
+    // workaround was the bug behind the literal "\" appearing in OpenCode (and
+    // it could only ever produce a backslash, never a real newline): being an
+    // ApplicationShortcut it consumed Shift+Enter BEFORE the QMLTermWidget, so
+    // the terminal's own encoding never ran. The fork now implements the Kitty
+    // keyboard protocol (MODIFICATIONS.md #13): it answers the "CSI ? u" probe,
+    // so OpenCode/Claude negotiate kitty and the widget reports Shift+Enter as
+    // ESC[13;2u — which both decode as "insert newline" natively, with no stray
+    // backslash. Removing this interception is what lets that reach the apps.
+    // (Editor surface was already excluded — nvim owns its Shift+Enter; bare
+    // zsh, which doesn't negotiate kitty, now just gets the keytab default.)
 
     // IDE-wide horizontal pane navigation.
     //
