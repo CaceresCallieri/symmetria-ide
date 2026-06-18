@@ -45,6 +45,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [QML Array.isArray rejects QVariantList](reference/qt-pyside/qml_qvariantlist_array_check.md) — PySide6 list props fail `Array.isArray()` in Qt 6.11; use `x != null && x.length > 0`
 - [grabWindow GIL deadlock](reference/qt-pyside/grabwindow_gil_deadlock.md) — sync grab + Python QQuickPaintedItem + threaded loop = ABBA hang; force basic loop
 - [Fork changes need makepkg](reference/qt-pyside/fork_changes_need_makepkg.md) — launchers load the pacman qmltermwidget pkg; commit + makepkg -sif after fork edits
+- [ApplicationShortcut masks terminal keys](reference/qt-pyside/applicationshortcut_masks_terminal_keys.md) — chrome Shortcut eats keys before QMLTermWidget; suspect it when a key fails in-IDE but works in Ghostty
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
 

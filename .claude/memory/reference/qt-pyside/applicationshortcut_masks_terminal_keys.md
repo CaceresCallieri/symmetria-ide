@@ -1,0 +1,19 @@
+---
+name: applicationshortcut_masks_terminal_keys
+description: A chrome-level Qt.ApplicationShortcut intercepts keys BEFORE the QMLTermWidget — suspect it first when a terminal key misbehaves in the IDE but works in a standalone terminal
+metadata: 
+  node_type: memory
+  type: reference
+  originSessionId: 43cf0692-d57b-4148-8a11-3012c53f8322
+---
+
+When a keystroke misbehaves **inside the IDE's terminal panes but works in a standalone terminal (Ghostty/kitty)**, the cause is very likely a chrome-level `Qt.ApplicationShortcut` in `qml/Main.qml`, NOT the terminal. `context: Qt.ApplicationShortcut` resolves at the Window level **before** the event ever reaches the `QMLTermWidget` (`TerminalDisplay::keyPressEvent` → emulation), so it silently masks ANY terminal-side key encoding — keytab, modifyOtherKeys, kitty, all of it.
+
+**The case that burned a whole session (2026-06-18):** Shift+Enter produced a literal `\` in OpenCode instead of a newline. An `ApplicationShortcut` (`sequences: ["Shift+Return","Shift+Enter"]`) was injecting `"\\\r"` (backslash+CR, claude's line-continuation) directly via `session.sendText()`. It could only ever produce a backslash, never a real newline, and **every terminal-side fix had zero effect** because the key was consumed before the terminal saw it. Ghostty worked precisely because it has no such IDE shortcut. The real fix was two-part and the layers compose: (1) the qmltermwidget fork now implements the **Kitty keyboard protocol** (`symmetria-qmltermwidget` MODIFICATIONS.md #13 — replies to `CSI ? u`, push/pop flag stack, reports Shift+Enter as `ESC[13;2u`); (2) the IDE shortcut was **removed** so the now-capable terminal handles the key natively (regression-guard comment lives at the old site in `qml/Main.qml`).
+
+**Why:** debugging cost enormous effort by fixing the wrong layer repeatedly. The terminal emulation, the handshake, even the real installed library were all verified correct in isolation — yet the live IDE kept failing identically, because an entirely different layer (chrome QML) ate the key. The "works in Ghostty, fails in IDE" signal is the tell: it isolates the difference to the IDE wrapper, not the app or the terminal engine.
+
+**How to apply:**
+- Before deep-diving the terminal/fork for a misbehaving key, `grep -nE "Key_Return|Shift\+|sequences:|ApplicationShortcut" qml/Main.qml` — check whether the IDE intercepts that key first. `Shortcut { context: Qt.ApplicationShortcut }` always wins over terminal key handling.
+- Confirm a relaunch actually loaded new code before concluding a fix "didn't work": `grep libqmltermwidget /proc/<pid>/maps` — a `(deleted)` path means the process still holds the pre-rebuild `.so` (running processes don't pick up a `makepkg -sif` until relaunch). Many stale instances coexist; check the specific PID under test.
+- Kitty keyboard protocol essentials (the modern fix for Shift+Enter vs Enter): app sends `CSI ? u` to detect, terminal MUST reply `CSI ? <flags> u` (the reply is what unlocks the app — a silent terminal keeps it in legacy mode), app pushes `CSI > flags u`, Shift+Enter is then reported as `ESC[13;2u`. Stock Konsole/qtermwidget does NOT implement this; our fork now does. See [[fork_changes_need_makepkg]] — fork edits need `makepkg -sif` to reach the launcher/daily-driver.
