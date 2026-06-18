@@ -1874,11 +1874,26 @@ Window {
                             // the real ordered assignment below.
                             rootPath: ""
                             function _applyTreeMount() {
+                                var root = controller.displayedRoot;
+                                // Unchanged root => nothing to remount. The
+                                // synthetic displayedRootChanged.emit() at the
+                                // end of start() (seeded for GitController) would
+                                // otherwise re-run this right after
+                                // Component.onCompleted already mounted the same
+                                // root. QML already suppresses the same-value
+                                // rootPath reassign (verified: exactly one FM
+                                // beginMount per launch), so this guard is belt-
+                                // and-suspenders — it keeps the single-mount
+                                // intent explicit and survives any future FM
+                                // change where an identical-rootPath write is no
+                                // longer a no-op.
+                                if (root === fileTreeView.rootPath)
+                                    return;
                                 // Order is load-bearing: restore set BEFORE root
                                 // so the FM's beginMount (fired synchronously by
                                 // the rootPath write below) reads the right list.
                                 fileTreeView.restoreExpandedPaths = controller.expandedPathsCache;
-                                fileTreeView.rootPath = controller.displayedRoot;
+                                fileTreeView.rootPath = root;
                             }
                             // Initial mount (engine.load): the cache was already
                             // populated in AppController.__init__ before the QML
@@ -1891,6 +1906,13 @@ Window {
                             // `_sync_expanded_paths_cache` slot connects in
                             // __init__ — so by the time it runs the controller's
                             // expandedPathsCache already holds the new root's set.
+                            // Ordering invariant: the controller emits
+                            // displayedRootChanged only AFTER engine.load
+                            // completes (the synthetic startup emit lives in
+                            // AppController.start(), called post-load), so
+                            // Component.onCompleted always runs the FIRST mount;
+                            // even if that order ever changed, the unchanged-root
+                            // guard in _applyTreeMount keeps the result correct.
                             Connections {
                                 target: controller
                                 function onDisplayedRootChanged() {
