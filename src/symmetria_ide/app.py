@@ -384,12 +384,16 @@ class AppController(QObject):
     focusedBrowserChanged = Signal()
     focusBrowserRequested = Signal(int)
     # Agent ↔ browser links — which agent owns/drives which browser window.
-    # Drives the browser glyph on the AgentTopBar chips. The ownership counts
-    # (glyph visible) are populated by _claim_browser_window in
-    # _open_browser_for_mcp; the activity flags (glyph pulse) are DORMANT since
-    # the chrome-devtools-mcp migration — nothing calls _record_browser_attribution
-    # now (page driving bypasses our bridge), so agentBrowserActive stays all-False
-    # until a future CDP monitor re-activates the hook. One notify covers both.
+    # Drives the browser glyph on the AgentTopBar chips (the agent-owned
+    # browser's PRIMARY entry point since the standalone tab was removed). The
+    # ownership counts (glyph visible) are populated by _claim_browser_window in
+    # _open_browser_for_mcp; the attention flags (glyph dot) by
+    # _set_browser_attention_for_mcp (the agent's explicit
+    # browser_request_attention call); the activity flags (glyph pulse) are
+    # DORMANT since the chrome-devtools-mcp migration — nothing calls
+    # _record_browser_attribution now (page driving bypasses our bridge), so
+    # agentBrowserActive stays all-False until a future CDP monitor re-activates
+    # the hook. One notify covers all three (count / attention / active).
     agentBrowserChanged = Signal()
     # Per-project agent-browser opt-in (the `.symmetria/ide.json` marker).
     # Drives the MCP popup's chrome-devtools on/off state (Ctrl+Shift+M → `w`).
@@ -581,6 +585,13 @@ class AppController(QObject):
         self._agent_browser_windows: dict[int, list[int]] = {}
         # agent slot -> count of browser ops currently in flight (>0 = pulse).
         self._agent_browser_active: dict[int, int] = {}
+        # agent slot -> attention message ("" = no message). PRESENCE of the
+        # key = the attention dot is lit on that agent's browser globe; the
+        # value carries the agent's optional reason (browser_request_attention)
+        # for a future tooltip/desktop notification. Set by the agent's
+        # explicit MCP call, cleared when the user views the window
+        # (focus_agent_browser), the window closes, or the agent dies.
+        self._agent_browser_attention: dict[int, str] = {}
         # Phase 4 Stage 2a: drives the embedded WebEngineViews via
         # QML-delivered runJavaScript (the views aren't Python-drivable).
         # The IDE-hosted browser MCP server. The bridge marshals agents' MCP
@@ -595,6 +606,7 @@ class AppController(QObject):
             self._browser_mcp_bridge,
             self._read_browser_windows,
             self._open_browser_for_mcp,
+            self._set_browser_attention_for_mcp,
         )
         # Publish/subscribe client to Symmetria Shell's agent-bridge hub.
         # Publishes this pool's spawns/focus/titles so the shell dashboard
@@ -2035,23 +2047,37 @@ class AppController(QObject):
             self.swap_to_git()
 
     @Slot()
-    def swap_to_browser(self) -> None:
-        """Make the embedded browser pool the visible central surface."""
-        self.set_central_surface("browser")
+    def jump_to_focused_agent_browser(self) -> None:
+        """Jump to the FOCUSED agent's browser window (bound to `Ctrl+Shift+B`).
 
-    @Slot()
-    def toggle_browser_terminal(self) -> None:
-        """Flip the central surface between the browser and the terminal.
+        This is how you go **watch what your agent is doing in the browser** —
+        or see the page it LEFT once it finished (the window persists as long as
+        the agent is alive, so an idle agent's last view is still there to
+        inspect). The keyboard twin of clicking an agent chip's globe, and the
+        entry point now that the standalone browser tab is gone and the browser
+        is reached only through its owning agent:
 
-        Bound to `Ctrl+Shift+B`. Same asymmetry as `toggle_git_history`:
-        'B' names the browser, so the chord always lands you there unless
-        you were already on it, in which case it returns you to the
-        terminal. Always emits exactly one `centralSurfaceChanged`.
+        - Already on the browser surface → return home to the terminal (the
+          keyboard way back out; same asymmetry as the other surface chords).
+        - Else, if the focused agent owns ≥1 browser window → jump to its
+          newest-driven one (and clear its attention dot, via
+          focus_agent_browser).
+        - Else → no-op (the agent-only reachability choice: the browser exists
+          only as something an agent owns; with no owned window there is
+          nowhere to jump). Logged so the dead press is explainable.
         """
         if self._central_surface == "browser":
             self.swap_to_terminal()
+            return
+        slot = self._focused_term_agent
+        if slot and self._agent_browser_windows.get(slot):
+            self.focus_agent_browser(slot)
         else:
-            self.swap_to_browser()
+            log.info(
+                "jump_to_focused_agent_browser: focused agent (%s) owns no "
+                "browser window — no-op",
+                slot or "none",
+            )
 
     @Slot()
     def focus_terminal(self) -> None:
@@ -2161,6 +2187,18 @@ class AppController(QObject):
         hook a future CDP monitor re-activates (see _record_browser_attribution)."""
         return [
             self._agent_browser_active.get(slot, 0) > 0
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
+    @Property("QVariantList", notify=agentBrowserChanged)
+    def agentBrowserAttention(self) -> list:
+        """Per-slot 'this agent wants you to look at its browser' flag, indexed
+        `slot - 1` → drives the attention dot on the chip's browser glyph. Set
+        by the agent's explicit browser_request_attention MCP call; cleared on
+        view (focus_agent_browser), window close, or agent death. Unlike
+        agentBrowserActive (the dormant in-flight pulse), this is live."""
+        return [
+            slot in self._agent_browser_attention
             for slot in range(1, self._MAX_INSTANCES + 1)
         ]
 
@@ -2329,12 +2367,18 @@ class AppController(QObject):
         the central surface to "browser" via the existing focus_browser. No-op
         when the agent owns no open window (the glyph wouldn't be visible then,
         but the guard keeps the binding safe). The 'jump to what they're doing'
-        action from the AgentTopBar browser glyph.
+        action from the AgentTopBar browser glyph — and the keyboard
+        jump_to_focused_agent_browser chord.
+
+        Viewing the window is what clears the agent's attention dot: the user
+        has now seen what the agent flagged, so the badge has served its purpose.
         """
         owned = self._agent_browser_windows.get(agent_slot)
         if not owned:
             log.info("focus_agent_browser: agent %d owns no window — no-op", agent_slot)
             return
+        if self._agent_browser_attention.pop(agent_slot, None) is not None:
+            self.agentBrowserChanged.emit()  # clear-on-view: dot off
         self.focus_browser(owned[-1])  # newest-driven = the jump target
 
     def _agent_slot_from_id(self, agent_id: str) -> int | None:
@@ -2405,21 +2449,59 @@ class AppController(QObject):
         if changed:
             self.agentBrowserChanged.emit()
 
+    def _release_agent_browser_windows(self, agent_slot: int) -> None:
+        """On agent death: close the windows the agent SOLELY owns, then forget
+        its links. Called from close_agent in place of a bare
+        _drop_agent_browser_links.
+
+        Closing the tab made the browser reachable only through its owning
+        agent, so a window left behind by a dead agent would be both leaking
+        RAM (the WebEngineView stays alive) AND unreachable (no globe, no tab).
+        We therefore close each owned window UNLESS another still-living agent
+        also owns it (co-driven windows — two agents driving the same window
+        both link it; keep it for the survivor). Iterate a copy: close_browser
+        mutates _agent_browser_windows via _drop_browser_window_links.
+        """
+        for browser_slot in list(self._agent_browser_windows.get(agent_slot, ())):
+            shared = any(
+                browser_slot in owned
+                for other, owned in self._agent_browser_windows.items()
+                if other != agent_slot
+            )
+            if not shared:
+                self.close_browser(browser_slot)  # frees the WebEngineView
+        self._drop_agent_browser_links(agent_slot)
+
     def _drop_agent_browser_links(self, agent_slot: int) -> None:
-        """Forget an agent's browser ownership + activity (on agent close)."""
+        """Forget an agent's browser ownership + activity + attention (on agent
+        close). Does NOT close windows — _release_agent_browser_windows does
+        that first; this is the bookkeeping-only tail."""
         removed = self._agent_browser_windows.pop(agent_slot, None)
         removed_active = self._agent_browser_active.pop(agent_slot, None)
-        if removed is not None or removed_active is not None:
+        removed_attn = self._agent_browser_attention.pop(agent_slot, None)
+        if (
+            removed is not None
+            or removed_active is not None
+            or removed_attn is not None
+        ):
             self.agentBrowserChanged.emit()
 
     def _drop_browser_window_links(self, browser_slot: int) -> None:
         """Remove a closed browser window from every agent's owned list, so the
-        chip count reflects only open windows (on browser-window close)."""
+        chip count reflects only open windows (on browser-window close). When an
+        agent's LAST window goes, also clear its attention dot — the globe hides
+        at count 0, and a lingering attention entry would wrongly re-light it if
+        the agent later opens a fresh window."""
         changed = False
-        for owned in self._agent_browser_windows.values():
+        for agent_slot, owned in self._agent_browser_windows.items():
             if browser_slot in owned:
                 owned.remove(browser_slot)
                 changed = True
+                if (
+                    not owned
+                    and self._agent_browser_attention.pop(agent_slot, None) is not None
+                ):
+                    changed = True
         if changed:
             self.agentBrowserChanged.emit()
 
@@ -2465,7 +2547,7 @@ class AppController(QObject):
             )
             del self._term_agents[slot]
             self._term_agent_activity.pop(slot, None)
-            self._drop_agent_browser_links(slot)
+            self._release_agent_browser_windows(slot)
             self.termAgentsChanged.emit()
             self._agent_bridge.notify_remove(slot)
             return
@@ -2473,7 +2555,7 @@ class AppController(QObject):
         self._agent_order.remove(slot)
         del self._term_agents[slot]
         self._term_agent_activity.pop(slot, None)
-        self._drop_agent_browser_links(slot)
+        self._release_agent_browser_windows(slot)
         self.termAgentsChanged.emit()
         self.agentActivityChanged.emit()
         self._agent_bridge.notify_remove(slot)
@@ -2620,12 +2702,20 @@ class AppController(QObject):
 
     @Slot()
     @Slot(str)
-    def open_browser(self, url: str = "about:blank") -> None:
-        """Allocate the lowest free slot for a browser window and focus it.
+    @Slot(str, bool)
+    def open_browser(self, url: str = "about:blank", focus: bool = True) -> None:
+        """Allocate the lowest free slot for a browser window.
 
         The QML Loader reacting to `browserSlotActive` instantiates the
         WebEngineView and loads `url`. New windows APPEND in display order
         (newest = highest chip number), matching the agent pool.
+
+        `focus` (default True) controls whether opening also brings the browser
+        surface forward + focuses the new window. Manual opens (`Ctrl+T`) focus —
+        the user asked to see it. Agent opens (`_open_browser_for_mcp`) pass
+        `focus=False`: now that the browser is agent-owned, an agent opening a
+        window must NOT yank the user's surface; it only lights the chip globe,
+        and the user jumps on their own terms (the globe / Ctrl+Shift+B).
         """
         slot = self._next_free_browser_slot()
         if slot is None:
@@ -2634,8 +2724,9 @@ class AppController(QObject):
         self._browser_tabs[slot] = {"url": url or "about:blank", "title": ""}
         self._browser_order.append(slot)
         self.browserTabsChanged.emit()
-        log.info("open_browser: slot %d → %s", slot, url)
-        self.focus_browser(slot)
+        log.info("open_browser: slot %d → %s (focus=%s)", slot, url, focus)
+        if focus:
+            self.focus_browser(slot)
 
     @Slot(int)
     def focus_browser(self, slot: int) -> None:
@@ -2778,9 +2869,12 @@ class AppController(QObject):
 
         Opens a new window so an agent has an autonomous entry point (the
         other tools only drive EXISTING windows). Returns the new window's
-        DISPLAY number, or a pool-full error. NB: open_browser switches the
-        central surface to the browser — an agent opening a window pulls the
-        user there, which is the intended "watch the agent work" behavior.
+        DISPLAY number, or a pool-full error. Opens with `focus=False`: now
+        that the browser is agent-owned (no standalone tab), an agent opening a
+        window must NOT yank the user's surface — it only lights the chip globe,
+        and the user jumps on their own terms (the globe / Ctrl+Shift+B). When
+        the agent has something worth showing it calls browser_request_attention
+        to light the attention dot.
 
         `agent_id` (from the X-Symmetria-Agent header) claims OWNERSHIP of the
         new window for the spawning agent, so its chip shows the browser glyph
@@ -2790,7 +2884,7 @@ class AppController(QObject):
         glyph is static until a future CDP monitor re-activates it.
         """
         before = len(self._browser_order)
-        self.open_browser(url or "about:blank")
+        self.open_browser(url or "about:blank", focus=False)
         if len(self._browser_order) > before:
             new_slot = self._browser_order[-1]
             agent_slot = self._agent_slot_from_id(agent_id)
@@ -2811,6 +2905,30 @@ class AppController(QObject):
                 "title": tab.get("title", ""),
             }
         return {"ok": False, "error": "pool-full"}
+
+    def _set_browser_attention_for_mcp(self, agent_id: str, message: str = "") -> dict:
+        """The `browser_request_attention` MCP tool body. GUI-thread only.
+
+        Lights the attention dot on the calling agent's browser glyph so the
+        user knows to come look (the agent-open path deliberately does NOT pull
+        them in). Requires the agent to own an open window — the dot rides the
+        globe, which only renders when the agent owns ≥1 window, so a request
+        with no window would be invisible; we reject it with a clear error
+        rather than store an attention the user can never see.
+
+        Untagged / foreign ids are dropped by `_agent_slot_from_id` (external
+        clients never touch the chips). `message` is stored for a future
+        tooltip / desktop notification; the dot itself shows either way.
+        """
+        agent_slot = self._agent_slot_from_id(agent_id)
+        if agent_slot is None:
+            return {"ok": False, "error": "unknown-agent"}
+        if not self._agent_browser_windows.get(agent_slot):
+            return {"ok": False, "error": "no-window"}
+        self._agent_browser_attention[agent_slot] = message or ""
+        self.agentBrowserChanged.emit()
+        log.info("browser attention raised by agent slot %d", agent_slot)
+        return {"ok": True}
 
     @Slot()
     def request_opencode_sessions(self) -> None:

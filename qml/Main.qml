@@ -157,15 +157,21 @@ Window {
         onActivated: controller.toggle_git_history()
     }
 
-    // Embedded-browser surface toggle. 'B' names the browser, so this always
-    // lands you there unless you were already on it, in which case it returns
-    // you to the terminal (same asymmetry as Ctrl+Shift+E/G). The browser is
-    // the agentic-browser pool — QtWebEngine views embedded so they never
-    // escape into a separate Hyprland window. See qml/BrowserSurface.qml.
+    // Jump to the FOCUSED agent's browser — go watch what the agent is doing
+    // (or see the page it left once idle; the window lives as long as the
+    // agent does). The keyboard twin of clicking an agent chip's globe. The
+    // browser is agent-owned: there is no standalone browser tab anymore, so
+    // you reach it only through the agent that owns it. 'B' still names the
+    // browser, and the asymmetry holds: already on the browser surface → back
+    // to the terminal; otherwise jump to the focused agent's newest-owned
+    // window (clearing its attention dot). If the focused agent owns no window,
+    // it's a no-op (agent-only reachability — see jump_to_focused_agent_browser).
+    // The pool is QtWebEngine views embedded so they never escape into a
+    // separate Hyprland window. See qml/BrowserSurface.qml.
     Shortcut {
         sequences: ["Ctrl+Shift+B"]
         context: Qt.ApplicationShortcut
-        onActivated: controller.toggle_browser_terminal()
+        onActivated: controller.jump_to_focused_agent_browser()
     }
 
     // New browser window — the standard browser "new tab" idiom, gated to the

@@ -61,6 +61,9 @@ def _server():
         # opener takes (url, agent_id) since Stage 3 — the controller records
         # window ownership for the calling agent.
         window_opener=lambda url, agent_id="": {"ok": True, "window": 1},
+        # attention_setter takes (agent_id, message) — lights the chip globe's
+        # attention dot for the calling agent (browser_request_attention).
+        attention_setter=lambda agent_id, message="": {"ok": True},
     )
 
 

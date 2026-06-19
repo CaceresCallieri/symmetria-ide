@@ -79,8 +79,11 @@ Rectangle {
                 // and it opens on changes — labelling it "history" would
                 // mis-name where the chip lands.
                 { surface: "git", label: "git" },
-                // Embedded browser pool (QtWebEngine) — Ctrl+Shift+B toggles it.
-                { surface: "browser", label: "browser" },
+                // NB: no "browser" segment. The embedded browser is agent-owned
+                // and reached only through its owning agent — click the globe on
+                // that agent's chip (below) or press Ctrl+Shift+B with the agent
+                // focused. Giving it a standalone switcher tab would contradict
+                // that ownership model, so it was deliberately removed.
             ]
 
             delegate: Item {
@@ -88,23 +91,6 @@ Rectangle {
 
                 required property var modelData
                 readonly property bool isCurrent: controller.centralSurface === segment.modelData.surface
-
-                // The browser segment is hidden from the switcher until a
-                // browser window actually exists — opened by the user (Ctrl+T)
-                // or by an agent via the browser_* MCP tools (open_browser).
-                // This mirrors agentic browsers that only surface the browser
-                // tab when something is using it: zero windows → no chrome
-                // clutter. It stays visible while it's the CURRENT surface so
-                // reaching an empty browser via Ctrl+Shift+B doesn't leave the
-                // switcher with no active chip (the user can then Ctrl+T to
-                // open the first window). `browserOrder` is a PySide
-                // QVariantList — use the `!= null && .length` idiom, not
-                // Array.isArray (fails on QVariantList in Qt 6.11). Row skips
-                // invisible delegates, so the strip just has one fewer segment.
-                visible: segment.modelData.surface !== "browser"
-                         || segment.isCurrent
-                         || (controller.browserOrder != null
-                             && controller.browserOrder.length > 0)
 
                 height: Theme.size.modeBadgeHeight
                 implicitWidth: segmentLabel.implicitWidth + Theme.spacing.md * 2
@@ -291,15 +277,23 @@ Rectangle {
                             elide: Text.ElideRight
                         }
 
-                        // Browser-link indicator — shown when this agent owns
-                        // ≥1 OPEN browser window (it opened or drove one via the
-                        // browser_* MCP tools). Clicking jumps to that window
-                        // (newest-driven). The glyph pulses while a browser op
-                        // is in flight, steady-dim when idle-owned. Rendered in
-                        // editorFontFamily (a Nerd Font) because the chip's UI
-                        // font may lack icon glyphs. `agentBrowserCount`/`Active`
-                        // are PySide QVariantLists — index then guard, per the
-                        // qml_qvariantlist_array_check memo (no Array.isArray).
+                        // Browser-link indicator — the PRIMARY way into the
+                        // agent-owned browser (the standalone browser tab is
+                        // gone). Shown when this agent owns ≥1 OPEN browser
+                        // window (it opened one via browser_open). Clicking jumps
+                        // to that window (newest-driven) — the mouse twin of the
+                        // Ctrl+Shift+B keyboard jump. Two layers ride the glyph:
+                        //   - the GLOBE = presence ("this agent has a browser");
+                        //   - the DOT   = attention ("…and it wants you to look"),
+                        //     lit by the agent's browser_request_attention call,
+                        //     cleared when you view the window (focus_agent_browser).
+                        // The dormant `active` pulse (in-flight driving) stays as
+                        // the future-CDP-monitor hook but never fires today.
+                        // Rendered in editorFontFamily (a Nerd Font) because the
+                        // chip's UI font may lack icon glyphs. `agentBrowserCount`/
+                        // `Active`/`Attention` are PySide QVariantLists — index
+                        // then guard, per qml_qvariantlist_array_check (no
+                        // Array.isArray).
                         Item {
                             id: browserIndicator
                             anchors.verticalCenter: parent.verticalCenter
@@ -307,6 +301,8 @@ Rectangle {
                                 (controller.agentBrowserCount[chip.slot - 1] || 0) > 0
                             readonly property bool active:
                                 !!(controller.agentBrowserActive[chip.slot - 1])
+                            readonly property bool attention:
+                                !!(controller.agentBrowserAttention[chip.slot - 1])
                             visible: browserIndicator.owns
                             width: browserIndicator.visible ? browserGlyph.implicitWidth : 0
                             height: browserGlyph.implicitHeight
@@ -339,6 +335,49 @@ Rectangle {
                                     }
                                     NumberAnimation {
                                         target: browserGlyph; property: "opacity"
+                                        to: 1.0; duration: Theme.anim.duration
+                                        easing.type: Easing.InOutQuad
+                                    }
+                                }
+                            }
+
+                            // Attention dot — the notification badge the agent
+                            // raises via browser_request_attention. Accent fill
+                            // with a chrome-bg ring so it reads as a badge ATOP
+                            // the globe's top-right (the conventional notify
+                            // corner). The 0.34 size + corner offsets are one-off
+                            // pixel ratios (local, per the header convention).
+                            // Drawn after the glyph so it paints on top; the
+                            // shared MouseArea below still wins the click, so
+                            // tapping the badge jumps + clears it.
+                            Rectangle {
+                                id: attentionDot
+                                visible: browserIndicator.attention
+                                width: Math.round(browserGlyph.implicitHeight * 0.34)
+                                height: width
+                                radius: width / 2
+                                color: Theme.color.accent.primary
+                                border.width: 1
+                                border.color: Theme.color.bg.chrome
+                                anchors.right: browserGlyph.right
+                                anchors.top: browserGlyph.top
+                                anchors.rightMargin: -Math.round(width * 0.25)
+                                anchors.topMargin: Math.round(width * 0.15)
+
+                                // Gentle attention pulse while lit — same
+                                // alwaysRunToEnd discipline as the glyph pulse so
+                                // it never freezes mid-fade; Theme.anim durations.
+                                SequentialAnimation {
+                                    running: attentionDot.visible
+                                    loops: Animation.Infinite
+                                    alwaysRunToEnd: true
+                                    NumberAnimation {
+                                        target: attentionDot; property: "opacity"
+                                        to: 0.45; duration: Theme.anim.duration
+                                        easing.type: Easing.InOutQuad
+                                    }
+                                    NumberAnimation {
+                                        target: attentionDot; property: "opacity"
                                         to: 1.0; duration: Theme.anim.duration
                                         easing.type: Easing.InOutQuad
                                     }

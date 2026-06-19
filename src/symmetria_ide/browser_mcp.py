@@ -198,6 +198,7 @@ class BrowserMcpServer:
         bridge: BrowserMcpBridge,
         windows_reader: Callable[[], dict],
         window_opener: Callable[[str, str], dict],
+        attention_setter: Callable[[str, str], dict],
     ) -> None:
         self._bridge = bridge
         self._windows_reader = windows_reader
@@ -205,6 +206,10 @@ class BrowserMcpServer:
         # calling agent, so its signature carries the agent id (vs the bare
         # url-only Stage-2 form).
         self._window_opener = window_opener
+        # (agent_id, message) -> dict: raises the attention badge on the calling
+        # agent's browser globe (browser_request_attention). Same agent-id seam
+        # as the opener — the IDE maps it onto the chip slot.
+        self._attention_setter = attention_setter
         self._server = None  # uvicorn.Server
         self._thread: threading.Thread | None = None
         self._sock: socket.socket | None = None  # held bound until uvicorn owns it
@@ -262,6 +267,7 @@ class BrowserMcpServer:
         bridge = self._bridge
         windows_reader = self._windows_reader
         window_opener = self._window_opener
+        attention_setter = self._attention_setter
         server = FastMCP(
             SERVER_NAME, host="127.0.0.1", port=self._port, log_level="WARNING"
         )
@@ -290,6 +296,22 @@ class BrowserMcpServer:
             tools: match a window's url here to a chrome-devtools-mcp page
             (list_pages) and select_page it before driving."""
             return await bridge.read(windows_reader)
+
+        @server.tool()
+        async def browser_request_attention(message: str = "") -> dict:
+            """Signal the user to look at THIS agent's browser window.
+
+            Lights a notification dot on your agent's browser globe in the IDE
+            top bar — use it when you've loaded or found something in the
+            browser the user should see (a result page, a diff, a preview).
+            The user does NOT get pulled to the browser automatically; this dot
+            is how they know to come look. Requires that you have an open window
+            (call browser_open first). `message` is an optional short reason
+            (carried for a future tooltip/notification; the dot shows either
+            way). Returns {ok, ...}; {ok: false} with an error if you own no
+            window or the caller is untagged."""
+            agent_id = _calling_agent_id(server)
+            return await bridge.read(lambda: attention_setter(agent_id, message))
 
         app = server.streamable_http_app()
         config = uvicorn.Config(

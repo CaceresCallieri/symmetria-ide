@@ -99,9 +99,11 @@ def test_focus_pull_connection_present(browser_surface: str):
 # ---------------------------------------------------------------------------
 
 
-def test_browser_toggle_chord_exists(main_qml: str):
+def test_browser_jump_chord_exists(main_qml: str):
+    """Ctrl+Shift+B is the keyboard jump to the focused agent's browser (the
+    browser is agent-owned; the standalone toggle/tab were removed)."""
     assert "Ctrl+Shift+B" in main_qml
-    assert "controller.toggle_browser_terminal()" in main_qml
+    assert "controller.jump_to_focused_agent_browser()" in main_qml
 
 
 def test_browser_surface_instantiated_and_gated(main_qml: str):
@@ -110,9 +112,21 @@ def test_browser_surface_instantiated_and_gated(main_qml: str):
 
 
 # ---------------------------------------------------------------------------
-# AgentTopBar.qml — the always-visible surface switcher includes browser.
+# AgentTopBar.qml — the browser is reached ONLY through its owning agent (the
+# chip globe + attention dot), NOT a standalone switcher tab.
 # ---------------------------------------------------------------------------
 
 
-def test_switcher_includes_browser_surface(agent_top_bar: str):
-    assert 'surface: "browser"' in agent_top_bar
+def test_switcher_excludes_browser_surface(agent_top_bar: str):
+    """The browser tab was removed from the surface switcher — a regression
+    that re-added it would contradict the agent-owned model."""
+    assert 'surface: "browser"' not in agent_top_bar
+
+
+def test_agent_chip_has_browser_globe_and_attention_dot(agent_top_bar: str):
+    """The chip globe (presence) + attention dot (the agent's
+    browser_request_attention signal) are the entry + notification affordances
+    now that the tab is gone."""
+    assert "controller.agentBrowserCount" in agent_top_bar  # globe presence
+    assert "controller.agentBrowserAttention" in agent_top_bar  # attention dot
+    assert "controller.focus_agent_browser(chip.slot)" in agent_top_bar  # click-jump

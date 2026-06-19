@@ -79,32 +79,52 @@ def test_unknown_surface_still_rejected(controller):
 
 
 # ---------------------------------------------------------------------------
-# Toggle slot — Ctrl+Shift+B, asymmetric ('B' names the browser).
+# jump_to_focused_agent_browser — Ctrl+Shift+B, the keyboard twin of the chip
+# globe now that the standalone browser tab is gone (agent-only reachability).
 # ---------------------------------------------------------------------------
 
 
-def test_toggle_from_terminal_lands_on_browser(controller):
-    assert controller.centralSurface == "terminal"
-    emissions = _capture(controller.centralSurfaceChanged)
-    controller.toggle_browser_terminal()
+def test_jump_to_agent_browser_jumps_when_focused_agent_owns_window(controller):
+    """With the focused agent owning a window, the chord jumps to it (and
+    switches the surface, via focus_agent_browser → focus_browser)."""
+    aid = f"{os.getpid()}_1"  # agent slot 1
+    controller._open_browser_for_mcp("https://x.com", aid)  # agent 1 owns window 1
+    controller._focused_term_agent = 1
+    controller.set_central_surface("editor")
+
+    controller.jump_to_focused_agent_browser()
+
     assert controller.centralSurface == "browser"
-    assert len(emissions) == 1
+    assert controller.focusedBrowser == 1
 
 
-def test_toggle_from_browser_returns_to_terminal(controller):
-    controller.swap_to_browser()
+def test_jump_to_agent_browser_noop_when_focused_agent_owns_nothing(controller):
+    """Agent-only reachability: with no owned window there is nowhere to jump,
+    so the chord is a silent no-op (no surface change)."""
+    controller._focused_term_agent = 1  # focused but owns no window
+    controller.set_central_surface("editor")
     emissions = _capture(controller.centralSurfaceChanged)
-    controller.toggle_browser_terminal()
-    assert controller.centralSurface == "terminal"
-    assert len(emissions) == 1
 
+    controller.jump_to_focused_agent_browser()
 
-def test_swap_to_browser_is_idempotent(controller):
-    controller.swap_to_browser()
-    emissions = _capture(controller.centralSurfaceChanged)
-    controller.swap_to_browser()
+    assert controller.centralSurface == "editor"
     assert emissions == []
-    assert controller.centralSurface == "browser"
+
+
+def test_jump_to_agent_browser_noop_when_no_agent_focused(controller):
+    """No focused agent (empty pool) → no-op, same agent-only rationale."""
+    assert controller._focused_term_agent == 0
+    controller.set_central_surface("editor")
+    controller.jump_to_focused_agent_browser()
+    assert controller.centralSurface == "editor"
+
+
+def test_jump_to_agent_browser_returns_to_terminal_when_on_browser(controller):
+    """Already on the browser surface → home to the terminal (the keyboard way
+    back out; same asymmetry as the other surface chords)."""
+    controller.set_central_surface("browser")
+    controller.jump_to_focused_agent_browser()
+    assert controller.centralSurface == "terminal"
 
 
 # ---------------------------------------------------------------------------
@@ -559,3 +579,146 @@ def test_attribution_end_after_agent_close_does_not_resurrect_or_emit(controller
     assert controller.agentBrowserCount[1] == 0  # no ownership resurrection
     assert controller.agentBrowserActive[1] is False
     assert emissions == []  # guarded emit — no spurious re-bind
+
+
+# ---------------------------------------------------------------------------
+# Agent-owned browser (notify, don't yank) — an agent opening a window lights
+# the chip globe but must NOT pull the user's surface; they jump on their own
+# terms. The user previously got yanked to the browser on every agent open.
+# ---------------------------------------------------------------------------
+
+
+def test_open_browser_for_mcp_does_not_switch_surface(controller):
+    aid = f"{os.getpid()}_1"
+    controller.set_central_surface("editor")
+    surf_emissions = _capture(controller.centralSurfaceChanged)
+
+    result = controller._open_browser_for_mcp("https://x.com", aid)
+
+    assert result["ok"] is True
+    assert controller.centralSurface == "editor"  # NOT yanked to browser
+    assert controller.focusedBrowser == 0  # focus untouched (no focus_browser)
+    assert surf_emissions == []
+    # The window still exists + is owned → the globe lights; just not focused.
+    assert list(controller.browserOrder) == [1]
+    assert controller.agentBrowserCount[0] == 1
+
+
+def test_manual_open_browser_still_focuses_and_switches(controller):
+    """The manual path (Ctrl+T → open_browser, focus default True) is unchanged
+    — only the agent path opts out of the surface switch."""
+    controller.set_central_surface("editor")
+    controller.open_browser("https://x.com")  # focus defaults True
+    assert controller.centralSurface == "browser"
+    assert controller.focusedBrowser == 1
+
+
+# ---------------------------------------------------------------------------
+# Attention badge — browser_request_attention lights the dot on the agent's
+# globe; cleared on view (focus_agent_browser), window close, or agent death.
+# ---------------------------------------------------------------------------
+
+
+def test_request_attention_lights_dot_for_owning_agent(controller):
+    aid = f"{os.getpid()}_2"  # agent slot 2 → index 1
+    controller._open_browser_for_mcp("https://x.com", aid)  # agent owns a window
+    emissions = _capture(controller.agentBrowserChanged)
+
+    result = controller._set_browser_attention_for_mcp(aid, "look here")
+
+    assert result == {"ok": True}
+    assert controller.agentBrowserAttention[1] is True
+    assert len(emissions) == 1
+    assert controller._agent_browser_attention[2] == "look here"  # message stored
+
+
+def test_request_attention_rejects_agent_without_window(controller):
+    """The dot rides the globe (only shown when the agent owns ≥1 window), so a
+    request with no window is rejected rather than stored-but-invisible."""
+    aid = f"{os.getpid()}_2"
+    result = controller._set_browser_attention_for_mcp(aid)
+    assert result == {"ok": False, "error": "no-window"}
+    assert controller.agentBrowserAttention[1] is False
+
+
+def test_request_attention_rejects_foreign_or_untagged(controller):
+    controller._open_browser_for_mcp("https://x.com", f"{os.getpid()}_2")
+    assert controller._set_browser_attention_for_mcp("") == {
+        "ok": False,
+        "error": "unknown-agent",
+    }
+    assert controller._set_browser_attention_for_mcp(f"{os.getpid() + 1}_2") == {
+        "ok": False,
+        "error": "unknown-agent",
+    }
+    assert controller.agentBrowserAttention == [False] * controller.maxAgentSlots
+
+
+def test_focus_agent_browser_clears_attention(controller):
+    aid = f"{os.getpid()}_1"
+    controller._open_browser_for_mcp("https://x.com", aid)
+    controller._set_browser_attention_for_mcp(aid, "look")
+    assert controller.agentBrowserAttention[0] is True
+
+    controller.focus_agent_browser(1)  # viewing it is what clears the dot
+    assert controller.agentBrowserAttention[0] is False
+
+
+def test_closing_last_window_clears_attention(controller):
+    """When an agent's last window closes, its attention is dropped so a fresh
+    window later doesn't re-light a stale dot."""
+    aid = f"{os.getpid()}_1"
+    controller._open_browser_for_mcp("https://x.com", aid)  # window slot 1
+    controller._set_browser_attention_for_mcp(aid, "look")
+    assert controller.agentBrowserAttention[0] is True
+
+    controller.close_browser(1)
+    assert controller.agentBrowserAttention[0] is False
+
+
+# ---------------------------------------------------------------------------
+# Leak safety — closing an agent must close the windows it SOLELY owns (free
+# the WebEngineView + avoid an unreachable orphan now the tab is gone), while
+# a window co-owned by another living agent is kept.
+# ---------------------------------------------------------------------------
+
+
+def test_close_agent_closes_its_solely_owned_window(controller):
+    aid = f"{os.getpid()}_2"
+    controller._open_browser_for_mcp("https://x.com", aid)  # agent 2 owns window 1
+    assert list(controller.browserOrder) == [1]
+    controller._term_agents[2] = {"harness": "claude", "title": ""}
+    controller._agent_order = [2]
+
+    controller.close_agent(2)
+
+    # The orphaned window is closed (RAM freed), not left dangling.
+    assert list(controller.browserOrder) == []
+    assert controller.browserSlotActive == [False] * controller.maxBrowserSlots
+    assert controller.agentBrowserCount[1] == 0
+
+
+def test_close_agent_keeps_window_co_owned_by_a_living_agent(controller):
+    """Two agents drive the same window; closing one keeps it for the other,
+    then closing the second finally frees it."""
+    aid_a = f"{os.getpid()}_2"  # index 1
+    aid_b = f"{os.getpid()}_3"  # index 2
+    controller._open_browser_for_mcp("https://x.com", aid_a)  # window 1, owned by A
+    controller._record_browser_attribution(aid_b, 1, "start")  # B co-drives window 1
+    assert controller.agentBrowserCount[1] == 1
+    assert controller.agentBrowserCount[2] == 1
+
+    # Close agent A — window 1 is still owned by living agent B, so it stays.
+    controller._term_agents[2] = {"harness": "claude", "title": ""}
+    controller._agent_order = [2]
+    controller.close_agent(2)
+    assert list(controller.browserOrder) == [1]  # window kept
+    assert controller.agentBrowserCount[1] == 0  # A's link gone
+    assert controller.agentBrowserCount[2] == 1  # B still owns it
+
+    # Close agent B — now solely owned → finally freed.
+    controller._term_agents[3] = {"harness": "claude", "title": ""}
+    controller._agent_order = [3]
+    controller.close_agent(3)
+    assert list(controller.browserOrder) == []
+    assert controller.agentBrowserCount[2] == 0
