@@ -1,12 +1,17 @@
-"""Tests for the browser MCP bridge + server lifecycle (Phase 4 Stage 2b).
+"""Tests for the browser MCP bridge + server lifecycle (Phase 4 Stage 2b/4).
 
 The bridge is the mcp-INDEPENDENT marshaling seam (it just needs Qt), so
-its GUI-thread slots are unit-tested here by calling them directly — the
+its GUI-thread slot is unit-tested here by calling it directly — the
 queued-signal delivery itself is Qt machinery. The FastMCP/uvicorn server
 is integration-verified out-of-band (a standalone harness drives a real
 MCP client against a real window); only its env-gated no-op path and
 config-file shape are pinned here, since those don't need the network
 stack.
+
+Stage 4 retired the page-driving op-path (navigate/eval/snapshot/click/fill
++ BrowserAutomation): driving is delegated to chrome-devtools-mcp over the
+embedded CDP endpoint. Our server now exposes only window management
+(browser_open / browser_list_windows), both GUI-thread reads.
 """
 
 from __future__ import annotations
@@ -14,121 +19,25 @@ from __future__ import annotations
 import concurrent.futures
 import json
 
-import pytest
-
-from symmetria_ide.browser_automation import BrowserAutomation
 from symmetria_ide.browser_mcp import SERVER_NAME, BrowserMcpBridge, BrowserMcpServer
 
 
-@pytest.fixture
-def auto():
-    return BrowserAutomation()
-
-
 # ---------------------------------------------------------------------------
-# Bridge — op marshaling + window→slot resolution + future resolution.
+# Bridge — read marshaling + future resolution.
 # ---------------------------------------------------------------------------
 
 
-def test_run_op_resolves_window_and_completes_future(auto):
-    """_run_op maps the window arg → internal slot via the resolver, kicks
-    the automation, and resolves the future when QML delivers the result."""
-    emitted = []
-    auto.automationRequested.connect(
-        lambda rid, slot, op, payload: emitted.append((rid, slot, op, payload))
-    )
-    # window 0 → focused slot 7; any other window passes through.
-    bridge = BrowserMcpBridge(auto, slot_resolver=lambda w: 7 if w == 0 else w)
-    fut: concurrent.futures.Future = concurrent.futures.Future()
-
-    bridge._run_op(0, "eval_js", json.dumps({"code": "1+1"}), fut)
-
-    assert emitted, "automation should have been asked"
-    rid, slot, op, _payload = emitted[0]
-    assert slot == 7  # window 0 resolved to focused slot 7
-    assert op == "eval_js"
-    assert not fut.done()  # awaiting QML
-
-    # Simulate QML delivering the runJavaScript result.
-    auto.on_result(rid, json.dumps({"ok": True, "value": 2}))
-    assert fut.done()
-    assert fut.result() == {"ok": True, "value": 2}
-
-
-def test_run_op_no_window_resolves_error_immediately(auto):
-    bridge = BrowserMcpBridge(auto, slot_resolver=lambda w: 0)  # never a window
-    fut: concurrent.futures.Future = concurrent.futures.Future()
-    bridge._run_op(3, "eval_js", "{}", fut)
-    assert fut.result() == {"ok": False, "error": "no-window"}
-
-
-# ---------------------------------------------------------------------------
-# Bridge attribution (Stage 3) — which agent is driving which window.
-# ---------------------------------------------------------------------------
-
-
-def test_run_op_fires_attribution_start_then_end(auto):
-    """An attributed op fires on_attribution("start") before the request and
-    ("end") when the result lands — balanced because on_result fires once."""
-    calls = []
-    emitted = []
-    auto.automationRequested.connect(lambda rid, *a: emitted.append(rid))
-    bridge = BrowserMcpBridge(
-        auto,
-        slot_resolver=lambda w: 4,
-        on_attribution=lambda aid, slot, phase: calls.append((aid, slot, phase)),
-    )
-    fut: concurrent.futures.Future = concurrent.futures.Future()
-
-    bridge._run_op(0, "eval_js", "{}", fut, "1234_2")
-    assert calls == [("1234_2", 4, "start")]  # start before the result
-    assert not fut.done()
-
-    auto.on_result(emitted[0], json.dumps({"ok": True}))
-    assert fut.result() == {"ok": True}
-    assert calls == [("1234_2", 4, "start"), ("1234_2", 4, "end")]  # balanced
-
-
-def test_run_op_skips_attribution_for_empty_agent_id(auto):
-    """An untagged caller (no X-Symmetria-Agent header → "") drives the window
-    but records no attribution — neither start nor end."""
-    calls = []
-    emitted = []
-    auto.automationRequested.connect(lambda rid, *a: emitted.append(rid))
-    bridge = BrowserMcpBridge(
-        auto, slot_resolver=lambda w: 4, on_attribution=lambda *a: calls.append(a)
-    )
-    fut: concurrent.futures.Future = concurrent.futures.Future()
-
-    bridge._run_op(0, "eval_js", "{}", fut, "")
-    auto.on_result(emitted[0], json.dumps({"ok": True}))
-    assert calls == []
-
-
-def test_run_op_no_window_skips_attribution(auto):
-    """A no-window resolution never reaches a slot, so it must not attribute
-    (start/end would be unbalanced — no result callback runs)."""
-    calls = []
-    bridge = BrowserMcpBridge(
-        auto, slot_resolver=lambda w: 0, on_attribution=lambda *a: calls.append(a)
-    )
-    fut: concurrent.futures.Future = concurrent.futures.Future()
-    bridge._run_op(2, "eval_js", "{}", fut, "1234_2")
-    assert fut.result() == {"ok": False, "error": "no-window"}
-    assert calls == []
-
-
-def test_run_read_resolves_with_fn_result(auto):
-    bridge = BrowserMcpBridge(auto, slot_resolver=lambda w: w)
+def test_run_read_resolves_with_fn_result():
+    bridge = BrowserMcpBridge()
     fut: concurrent.futures.Future = concurrent.futures.Future()
     bridge._run_read(lambda: {"ok": True, "windows": [{"window": 1}]}, fut)
     assert fut.result() == {"ok": True, "windows": [{"window": 1}]}
 
 
-def test_run_read_swallows_exception(auto):
+def test_run_read_swallows_exception():
     """A read fn that raises must still resolve the future (never hang the
     awaiting tool) with an error dict."""
-    bridge = BrowserMcpBridge(auto, slot_resolver=lambda w: w)
+    bridge = BrowserMcpBridge()
     fut: concurrent.futures.Future = concurrent.futures.Future()
 
     def boom():
@@ -145,9 +54,9 @@ def test_run_read_swallows_exception(auto):
 # ---------------------------------------------------------------------------
 
 
-def _server(auto):
+def _server():
     return BrowserMcpServer(
-        BrowserMcpBridge(auto, slot_resolver=lambda w: w),
+        BrowserMcpBridge(),
         windows_reader=lambda: {"ok": True, "windows": []},
         # opener takes (url, agent_id) since Stage 3 — the controller records
         # window ownership for the calling agent.
@@ -155,21 +64,21 @@ def _server(auto):
     )
 
 
-def test_server_disabled_via_env_is_noop(auto, monkeypatch):
+def test_server_disabled_via_env_is_noop(monkeypatch):
     monkeypatch.setenv("SYMMETRIA_IDE_BROWSER_MCP", "0")
-    server = _server(auto)
+    server = _server()
     server.start()
     assert server.port == 0
     assert server.url == ""
     assert server.config_path == ""
 
 
-def test_config_file_shape(auto, tmp_path, monkeypatch):
+def test_config_file_shape(tmp_path, monkeypatch):
     """The written MCP config is claude-shaped (mcpServers/<name>/type:http)
     so `--mcp-config` loads it. Drive _write_config directly with a known
     port to avoid binding a socket."""
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
-    server = _server(auto)
+    server = _server()
     server._port = 12345  # pretend the server bound this port
     server._write_config()
     assert server.config_path
@@ -200,14 +109,14 @@ def test_reap_orphan_configs(tmp_path, monkeypatch):
     assert junk.exists()
 
 
-def test_agent_config_path_writes_identity_header(auto, tmp_path, monkeypatch):
+def test_agent_config_path_writes_identity_header(tmp_path, monkeypatch):
     """A per-agent config points at the server URL AND stamps the
     X-Symmetria-Agent header — the basis for attributing tool calls back to
     the spawning agent. Filename is keyed by the agent id (<pid>_<slot>)."""
     from symmetria_ide.browser_mcp import _AGENT_HEADER
 
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
-    server = _server(auto)
+    server = _server()
     server._port = 23456  # pretend bound
     path = server.agent_config_path("1234_2")
     assert path.endswith("1234_2.json")
@@ -219,23 +128,59 @@ def test_agent_config_path_writes_identity_header(auto, tmp_path, monkeypatch):
     assert entry["headers"][_AGENT_HEADER] == "1234_2"
 
 
-def test_agent_config_path_empty_without_port_or_id(auto, tmp_path, monkeypatch):
+def test_agent_config_path_injects_chrome_devtools_when_cdp_enabled(
+    tmp_path, monkeypatch
+):
+    """When CDP is enabled (QTWEBENGINE_REMOTE_DEBUGGING set in run()), the
+    per-agent config ALSO carries an off-the-shelf chrome-devtools-mcp stdio
+    entry pointed at the embedded view's CDP port — the agent's full
+    browser-automation surface alongside our two window tools."""
+    from symmetria_ide.browser_mcp import _CHROME_DEVTOOLS_MCP_VERSION
+
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
+    server = _server()
+    server._port = 23456
+    with open(server.agent_config_path("1234_2")) as handle:
+        config = json.load(handle)
+    cdt = config["mcpServers"]["chrome-devtools"]
+    assert cdt["command"] == "npx"
+    assert f"chrome-devtools-mcp@{_CHROME_DEVTOOLS_MCP_VERSION}" in cdt["args"]
+    assert "http://127.0.0.1:9911" in cdt["args"]
+    # Our own server entry is still present (window allocation + attribution).
+    assert SERVER_NAME in config["mcpServers"]
+
+
+def test_agent_config_path_omits_chrome_devtools_without_cdp(tmp_path, monkeypatch):
+    """No CDP port (remote debugging off) → no chrome-devtools entry; the
+    agent still gets our window tools."""
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.delenv("QTWEBENGINE_REMOTE_DEBUGGING", raising=False)
+    server = _server()
+    server._port = 23456
+    with open(server.agent_config_path("1234_2")) as handle:
+        config = json.load(handle)
+    assert "chrome-devtools" not in config["mcpServers"]
+    assert SERVER_NAME in config["mcpServers"]
+
+
+def test_agent_config_path_empty_without_port_or_id(tmp_path, monkeypatch):
     """No port (server down) or empty id → "" — spawn_argv treats that as no
     --mcp-config, so the agent simply gets no browser tools."""
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
-    server = _server(auto)
+    server = _server()
     assert server.agent_config_path("1234_2") == ""  # _port still 0
     server._port = 23456
     assert server.agent_config_path("") == ""  # no agent id
 
 
-def test_stop_unlinks_per_agent_configs(auto, tmp_path, monkeypatch):
+def test_stop_unlinks_per_agent_configs(tmp_path, monkeypatch):
     """stop() removes every per-agent config it wrote (graceful cleanup; a
     hard-kill's orphans are swept by reap_orphan_configs instead)."""
     import os
 
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
-    server = _server(auto)
+    server = _server()
     server._port = 23456
     p1 = server.agent_config_path("1234_2")
     p2 = server.agent_config_path("1234_3")
@@ -260,17 +205,3 @@ def test_reap_orphan_configs_handles_per_agent_filenames(tmp_path, monkeypatch):
 
     assert not dead.exists()
     assert live.exists()
-
-
-def test_perf_js_payload_shape():
-    """The browser_perf payload reads the reliable Performance APIs and keeps
-    the process-relative-paint guard (validated live against a real page)."""
-    from symmetria_ide.browser_mcp import _PERF_JS
-
-    assert "getEntriesByType('navigation')" in _PERF_JS
-    assert "getEntriesByType('resource')" in _PERF_JS
-    for key in ("timing", "webVitals", "transferKB", "resourceCount", "jsHeapMB"):
-        assert key in _PERF_JS
-    # The plaus() guard drops QtWebEngine's leaked process-relative paint
-    # timestamp — must survive refactors (see the 512660ms artifact).
-    assert "plaus" in _PERF_JS

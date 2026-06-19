@@ -52,7 +52,6 @@ from PySide6.QtWebEngineQuick import QtWebEngineQuick
 
 from . import agent_harness
 from .agent_bridge import AgentBridgeClient, emit_gc_safe
-from .browser_automation import BrowserAutomation
 from .browser_mcp import BrowserMcpBridge, BrowserMcpServer
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .trace import trace
@@ -576,19 +575,14 @@ class AppController(QObject):
         self._agent_browser_active: dict[int, int] = {}
         # Phase 4 Stage 2a: drives the embedded WebEngineViews via
         # QML-delivered runJavaScript (the views aren't Python-drivable).
-        # Exposed to QML as `controller.browserAutomation`; the Stage 2b MCP
-        # server wraps its `request()` API. See browser_automation.py.
-        self._browser_automation = BrowserAutomation(self)
-        # Stage 2b: the IDE-hosted browser MCP server. The bridge marshals
-        # agents' MCP tool calls (uvicorn thread) ONTO the GUI thread; the
-        # server runs FastMCP+uvicorn and is started in start() (unless
-        # SYMMETRIA_IDE_BROWSER_MCP=0). See browser_mcp.py.
-        self._browser_mcp_bridge = BrowserMcpBridge(
-            self._browser_automation,
-            self._resolve_browser_window,
-            self._record_browser_attribution,
-            self,
-        )
+        # The IDE-hosted browser MCP server. The bridge marshals agents' MCP
+        # tool calls (uvicorn thread) ONTO the GUI thread; the server runs
+        # FastMCP+uvicorn and is started in start() (unless
+        # SYMMETRIA_IDE_BROWSER_MCP=0). It exposes WINDOW MANAGEMENT
+        # (browser_open / browser_list_windows); page driving is delegated to
+        # chrome-devtools-mcp (injected per-agent, pointed at the embedded CDP
+        # endpoint). See browser_mcp.py.
+        self._browser_mcp_bridge = BrowserMcpBridge(self)
         self._browser_mcp_server = BrowserMcpServer(
             self._browser_mcp_bridge,
             self._read_browser_windows,
@@ -2290,9 +2284,17 @@ class AppController(QObject):
     ) -> None:
         """Record that an agent is driving a browser window (GUI thread).
 
-        Called by BrowserMcpBridge around every attributed browser op. `phase`
-        "start" claims OWNERSHIP of the window for the agent and marks it
-        actively driving (+1 in-flight → the chip pulse); "end" clears that
+        DORMANT since the chrome-devtools-mcp migration (Stage 4): page driving
+        now flows agent → chrome-devtools-mcp → embedded CDP endpoint, bypassing
+        our bridge, so nothing calls this for the in-flight PULSE anymore (the
+        ownership glyph + click-jump still work — browser_open claims ownership
+        directly via _claim_browser_window in _open_browser_for_mcp). This is
+        the hook the deferred pulse-restoration follow-up re-activates: an
+        IDE-owned CDP monitor maps targetId→slot→agent and calls this with
+        "start"/"end" around observed CDP activity. See docs/phases.md Phase 4.
+
+        `phase` "start" claims OWNERSHIP of the window for the agent and marks
+        it actively driving (+1 in-flight → the chip pulse); "end" clears that
         activity (-1). Untagged / foreign ids are dropped by
         _agent_slot_from_id, so external clients never touch the chips.
 
@@ -2478,13 +2480,6 @@ class AppController(QObject):
     @Property(int, constant=True)
     def maxBrowserSlots(self) -> int:
         return self._MAX_INSTANCES
-
-    @Property(QObject, constant=True)
-    def browserAutomation(self) -> QObject:
-        """The BrowserAutomation bridge (Stage 2a) — QML binds its delivery
-        Connections to `controller.browserAutomation.onAutomationRequested`
-        and answers via `on_result`."""
-        return self._browser_automation
 
     @Property("QVariantList", notify=browserTabsChanged)
     def browserOrder(self) -> list:
@@ -2672,20 +2667,6 @@ class AppController(QObject):
                 return slot
         return None
 
-    def _resolve_browser_window(self, window: int) -> int:
-        """Map an MCP `window` arg → internal pool slot. GUI-thread only.
-
-        `window`: 0 = the focused window; N = the 1-based DISPLAY position
-        (what `browser_list_windows` reports). Returns the internal slot, or
-        0 when there's no such window (the bridge answers `no-window`). The
-        display/internal split mirrors the agent pool (chip number ≠ slot).
-        """
-        if window <= 0:
-            return self._focused_browser
-        if 1 <= window <= len(self._browser_order):
-            return self._browser_order[window - 1]
-        return 0
-
     def _read_browser_windows(self) -> dict:
         """The `browser_list_windows` MCP tool body. GUI-thread only.
 
@@ -2728,7 +2709,19 @@ class AppController(QObject):
             if agent_slot is not None:
                 self._claim_browser_window(agent_slot, new_slot)
                 self.agentBrowserChanged.emit()
-            return {"ok": True, "window": len(self._browser_order)}
+            tab = self._browser_tabs.get(new_slot, {})
+            # Return url/title so the agent can correlate THIS window to a
+            # chrome-devtools-mcp page (select_page). These are the values
+            # known at open time — the COMMITTED url/title settle after the
+            # view navigates (mirrored live into browser_list_windows), so an
+            # agent should read browser_list_windows for the settled url before
+            # select_page. See the browser_open tool docstring.
+            return {
+                "ok": True,
+                "window": len(self._browser_order),
+                "url": tab.get("url", ""),
+                "title": tab.get("title", ""),
+            }
         return {"ok": False, "error": "pool-full"}
 
     @Slot()
@@ -4132,6 +4125,38 @@ def run() -> int:
     _configure_freetype_interpreter()
     # Must run before the engine spawns the terminal panes — see _export_host_window_pid().
     _export_host_window_pid()
+
+    # Enable Chrome DevTools Protocol on the embedded QtWebEngine. The env var
+    # is consumed ONCE inside initialize() below (Chromium binds the port at
+    # startup), so it must be set here. We reserve a free ephemeral port via a
+    # bind-probe, then CLOSE it and hand Chromium only the number — unlike
+    # browser_mcp.py's server (which keeps its probe socket OPEN and gives it
+    # to uvicorn via serve(sockets=[…])), Chromium binds the port itself and
+    # cannot consume a Python socket, so the close→Chromium-binds gap is an
+    # unavoidable but narrow TOCTOU (single-threaded, before the Qt event loop
+    # exists; acceptable for a single-user IDE). The env var is the SINGLE
+    # SOURCE OF TRUTH for the port — read it back from os.environ where needed
+    # (browser_mcp.agent_config_path) rather than threading it through. This is
+    # what lets spawned agents drive the contained browser via chrome-devtools-mcp
+    # (--browserUrl). Skipped when the browser MCP is disabled or the var is
+    # already set (explicit override / spike). See CLAUDE.md "The browser panes".
+    if os.environ.get("SYMMETRIA_IDE_BROWSER_MCP") != "0" and not os.environ.get(
+        "QTWEBENGINE_REMOTE_DEBUGGING"
+    ):
+        _cdp_probe = socket.socket()
+        try:
+            _cdp_probe.bind(("127.0.0.1", 0))
+            os.environ["QTWEBENGINE_REMOTE_DEBUGGING"] = str(
+                _cdp_probe.getsockname()[1]
+            )
+            log.info(
+                "CDP remote debugging on 127.0.0.1:%s",
+                os.environ["QTWEBENGINE_REMOTE_DEBUGGING"],
+            )
+        except OSError:
+            log.warning("could not reserve a CDP port; agent browser tools disabled")
+        finally:
+            _cdp_probe.close()
 
     # QtWebEngine MUST initialize before QGuiApplication: it installs the
     # shared OpenGL context (AA_ShareOpenGLContexts) the Chromium compositor

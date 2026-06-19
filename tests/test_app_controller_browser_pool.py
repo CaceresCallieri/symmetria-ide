@@ -316,24 +316,6 @@ def test_title_and_url_callbacks_ignore_empty_slots(controller):
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_browser_window_maps_display_position_to_slot(controller):
-    controller.open_browser()  # slot 1
-    controller.open_browser()  # slot 2 (focused)
-    controller.close_browser(1)  # free slot 1; order now [2]
-    controller.open_browser()  # reuses internal slot 1; order [2, 1]
-    # window 0 = focused (internal slot 1, the newest).
-    assert controller._resolve_browser_window(0) == controller.focusedBrowser
-    # display positions map through _browser_order, not internal slot numbers.
-    assert controller._resolve_browser_window(1) == 2  # 1st displayed → slot 2
-    assert controller._resolve_browser_window(2) == 1  # 2nd displayed → slot 1
-    assert controller._resolve_browser_window(3) == 0  # out of range → no window
-
-
-def test_resolve_browser_window_empty_pool(controller):
-    assert controller._resolve_browser_window(0) == 0  # focused == 0
-    assert controller._resolve_browser_window(1) == 0
-
-
 def test_read_browser_windows_reports_display_positions(controller):
     controller.open_browser("https://a.com")  # slot 1, display 1
     controller.on_browser_title(1, "A")
@@ -346,13 +328,22 @@ def test_read_browser_windows_reports_display_positions(controller):
 
 
 def test_open_browser_for_mcp_returns_display_number(controller):
+    # Returns the display number plus url/title — the correlator an agent hands
+    # to chrome-devtools-mcp's select_page (the committed url settles later).
     assert controller._open_browser_for_mcp("https://x.com") == {
         "ok": True,
         "window": 1,
+        "url": "https://x.com",
+        "title": "",
     }
     assert controller.browserUrls[0] == "https://x.com"
     # Second open appends as display position 2.
-    assert controller._open_browser_for_mcp("about:blank") == {"ok": True, "window": 2}
+    assert controller._open_browser_for_mcp("about:blank") == {
+        "ok": True,
+        "window": 2,
+        "url": "about:blank",
+        "title": "",
+    }
 
 
 def test_open_browser_for_mcp_pool_full(controller):
@@ -446,7 +437,7 @@ def test_close_browser_prunes_agent_ownership(controller):
 def test_open_browser_for_mcp_attributes_window_to_caller(controller):
     aid = f"{os.getpid()}_3"  # agent slot 3 → index 2
     result = controller._open_browser_for_mcp("https://x.com", aid)
-    assert result == {"ok": True, "window": 1}
+    assert result == {"ok": True, "window": 1, "url": "https://x.com", "title": ""}
     assert controller.agentBrowserCount[2] == 1  # caller owns the opened window
     assert controller.agentBrowserActive[2] is False  # open's start/end nets to idle
 
