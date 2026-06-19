@@ -86,8 +86,49 @@ jsHeapMB:(performance.memory?Math.round(performance.memory.usedJSHeapSize/104857
 };
 })()"""
 
-# Per-launch MCP config files are named <prefix><pid>.json in the temp dir.
+# Per-launch MCP config files are named <prefix><pid>.json (the shared
+# discovery config) or <prefix><pid>_<slot>.json (a per-agent config) in the
+# temp dir. Both encode the writing IDE's pid as the LEADING token so
+# reap_orphan_configs can clean either after a hard-kill.
 _CONFIG_PREFIX = "symmetria-browser-mcp-"
+
+# Header an agent's per-agent config stamps onto every browser tool request so
+# the tool body can attribute the call to the spawning agent. The value is the
+# agent's `<ide_pid>_<slot>` id — the SAME key the bridge/hooks use, so the IDE
+# maps it straight onto the agent's chip slot. Read case-insensitively
+# server-side (Starlette Headers), so the exact casing here is cosmetic.
+_AGENT_HEADER = "X-Symmetria-Agent"
+
+
+def _calling_agent_id(server) -> str:
+    """The `X-Symmetria-Agent` id of the in-flight MCP request, or "".
+
+    Each spawned agent loads a per-agent config (`agent_config_path`) that
+    stamps this header; the tool body reads it back to know which agent is
+    driving the browser. Defensive: returns "" when there is no HTTP request
+    context (non-HTTP transport, or an untagged caller — the bench harness, or
+    an opencode agent that has no per-launch MCP flag yet).
+    """
+    try:
+        request = server.get_context().request_context.request
+    except (ValueError, AttributeError):
+        # ValueError: no active request context; AttributeError: a transport
+        # whose request_context carries no `.request` (non-HTTP).
+        return ""
+    if request is None:
+        return ""
+    try:
+        # Header is primary (an unknown header can't break the MCP connection,
+        # whereas a query-string URL conceivably could, so the config writes
+        # the header form). The query-param fallback makes the server accept a
+        # `?agent=<id>` URL too, so switching config forms is a one-line change
+        # if a client turns out not to forward the header.
+        agent_id = request.headers.get(_AGENT_HEADER, "")
+        if not agent_id:
+            agent_id = request.query_params.get("agent", "")
+        return agent_id or ""
+    except (AttributeError, TypeError):
+        return ""
 
 
 def reap_orphan_configs() -> None:
@@ -105,9 +146,12 @@ def reap_orphan_configs() -> None:
     """
     pattern = os.path.join(tempfile.gettempdir(), f"{_CONFIG_PREFIX}*.json")
     for path in glob.glob(pattern):
+        stem = os.path.basename(path)[len(_CONFIG_PREFIX) : -len(".json")]
         try:
-            pid = int(os.path.basename(path)[len(_CONFIG_PREFIX) : -len(".json")])
-        except ValueError:
+            # Leading token before any "_" is the pid: "<pid>" (shared config)
+            # or "<pid>_<slot>" (per-agent config) both yield the same pid.
+            pid = int(stem.split("_")[0])
+        except (ValueError, IndexError):
             continue  # not a pid-named config — leave it alone
         if pid == os.getpid() or os.path.exists(f"/proc/{pid}"):
             continue  # ours, or the writing IDE is still alive
@@ -127,8 +171,8 @@ class BrowserMcpBridge(QObject):
     BrowserAutomation callback; reads resolve synchronously.
     """
 
-    # slot, op, payload_json, future(object) — queued to the GUI thread.
-    _opRequested = Signal(int, str, str, object)
+    # slot, op, payload_json, future(object), agent_id — queued to the GUI thread.
+    _opRequested = Signal(int, str, str, object, str)
     # fn(object), future(object) — queued to the GUI thread.
     _readRequested = Signal(object, object)
 
@@ -136,6 +180,7 @@ class BrowserMcpBridge(QObject):
         self,
         automation: BrowserAutomation,
         slot_resolver: Callable[[int], int],
+        on_attribution: Callable[[str, int, str], None] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -144,6 +189,11 @@ class BrowserMcpBridge(QObject):
         # slot (or 0 if no such window). Run on the GUI thread inside _run_op,
         # so it reads controller pool state safely.
         self._slot_resolver = slot_resolver
+        # (agent_id, browser_slot, phase) where phase ∈ {"start","end"} —
+        # called on the GUI thread inside _run_op so the controller records
+        # which agent is driving which window (ownership + the in-flight pulse).
+        # None in tests that only exercise the marshaling seam.
+        self._on_attribution = on_attribution
         # Queued: emitted from the uvicorn thread, delivered on the GUI thread
         # where the WebEngineViews + controller state live (project-standards
         # §4 P2 — cross-thread signal, explicit QueuedConnection).
@@ -151,11 +201,16 @@ class BrowserMcpBridge(QObject):
         self._readRequested.connect(self._run_read, Qt.ConnectionType.QueuedConnection)
 
     # -- async entry points (called from MCP tool bodies) ----------------
-    async def op(self, window: int, op: str, payload: dict) -> dict:
+    async def op(self, window: int, op: str, payload: dict, agent_id: str = "") -> dict:
         """Run an automation op on `window` (0 = focused, N = 1-based display
-        position) and await the result."""
+        position) and await the result.
+
+        `agent_id` (the calling agent's `<ide_pid>_<slot>` id, "" when
+        untagged) drives the attribution callback so the IDE can show which
+        agent is using which window.
+        """
         future: concurrent.futures.Future = concurrent.futures.Future()
-        self._opRequested.emit(window, op, json.dumps(payload), future)
+        self._opRequested.emit(window, op, json.dumps(payload), future, agent_id)
         return await asyncio.wrap_future(future)
 
     async def read(self, fn: Callable[[], dict]) -> dict:
@@ -165,8 +220,10 @@ class BrowserMcpBridge(QObject):
         return await asyncio.wrap_future(future)
 
     # -- GUI-thread slots ------------------------------------------------
-    @Slot(int, str, str, object)
-    def _run_op(self, window: int, op: str, payload_json: str, future) -> None:
+    @Slot(int, str, str, object, str)
+    def _run_op(
+        self, window: int, op: str, payload_json: str, future, agent_id: str = ""
+    ) -> None:
         slot = self._slot_resolver(window)
         if slot <= 0:
             if not future.done():
@@ -177,9 +234,18 @@ class BrowserMcpBridge(QObject):
         except (json.JSONDecodeError, TypeError):
             payload = {}
 
+        # Attribution: mark the agent as actively driving this window for the
+        # op's lifetime. "start"/"end" balance because BrowserAutomation pops
+        # its pending callback, so `on_result` fires exactly once per request
+        # (success, timeout, or synchronous rejection like a bad ref).
+        if self._on_attribution and agent_id:
+            self._on_attribution(agent_id, slot, "start")
+
         def on_result(result: dict) -> None:
             if not future.done():
                 future.set_result(result)
+            if self._on_attribution and agent_id:
+                self._on_attribution(agent_id, slot, "end")
 
         self._automation.request(slot, op, payload, on_result)
 
@@ -208,16 +274,22 @@ class BrowserMcpServer:
         self,
         bridge: BrowserMcpBridge,
         windows_reader: Callable[[], dict],
-        window_opener: Callable[[str], dict],
+        window_opener: Callable[[str, str], dict],
     ) -> None:
         self._bridge = bridge
         self._windows_reader = windows_reader
+        # (url, agent_id) -> dict: the opener records window ownership for the
+        # calling agent, so its signature carries the agent id (vs the bare
+        # url-only Stage-2 form).
         self._window_opener = window_opener
         self._server = None  # uvicorn.Server
         self._thread: threading.Thread | None = None
         self._sock: socket.socket | None = None  # held bound until uvicorn owns it
         self._port = 0
         self._config_path = ""
+        # Per-agent config files written by agent_config_path(), unlinked on
+        # stop() (orphans from a hard-kill are swept by reap_orphan_configs).
+        self._agent_config_paths: set[str] = set()
 
     @property
     def port(self) -> int:
@@ -276,20 +348,25 @@ class BrowserMcpServer:
             """Open a NEW browser window at `url` (the autonomous entry point —
             the other tools only drive existing windows). Returns the new
             window's number for use as the `window` arg of the other tools."""
-            return await bridge.read(lambda: window_opener(url))
+            agent_id = _calling_agent_id(server)
+            return await bridge.read(lambda: window_opener(url, agent_id))
 
         @server.tool()
         async def browser_navigate(url: str, window: int = 0) -> dict:
             """Navigate an EXISTING browser window to a URL (bare hosts/
             localhost are resolved; use browser_open for a new window).
             `window`: 1-based window number, 0 = the focused one."""
-            return await bridge.op(window, "navigate", {"url": url})
+            return await bridge.op(
+                window, "navigate", {"url": url}, _calling_agent_id(server)
+            )
 
         @server.tool()
         async def browser_eval_js(code: str, window: int = 0) -> dict:
             """Evaluate JavaScript in a browser window and return its value.
             The general-purpose primitive — read or manipulate the page."""
-            return await bridge.op(window, "eval_js", {"code": code})
+            return await bridge.op(
+                window, "eval_js", {"code": code}, _calling_agent_id(server)
+            )
 
         @server.tool()
         async def browser_perf(window: int = 0) -> dict:
@@ -300,7 +377,9 @@ class BrowserMcpServer:
             timing like Chrome). Reads the Performance API via JS; no external
             DevTools/profiler needed for the common 'how does this page perform'
             question."""
-            res = await bridge.op(window, "eval_js", {"code": _PERF_JS})
+            res = await bridge.op(
+                window, "eval_js", {"code": _PERF_JS}, _calling_agent_id(server)
+            )
             if isinstance(res, dict) and res.get("ok"):
                 value = res.get("value")
                 if value is None:
@@ -314,17 +393,21 @@ class BrowserMcpServer:
         async def browser_snapshot(window: int = 0) -> dict:
             """Snapshot the page's interactive elements (links, buttons, form
             fields), each tagged with a `ref` to pass to click/fill."""
-            return await bridge.op(window, "snapshot", {})
+            return await bridge.op(window, "snapshot", {}, _calling_agent_id(server))
 
         @server.tool()
         async def browser_click(ref: str, window: int = 0) -> dict:
             """Click an element by its snapshot `ref`."""
-            return await bridge.op(window, "click", {"ref": ref})
+            return await bridge.op(
+                window, "click", {"ref": ref}, _calling_agent_id(server)
+            )
 
         @server.tool()
         async def browser_fill(ref: str, text: str, window: int = 0) -> dict:
             """Fill a form field by its snapshot `ref` with `text`."""
-            return await bridge.op(window, "fill", {"ref": ref, "text": text})
+            return await bridge.op(
+                window, "fill", {"ref": ref, "text": text}, _calling_agent_id(server)
+            )
 
         @server.tool()
         async def browser_list_windows() -> dict:
@@ -366,11 +449,52 @@ class BrowserMcpServer:
             json.dump(config, handle)
         self._config_path = path
 
+    def agent_config_path(self, agent_id: str) -> str:
+        """Write (idempotently) a per-agent MCP config and return its path.
+
+        The config points at this server's URL but adds a `headers` entry
+        stamping the agent's `<ide_pid>_<slot>` id, so the browser tool bodies
+        can attribute each call back to the spawning agent (the basis for the
+        agent-bubble browser indicator). `agent_spawn_argv` passes the returned
+        path via `--mcp-config`.
+
+        Returns "" when the server isn't running or `agent_id` is empty — both
+        mean "no per-agent config", which `spawn_argv` treats as no
+        `--mcp-config` flag (the agent simply gets no browser tools).
+        """
+        if not self._port or not agent_id:
+            return ""
+        config = {
+            "mcpServers": {
+                SERVER_NAME: {
+                    "type": "http",
+                    "url": self.url,
+                    "headers": {_AGENT_HEADER: agent_id},
+                },
+            }
+        }
+        # agent_id is already "<pid>_<slot>", so the file is
+        # <prefix><pid>_<slot>.json — leading-pid-parseable by the reaper.
+        path = os.path.join(tempfile.gettempdir(), f"{_CONFIG_PREFIX}{agent_id}.json")
+        try:
+            with open(path, "w") as handle:
+                json.dump(config, handle)
+        except OSError:
+            log.exception(
+                "failed to write per-agent browser MCP config for %s", agent_id
+            )
+            return ""
+        self._agent_config_paths.add(path)
+        return path
+
     def stop(self) -> None:
         if self._server is not None:
             self._server.should_exit = True
-        if self._config_path:
+        paths = [self._config_path] if self._config_path else []
+        paths.extend(self._agent_config_paths)
+        for path in paths:
             try:
-                os.unlink(self._config_path)
+                os.unlink(path)
             except OSError:
                 pass
+        self._agent_config_paths.clear()

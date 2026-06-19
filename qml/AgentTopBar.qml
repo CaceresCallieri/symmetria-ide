@@ -220,6 +220,13 @@ Rectangle {
                         id: chipContent
                         anchors.centerIn: parent
                         spacing: Theme.spacing.sm
+                        // Raised above the chip's full-fill focus MouseArea
+                        // (declared later, default z) so the browser glyph's
+                        // own MouseArea wins its clicks. The other children
+                        // (sparkle, number, title) are plain non-interactive
+                        // items, so clicks on them still fall through to the
+                        // focus MouseArea below — focus-to-select keeps working.
+                        z: 1
 
                         // Shared sparkle (Symmetria.Agents.UI) — dormant
                         // dot when idle, starburst spin while the agent
@@ -282,6 +289,67 @@ Rectangle {
                             font.weight: Theme.font.weight.normal
                             renderType: Text.NativeRendering
                             elide: Text.ElideRight
+                        }
+
+                        // Browser-link indicator — shown when this agent owns
+                        // ≥1 OPEN browser window (it opened or drove one via the
+                        // browser_* MCP tools). Clicking jumps to that window
+                        // (newest-driven). The glyph pulses while a browser op
+                        // is in flight, steady-dim when idle-owned. Rendered in
+                        // editorFontFamily (a Nerd Font) because the chip's UI
+                        // font may lack icon glyphs. `agentBrowserCount`/`Active`
+                        // are PySide QVariantLists — index then guard, per the
+                        // qml_qvariantlist_array_check memo (no Array.isArray).
+                        Item {
+                            id: browserIndicator
+                            anchors.verticalCenter: parent.verticalCenter
+                            readonly property bool owns:
+                                (controller.agentBrowserCount[chip.slot - 1] || 0) > 0
+                            readonly property bool active:
+                                !!(controller.agentBrowserActive[chip.slot - 1])
+                            visible: browserIndicator.owns
+                            width: browserIndicator.visible ? browserGlyph.implicitWidth : 0
+                            height: browserGlyph.implicitHeight
+
+                            Text {
+                                id: browserGlyph
+                                anchors.centerIn: parent
+                                text: ""  // nf-fa-globe — universal browser/web mark
+                                font.family: editorFontFamily
+                                font.pixelSize: Theme.font.size.sm
+                                color: browserIndicator.active
+                                    ? Theme.color.text.strong
+                                    : Theme.color.text.dim
+                                renderType: Text.NativeRendering
+
+                                // Attention pulse only while actively driving;
+                                // `alwaysRunToEnd` lets the loop finish on its
+                                // second leg (opacity → 1.0) when activity ends,
+                                // so the glyph never freezes mid-fade. Durations
+                                // from Theme.anim (no hand-rolled ms) per the
+                                // popup-animation convention.
+                                SequentialAnimation {
+                                    running: browserIndicator.active
+                                    loops: Animation.Infinite
+                                    alwaysRunToEnd: true
+                                    NumberAnimation {
+                                        target: browserGlyph; property: "opacity"
+                                        to: 0.4; duration: Theme.anim.duration
+                                        easing.type: Easing.InOutQuad
+                                    }
+                                    NumberAnimation {
+                                        target: browserGlyph; property: "opacity"
+                                        to: 1.0; duration: Theme.anim.duration
+                                        easing.type: Easing.InOutQuad
+                                    }
+                                }
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: controller.focus_agent_browser(chip.slot)
+                            }
                         }
                     }
 

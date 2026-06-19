@@ -16,6 +16,8 @@ verification section.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from symmetria_ide.app import AppController
@@ -359,3 +361,110 @@ def test_open_browser_for_mcp_pool_full(controller):
     result = controller._open_browser_for_mcp("about:blank")
     assert result["ok"] is False
     assert result["error"] == "pool-full"
+
+
+# ---------------------------------------------------------------------------
+# Agent ↔ browser attribution (Stage 3) — the chip browser glyph's data.
+# `<our_pid>_<slot>` ids map to a chip slot; the count/active lists are
+# indexed slot-1 (agent slot 2 → index 1), mirroring agentTitles.
+# ---------------------------------------------------------------------------
+
+
+def test_attribution_records_ownership_and_pulse(controller):
+    aid = f"{os.getpid()}_2"  # agent slot 2 → index 1
+    controller.open_browser()  # browser slot 1
+    emissions = _capture(controller.agentBrowserChanged)
+
+    controller._record_browser_attribution(aid, 1, "start")
+    assert controller.agentBrowserCount[1] == 1
+    assert controller.agentBrowserActive[1] is True  # in-flight → pulse
+
+    controller._record_browser_attribution(aid, 1, "end")
+    assert controller.agentBrowserActive[1] is False  # op done → no pulse
+    assert controller.agentBrowserCount[1] == 1  # ownership persists
+    assert len(emissions) == 2
+
+
+def test_attribution_ignores_foreign_and_malformed_ids(controller):
+    controller.open_browser()
+    controller._record_browser_attribution("", 1, "start")  # untagged
+    controller._record_browser_attribution(
+        f"{os.getpid() + 1}_2", 1, "start"
+    )  # foreign pid
+    controller._record_browser_attribution("garbage", 1, "start")  # malformed
+    assert controller.agentBrowserCount == [0] * controller.maxAgentSlots
+    assert controller.agentBrowserActive == [False] * controller.maxAgentSlots
+
+
+def test_focus_agent_browser_jumps_to_newest_owned_window(controller):
+    aid = f"{os.getpid()}_1"  # agent slot 1
+    controller.open_browser()  # browser slot 1
+    controller.open_browser()  # browser slot 2
+    controller._record_browser_attribution(aid, 1, "start")
+    controller._record_browser_attribution(aid, 2, "start")  # newest-driven = 2
+    controller.set_central_surface("editor")
+    focus_args = _capture_int(controller.focusBrowserRequested)
+
+    controller.focus_agent_browser(1)
+
+    assert controller.focusedBrowser == 2  # newest owned window
+    assert controller.centralSurface == "browser"  # focus_browser switches surface
+    assert focus_args == [2]
+
+
+def test_redriving_a_window_makes_it_the_newest_jump_target(controller):
+    aid = f"{os.getpid()}_1"
+    controller.open_browser()  # slot 1
+    controller.open_browser()  # slot 2
+    controller._record_browser_attribution(aid, 1, "start")
+    controller._record_browser_attribution(aid, 2, "start")
+    controller._record_browser_attribution(aid, 1, "start")  # re-drive 1 → newest
+
+    controller.focus_agent_browser(1)
+    assert controller.focusedBrowser == 1
+    assert controller.agentBrowserCount[0] == 2  # owns both, no duplicate entry
+
+
+def test_focus_agent_browser_noop_without_owned_window(controller):
+    controller.set_central_surface("editor")
+    emissions = _capture_int(controller.focusBrowserRequested)
+    controller.focus_agent_browser(3)  # agent 3 owns nothing
+    assert emissions == []
+    assert controller.centralSurface == "editor"  # no spurious surface switch
+
+
+def test_close_browser_prunes_agent_ownership(controller):
+    aid = f"{os.getpid()}_1"
+    controller.open_browser()  # browser slot 1
+    controller._record_browser_attribution(aid, 1, "start")
+    assert controller.agentBrowserCount[0] == 1
+
+    controller.close_browser(1)
+    assert controller.agentBrowserCount[0] == 0  # closed window → link gone
+
+
+def test_open_browser_for_mcp_attributes_window_to_caller(controller):
+    aid = f"{os.getpid()}_3"  # agent slot 3 → index 2
+    result = controller._open_browser_for_mcp("https://x.com", aid)
+    assert result == {"ok": True, "window": 1}
+    assert controller.agentBrowserCount[2] == 1  # caller owns the opened window
+    assert controller.agentBrowserActive[2] is False  # open's start/end nets to idle
+
+    controller.set_central_surface("editor")
+    controller.focus_agent_browser(3)
+    assert controller.focusedBrowser == 1  # the opened window is the jump target
+
+
+def test_close_agent_prunes_browser_links(controller):
+    """Closing an agent drops its browser ownership/activity so a freed slot
+    doesn't carry a stale link into a future agent reusing the slot."""
+    aid = f"{os.getpid()}_2"
+    controller.open_browser()  # browser slot 1
+    controller._record_browser_attribution(aid, 1, "start")
+    assert controller.agentBrowserCount[1] == 1
+    # Minimal agent state so close_agent's normal (non-desync) path runs.
+    controller._term_agents[2] = {"harness": "claude", "title": ""}
+    controller._agent_order = [2]
+
+    controller.close_agent(2)
+    assert controller.agentBrowserCount[1] == 0  # links pruned on agent close

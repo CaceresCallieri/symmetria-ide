@@ -383,6 +383,12 @@ class AppController(QObject):
     browserTabsChanged = Signal()
     focusedBrowserChanged = Signal()
     focusBrowserRequested = Signal(int)
+    # Agent ↔ browser links — which agent owns/drives which browser window.
+    # Drives the browser glyph on the AgentTopBar chips (ownership → visible,
+    # in-flight op → pulse). Populated by _record_browser_attribution from the
+    # browser MCP bridge's per-call attribution; one notify covers both the
+    # ownership counts and the activity flags the chips bind.
+    agentBrowserChanged = Signal()
     # Bridge-mediated STT injection into an agent pane: (slot, text,
     # submit, request_id). Python cannot drive QMLTermSession (KSession is
     # not Python-wrappable — see "The terminal panes" in CLAUDE.md), so the
@@ -561,6 +567,13 @@ class AppController(QObject):
         self._browser_tabs: dict[int, dict[str, str]] = {}
         self._browser_order: list[int] = []
         self._focused_browser: int = 0
+        # Agent ↔ browser attribution (drives the chip browser glyph).
+        # agent slot -> internal browser slots it owns, newest-driven LAST
+        # (the jump target for focus_agent_browser). Pruned when a window or
+        # the agent closes.
+        self._agent_browser_windows: dict[int, list[int]] = {}
+        # agent slot -> count of browser ops currently in flight (>0 = pulse).
+        self._agent_browser_active: dict[int, int] = {}
         # Phase 4 Stage 2a: drives the embedded WebEngineViews via
         # QML-delivered runJavaScript (the views aren't Python-drivable).
         # Exposed to QML as `controller.browserAutomation`; the Stage 2b MCP
@@ -571,7 +584,10 @@ class AppController(QObject):
         # server runs FastMCP+uvicorn and is started in start() (unless
         # SYMMETRIA_IDE_BROWSER_MCP=0). See browser_mcp.py.
         self._browser_mcp_bridge = BrowserMcpBridge(
-            self._browser_automation, self._resolve_browser_window, self
+            self._browser_automation,
+            self._resolve_browser_window,
+            self._record_browser_attribution,
+            self,
         )
         self._browser_mcp_server = BrowserMcpServer(
             self._browser_mcp_bridge,
@@ -2059,6 +2075,26 @@ class AppController(QObject):
             for slot in range(1, self._MAX_INSTANCES + 1)
         ]
 
+    @Property("QVariantList", notify=agentBrowserChanged)
+    def agentBrowserCount(self) -> list:
+        """Per-slot count of OPEN browser windows the agent owns, indexed
+        `slot - 1`. >0 → the chip shows the browser glyph. Pruned to open
+        windows only (close_browser drops the slot from every owner)."""
+        return [
+            len(self._agent_browser_windows.get(slot, ()))
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
+    @Property("QVariantList", notify=agentBrowserChanged)
+    def agentBrowserActive(self) -> list:
+        """Per-slot 'a browser op is in flight' flag, indexed `slot - 1` →
+        drives the chip glyph's pulse. True while the agent's in-flight op
+        counter is >0 (set on op start, cleared on op result/timeout)."""
+        return [
+            self._agent_browser_active.get(slot, 0) > 0
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
     @Property(int, notify=sttStateChanged)
     def sttTargetSlot(self) -> int:
         """1-based slot the STT pipeline is dictating into; 0 = none."""
@@ -2170,16 +2206,20 @@ class AppController(QObject):
                 inst["harness"],
             )
             return []
+        agent_id = f"{os.getpid()}_{slot}"
         return agent_harness.spawn_argv(
             spec,
             inst["spawn_type"],
             inst["dangerous"],
-            f"{os.getpid()}_{slot}",
+            agent_id,
             inst["session_id"],
-            # Stage 2c: inject the IDE's browser MCP server so the agent gets
-            # the browser_* tools. Empty when the server isn't running (or the
-            # harness has no --mcp-config flag) → a no-op in spawn_argv.
-            self._browser_mcp_server.config_path,
+            # Stage 2c: inject a PER-AGENT browser MCP config so the agent gets
+            # the browser_* tools AND its requests carry the X-Symmetria-Agent
+            # header — that header is what lets the IDE attribute a browser
+            # window to this agent (Stage 3, the chip glyph). Empty when the
+            # server isn't running (or the harness has no --mcp-config flag) →
+            # a no-op in spawn_argv.
+            self._browser_mcp_server.agent_config_path(agent_id),
         )
 
     @Slot(int)
@@ -2200,6 +2240,87 @@ class AppController(QObject):
         self._agent_bridge.notify_focus(slot)
         self.set_central_surface("agent")
         self.focusAgentRequested.emit(slot)
+
+    @Slot(int)
+    def focus_agent_browser(self, agent_slot: int) -> None:
+        """Jump to the browser window the agent is driving (chip glyph click).
+
+        Focuses the agent's newest-driven still-open window, which switches
+        the central surface to "browser" via the existing focus_browser. No-op
+        when the agent owns no open window (the glyph wouldn't be visible then,
+        but the guard keeps the binding safe). The 'jump to what they're doing'
+        action from the AgentTopBar browser glyph.
+        """
+        owned = self._agent_browser_windows.get(agent_slot)
+        if not owned:
+            log.info("focus_agent_browser: agent %d owns no window — no-op", agent_slot)
+            return
+        self.focus_browser(owned[-1])  # newest-driven = the jump target
+
+    def _agent_slot_from_id(self, agent_id: str) -> int | None:
+        """Map a browser-MCP `<ide_pid>_<slot>` agent id to our chip slot.
+
+        Returns None for ids that aren't ours — an untagged caller (""), a
+        foreign-pid id (another IDE / an external client), or a malformed id —
+        so only THIS IDE's agents accrue browser links. Mirrors the
+        `f"{os.getpid()}_{slot}"` keying agent_spawn_argv stamps.
+        """
+        pid_str, _, slot_str = agent_id.partition("_")
+        if not slot_str:
+            return None
+        try:
+            if int(pid_str) != os.getpid():
+                return None
+            slot = int(slot_str)
+        except ValueError:
+            return None
+        return slot if 1 <= slot <= self._MAX_INSTANCES else None
+
+    def _record_browser_attribution(
+        self, agent_id: str, browser_slot: int, phase: str
+    ) -> None:
+        """Record that an agent is driving a browser window (GUI thread).
+
+        Called by BrowserMcpBridge around every attributed browser op, and by
+        _open_browser_for_mcp on open. `phase` "start" claims OWNERSHIP of the
+        window for the agent (newest-driven moves to the end = the jump target)
+        and marks it actively driving (+1 in-flight → the chip pulse); "end"
+        clears that activity (-1). Untagged / foreign ids are dropped by
+        _agent_slot_from_id, so external clients never touch the chips.
+        """
+        agent_slot = self._agent_slot_from_id(agent_id)
+        if agent_slot is None:
+            return
+        if phase == "start":
+            owned = self._agent_browser_windows.setdefault(agent_slot, [])
+            if browser_slot in owned:
+                owned.remove(browser_slot)  # re-driving → bump to newest
+            owned.append(browser_slot)
+            self._agent_browser_active[agent_slot] = (
+                self._agent_browser_active.get(agent_slot, 0) + 1
+            )
+        elif phase == "end":
+            if self._agent_browser_active.get(agent_slot, 0) > 0:
+                self._agent_browser_active[agent_slot] -= 1
+        self.agentBrowserChanged.emit()
+
+    def _drop_agent_browser_links(self, agent_slot: int) -> None:
+        """Forget an agent's browser ownership + activity (on agent close)."""
+        removed = self._agent_browser_windows.pop(agent_slot, None)
+        removed_active = self._agent_browser_active.pop(agent_slot, None)
+        if removed is not None or removed_active is not None:
+            self.agentBrowserChanged.emit()
+
+    def _drop_browser_window_links(self, browser_slot: int) -> None:
+        """Remove a closed browser window from every agent's owned list, so the
+        chip count reflects only open windows (on browser-window close)."""
+        changed = False
+        for owned in self._agent_browser_windows.values():
+            if browser_slot in owned:
+                owned.remove(browser_slot)
+                changed = True
+        if changed:
+            self.agentBrowserChanged.emit()
 
     @Slot(int)
     def cycle_agent_focus(self, direction: int) -> None:
@@ -2243,6 +2364,7 @@ class AppController(QObject):
             )
             del self._term_agents[slot]
             self._term_agent_activity.pop(slot, None)
+            self._drop_agent_browser_links(slot)
             self.termAgentsChanged.emit()
             self._agent_bridge.notify_remove(slot)
             return
@@ -2250,6 +2372,7 @@ class AppController(QObject):
         self._agent_order.remove(slot)
         del self._term_agents[slot]
         self._term_agent_activity.pop(slot, None)
+        self._drop_agent_browser_links(slot)
         self.termAgentsChanged.emit()
         self.agentActivityChanged.emit()
         self._agent_bridge.notify_remove(slot)
@@ -2471,11 +2594,13 @@ class AppController(QObject):
                 slot,
             )
             del self._browser_tabs[slot]
+            self._drop_browser_window_links(slot)
             self.browserTabsChanged.emit()
             return
         closed_position = self._browser_order.index(slot)
         self._browser_order.remove(slot)
         del self._browser_tabs[slot]
+        self._drop_browser_window_links(slot)
         self.browserTabsChanged.emit()
         log.info("close_browser: slot %d closed", slot)
         if self._focused_browser == slot:
@@ -2568,17 +2693,26 @@ class AppController(QObject):
             focused_position = self._browser_order.index(self._focused_browser) + 1
         return {"ok": True, "windows": windows, "focused": focused_position}
 
-    def _open_browser_for_mcp(self, url: str) -> dict:
+    def _open_browser_for_mcp(self, url: str, agent_id: str = "") -> dict:
         """The `browser_open` MCP tool body. GUI-thread only.
 
         Opens a new window so an agent has an autonomous entry point (the
         other tools only drive EXISTING windows). Returns the new window's
         DISPLAY number, or a pool-full error. NB: open_browser switches the
         central surface to the browser — an agent opening a window pulls the
-        user there, which is the intended "watch the agent work" behavior."""
+        user there, which is the intended "watch the agent work" behavior.
+
+        `agent_id` (from the X-Symmetria-Agent header) claims OWNERSHIP of the
+        new window for the spawning agent, so its chip shows the browser glyph
+        and a click jumps here. The start/end pair records ownership without a
+        lingering pulse — the agent's first navigate is what pulses the glyph.
+        """
         before = len(self._browser_order)
         self.open_browser(url or "about:blank")
         if len(self._browser_order) > before:
+            new_slot = self._browser_order[-1]
+            self._record_browser_attribution(agent_id, new_slot, "start")
+            self._record_browser_attribution(agent_id, new_slot, "end")
             return {"ok": True, "window": len(self._browser_order)}
         return {"ok": False, "error": "pool-full"}
 
