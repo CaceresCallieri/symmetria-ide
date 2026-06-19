@@ -331,7 +331,7 @@ class BrowserMcpServer:
             json.dump(config, handle)
         self._config_path = path
 
-    def agent_config_path(self, agent_id: str) -> str:
+    def agent_config_path(self, agent_id: str, browser_enabled: bool = False) -> str:
         """Write (idempotently) a per-agent MCP config and return its path.
 
         The config points at this server's URL but adds a `headers` entry
@@ -340,11 +340,20 @@ class BrowserMcpServer:
         agent-bubble browser indicator). `agent_spawn_argv` passes the returned
         path via `--mcp-config`.
 
-        Returns "" when the server isn't running or `agent_id` is empty — both
-        mean "no per-agent config", which `spawn_argv` treats as no
-        `--mcp-config` flag (the agent simply gets no browser tools).
+        `browser_enabled` is the PER-PROJECT gate (default False). When the
+        project hasn't opted into the agent browser capability (no
+        `.symmetria/ide.json` marker — see project_browser_marker), this
+        returns "" and the agent gets NO browser MCP at all: neither our
+        window tools NOR chrome-devtools, so no per-agent `npx
+        chrome-devtools-mcp` Node process spawns (the RAM the gate saves). The
+        decision is harness-agnostic — it's made here, before
+        `spawn_argv` applies the harness-specific `--mcp-config` flag.
+
+        Returns "" when not enabled, the server isn't running, or `agent_id`
+        is empty — all mean "no per-agent config", which `spawn_argv` treats
+        as no `--mcp-config` flag (the agent simply gets no browser tools).
         """
-        if not self._port or not agent_id:
+        if not browser_enabled or not self._port or not agent_id:
             return ""
         config = {
             "mcpServers": {

@@ -42,9 +42,10 @@ import hashlib
 import json
 import logging
 import os
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from .fs_atomic import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -141,39 +142,7 @@ def save_expanded(repo_root: str, paths: list[str]) -> None:
         # external watchers.
         "expanded_paths": sorted(set(p for p in paths if isinstance(p, str))),
     }
-    serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-
-    # `dir=` is load-bearing: `os.replace` is atomic only across paths
-    # on the same filesystem, and `tempfile`'s default tmp dir might
-    # live on a different FS than the state dir.
-    tmp_fd = None
-    tmp_path = None
-    try:
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            prefix=".tree-state-",
-            suffix=".json.tmp",
-            dir=str(target.parent),
-        )
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            tmp_fd = None  # ownership passed to the file object
-            f.write(serialized)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, target)
-        tmp_path = None
-    except OSError as e:
-        log.warning("tree_state_cache: save failed for %s: %s", repo_root, e)
-    finally:
-        # Defensive cleanup if either the open or the replace raised
-        # before we relinquished ownership. Errors here are silent —
-        # a leaked tmp file in the state dir is harmless.
-        if tmp_fd is not None:
-            try:
-                os.close(tmp_fd)
-            except OSError:
-                pass
-        if tmp_path is not None and os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+    # Crash-safe write-temp-then-rename, shared with the per-project marker
+    # writer (see fs_atomic). A failed write is logged there and non-fatal —
+    # the next save retries, and load tolerates a missing file.
+    atomic_write_json(target, payload)

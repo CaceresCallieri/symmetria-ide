@@ -108,6 +108,67 @@ def test_swap_to_browser_is_idempotent(controller):
 
 
 # ---------------------------------------------------------------------------
+# Per-project agent-browser gate (the committable .symmetria/ide.json marker).
+# ---------------------------------------------------------------------------
+
+
+def test_project_browser_default_off(controller, tmp_path):
+    """A project with no marker reads as disabled after anchoring to it."""
+    (tmp_path / ".git").mkdir()  # make tmp_path a deterministic project root
+    controller.anchor_to_path(str(tmp_path))
+    assert controller.projectBrowserEnabled is False
+
+
+def test_toggle_project_browser_flips_and_persists(controller, tmp_path):
+    """The MCP-popup toggle flips the flag, emits its notify, and writes the
+    committable marker; toggling again disables it."""
+    from symmetria_ide import project_browser_marker as pbm
+
+    # Plant a `.git` so resolve_project_root anchors the marker AT tmp_path —
+    # never walking up into the real repo (which would write a committable
+    # marker into this project's tree). Bulletproofs isolation regardless of
+    # where pytest roots its tmp dir.
+    (tmp_path / ".git").mkdir()
+    controller.anchor_to_path(str(tmp_path))
+    emissions = _capture(controller.projectBrowserEnabledChanged)
+
+    controller.toggle_project_browser()
+    assert controller.projectBrowserEnabled is True
+    assert len(emissions) == 1
+    assert pbm.browser_agents_enabled(str(tmp_path)) is True
+    assert (tmp_path / ".symmetria" / "ide.json").exists()
+
+    controller.toggle_project_browser()
+    assert controller.projectBrowserEnabled is False
+    assert len(emissions) == 2
+    assert pbm.browser_agents_enabled(str(tmp_path)) is False
+
+
+def test_spawn_argv_gates_browser_mcp(controller, tmp_path, monkeypatch):
+    """agent_spawn_argv injects --mcp-config ONLY when the project opted in.
+
+    With a fake server port + a spawned slot, the per-agent config (hence the
+    --mcp-config flag claude loads it through) appears only after the project
+    is enabled — the harness-agnostic gate in action. Config writes are routed
+    to tmp via gettempdir so the test leaves no temp-dir litter."""
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    (tmp_path / ".git").mkdir()  # anchor the marker at tmp_path, never the repo
+    controller.anchor_to_path(str(tmp_path))
+    # Pretend the browser MCP server bound a port so agent_config_path can
+    # write a config when the gate allows it.
+    controller._browser_mcp_server._port = 54321
+    controller.spawn_agent("fresh", True, "claude")
+    slot = controller.agentOrder[0]
+
+    # OFF (default): the gate returns "" → no --mcp-config flag.
+    assert "--mcp-config" not in controller.agent_spawn_argv(slot)
+
+    # ON: enable; the spawn-time re-read picks it up → --mcp-config present.
+    controller.toggle_project_browser()
+    assert "--mcp-config" in controller.agent_spawn_argv(slot)
+
+
+# ---------------------------------------------------------------------------
 # Pool list-shape invariants — fixed-length, indexed slot-1.
 # ---------------------------------------------------------------------------
 

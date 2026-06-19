@@ -118,7 +118,7 @@ def test_agent_config_path_writes_identity_header(tmp_path, monkeypatch):
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
     server = _server()
     server._port = 23456  # pretend bound
-    path = server.agent_config_path("1234_2")
+    path = server.agent_config_path("1234_2", browser_enabled=True)
     assert path.endswith("1234_2.json")
     with open(path) as handle:
         config = json.load(handle)
@@ -145,7 +145,7 @@ def test_agent_config_path_injects_chrome_devtools_when_cdp_enabled(
     )
     server = _server()
     server._port = 23456
-    with open(server.agent_config_path("1234_2")) as handle:
+    with open(server.agent_config_path("1234_2", browser_enabled=True)) as handle:
         config = json.load(handle)
     cdt = config["mcpServers"]["chrome-devtools"]
     assert cdt["command"] == "npx"
@@ -162,7 +162,7 @@ def test_agent_config_path_omits_chrome_devtools_without_cdp(tmp_path, monkeypat
     monkeypatch.delenv("QTWEBENGINE_REMOTE_DEBUGGING", raising=False)
     server = _server()
     server._port = 23456
-    with open(server.agent_config_path("1234_2")) as handle:
+    with open(server.agent_config_path("1234_2", browser_enabled=True)) as handle:
         config = json.load(handle)
     assert "chrome-devtools" not in config["mcpServers"]
     assert SERVER_NAME in config["mcpServers"]
@@ -177,7 +177,7 @@ def test_agent_config_path_omits_chrome_devtools_without_npx(tmp_path, monkeypat
     monkeypatch.setattr("symmetria_ide.browser_mcp.shutil.which", lambda _: None)
     server = _server()
     server._port = 23456
-    with open(server.agent_config_path("1234_2")) as handle:
+    with open(server.agent_config_path("1234_2", browser_enabled=True)) as handle:
         config = json.load(handle)
     assert "chrome-devtools" not in config["mcpServers"]
     assert SERVER_NAME in config["mcpServers"]  # window tools still present
@@ -185,12 +185,30 @@ def test_agent_config_path_omits_chrome_devtools_without_npx(tmp_path, monkeypat
 
 def test_agent_config_path_empty_without_port_or_id(tmp_path, monkeypatch):
     """No port (server down) or empty id → "" — spawn_argv treats that as no
-    --mcp-config, so the agent simply gets no browser tools."""
+    --mcp-config, so the agent simply gets no browser tools. (browser_enabled
+    is True here so the per-project gate isn't what's returning "".)"""
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
     server = _server()
-    assert server.agent_config_path("1234_2") == ""  # _port still 0
+    assert server.agent_config_path("1234_2", browser_enabled=True) == ""  # _port 0
     server._port = 23456
-    assert server.agent_config_path("") == ""  # no agent id
+    assert server.agent_config_path("", browser_enabled=True) == ""  # no agent id
+
+
+def test_agent_config_path_gated_off_returns_empty(tmp_path, monkeypatch):
+    """The per-project gate: browser_enabled=False (the default) → "" even
+    with a live port, a real agent id, and CDP enabled. This is what keeps a
+    non-web project's agents from spawning the chrome-devtools-mcp Node
+    process — they get no --mcp-config at all."""
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
+    monkeypatch.setattr(
+        "symmetria_ide.browser_mcp.shutil.which", lambda _: "/usr/bin/npx"
+    )
+    server = _server()
+    server._port = 23456
+    # Explicit False and the default both gate off.
+    assert server.agent_config_path("1234_2", browser_enabled=False) == ""
+    assert server.agent_config_path("1234_2") == ""
 
 
 def test_stop_unlinks_per_agent_configs(tmp_path, monkeypatch):
@@ -201,8 +219,8 @@ def test_stop_unlinks_per_agent_configs(tmp_path, monkeypatch):
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
     server = _server()
     server._port = 23456
-    p1 = server.agent_config_path("1234_2")
-    p2 = server.agent_config_path("1234_3")
+    p1 = server.agent_config_path("1234_2", browser_enabled=True)
+    p2 = server.agent_config_path("1234_3", browser_enabled=True)
     assert os.path.exists(p1) and os.path.exists(p2)
     server.stop()  # never started, but must still unlink the configs
     assert not os.path.exists(p1)

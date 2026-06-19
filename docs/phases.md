@@ -137,6 +137,16 @@ Each phase ends with a go/no-go checkpoint. If a phase's deliverable does not fe
 
 **Checkpoint (Stage 4) — MET:** a real `chrome-devtools-mcp` drove the embedded view end-to-end (select_page-by-url correlation, navigate, 377 KB screenshot on a visible page); `new_page` fails cleanly so agents can't create invisible un-pooled pages.
 
+**Stage 5 — per-project gating, default OFF (SHIPPED 2026-06-19):**
+
+- chrome-devtools-mcp spawns a Node process (~80–150 MB) per claude agent (stdio-only), and the user runs many agents across many one-IDE-per-project instances, so unconditional injection wastes RAM on non-web projects. The agent browser capability is now opt-in per project via a **committable marker `<repo>/.symmetria/ide.json`** (`{"version":1,"browser_agents":true}`), read by `project_browser_marker.py`; default OFF.
+- ONE **harness-agnostic** gate in `AppController` (`_project_browser_enabled`, re-read on `displayedRootChanged` + at spawn): off → `agent_config_path` returns `""` → no `--mcp-config` → the agent gets NO browser MCP (neither `symmetria-browser` nor `chrome-devtools`) → no Node process. CDP stays always-on (cheap loopback port) so a runtime toggle applies to the next spawn without restart; only injection is gated.
+- Toggle: a keyboard-first **MCP popup** (`McpMenu.qml`, opened by **`Ctrl+Shift+M`**) where `w` flips chrome-devtools (`toggle_project_browser`); the row reflects `projectBrowserEnabled`. Kept off the AgentTopBar to keep it clean; structured to host more MCP toggles later. Affects newly-spawned agents (MCP read at spawn).
+- opencode still gets nothing (no `mcp_config_flag`) — wiring its `opencode.json` injection later reuses the same gate. DRY: the marker write reuses `fs_atomic.atomic_write_json` (extracted from `tree_state_cache`).
+- **Authoritative record: CLAUDE.md "The browser panes" Stage 5.**
+
+**Checkpoint (Stage 5) — MET:** with no marker, a spawned claude agent gets no `--mcp-config` (verified in `tests/test_app_controller_browser_pool.py::test_spawn_argv_gates_browser_mcp`); the MCP popup (`Ctrl+Shift+M` → `w`) writes the marker, flips the popup state, and the next spawn carries the browser MCP.
+
 ## Far future
 
 - **Own window manager** — fork Hyprland (~2 years out, dependent on LLM advancement). May reopen the federation architecture question.

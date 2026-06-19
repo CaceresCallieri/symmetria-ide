@@ -69,6 +69,7 @@ from .session_host import SessionHost
 from .session_models import (  # noqa: F401 — side-effect: @QmlElement registration
     SessionModel,
 )
+from .project_browser_marker import browser_agents_enabled, set_browser_agents
 from .tree_state_cache import load_expanded, save_expanded
 from .whichkey_models import (  # noqa: F401 — side-effect: @QmlElement registration
     WhichKeyModel,
@@ -390,6 +391,11 @@ class AppController(QObject):
     # now (page driving bypasses our bridge), so agentBrowserActive stays all-False
     # until a future CDP monitor re-activates the hook. One notify covers both.
     agentBrowserChanged = Signal()
+    # Per-project agent-browser opt-in (the `.symmetria/ide.json` marker).
+    # Drives the MCP popup's chrome-devtools on/off state (Ctrl+Shift+M → `w`).
+    # The cached flag it notifies is the gate that decides whether spawned
+    # agents get the browser MCP at all (see _refresh_project_browser_enabled).
+    projectBrowserEnabledChanged = Signal()
     # Bridge-mediated STT injection into an agent pane: (slot, text,
     # submit, request_id). Python cannot drive QMLTermSession (KSession is
     # not Python-wrappable — see "The terminal panes" in CLAUDE.md), so the
@@ -709,6 +715,12 @@ class AppController(QObject):
         # NOT a nvim `<leader>` binding (it has to fire from any pane).
         self._anchored: bool = False
         self._anchored_root: str = ""
+        # Per-project agent-browser opt-in, read from the `.symmetria/ide.json`
+        # marker for `displayedRoot` (default OFF). Refreshed on every
+        # displayedRootChanged (so it tracks the right project) and re-read at
+        # spawn time. This is the harness-agnostic gate: agents get the browser
+        # MCP only when their project opted in. See project_browser_marker.
+        self._project_browser_enabled: bool = False
         # Per-project expanded-state cache (option 6). Populated synchronously
         # from disk in `_sync_expanded_paths_cache` whenever displayedRoot
         # changes — happens BEFORE `_sync_git_repo_root` because the QML
@@ -815,6 +827,11 @@ class AppController(QObject):
 
         # same-thread: displayedRootChanged fires on the GUI thread; GitController.set_repo_root is GUI-only
         self.displayedRootChanged.connect(self._sync_git_repo_root)
+
+        # Re-read the per-project browser marker whenever the project root
+        # changes (and once at startup via the synthetic emit in start()).
+        # GUI-thread, same as the git sync above.
+        self.displayedRootChanged.connect(self._refresh_project_browser_enabled)
 
         # Mirror the displayed root into nvim's `:pwd`. Without this, nvim's
         # working directory stays frozen at Python's launch-time cwd, so
@@ -1581,6 +1598,59 @@ class AppController(QObject):
             self.displayedRootChanged.emit()
         log.info("anchor: released")
 
+    def _refresh_project_browser_enabled(self) -> None:
+        """Re-read the `.symmetria/ide.json` marker for the current project
+        and update the cached flag + indicator if it changed.
+
+        Wired to `displayedRootChanged` (tracks the active project; seeded by
+        the synthetic emit in `start()`) and called from `agent_spawn_argv`
+        so a hand-edit of the committed marker is honoured at the next spawn.
+        The cached value backs the QML-facing `projectBrowserEnabled`; the
+        gate read at spawn time is authoritative.
+        """
+        enabled = browser_agents_enabled(self.displayedRoot)
+        if enabled != self._project_browser_enabled:
+            self._project_browser_enabled = enabled
+            self.projectBrowserEnabledChanged.emit()
+
+    @Property(bool, notify=projectBrowserEnabledChanged)
+    def projectBrowserEnabled(self) -> bool:
+        """Whether THIS project has opted into agent browser tools.
+
+        Drives the MCP popup's chrome-devtools on/off state (the popup opens
+        on Ctrl+Shift+M; `w` toggles it). A display mirror of the committable
+        `.symmetria/ide.json` marker (see project_browser_marker); the
+        authoritative gate is re-read at spawn time in `agent_spawn_argv`.
+        """
+        return self._project_browser_enabled
+
+    @Slot()
+    def toggle_project_browser(self) -> None:
+        """Flip the per-project agent-browser opt-in (the MCP popup's `w` key;
+        Ctrl+Shift+M opens the popup).
+
+        Writes/updates the committable `.symmetria/ide.json` marker at the
+        project root, then refreshes the cached flag (which updates the
+        popup's state). Affects NEWLY-spawned agents only — MCP config is read
+        at spawn, so already-running agents keep whatever they launched with.
+        Harness-agnostic: the same flag gates every harness's injection
+        (claude today; opencode + future agents via the same path).
+        """
+        target = not self._project_browser_enabled
+        root = set_browser_agents(self.displayedRoot, target)
+        if not root:
+            log.warning(
+                "toggle_project_browser: could not write marker for %s",
+                self.displayedRoot,
+            )
+            return
+        self._refresh_project_browser_enabled()
+        log.info(
+            "project browser agents %s for %s",
+            "enabled" if target else "disabled",
+            root,
+        )
+
     @Property(bool, notify=treeVisibleChanged)
     def treeVisible(self) -> bool:
         """Sidebar visibility — the single source of truth.
@@ -2206,6 +2276,12 @@ class AppController(QObject):
             )
             return []
         agent_id = f"{os.getpid()}_{slot}"
+        # Per-project gate: re-read the marker now (cheap, honours a hand-edit
+        # of the committed `.symmetria/ide.json` since the last root change),
+        # then pass the result into agent_config_path. When the project hasn't
+        # opted in, agent_config_path returns "" → no --mcp-config → the agent
+        # gets NO browser MCP and no chrome-devtools-mcp Node process spawns.
+        self._refresh_project_browser_enabled()
         return agent_harness.spawn_argv(
             spec,
             inst["spawn_type"],
@@ -2216,9 +2292,11 @@ class AppController(QObject):
             # the browser_* tools AND its requests carry the X-Symmetria-Agent
             # header — that header is what lets the IDE attribute a browser
             # window to this agent (Stage 3, the chip glyph). Empty when the
-            # server isn't running (or the harness has no --mcp-config flag) →
-            # a no-op in spawn_argv.
-            self._browser_mcp_server.agent_config_path(agent_id),
+            # project hasn't opted in (the gate), the server isn't running, or
+            # the harness has no --mcp-config flag → a no-op in spawn_argv.
+            self._browser_mcp_server.agent_config_path(
+                agent_id, browser_enabled=self._project_browser_enabled
+            ),
         )
 
     @Slot(int)

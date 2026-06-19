@@ -286,6 +286,25 @@ Window {
         }
     }
 
+    // MCP toggles popup — M-for-MCP. Opens the keyboard-first modal where a
+    // single key flips each per-project MCP server for THIS project's agents
+    // (`w` = chrome devtools / the embedded-browser capability). The toggle
+    // lives in the popup (not a persistent top-bar affordance) to keep the
+    // AgentTopBar clean. Modal guard: don't stack over another z-40 modal —
+    // two self-healing key catchers would ping-pong focus (see
+    // _restoreCentralFocus). open() is idempotent + re-asserts the catcher.
+    Shortcut {
+        sequences: ["Ctrl+Shift+M"]
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (agentSessionPicker.visible
+                    || agentSpawnMenu.visible
+                    || closeConfirmDialog.visible)
+                return;
+            mcpMenu.open();
+        }
+    }
+
     // Close the focused slot. Shared between the agent and browser pools —
     // whichever surface is visible owns the chord (the two are never visible
     // together, so there is no ambiguity).
@@ -2336,6 +2355,16 @@ Window {
         onDismissed: root._restoreCentralFocus()
     }
 
+    // Per-project MCP toggles — Window-level modal overlay (Ctrl+Shift+M).
+    // `w` toggles the chrome-devtools MCP for this project's agents; the
+    // marker it writes is committable (travels with the repo). On dismiss
+    // focus returns to the visible surface via the same dispatch the other
+    // modals use.
+    McpMenu {
+        id: mcpMenu
+        onDismissed: root._restoreCentralFocus()
+    }
+
     // Window-close confirmation (Hyprland Super+Q / WM close). Closing the
     // IDE reaps every terminal-agent + the editor session at once, so the
     // close request is vetoed in `onClosing` below and routed here first —
@@ -2485,6 +2514,10 @@ Window {
             agentSpawnMenu.reassert();
             return;
         }
+        if (mcpMenu.visible) {
+            mcpMenu.reassert();
+            return;
+        }
         if (agentSessionPicker.visible) {
             // reassert(), not open() — open() re-fetches the session list.
             agentSessionPicker.reassert();
@@ -2554,6 +2587,8 @@ Window {
         // left as-is.
         if (agentSpawnMenu.visible)
             agentSpawnMenu.dismiss();
+        if (mcpMenu.visible)
+            mcpMenu.dismiss();
         if (agentSessionPicker.visible)
             agentSessionPicker.dismiss();
         closeConfirmDialog.open();
