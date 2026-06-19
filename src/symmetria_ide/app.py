@@ -2277,10 +2277,13 @@ class AppController(QObject):
             return []
         agent_id = f"{os.getpid()}_{slot}"
         # Per-project gate: re-read the marker now (cheap, honours a hand-edit
-        # of the committed `.symmetria/ide.json` since the last root change),
-        # then pass the result into agent_config_path. When the project hasn't
-        # opted in, agent_config_path returns "" → no --mcp-config → the agent
-        # gets NO browser MCP and no chrome-devtools-mcp Node process spawns.
+        # of the committed `.symmetria/ide.json` since the last root change —
+        # the re-read may emit projectBrowserEnabledChanged, refreshing the MCP
+        # popup when the on-disk flag changed; that emit is intended, so don't
+        # "optimize away" this call). Then pass the result into
+        # agent_config_path: when the project hasn't opted in it returns "" →
+        # no --mcp-config → the agent gets NO browser MCP and no
+        # chrome-devtools-mcp Node process spawns.
         self._refresh_project_browser_enabled()
         return agent_harness.spawn_argv(
             spec,

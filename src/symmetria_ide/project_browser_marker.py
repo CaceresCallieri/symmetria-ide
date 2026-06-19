@@ -18,7 +18,7 @@ per-agent `npx chrome-devtools-mcp` Node process (the RAM the gate saves).
 Pure, synchronous, Qt-free (unit-testable like `agent_harness`):
 `AppController` reads `browser_agents_enabled()` to gate
 `browser_mcp.agent_config_path`, and flips it via `set_browser_agents()`
-behind the `Ctrl+Shift+W` toggle.
+behind the MCP-toggles popup (`Ctrl+Shift+M` → `w`).
 
 Root resolution mirrors how git itself finds a repo: walk up from the
 launch dir to the first ancestor holding a `.git` (dir OR file — worktrees

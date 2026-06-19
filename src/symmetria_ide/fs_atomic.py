@@ -37,6 +37,11 @@ def atomic_write_json(target: Path, payload: dict) -> bool:
     caller decides whether a failed state write is fatal (for caches and
     per-project settings it never is). Mirrors the fault-tolerance of the
     matching loaders, which treat a missing/corrupt file as "no state".
+
+    ``payload`` must be JSON-serializable: a serialization error
+    (``TypeError``/``ValueError`` from ``json.dumps``, raised before the I/O
+    ``try``) is a caller bug and propagates — deliberately NOT folded into the
+    ``False`` return, which is reserved for filesystem failures.
     """
     serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
