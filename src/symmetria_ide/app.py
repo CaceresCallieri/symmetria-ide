@@ -2276,33 +2276,46 @@ class AppController(QObject):
             return None
         return slot if 1 <= slot <= self._MAX_INSTANCES else None
 
+    def _claim_browser_window(self, agent_slot: int, browser_slot: int) -> None:
+        """Record that `agent_slot` owns `browser_slot`, newest-driven LAST
+        (the jump target). Re-driving an owned window bumps it to newest.
+        Ownership only — the in-flight pulse counter is untouched here."""
+        owned = self._agent_browser_windows.setdefault(agent_slot, [])
+        if browser_slot in owned:
+            owned.remove(browser_slot)  # re-driving → bump to newest
+        owned.append(browser_slot)
+
     def _record_browser_attribution(
         self, agent_id: str, browser_slot: int, phase: str
     ) -> None:
         """Record that an agent is driving a browser window (GUI thread).
 
-        Called by BrowserMcpBridge around every attributed browser op, and by
-        _open_browser_for_mcp on open. `phase` "start" claims OWNERSHIP of the
-        window for the agent (newest-driven moves to the end = the jump target)
-        and marks it actively driving (+1 in-flight → the chip pulse); "end"
-        clears that activity (-1). Untagged / foreign ids are dropped by
+        Called by BrowserMcpBridge around every attributed browser op. `phase`
+        "start" claims OWNERSHIP of the window for the agent and marks it
+        actively driving (+1 in-flight → the chip pulse); "end" clears that
+        activity (-1). Untagged / foreign ids are dropped by
         _agent_slot_from_id, so external clients never touch the chips.
+
+        The emit is guarded so an "end" that doesn't actually decrement (e.g. a
+        late op result arriving after the agent was closed and its counter
+        dropped) doesn't fire a spurious agentBrowserChanged re-bind.
         """
         agent_slot = self._agent_slot_from_id(agent_id)
         if agent_slot is None:
             return
+        changed = False
         if phase == "start":
-            owned = self._agent_browser_windows.setdefault(agent_slot, [])
-            if browser_slot in owned:
-                owned.remove(browser_slot)  # re-driving → bump to newest
-            owned.append(browser_slot)
+            self._claim_browser_window(agent_slot, browser_slot)
             self._agent_browser_active[agent_slot] = (
                 self._agent_browser_active.get(agent_slot, 0) + 1
             )
+            changed = True
         elif phase == "end":
             if self._agent_browser_active.get(agent_slot, 0) > 0:
                 self._agent_browser_active[agent_slot] -= 1
-        self.agentBrowserChanged.emit()
+                changed = True
+        if changed:
+            self.agentBrowserChanged.emit()
 
     def _drop_agent_browser_links(self, agent_slot: int) -> None:
         """Forget an agent's browser ownership + activity (on agent close)."""
@@ -2704,15 +2717,17 @@ class AppController(QObject):
 
         `agent_id` (from the X-Symmetria-Agent header) claims OWNERSHIP of the
         new window for the spawning agent, so its chip shows the browser glyph
-        and a click jumps here. The start/end pair records ownership without a
-        lingering pulse — the agent's first navigate is what pulses the glyph.
+        and a click jumps here. Opening claims ownership WITHOUT a pulse (no
+        in-flight op yet) — the agent's first navigate is what pulses the glyph.
         """
         before = len(self._browser_order)
         self.open_browser(url or "about:blank")
         if len(self._browser_order) > before:
             new_slot = self._browser_order[-1]
-            self._record_browser_attribution(agent_id, new_slot, "start")
-            self._record_browser_attribution(agent_id, new_slot, "end")
+            agent_slot = self._agent_slot_from_id(agent_id)
+            if agent_slot is not None:
+                self._claim_browser_window(agent_slot, new_slot)
+                self.agentBrowserChanged.emit()
             return {"ok": True, "window": len(self._browser_order)}
         return {"ok": False, "error": "pool-full"}
 

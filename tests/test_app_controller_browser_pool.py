@@ -468,3 +468,35 @@ def test_close_agent_prunes_browser_links(controller):
 
     controller.close_agent(2)
     assert controller.agentBrowserCount[1] == 0  # links pruned on agent close
+
+
+def test_close_agent_desync_branch_also_prunes_browser_links(controller):
+    """close_agent's defensive desync branch (slot in _term_agents but not
+    _agent_order) must prune browser links too — it calls the same helper."""
+    aid = f"{os.getpid()}_2"
+    controller.open_browser()  # browser slot 1
+    controller._record_browser_attribution(aid, 1, "start")
+    assert controller.agentBrowserCount[1] == 1
+    # Force the desync: agent present in _term_agents but absent from _agent_order.
+    controller._term_agents[2] = {"harness": "claude", "title": ""}
+    # _agent_order intentionally left without slot 2 → desync recovery path.
+
+    controller.close_agent(2)  # must not raise, and must prune
+    assert controller.agentBrowserCount[1] == 0
+
+
+def test_attribution_end_after_agent_close_does_not_resurrect_or_emit(controller):
+    """A late op 'end' arriving after the agent was closed (its counter
+    dropped) must not resurrect ownership nor fire a spurious change signal."""
+    aid = f"{os.getpid()}_2"
+    controller.open_browser()  # browser slot 1
+    controller._record_browser_attribution(aid, 1, "start")  # owns + pulsing
+    controller._drop_agent_browser_links(2)  # simulate the agent closing mid-op
+    assert controller.agentBrowserCount[1] == 0
+    assert controller.agentBrowserActive[1] is False
+
+    emissions = _capture(controller.agentBrowserChanged)
+    controller._record_browser_attribution(aid, 1, "end")  # the late op result
+    assert controller.agentBrowserCount[1] == 0  # no ownership resurrection
+    assert controller.agentBrowserActive[1] is False
+    assert emissions == []  # guarded emit — no spurious re-bind

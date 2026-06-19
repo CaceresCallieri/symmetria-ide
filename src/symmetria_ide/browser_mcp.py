@@ -120,9 +120,10 @@ def _calling_agent_id(server) -> str:
     try:
         # Header is primary (an unknown header can't break the MCP connection,
         # whereas a query-string URL conceivably could, so the config writes
-        # the header form). The query-param fallback makes the server accept a
-        # `?agent=<id>` URL too, so switching config forms is a one-line change
-        # if a client turns out not to forward the header.
+        # the header form). NO config currently writes the `?agent=` form — the
+        # query-param branch is dormant, present only so that IF a client turns
+        # out not to forward the header, switching `agent_config_path` to the
+        # query-param URL is a one-line change the server already accepts.
         agent_id = request.headers.get(_AGENT_HEADER, "")
         if not agent_id:
             agent_id = request.query_params.get("agent", "")
@@ -431,11 +432,18 @@ class BrowserMcpServer:
         log.info("browser MCP server on %s (config %s)", self.url, self._config_path)
 
     def _write_config(self) -> None:
-        """Write the claude-shaped MCP config agents load via --mcp-config.
+        """Write the shared per-launch MCP config (the DISCOVERY anchor).
 
         `type: "http"` = streamable-HTTP (what `streamable_http_app()` serves).
         Per-launch file in the temp dir, keyed by pid so concurrent IDE
         instances don't clobber each other's config.
+
+        Since Stage 3 this is NOT what spawned agents load — they get a
+        per-agent config from `agent_config_path` (which adds the identity
+        header). This headerless shared config is retained only so external
+        clients can DISCOVER the server's URL by pid (e.g.
+        `bench/browser_mcp_live.py`), and as the reap anchor; agents never
+        inject it.
         """
         config = {
             "mcpServers": {
