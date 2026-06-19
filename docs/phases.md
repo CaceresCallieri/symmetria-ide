@@ -120,13 +120,22 @@ Each phase ends with a go/no-go checkpoint. If a phase's deliverable does not fe
 - Pool state/API on `AppController` (`open_browser`/`focus_browser`/`cycle_browser_focus`/`close_browser`/`on_browser_title`/`on_browser_url`); see `src/symmetria_ide/app.py` "Embedded browser pool".
 - Solves the escape problem for *manual* browsing already.
 
-**Stage 2 — agent control via IDE-hosted MCP (SHIPPED 2026-06-16):**
+**Stage 2 — agent control via IDE-hosted MCP (SHIPPED 2026-06-16; the six driving tools + `browser_automation.py` were SUPERSEDED by Stage 4 below — this records the original design):**
 
 - The IDE serves browser tools over local streamable-HTTP (`FastMCP` + uvicorn in a daemon thread, ephemeral port): `browser_navigate`/`eval_js`/`snapshot`/`click`/`fill`/`list_windows`. `eval_js` is the general primitive; `snapshot` tags interactive elements with a `data-sym-ref` that `click`/`fill` address (a v1 interactive-elements snapshot; a full a11y tree is a later refinement).
 - Spawned agents auto-discover it via per-harness `--mcp-config` injection in `agent_harness.py` (claude; opencode's per-launch path is still open). Automation drives the `WebEngineView` via `runJavaScript`, delivered QML-side (the view isn't Python-drivable) and marshaled ONTO the GUI thread by `BrowserMcpBridge` (the inverse of gotcha #1).
 - Modules: `browser_automation.py` (2a, the delivery substrate), `browser_mcp.py` (2b, the server + bridge), `agent_harness.py` (2c, injection). Non-fatal if `python-mcp` is absent or `SYMMETRIA_IDE_BROWSER_MCP=0`.
 
 **Checkpoint (Stage 2) — MET:** a real MCP client drives `eval_js`/`navigate`/`list_windows` against a live embedded window end-to-end, with zero external Chromium. Deferred: agent-pane↔browser shared state (screenshots into agent history) and a full a11y-tree snapshot.
+
+**Stage 4 — full feature parity via off-the-shelf chrome-devtools-mcp (SHIPPED 2026-06-18):**
+
+- Replaces the six Stage-2 driving tools with Google's `chrome-devtools-mcp` (screenshots, network, console, performance traces, Lighthouse, a11y snapshots) pointed at the embedded view's CDP endpoint — `app.run()` enables it via `QTWEBENGINE_REMOTE_DEBUGGING=<ephemeral port>` before `QtWebEngineQuick.initialize()`; QtWebEngine *is* Chromium, so this keeps containment (no escaped window). Injected per claude agent in `browser_mcp.agent_config_path` alongside our http entry (needs `node`/`npx`).
+- **Hybrid, not replacement:** the IDE keeps `browser_open` (visible-window allocation, returns `{window,url,title}`) + `browser_list_windows` (url↔window correlation) because chrome-devtools-mcp can't allocate a pooled `WebEngineView` (`Target.createTarget` is unsupported on QtWebEngine). RETIRED: `browser_navigate`/`eval_js`/`perf`/`snapshot`/`click`/`fill`, `browser_automation.py`, the `BrowserMcpBridge` op-path, `_resolve_browser_window`.
+- Stage-3 ownership glyph + click-jump preserved; the in-flight pulse is deferred (a future IDE-owned CDP monitor re-activates `_record_browser_attribution`).
+- **Authoritative record + caveats (occlusion stalls render-dependent ops; use a Puppeteer-based MCP, not Playwright): CLAUDE.md "The browser panes" Stage 4** and `.claude/memory/reference/qt-pyside/qtwebengine_cdp_devtools_mcp.md`.
+
+**Checkpoint (Stage 4) — MET:** a real `chrome-devtools-mcp` drove the embedded view end-to-end (select_page-by-url correlation, navigate, 377 KB screenshot on a visible page); `new_page` fails cleanly so agents can't create invisible un-pooled pages.
 
 ## Far future
 

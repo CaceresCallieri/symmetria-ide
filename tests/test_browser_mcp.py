@@ -139,6 +139,10 @@ def test_agent_config_path_injects_chrome_devtools_when_cdp_enabled(
 
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
     monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
+    # Force npx "present" so the test is deterministic regardless of the host.
+    monkeypatch.setattr(
+        "symmetria_ide.browser_mcp.shutil.which", lambda _: "/usr/bin/npx"
+    )
     server = _server()
     server._port = 23456
     with open(server.agent_config_path("1234_2")) as handle:
@@ -162,6 +166,21 @@ def test_agent_config_path_omits_chrome_devtools_without_cdp(tmp_path, monkeypat
         config = json.load(handle)
     assert "chrome-devtools" not in config["mcpServers"]
     assert SERVER_NAME in config["mcpServers"]
+
+
+def test_agent_config_path_omits_chrome_devtools_without_npx(tmp_path, monkeypatch):
+    """CDP is live but node/npx is missing → omit the chrome-devtools entry so
+    the agent cleanly falls back to the two window tools (a broken stdio server
+    would otherwise just fail at the agent's MCP client)."""
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
+    monkeypatch.setattr("symmetria_ide.browser_mcp.shutil.which", lambda _: None)
+    server = _server()
+    server._port = 23456
+    with open(server.agent_config_path("1234_2")) as handle:
+        config = json.load(handle)
+    assert "chrome-devtools" not in config["mcpServers"]
+    assert SERVER_NAME in config["mcpServers"]  # window tools still present
 
 
 def test_agent_config_path_empty_without_port_or_id(tmp_path, monkeypatch):

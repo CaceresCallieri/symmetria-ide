@@ -383,10 +383,12 @@ class AppController(QObject):
     focusedBrowserChanged = Signal()
     focusBrowserRequested = Signal(int)
     # Agent ↔ browser links — which agent owns/drives which browser window.
-    # Drives the browser glyph on the AgentTopBar chips (ownership → visible,
-    # in-flight op → pulse). Populated by _record_browser_attribution from the
-    # browser MCP bridge's per-call attribution; one notify covers both the
-    # ownership counts and the activity flags the chips bind.
+    # Drives the browser glyph on the AgentTopBar chips. The ownership counts
+    # (glyph visible) are populated by _claim_browser_window in
+    # _open_browser_for_mcp; the activity flags (glyph pulse) are DORMANT since
+    # the chrome-devtools-mcp migration — nothing calls _record_browser_attribution
+    # now (page driving bypasses our bridge), so agentBrowserActive stays all-False
+    # until a future CDP monitor re-activates the hook. One notify covers both.
     agentBrowserChanged = Signal()
     # Bridge-mediated STT injection into an agent pane: (slot, text,
     # submit, request_id). Python cannot drive QMLTermSession (KSession is
@@ -2082,8 +2084,11 @@ class AppController(QObject):
     @Property("QVariantList", notify=agentBrowserChanged)
     def agentBrowserActive(self) -> list:
         """Per-slot 'a browser op is in flight' flag, indexed `slot - 1` →
-        drives the chip glyph's pulse. True while the agent's in-flight op
-        counter is >0 (set on op start, cleared on op result/timeout)."""
+        drives the chip glyph's pulse. DORMANT since the chrome-devtools-mcp
+        migration: nothing sets the counter anymore (the op-path that did was
+        retired — driving flows agent→chrome-devtools-mcp→CDP, bypassing our
+        bridge), so this is permanently all-False in production. Kept as the
+        hook a future CDP monitor re-activates (see _record_browser_attribution)."""
         return [
             self._agent_browser_active.get(slot, 0) > 0
             for slot in range(1, self._MAX_INSTANCES + 1)
@@ -2698,8 +2703,10 @@ class AppController(QObject):
 
         `agent_id` (from the X-Symmetria-Agent header) claims OWNERSHIP of the
         new window for the spawning agent, so its chip shows the browser glyph
-        and a click jumps here. Opening claims ownership WITHOUT a pulse (no
-        in-flight op yet) — the agent's first navigate is what pulses the glyph.
+        and a click jumps here. Ownership is claimed WITHOUT a pulse — since
+        the chrome-devtools-mcp migration the in-flight pulse is DORMANT (page
+        driving bypasses our bridge; see `_record_browser_attribution`), so the
+        glyph is static until a future CDP monitor re-activates it.
         """
         before = len(self._browser_order)
         self.open_browser(url or "about:blank")

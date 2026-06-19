@@ -358,6 +358,13 @@ def test_open_browser_for_mcp_pool_full(controller):
 # Agent ↔ browser attribution (Stage 3) — the chip browser glyph's data.
 # `<our_pid>_<slot>` ids map to a chip slot; the count/active lists are
 # indexed slot-1 (agent slot 2 → index 1), mirroring agentTitles.
+#
+# NB: these call _record_browser_attribution DIRECTLY. Since the Stage-4
+# chrome-devtools-mcp migration nothing in production calls it (page driving
+# bypasses our bridge), so the PULSE path exercised here is a deliberately
+# DORMANT hook — kept (and tested) for the future CDP monitor that re-activates
+# it. The OWNERSHIP path (glyph visibility, click-jump) IS live via
+# _open_browser_for_mcp → _claim_browser_window.
 # ---------------------------------------------------------------------------
 
 

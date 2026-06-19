@@ -43,6 +43,7 @@ import glob
 import json
 import logging
 import os
+import shutil
 import socket
 import tempfile
 import threading
@@ -364,7 +365,7 @@ class BrowserMcpServer:
         # drives them by select_page. Omitted when CDP is disabled (then the
         # agent just gets our two window tools). See CLAUDE.md "The browser panes".
         cdp_port = os.environ.get("QTWEBENGINE_REMOTE_DEBUGGING", "")
-        if cdp_port:
+        if cdp_port and shutil.which("npx"):
             config["mcpServers"]["chrome-devtools"] = {
                 "command": "npx",
                 "args": [
@@ -374,6 +375,16 @@ class BrowserMcpServer:
                     f"http://127.0.0.1:{cdp_port}",
                 ],
             }
+        elif cdp_port:
+            # CDP is live but node/npx is missing: omit the entry so the agent
+            # cleanly gets only our two window tools (a broken stdio server
+            # would otherwise just fail at the agent's MCP client). Warn so the
+            # missing dep is visible rather than a silent capability loss.
+            log.warning(
+                "npx not on PATH — agent %s gets no chrome-devtools-mcp browser "
+                "tools (only browser_open/browser_list_windows); install node",
+                agent_id,
+            )
         # agent_id is already "<pid>_<slot>", so the file is
         # <prefix><pid>_<slot>.json — leading-pid-parseable by the reaper.
         path = os.path.join(tempfile.gettempdir(), f"{_CONFIG_PREFIX}{agent_id}.json")
