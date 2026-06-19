@@ -121,7 +121,15 @@ def test_jump_to_agent_browser_noop_when_no_agent_focused(controller):
 
 def test_jump_to_agent_browser_returns_to_terminal_when_on_browser(controller):
     """Already on the browser surface → home to the terminal (the keyboard way
-    back out; same asymmetry as the other surface chords)."""
+    back out; same asymmetry as the other surface chords).
+
+    The focused agent ALSO owns a window here, so this pins the branch ORDER:
+    the early-return on "already on browser" must win over the "owns a window →
+    jump" branch (a reordering of the checks would otherwise re-jump and never
+    leave the surface)."""
+    aid = f"{os.getpid()}_1"
+    controller._open_browser_for_mcp("https://x.com", aid)  # agent 1 owns a window
+    controller._focused_term_agent = 1
     controller.set_central_surface("browser")
     controller.jump_to_focused_agent_browser()
     assert controller.centralSurface == "terminal"
@@ -673,6 +681,24 @@ def test_closing_last_window_clears_attention(controller):
     assert controller.agentBrowserAttention[0] is True
 
     controller.close_browser(1)
+    assert controller.agentBrowserAttention[0] is False
+
+
+def test_attention_persists_until_agents_last_window_closes(controller):
+    """With an agent owning TWO windows, closing the first KEEPS attention (the
+    `not owned` guard in _drop_browser_window_links only clears on the agent's
+    LAST window); closing the second finally clears it."""
+    aid = f"{os.getpid()}_1"
+    controller._open_browser_for_mcp("https://a.com", aid)  # window slot 1
+    controller._open_browser_for_mcp("https://b.com", aid)  # window slot 2
+    controller._set_browser_attention_for_mcp(aid, "look")
+    assert controller.agentBrowserCount[0] == 2
+    assert controller.agentBrowserAttention[0] is True
+
+    controller.close_browser(1)  # still owns window 2 → attention stays
+    assert controller.agentBrowserAttention[0] is True
+
+    controller.close_browser(2)  # last window gone → attention cleared
     assert controller.agentBrowserAttention[0] is False
 
 

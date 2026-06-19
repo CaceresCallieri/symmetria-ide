@@ -2461,6 +2461,16 @@ class AppController(QObject):
         also owns it (co-driven windows — two agents driving the same window
         both link it; keep it for the survivor). Iterate a copy: close_browser
         mutates _agent_browser_windows via _drop_browser_window_links.
+
+        Surface side-effect (intentional, inherited from close_browser): if the
+        user is ON the browser surface viewing the very window a dying agent
+        solely owned, close_browser falls back to the terminal — the same
+        landing as a manual last-window close. That is NOT the notify-don't-yank
+        rule being violated (that rule is about an agent OPENING a window); here
+        the window the user was looking at no longer exists, so terminal is the
+        only sensible home. A background agent dying while you view a DIFFERENT
+        window doesn't touch your surface (close_browser only refocuses when the
+        closed slot WAS the focused one).
         """
         for browser_slot in list(self._agent_browser_windows.get(agent_slot, ())):
             shared = any(

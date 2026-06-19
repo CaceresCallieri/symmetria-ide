@@ -2,7 +2,9 @@
 
 Exposes the embedded browser's WINDOW MANAGEMENT to spawned agents as MCP
 tools over local streamable-HTTP — `browser_open` (allocate a visible pooled
-WebEngineView) and `browser_list_windows` (the url↔window correlation table).
+WebEngineView), `browser_list_windows` (the url↔window correlation table), and
+`browser_request_attention` (light the notification dot on the agent's chip
+globe so the user knows to come look).
 Page DRIVING (navigate, eval, screenshot, network, console, performance) is
 delegated to the off-the-shelf chrome-devtools-mcp, injected per-agent and
 pointed at the embedded view's CDP endpoint (see agent_config_path +
@@ -146,12 +148,13 @@ class BrowserMcpBridge(QObject):
 
     `read()` is awaited from the uvicorn asyncio thread; the queued signal
     delivers to `_run_read` on the GUI thread (this QObject is created on the
-    GUI thread) where the controller pool state lives. Reads resolve
-    synchronously. The only tools left on our server — browser_open and
-    browser_list_windows — are GUI-thread reads; page DRIVING (navigate, eval,
-    screenshot, …) is delegated to chrome-devtools-mcp over the embedded CDP
-    endpoint, so the former automation op-path (BrowserAutomation +
-    runJavaScript) is gone.
+    GUI thread) where the controller pool state lives, and resolves
+    synchronously. The name is "read", but the fn is any GUI-thread closure:
+    browser_open and browser_list_windows read pool state, while
+    browser_request_attention WRITES it (sets the attention dot) — all three
+    marshal through here identically. Page DRIVING (navigate, eval, screenshot,
+    …) is delegated to chrome-devtools-mcp over the embedded CDP endpoint, so
+    the former automation op-path (BrowserAutomation + runJavaScript) is gone.
     """
 
     # fn(object), future(object) — queued to the GUI thread.
