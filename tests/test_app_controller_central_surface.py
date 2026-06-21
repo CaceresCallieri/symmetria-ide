@@ -197,9 +197,12 @@ def test_toggle_from_terminal_lands_on_editor(controller):
 
 
 def test_toggle_from_editor_returns_to_terminal(controller):
-    """Pressing the toggle while on the editor returns to terminal.
-    This is the 'flip' half of the toggle's contract."""
-    controller.swap_to_editor()  # precondition: start on editor
+    """Pressing the toggle while on the editor returns to the PREVIOUS surface
+    — terminal here, because that's where we came from (swap_to_editor from the
+    default terminal). The common single-step case of the swap-last-two model;
+    test_editor_toggle_returns_to_previous_non_terminal covers the case where
+    'back' is NOT the terminal."""
+    controller.swap_to_editor()  # precondition: start on editor (from terminal)
     emissions = _capture(controller.centralSurfaceChanged)
 
     controller.toggle_editor_terminal()
@@ -223,6 +226,102 @@ def test_toggle_round_trip_emits_each_time(controller):
 
     assert controller.centralSurface == "editor"
     assert len(emissions) == 3
+
+
+# ---------------------------------------------------------------------------
+# Surface back-navigation — single previous-pointer (swap-last-two / alt-tab).
+#
+# A surface chord pressed while already on its named surface returns to the
+# surface you CAME FROM (`_previous_surface`), not a hard-coded terminal. The
+# pointer is recorded at the one funnel `set_central_surface`, so it tracks
+# every transition regardless of which chord/auto-switch caused it.
+# ---------------------------------------------------------------------------
+
+
+def test_previous_surface_starts_none(controller):
+    """No history before the first transition — back-target falls back to the
+    terminal home base in that case (see _surface_back_target)."""
+    assert controller._previous_surface is None
+    assert controller._surface_back_target() == "terminal"
+
+
+def test_set_central_surface_records_previous(controller):
+    """The funnel records where we came from BEFORE updating — that's what
+    every back-toggle reads. One place to track, so history is correct no
+    matter how the surface was reached."""
+    controller.set_central_surface("editor")
+    assert controller._previous_surface == "terminal"
+    controller.set_central_surface("git")
+    assert controller._previous_surface == "editor"
+
+
+def test_noop_transition_does_not_pollute_history(controller):
+    """Re-selecting the current surface is a no-op (returns before recording),
+    so a spurious repeat press can't overwrite the real previous pointer."""
+    controller.set_central_surface("editor")  # prev = terminal
+    controller.set_central_surface("editor")  # no-op
+    assert controller._previous_surface == "terminal"
+
+
+def test_editor_toggle_returns_to_previous_non_terminal(controller):
+    """The headline behavior: Ctrl+Shift+E pressed on the editor returns to the
+    PREVIOUS surface (git here), not the terminal. This is the whole point of
+    the feature — the chord no longer always dumps you on the terminal."""
+    controller.toggle_git_history()  # terminal → git (forward)
+    controller.toggle_editor_terminal()  # git → editor (forward)
+    controller.toggle_editor_terminal()  # editor → BACK to git, not terminal
+    assert controller.centralSurface == "git"
+
+
+def test_git_toggle_returns_to_previous_non_terminal(controller):
+    """Symmetric to the editor case: Ctrl+Shift+G on the git surface returns to
+    the previous surface (editor here), not the terminal."""
+    controller.toggle_editor_terminal()  # terminal → editor (forward)
+    controller.toggle_git_history()  # editor → git (forward)
+    controller.toggle_git_history()  # git → BACK to editor, not terminal
+    assert controller.centralSurface == "editor"
+
+
+def test_terminal_home_forward_lands_on_terminal(controller):
+    """Ctrl+Shift+T from any other surface still goes to the terminal (the
+    home base's forward direction is unchanged)."""
+    controller.toggle_editor_terminal()  # terminal → editor
+    controller.toggle_terminal_home()  # editor → terminal (forward)
+    assert controller.centralSurface == "terminal"
+
+
+def test_terminal_home_toggles_back_to_previous(controller):
+    """Per the user's choice, Ctrl+Shift+T ALSO gained back-on-repeat: pressed
+    while already on the terminal it returns to the previous surface, so the
+    terminal is no longer a privileged forced-fallback."""
+    controller.toggle_editor_terminal()  # terminal → editor (prev = terminal)
+    controller.toggle_terminal_home()  # editor → terminal (prev = editor)
+    controller.toggle_terminal_home()  # terminal → BACK to editor
+    assert controller.centralSurface == "editor"
+
+
+def test_swap_last_two_ping_pong(controller):
+    """Single-pointer semantics: with editor + git as the two most-recent
+    surfaces, each back-press swaps between them (vim Ctrl-^ / alt-tab),
+    rather than unwinding a deeper trail."""
+    controller.toggle_editor_terminal()  # terminal → editor
+    controller.toggle_git_history()  # editor → git
+    controller.toggle_git_history()  # git → editor (back)
+    assert controller.centralSurface == "editor"
+    controller.toggle_editor_terminal()  # editor → git (back)
+    assert controller.centralSurface == "git"
+    controller.toggle_git_history()  # git → editor (back)
+    assert controller.centralSurface == "editor"
+
+
+def test_agent_surface_is_a_valid_back_target(controller):
+    """Agents are special only for their OWN chord (Ctrl+Shift+A opens the
+    spawn menu). The agent surface still participates as a back DESTINATION:
+    arriving at git from the agent surface, Ctrl+Shift+G returns to agent."""
+    controller.set_central_surface("agent")  # terminal → agent
+    controller.toggle_git_history()  # agent → git (forward)
+    controller.toggle_git_history()  # git → BACK to agent
+    assert controller.centralSurface == "agent"
 
 
 # ---------------------------------------------------------------------------

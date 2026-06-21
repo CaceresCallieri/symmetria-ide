@@ -37,30 +37,26 @@ def test_editor_terminal_toggle_chord_exists(main_qml: str):
     `toggle_editor_terminal` slot, bound at QApplicationShortcut scope
     so it wins over NvimView's keyboard capture even in insert mode.
 
-    Distinct from the direct Ctrl+Shift+T "home to terminal" jump
-    (see test_direct_terminal_chord_present): E is the binary
-    editor↔terminal flip, T is the unconditional one-way return.
+    Both E and T are now swap-last-two toggles (forward to their named
+    surface, back to where you came from); they differ only in which
+    surface they name (see test_direct_terminal_chord_present for T).
     """
     assert "Ctrl+Shift+E" in main_qml
     assert "controller.toggle_editor_terminal()" in main_qml
 
 
 def test_direct_terminal_chord_present(main_qml: str):
-    """Ctrl+Shift+T must be a direct "home to terminal" jump, calling
-    `swap_to_terminal` (a one-way, idempotent landing — NOT a toggle).
+    """Ctrl+Shift+T must call `toggle_terminal_home` — a toggle, not a
+    one-way jump. Forward (from any other surface) → terminal; pressed
+    while already on the terminal → BACK to the previous surface.
 
-    The terminal is the IDE's home base: every surface toggle (E/G,
-    Ctrl+E) returns here as its "off" direction, but the terminal
-    itself lacked a direct chord, so reaching it from a non-toggle
-    surface (e.g. the agent pane) took two presses. This chord restores
-    the symmetry — every central surface now has a direct entry point.
-
-    (Ctrl+Shift+T shipped once for the binary editor/terminal swap and
-    was retired there as redundant; re-added 2026-06-16 now that the
-    multi-surface world makes a direct terminal chord non-redundant.
-    Scope the wiring assertion to the chord BLOCK so the bare
-    `swap_to_terminal` substring — which legitimately appears in toggle
-    slots — can't false-positive.)
+    The terminal is the home base but no longer a privileged forced
+    fallback: every surface chord (E/T/G/B) now swaps between your two
+    most-recent surfaces (single previous-pointer; vim Ctrl-^ semantics).
+    `swap_to_terminal` survives as the one-way "go home, no bounce"
+    primitive for file-open/tests, so scope the wiring assertion to the
+    chord BLOCK — the bare `toggle_terminal_home` substring is unique, but
+    block-scoping keeps the assertion robust to future edits.
     """
     chord_idx = main_qml.find('sequences: ["Ctrl+Shift+T"]')
     assert chord_idx >= 0, "Ctrl+Shift+T Shortcut block not found in Main.qml"
@@ -73,7 +69,7 @@ def test_direct_terminal_chord_present(main_qml: str):
     shortcut_decl = main_qml.rfind("Shortcut", 0, chord_idx)
     assert shortcut_decl >= 0
     chord_block = _extract_braced_body(main_qml, shortcut_decl)
-    assert "controller.swap_to_terminal()" in chord_block
+    assert "controller.toggle_terminal_home()" in chord_block
     assert "Qt.ApplicationShortcut" in chord_block
 
 

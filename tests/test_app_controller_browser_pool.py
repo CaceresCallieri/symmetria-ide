@@ -119,9 +119,11 @@ def test_jump_to_agent_browser_noop_when_no_agent_focused(controller):
     assert controller.centralSurface == "editor"
 
 
-def test_jump_to_agent_browser_returns_to_terminal_when_on_browser(controller):
-    """Already on the browser surface → home to the terminal (the keyboard way
-    back out; same asymmetry as the other surface chords).
+def test_jump_to_agent_browser_returns_to_previous_when_on_browser(controller):
+    """Already on the browser surface → BACK to the surface you came from
+    (_surface_back_target), not hard-coded terminal. Here we arrive at the
+    browser FROM the agent surface, so the chord returns to "agent" — the
+    swap-last-two shape shared by every surface chord.
 
     The focused agent ALSO owns a window here, so this pins the branch ORDER:
     the early-return on "already on browser" must win over the "owns a window →
@@ -130,9 +132,10 @@ def test_jump_to_agent_browser_returns_to_terminal_when_on_browser(controller):
     aid = f"{os.getpid()}_1"
     controller._open_browser_for_mcp("https://x.com", aid)  # agent 1 owns a window
     controller._focused_term_agent = 1
-    controller.set_central_surface("browser")
+    controller.set_central_surface("agent")  # came from the agent surface...
+    controller.set_central_surface("browser")  # ...then onto the browser
     controller.jump_to_focused_agent_browser()
-    assert controller.centralSurface == "terminal"
+    assert controller.centralSurface == "agent"
 
 
 # ---------------------------------------------------------------------------

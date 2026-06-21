@@ -114,43 +114,39 @@ Window {
     // Ctrl+Shift+T (→ terminal) + Ctrl+Shift+E (→ editor) under the
     // "each IDE concept is its own chord" precedent, but day-to-day
     // ergonomics didn't bear out two distinct chords for a binary swap.
-    // Now: Ctrl+Shift+E flips between editor and terminal — pressing from
-    // a non-editor surface lands you on the editor; pressing from the
-    // editor returns you to the terminal. See
-    // AppController.toggle_editor_terminal for the asymmetry rationale
-    // (chord names the editor, so non-editor → editor is the dominant
-    // direction). (Ctrl+Shift+T was later re-added as a one-way "home to
-    // terminal" jump — see its block just below — once the multi-surface
-    // world made a direct terminal chord non-redundant.)
+    // Now: Ctrl+Shift+E flips between the editor and where you came from —
+    // pressing from a non-editor surface lands you on the editor; pressing
+    // from the editor returns you BACK to your previous surface (not
+    // hard-coded terminal). See AppController.toggle_editor_terminal for the
+    // swap-last-two rationale (chord names the editor, so non-editor → editor
+    // is the forward direction; editor → back is the return). Every surface
+    // chord (E/T/G/B) shares this shape now — see toggle_terminal_home below.
     Shortcut {
         sequences: ["Ctrl+Shift+E"]
         context: Qt.ApplicationShortcut
         onActivated: controller.toggle_editor_terminal()
     }
 
-    // Direct "home to terminal" chord. Unlike the toggles above, this is a
-    // one-way jump, not a flip: it ALWAYS lands you on the terminal and
-    // no-ops if you're already there (swap_to_terminal is idempotent). The
-    // terminal is the IDE's home base — the editor↔terminal and git↔terminal
-    // toggles (Ctrl+Shift+E/G) return here as their "off" direction (the FM
-    // is an overlay, not a terminal-returning toggle) — but the terminal
-    // itself had no direct chord, so reaching it from a non-toggle surface
-    // (e.g. the agent pane) took two presses. This restores the symmetry:
-    // every central surface now has a direct chord. (Ctrl+Shift+T shipped
-    // once for the binary editor/terminal swap and was retired as redundant
-    // there — see the Ctrl+Shift+E comment above; the binary-swap world it
-    // was retired in is gone, so that redundancy rationale no longer holds.)
+    // Terminal chord — 'T' names the terminal home base. Now a toggle like
+    // the others: pressing from any other surface → terminal; pressing while
+    // already on the terminal → BACK to the surface you came from
+    // (toggle_terminal_home → _surface_back_target). The terminal is no longer
+    // a privileged forced-fallback — every surface chord swaps between your
+    // two most-recent surfaces (single previous-pointer; vim Ctrl-^ / alt-tab
+    // semantics). swap_to_terminal stays the one-way "go home, no bounce"
+    // primitive for callers (file-open, tests) that need it.
     Shortcut {
         sequences: ["Ctrl+Shift+T"]
         context: Qt.ApplicationShortcut
-        onActivated: controller.swap_to_terminal()
+        onActivated: controller.toggle_terminal_home()
     }
 
     // Git-history viewer toggle. 'G' names the history surface, so this
     // always lands you there unless you were already on it, in which case
-    // it returns you to the terminal (same asymmetry as Ctrl+Shift+E). The
-    // viewer is the read-only comprehension surface for catching up on
-    // agent-authored commits — see qml/githistory/.
+    // it returns you BACK to the surface you came from (not hard-coded
+    // terminal — same swap-last-two shape as Ctrl+Shift+E/T). The viewer is
+    // the read-only comprehension surface for catching up on agent-authored
+    // commits — see qml/githistory/.
     Shortcut {
         sequences: ["Ctrl+Shift+G"]
         context: Qt.ApplicationShortcut
@@ -162,8 +158,9 @@ Window {
     // agent does). The keyboard twin of clicking an agent chip's globe. The
     // browser is agent-owned: there is no standalone browser tab anymore, so
     // you reach it only through the agent that owns it. 'B' still names the
-    // browser, and the asymmetry holds: already on the browser surface → back
-    // to the terminal; otherwise jump to the focused agent's newest-owned
+    // browser, and the shape holds: already on the browser surface → BACK to
+    // the surface you came from (usually the owning agent, not hard-coded
+    // terminal); otherwise jump to the focused agent's newest-owned
     // window (clearing its attention dot). If the focused agent owns no window,
     // it's a no-op (agent-only reachability — see jump_to_focused_agent_browser).
     // The pool is QtWebEngine views embedded so they never escape into a

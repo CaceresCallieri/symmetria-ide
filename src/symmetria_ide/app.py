@@ -481,6 +481,15 @@ class AppController(QObject):
         # Per Q2-d topology decision: terminal is the persistent home
         # surface, the editor is summoned over it. First-launch = terminal.
         self._central_surface: str = "terminal"
+        # Surface back-navigation (single previous-pointer). Records the
+        # surface that was central immediately BEFORE the current one, so a
+        # surface chord pressed while already on its named surface returns
+        # "back" to where you came from instead of hard-coding the terminal.
+        # Updated at the single funnel `set_central_surface` on every real
+        # transition; consumed by `_surface_back_target`. One pointer (not a
+        # stack) gives alt-tab / vim Ctrl-^ semantics: back-press swaps the
+        # two most-recent surfaces. `None` until the first surface change.
+        self._previous_surface: str | None = None
         self._status = StatusBarState(self)
         self._capsules = CapsuleModel(self)
         self._cmdline = CmdlineState(self)
@@ -1978,21 +1987,61 @@ class AppController(QObject):
             return
         if self._central_surface == surface:
             return
+        # Record where we came from BEFORE updating, so back-navigation
+        # (`_surface_back_target`) follows the user's real trail. This is the
+        # one place every transition passes through — chord toggles, the
+        # focus_agent/open_browser auto-switches, the top-bar switcher, and
+        # file-open all funnel here — so history stays correct regardless of
+        # how a surface was reached. No-op transitions return above, so the
+        # pointer never records a self-loop.
+        self._previous_surface = self._central_surface
         self._central_surface = surface
         self.centralSurfaceChanged.emit()
+
+    def _surface_back_target(self) -> str:
+        """Where a surface chord returns to when pressed on its own surface.
+
+        The surface we came from (`_previous_surface`), falling back to the
+        terminal home base when there's no recorded history yet (fresh launch)
+        or — defensively — when it would be a self-return. Replaces the old
+        hard-coded "return to terminal" that the editor/git/browser/terminal
+        toggles each duplicated, so back-navigation follows the user's actual
+        trail instead of always dumping them on the terminal.
+        """
+        prev = self._previous_surface
+        if prev and prev != self._central_surface:
+            return prev
+        return "terminal"
 
     @Slot()
     def swap_to_terminal(self) -> None:
         """Make the terminal pane the visible central surface.
 
         Idempotent: if terminal is already visible, no signal fires.
-        Called by `toggle_editor_terminal`/`toggle_git_history` as their
-        "off" direction, and bound directly to `Ctrl+Shift+T` as the
-        "home to terminal" chord (a one-way jump, not a toggle — the
-        terminal is the IDE's home base, so reaching it should be
-        unconditional from any surface).
+        The pure "go to terminal" primitive — used as the forward direction
+        of `toggle_terminal_home` and callable from internal slots/tests.
+        (No longer the hard-coded "off" direction of the editor/git toggles;
+        those now go `_surface_back_target` so they follow the user's trail.)
         """
         self.set_central_surface("terminal")
+
+    @Slot()
+    def toggle_terminal_home(self) -> None:
+        """Flip between the terminal and the surface you came from.
+
+        Bound to `Ctrl+Shift+T`. Pressing from any other surface → terminal
+        (the home base). Pressing while already on the terminal → **back** to
+        your previous surface (`_surface_back_target`). Same swap-last-two
+        shape as `toggle_editor_terminal` / `toggle_git_history`: every
+        surface chord is now symmetric — forward to its named surface, back to
+        where you came from — so the terminal is no longer a privileged
+        forced-fallback. `swap_to_terminal` stays the one-way primitive for
+        callers (file-open, tests) that genuinely want "go home, no bounce".
+        """
+        if self._central_surface == "terminal":
+            self.set_central_surface(self._surface_back_target())
+        else:
+            self.swap_to_terminal()
 
     @Slot()
     def swap_to_editor(self) -> None:
@@ -2009,21 +2058,20 @@ class AppController(QObject):
     def toggle_editor_terminal(self) -> None:
         """Flip the central surface between editor and terminal.
 
-        Bound to `Ctrl+Shift+E` in Main.qml. Pressing from editor →
-        terminal; pressing from any other surface (terminal today, a
-        hypothetical tertiary central surface tomorrow) → editor. The
-        asymmetry is intentional: 'E' names the editor, so the chord
-        always lands you on the editor unless you were already there.
+        Bound to `Ctrl+Shift+E` in Main.qml. Pressing from any other
+        surface → editor ('E' names the editor, so the chord always
+        lands you there unless you were already on it). Pressing from
+        the editor → **back** to the surface you came from
+        (`_surface_back_target`), not hard-coded terminal — so the chord
+        is a true swap between your two most-recent surfaces.
 
-        Always emits exactly one `centralSurfaceChanged`; never a noop
-        from the user's perspective. Composes the existing
-        `swap_to_editor` / `swap_to_terminal` primitives rather than
-        mutating state directly so any future invariants (logging,
-        focus side-effects, session bookkeeping) added to those slots
-        are honored by the toggle as well.
+        Composes the `swap_to_editor` primitive and the generic
+        `set_central_surface` funnel rather than mutating state directly,
+        so any future invariants (logging, focus side-effects, session
+        bookkeeping) added there are honored by the toggle as well.
         """
         if self._central_surface == "editor":
-            self.swap_to_terminal()
+            self.set_central_surface(self._surface_back_target())
         else:
             self.swap_to_editor()
 
@@ -2036,13 +2084,14 @@ class AppController(QObject):
     def toggle_git_history(self) -> None:
         """Flip the central surface between the git viewer and the terminal.
 
-        Bound to `Ctrl+Shift+G`. Same asymmetry as `toggle_editor_terminal`:
+        Bound to `Ctrl+Shift+G`. Same shape as `toggle_editor_terminal`:
         'G' names the history viewer, so the chord always lands you there
-        unless you were already on it, in which case it returns you to the
-        terminal. Always emits exactly one `centralSurfaceChanged`.
+        unless you were already on it, in which case it returns you **back**
+        to the surface you came from (`_surface_back_target`), not hard-coded
+        terminal.
         """
         if self._central_surface == "git":
-            self.swap_to_terminal()
+            self.set_central_surface(self._surface_back_target())
         else:
             self.swap_to_git()
 
@@ -2057,8 +2106,10 @@ class AppController(QObject):
         entry point now that the standalone browser tab is gone and the browser
         is reached only through its owning agent:
 
-        - Already on the browser surface → return home to the terminal (the
-          keyboard way back out; same asymmetry as the other surface chords).
+        - Already on the browser surface → return **back** to the surface you
+          came from (`_surface_back_target`, not hard-coded terminal — same
+          swap-last-two shape as the other surface chords; since you reach the
+          browser through an agent, "back" is usually that agent surface).
         - Else, if the focused agent owns ≥1 browser window → jump to its
           newest-driven one (and clear its attention dot, via
           focus_agent_browser).
@@ -2067,7 +2118,7 @@ class AppController(QObject):
           nowhere to jump). Logged so the dead press is explainable.
         """
         if self._central_surface == "browser":
-            self.swap_to_terminal()
+            self.set_central_surface(self._surface_back_target())
             return
         slot = self._focused_term_agent
         if slot and self._agent_browser_windows.get(slot):
