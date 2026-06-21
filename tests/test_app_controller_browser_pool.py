@@ -132,6 +132,7 @@ def test_jump_to_agent_browser_returns_to_previous_when_on_browser(controller):
     aid = f"{os.getpid()}_1"
     controller._open_browser_for_mcp("https://x.com", aid)  # agent 1 owns a window
     controller._focused_term_agent = 1
+    controller._agent_order.append(1)  # agent 1 is live → agent surface navigable
     controller.set_central_surface("agent")  # came from the agent surface...
     controller.set_central_surface("browser")  # ...then onto the browser
     controller.jump_to_focused_agent_browser()

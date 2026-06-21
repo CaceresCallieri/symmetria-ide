@@ -1,11 +1,16 @@
 """Tests for the Phase 2.5 central-surface state machine on AppController.
 
-Covers the swap-state machine introduced in PR 4:
+Covers the swap-state machine introduced in PR 4 (plus the swap-last-two
+back-navigation added later):
 
-- `_central_surface` is the source of truth ("terminal" | "editor").
+- `_central_surface` is the source of truth
+  ("terminal" | "editor" | "agent" | "git" | "browser").
 - `centralSurface`, `editorVisible`, `terminalVisible` are derived
   `@Property` over the same notify signal — they can never drift.
 - `swap_to_*` slots are idempotent (no spurious signal on repeat).
+- `_previous_surface` + `_surface_back_target` drive back-navigation:
+  a surface chord pressed on its own surface returns to where you came
+  from, falling back to terminal when that surface is gone/emptied.
 - `focus_terminal` emits `focusTerminalRequested` for QML to handle.
 - `start()` pre-warms the terminal backend AFTER nvim, per the Q1-1b
   pattern.
@@ -317,11 +322,58 @@ def test_swap_last_two_ping_pong(controller):
 def test_agent_surface_is_a_valid_back_target(controller):
     """Agents are special only for their OWN chord (Ctrl+Shift+A opens the
     spawn menu). The agent surface still participates as a back DESTINATION:
-    arriving at git from the agent surface, Ctrl+Shift+G returns to agent."""
+    arriving at git from the agent surface, Ctrl+Shift+G returns to agent.
+
+    A live agent is required for the surface to be navigable (an empty agent
+    pool is rejected by _surface_is_navigable — see the emptied-pool tests
+    below), so seed one directly into the pool list."""
+    controller._agent_order.append(1)  # one agent is live → surface navigable
     controller.set_central_surface("agent")  # terminal → agent
     controller.toggle_git_history()  # agent → git (forward)
     controller.toggle_git_history()  # git → BACK to agent
     assert controller.centralSurface == "agent"
+
+
+def test_back_target_skips_emptied_agent_surface(controller):
+    """Regression (seal review of 8c5d4ee): closing the agent the back-pointer
+    names must NOT strand the user on a blank agent surface. You arrive at git
+    from the agent surface (prev="agent"), then the last agent closes — the
+    back-toggle must fall back to the terminal, not the empty agent pane.
+
+    The pool list is mutated directly (no subprocess) because that is exactly
+    what _surface_is_navigable reads — an empty _agent_order IS "the agent the
+    pointer named has since closed"."""
+    controller.set_central_surface("agent")  # terminal → agent
+    controller._agent_order.append(1)  # an agent is live while we're here
+    controller.set_central_surface("git")  # agent → git (prev = "agent")
+    controller._agent_order.clear()  # ...then that agent closes
+    assert controller._surface_back_target() == "terminal"
+    controller.toggle_git_history()  # git → back, NOT the empty agent surface
+    assert controller.centralSurface == "terminal"
+
+
+def test_back_target_skips_emptied_browser_surface(controller):
+    """Browser counterpart of test_back_target_skips_emptied_agent_surface: a
+    back-pointer to the browser surface whose window pool has since emptied
+    falls back to the terminal rather than a blank browser pane."""
+    controller.set_central_surface("browser")  # terminal → browser
+    controller._browser_order.append(1)  # a window is open while we're here
+    controller.set_central_surface("git")  # browser → git (prev = "browser")
+    controller._browser_order.clear()  # ...then the only window closes
+    assert controller._surface_back_target() == "terminal"
+    controller.toggle_git_history()  # git → back, NOT the empty browser surface
+    assert controller.centralSurface == "terminal"
+
+
+def test_emptied_pool_guard_does_not_overfire_while_occupied(controller):
+    """The navigability guard must reject ONLY emptied pools — while the agent
+    pool is still occupied, the back-pointer to the agent surface is honored
+    (a guard that always rejected agent/browser would silently re-break the
+    swap-last-two behavior for those surfaces)."""
+    controller.set_central_surface("agent")
+    controller._agent_order.append(1)
+    controller.set_central_surface("git")  # prev = "agent", pool still occupied
+    assert controller._surface_back_target() == "agent"
 
 
 # ---------------------------------------------------------------------------

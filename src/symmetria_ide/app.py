@@ -2002,16 +2002,38 @@ class AppController(QObject):
         """Where a surface chord returns to when pressed on its own surface.
 
         The surface we came from (`_previous_surface`), falling back to the
-        terminal home base when there's no recorded history yet (fresh launch)
-        or — defensively — when it would be a self-return. Replaces the old
-        hard-coded "return to terminal" that the editor/git/browser/terminal
-        toggles each duplicated, so back-navigation follows the user's actual
-        trail instead of always dumping them on the terminal.
+        terminal home base when there's no recorded history yet (fresh launch),
+        when it would be a self-return, or when the recorded surface is no
+        longer navigable (an agent/browser pool that has since emptied — see
+        `_surface_is_navigable`). Replaces the old hard-coded "return to
+        terminal" that the editor/git/browser/terminal toggles each duplicated,
+        so back-navigation follows the user's actual trail instead of always
+        dumping them on the terminal.
         """
         prev = self._previous_surface
-        if prev and prev != self._central_surface:
+        if prev and prev != self._central_surface and self._surface_is_navigable(prev):
             return prev
         return "terminal"
+
+    def _surface_is_navigable(self, surface: str) -> bool:
+        """True unless `surface` is an agent/browser pool that has since emptied.
+
+        The previous-pointer can name a surface whose backing pool was emptied
+        AFTER we recorded it — e.g. you're on the agent surface, switch to git
+        (`_previous_surface="agent"`), then close the last agent. Returning
+        "back" to an agent/browser surface with no slots is a dead end (a blank
+        pane), so an emptied pool counts as non-navigable and the back-target
+        falls back to the terminal. Centralizing the check here (rather than
+        scrubbing `_previous_surface` in every close handler) covers all close
+        paths — including closing the last agent/window while NOT on its
+        surface, where the close handler's own surface-switch guard doesn't
+        fire. The three singleton surfaces (terminal/editor/git) always exist.
+        """
+        if surface == "agent":
+            return bool(self._agent_order)
+        if surface == "browser":
+            return bool(self._browser_order)
+        return True
 
     @Slot()
     def swap_to_terminal(self) -> None:
@@ -2082,7 +2104,7 @@ class AppController(QObject):
 
     @Slot()
     def toggle_git_history(self) -> None:
-        """Flip the central surface between the git viewer and the terminal.
+        """Flip between the git viewer and the surface you came from.
 
         Bound to `Ctrl+Shift+G`. Same shape as `toggle_editor_terminal`:
         'G' names the history viewer, so the chord always lands you there
