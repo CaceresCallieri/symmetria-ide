@@ -48,6 +48,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Fork changes need makepkg](reference/qt-pyside/fork_changes_need_makepkg.md) — launchers load the pacman qmltermwidget pkg; commit + makepkg -sif after fork edits
 - [ApplicationShortcut masks terminal keys](reference/qt-pyside/applicationshortcut_masks_terminal_keys.md) — chrome Shortcut eats keys before QMLTermWidget; suspect it when a key fails in-IDE but works in Ghostty
 - [QtWebEngine CDP drives chrome-devtools-mcp](reference/qt-pyside/qtwebengine_cdp_devtools_mcp.md) — QTWEBENGINE_REMOTE_DEBUGGING + --browserUrl: all 29 tools work; Puppeteer attaches, Playwright fails #36961
+- [Startup performance](reference/qt-pyside/startup_perf.md) — SYMMETRIA_IDE_TRACE waterfall + interleaved A/B; fixed browser-MCP GUI-thread import (~1s) + eager WebEngine (~430ms)
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
 

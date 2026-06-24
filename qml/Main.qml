@@ -1138,12 +1138,32 @@ Window {
                 // Gated on the same XOR as the other central surfaces;
                 // `browserSurfaceVisible` is derived from
                 // `centralSurface == "browser"`. Ctrl+Shift+B toggles it.
-                BrowserSurface {
-                    id: browserSurface
+                // Deferred until the FIRST browser open (manual Ctrl+T or an
+                // agent's browser_open flips controller.browserEverOpened).
+                // Eager instantiation cost cold start ~430ms — the `import
+                // QtWebEngine` QML module load + the persistent WebEngineProfile
+                // creation — for a surface most launches never touch (measured
+                // via SYMMETRIA_IDE_TRACE: engine.load ~696ms → ~268ms with this
+                // stubbed). The inner view pool is already lazy (per-slot
+                // Loaders), so this only defers the WebEngine SCAFFOLDING.
+                // Activation is synchronous and the latch is set BEFORE the slot
+                // becomes active (AppController.open_browser), so the surface +
+                // its pool exist before focus_browser / the view delegate run.
+                // NOTE: unlike the reverted AgentPane-Loader experiment (a
+                // ~12-25ms component), this defers a ~430ms heavyweight — a
+                // different risk/reward. Re-verified no tree-mount regression on
+                // the bambin repo via bench/measure_mount.py.
+                Loader {
+                    id: browserSurfaceLoader
                     anchors.fill: parent
+                    active: controller.browserEverOpened
                     visible: controller.browserSurfaceVisible
                         && !controller.fmVisible
                         && !controller.agentVisible
+                    sourceComponent: BrowserSurface {
+                        id: browserSurface
+                        anchors.fill: parent
+                    }
                 }
 
                 // Git-history viewer — sibling central surface (read-only

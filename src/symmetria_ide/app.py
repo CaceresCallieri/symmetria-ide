@@ -383,6 +383,14 @@ class AppController(QObject):
     browserTabsChanged = Signal()
     focusedBrowserChanged = Signal()
     focusBrowserRequested = Signal(int)
+    # One-way latch: fires the first time ANY browser window is opened (manual
+    # Ctrl+T or an agent's browser_open). Main.qml gates the BrowserSurface
+    # Loader on the `browserEverOpened` property this notifies, so the whole
+    # QtWebEngine scaffolding (the `import QtWebEngine` QML module + the
+    # persistent WebEngineProfile) is deferred off cold start — it cost ~430ms
+    # of engine.load eagerly, for a surface most launches never use (measured
+    # via SYMMETRIA_IDE_TRACE). Never resets — once WebEngine is up it stays up.
+    browserEverOpenedChanged = Signal()
     # Agent ↔ browser links — which agent owns/drives which browser window.
     # Drives the browser glyph on the AgentTopBar chips (the agent-owned
     # browser's PRIMARY entry point since the standalone tab was removed). The
@@ -587,6 +595,9 @@ class AppController(QObject):
         self._browser_tabs: dict[int, dict[str, str]] = {}
         self._browser_order: list[int] = []
         self._focused_browser: int = 0
+        # One-way latch behind the lazy BrowserSurface Loader (see
+        # browserEverOpenedChanged). False until the first window opens.
+        self._browser_ever_opened: bool = False
         # Agent ↔ browser attribution (drives the chip browser glyph).
         # agent slot -> internal browser slots it owns, newest-driven LAST
         # (the jump target for focus_agent_browser). Pruned when a window or
@@ -1633,6 +1644,14 @@ class AppController(QObject):
         if enabled != self._project_browser_enabled:
             self._project_browser_enabled = enabled
             self.projectBrowserEnabledChanged.emit()
+        # Lazily start the browser MCP server ONLY for opted-in projects (the
+        # default is OFF). `start()` is idempotent + backgrounded, so calling it
+        # on every displayedRootChanged is cheap and the ~1s FastMCP/uvicorn
+        # import never touches the cold-start path of the common (non-browser)
+        # project. The Ctrl+Shift+M toggle reaches here via toggle_project_
+        # browser → this method, so flipping the marker ON also starts it.
+        if self._project_browser_enabled:
+            self._browser_mcp_server.start()
 
     @Property(bool, notify=projectBrowserEnabledChanged)
     def projectBrowserEnabled(self) -> bool:
@@ -2732,6 +2751,16 @@ class AppController(QObject):
     def maxBrowserSlots(self) -> int:
         return self._MAX_INSTANCES
 
+    @Property(bool, notify=browserEverOpenedChanged)
+    def browserEverOpened(self) -> bool:
+        """True once any browser window has been opened this session.
+
+        Main.qml binds the BrowserSurface Loader's `active` to this, deferring
+        the eager QtWebEngine instantiation (~430ms of engine.load) until the
+        user/agent actually opens a browser. See browserEverOpenedChanged.
+        """
+        return self._browser_ever_opened
+
     @Property("QVariantList", notify=browserTabsChanged)
     def browserOrder(self) -> list:
         """Internal slots in DISPLAY order — the BrowserSurface chip model.
@@ -2804,6 +2833,14 @@ class AppController(QObject):
         if slot is None:
             log.warning("open_browser: pool full (%d slots)", self._MAX_INSTANCES)
             return
+        # Flip the lazy-load latch FIRST: emitting browserEverOpenedChanged
+        # activates the BrowserSurface Loader synchronously (Qt signal emission
+        # is synchronous), so the surface — and its inner per-slot view pool —
+        # exist before the browserTabsChanged emit below drives the slot's view
+        # delegate. Latched once; the WebEngine scaffolding stays up thereafter.
+        if not self._browser_ever_opened:
+            self._browser_ever_opened = True
+            self.browserEverOpenedChanged.emit()
         self._browser_tabs[slot] = {"url": url or "about:blank", "title": ""}
         self._browser_order.append(slot)
         self.browserTabsChanged.emit()
@@ -3742,10 +3779,13 @@ class AppController(QObject):
         # Non-blocking: the client's reader thread owns connect/retry, so
         # a missing bridge (shell down) just means silent backoff.
         self._agent_bridge.start()
-        # Start the browser MCP server (Stage 2b) so spawned agents can drive
-        # the embedded browser. Non-fatal on failure (Stage-1 manual browsing
-        # still works); writes the per-launch --mcp-config agents pick up.
-        self._browser_mcp_server.start()
+        # NB: the browser MCP server is NO LONGER started unconditionally here.
+        # Its FastMCP+uvicorn import is ~1s and used to block this startup path
+        # (even though the browser-agent capability is per-project, default OFF).
+        # It now starts lazily + backgrounded, gated on the project opt-in, via
+        # `_refresh_project_browser_enabled` — triggered by the synthetic
+        # `displayedRootChanged.emit()` a few lines below (and on every project
+        # change / the Ctrl+Shift+M toggle). See that method + browser_mcp.start.
         # Seed the GitController with the launch cwd by firing
         # `displayedRootChanged` once at startup. Without this, the very
         # first nvim cwd capsule arrives with a value equal to `_cwd`

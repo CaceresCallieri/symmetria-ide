@@ -214,7 +214,11 @@ class BrowserMcpServer:
         # as the opener — the IDE maps it onto the chip slot.
         self._attention_setter = attention_setter
         self._server = None  # uvicorn.Server
-        self._thread: threading.Thread | None = None
+        self._thread: threading.Thread | None = None  # uvicorn serve thread
+        # Starter thread that runs _start() (the ~1s FastMCP+uvicorn import +
+        # build) OFF the GUI thread. Distinct from _thread (uvicorn) so the
+        # idempotency guard in start() and the uvicorn thread don't alias.
+        self._start_thread: threading.Thread | None = None
         self._sock: socket.socket | None = None  # held bound until uvicorn owns it
         self._port = 0
         self._config_path = ""
@@ -240,10 +244,34 @@ class BrowserMcpServer:
         if os.environ.get("SYMMETRIA_IDE_BROWSER_MCP") == "0":
             log.info("browser MCP server disabled (SYMMETRIA_IDE_BROWSER_MCP=0)")
             return
+        # Idempotent: the per-project gate (AppController._refresh_project_
+        # browser_enabled) calls this on every displayedRootChanged while the
+        # project has opted in — only the FIRST call spawns the starter thread.
+        if self._start_thread is not None:
+            return
+        # Run the build OFF the GUI thread. The lazy `from mcp.server.fastmcp
+        # import FastMCP` + `import uvicorn` alone is ~1s (the whole
+        # FastMCP→uvicorn→starlette→pydantic stack); running it inline used to
+        # block the entire startup path before app.exec() — the single largest
+        # phase in the launch waterfall. Agents only read _port/_config_path on
+        # a user-initiated spawn (long after launch), and agent_config_path()
+        # returns "" while _port is still 0, so the brief not-yet-ready window
+        # degrades gracefully (no browser MCP for that one spawn). See CLAUDE.md
+        # "Browser MCP server" + the startup-perf notes in bench/.
+        self._start_thread = threading.Thread(
+            target=self._start_guarded, daemon=True, name="browser-mcp-start"
+        )
+        self._start_thread.start()
+
+    def _start_guarded(self) -> None:
+        """Starter-thread body: build + launch the server, swallowing failure.
+
+        Non-fatal on error — Stage-1 manual browsing still works without the
+        server; _port stays 0 so agent_config_path() returns "" for every
+        spawn until (if ever) a later start succeeds."""
         try:
             self._start()
         except Exception:
-            # Non-fatal: Stage-1 manual browsing still works without the server.
             log.exception("browser MCP server failed to start — agent control disabled")
             self._port = 0
             self._config_path = ""
