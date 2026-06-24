@@ -1161,7 +1161,6 @@ Window {
                         && !controller.fmVisible
                         && !controller.agentVisible
                     sourceComponent: BrowserSurface {
-                        id: browserSurface
                         anchors.fill: parent
                     }
                 }

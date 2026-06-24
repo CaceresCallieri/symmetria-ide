@@ -1,7 +1,7 @@
 ---
 name: startup-perf
 description: "How to benchmark IDE cold start, and the two big costs found+fixed (browser-MCP GUI-thread import, eager WebEngine)"
-metadata: 
+metadata:
   node_type: memory
   type: reference
   originSessionId: ff5a74c5-0a74-4855-b0ea-5268bea5dc7a
@@ -24,4 +24,4 @@ metadata:
 1. **Browser MCP server start blocked the GUI thread ~1s.** `BrowserMcpServer._start()` ran `from mcp.server.fastmcp import FastMCP` + `import uvicorn` synchronously in `AppController.start()` on EVERY launch — even though browser-agents are per-project default-OFF. Fix: start it **lazily on a daemon starter thread (`_start_thread`), gated on `_project_browser_enabled`** (only opted-in projects). See `src/symmetria_ide/browser_mcp.py` `start()`/`_start_guarded` + `AppController._refresh_project_browser_enabled`. A silent regression — added Phase 4 (June), after the May `bench/` rounds, never measured.
 2. **Eager `BrowserSurface` cost ~430ms of `engine.load`** (the `import QtWebEngine` QML module + persistent `WebEngineProfile`). Fix: wrap it in a `Loader` gated on a one-way `controller.browserEverOpened` latch flipped on first `open_browser`. See `qml/Main.qml` `browserSurfaceLoader` + `AppController.open_browser`.
 
-**Rule for future startup work:** never add a heavy import or eager heavyweight-QML-component to the pre-`app.exec()` path for a capability most launches don't use — defer it (Loader / lazy import / background thread) and gate on actual need. Related: [[mcp_enablement_per_project]] (the per-project gate this reused).
+**Rule for future startup work:** never add a heavy import or eager heavyweight-QML-component to the pre-`app.exec()` path for a capability most launches don't use — defer it (Loader / lazy import / background thread) and gate on actual need. Related: [per-project MCP gating](../../feedback/mcp_enablement_per_project.md) (the per-project gate this reused).

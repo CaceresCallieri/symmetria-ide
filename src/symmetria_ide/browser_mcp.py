@@ -257,7 +257,7 @@ class BrowserMcpServer:
         # a user-initiated spawn (long after launch), and agent_config_path()
         # returns "" while _port is still 0, so the brief not-yet-ready window
         # degrades gracefully (no browser MCP for that one spawn). See CLAUDE.md
-        # "Browser MCP server" + the startup-perf notes in bench/.
+        # "Browser MCP server" + "The browser panes" Stage 5 startup-perf note.
         self._start_thread = threading.Thread(
             target=self._start_guarded, daemon=True, name="browser-mcp-start"
         )
@@ -275,6 +275,19 @@ class BrowserMcpServer:
             log.exception("browser MCP server failed to start — agent control disabled")
             self._port = 0
             self._config_path = ""
+            # Release the probe socket if the failure landed AFTER bind but
+            # before uvicorn took ownership — otherwise the ephemeral port
+            # stays held for the process lifetime.
+            if self._sock is not None:
+                self._sock.close()
+                self._sock = None
+            # Deliberately do NOT reset _start_thread: a failed start is
+            # try-once for the session (matches the pre-deferral behaviour,
+            # which called start() exactly once). Resetting it would let the
+            # per-project gate re-attempt on EVERY displayedRootChanged — and
+            # the dominant failure (python-mcp not installed) fails identically
+            # each time, so that would only spam log.exception + spawn churn.
+            # Recovery from a genuine transient failure is an IDE restart.
 
     def _start(self) -> None:
         from mcp.server.fastmcp import FastMCP  # lazy: optional dependency
@@ -462,6 +475,10 @@ class BrowserMcpServer:
         return path
 
     def stop(self) -> None:
+        # Called only at app shutdown (aboutToQuit). `_server` may still be None
+        # here if the background starter thread hasn't finished building — in
+        # that case the daemon starter + uvicorn threads are reaped by process
+        # exit, so we rely on that rather than racing the in-flight build.
         if self._server is not None:
             self._server.should_exit = True
         paths = [self._config_path] if self._config_path else []
