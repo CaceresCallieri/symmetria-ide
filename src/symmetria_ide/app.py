@@ -4580,7 +4580,20 @@ def run() -> int:
     # Qt renders" race surface that caused SIGSEGVs under Python 3.14.
     # Later allocations wouldn't be frozen; earlier placement would miss
     # state that still needs freezing. See CLAUDE.md gotcha #10.
-    gc.collect()
+    #
+    # We deliberately do NOT gc.collect() before freezing. The only reason
+    # to collect-before-freeze is to avoid freezing cyclic garbage into the
+    # permanent gen — but a startup-time probe measured ~0 unreachable
+    # objects here (0 on most runs, ~24 once) and a flat RSS, so there is
+    # essentially no garbage to free. The collect cost ~20ms of cold start
+    # for no practical benefit. Dropping it freezes at most a handful of
+    # tiny objects (KB-scale, held until exit) and does NOT weaken the
+    # gotcha-#10 mitigation: freeze still freezes the entire live set, and
+    # leaving the (near-empty) youngest gen un-collected only shrinks, never
+    # grows, the GC-vs-render race surface. Do not "restore" the collect as
+    # a perceived regression — it was removed with measurement. If a future
+    # change makes startup allocate cyclic garbage worth reaping, prefer the
+    # cheap youngest-gen-only gc.collect(0) over a full collect.
     gc.freeze()
 
     trace("exec_entered")
