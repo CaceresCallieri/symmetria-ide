@@ -1031,16 +1031,24 @@ Window {
                         }
                     }
 
-                    /// Half-page scrollback on the focused agent terminal.
-                    /// direction: +1 = up (older output), -1 = down. Qt
-                    /// converts 120 wheel units → 3 lines, so half a page
-                    /// is (lines / 2) / 3 notches.
+                    /// Half-page scroll of the focused agent terminal, bound to
+                    /// Ctrl+U/D. direction: +1 = up (older output), -1 = down.
+                    /// Calls the fork's dedicated `scrollPageFraction` slot —
+                    /// DELIBERATELY NOT `simulateWheel`: simulateWheel routes
+                    /// through the C++ wheelEvent, which would couple this to the
+                    /// physical mouse wheel and change the wheel's sensitivity.
+                    /// Keeping a separate slot lets the keybind jump half a page
+                    /// while the mouse wheel keeps its stock per-notch feel.
                     function scrollFocusedAgent(direction) {
                         var term = focusedTerminal();
                         if (!term)
                             return;
-                        var notches = Math.max(1, Math.round(term.lines / 6));
-                        term.simulateWheel(0, 0, 0, 0, Qt.point(0, direction * notches * 120));
+                        // ~1/6 of visible height per press. Intentionally below a
+                        // literal "half page": claude's TUI scrolls several of
+                        // its own lines per wheel event scrollByLines emits, so a
+                        // 0.5 fraction overshot to ~1.5 pages. 0.167 lands near a
+                        // real half-page jump. Tune here if the feel drifts.
+                        term.scrollPageFraction(0.167, direction);
                     }
 
                     Repeater {
