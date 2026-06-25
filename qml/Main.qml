@@ -349,14 +349,15 @@ Window {
         }
     }
 
-    // Half-page scrollback in the focused agent terminal. claude's TUI is
-    // an alternate-screen app, but its output history rides Konsole's
-    // scrollback; Ctrl+U/D mirror vim's half-page motion. simulateWheel
-    // bypasses VT key encoding entirely (scrollback rides Konsole's buffer,
-    // not the key-event path — independent of any keyboard protocol),
-    // and Qt's wheel handling converts 120 units → 3 lines, hence the
-    // lines/6 notch math for a half page. Gated off while the sidebar
-    // holds focus — the tree owns Ctrl+U/D for its own paging.
+    // ~Half-page scroll of the focused agent terminal — Ctrl+U/D mirror vim's
+    // half-page motion via agentSurface.scrollFocusedAgent, which calls the
+    // fork's scrollPageFraction slot (NOT simulateWheel — that routes through
+    // wheelEvent and would couple this to the physical mouse wheel). For a
+    // mouse-tracking TUI like claude the fork emits scroll mouse-events to the
+    // program rather than touching Konsole scrollback; claude's per-event line
+    // multiplier is why the fraction is ~0.167, not 0.5 (see scrollFocusedAgent
+    // for the tuning rationale). Gated off while the sidebar holds focus — the
+    // tree owns Ctrl+U/D for its own paging.
     Shortcut {
         sequences: ["Ctrl+U"]
         context: Qt.ApplicationShortcut
