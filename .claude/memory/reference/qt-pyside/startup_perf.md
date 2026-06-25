@@ -17,7 +17,7 @@ metadata:
 - `bench/measure_mount.py --repo ~/work/sales/bambin --runs 5` is the file-tree-mount regression gate (run it after ANY surface-deferral change — deferring a surface can change first-frame scheduling; verify on bambin, the dominant large repo).
 
 **Surprises worth remembering:**
-- `QtWebEngineQuick.initialize()` is CHEAP (~20ms) — Chromium init is lazy until a `WebEngineView` exists. WebEngine's startup cost is the **import** (~120ms) + **eager QML instantiation** (~430ms), not `initialize()`.
+- `QtWebEngineQuick.initialize()` is CHEAP (~20ms) — Chromium init is lazy until a `WebEngineView` exists. WebEngine's startup cost is the **import** (~120ms) + **eager QML instantiation** (~430ms), not `initialize()`. The ~430ms is recovered (the `browserSurfaceLoader` defers it). The ~120ms import is NOT — deferring it forces a Qt-**deprecated** late `initialize()` (after `QGuiApplication`); spiked + works on Qt 6.11 but HELD by user decision 2026-06-25. Full why-held: [startup-optimization-followups](../../project/active/startup_optimization_followups.md).
 - `first_capsule` (status-bar populated = true interactivity) is gated by the user's **nvim config boot** (~1.5s with plugins), which overlaps the Python path in nvim's child process. Once the Python path is fast, nvim becomes the floor.
 
 **The two big costs found + fixed (2026-06-24)** — took cold-start `exec_entered` ~2.5s → ~1.0s, `first_capsule` ~2.5s → ~1.25s:
