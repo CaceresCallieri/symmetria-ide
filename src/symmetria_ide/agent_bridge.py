@@ -225,10 +225,12 @@ class AgentBridgeClient(QObject):
         Stored into `_instances[slot]` so a reconnect `sync` replays them, and
         sent as an `updated` message for live deltas. NOT debounced (unlike
         titles): activity is already coalesced to one event per transition by the
-        state machine, and sparkle latency matters. `session_id` is sticky —
-        published/stored only when non-empty, so a clear event (which carries
-        none) never blanks a captured id. Inert until the shell prefers these
-        `inst` fields over its own computed activity (the Phase 2 shell-half).
+        state machine, and sparkle latency matters. The caller passes the slot's
+        CURRENT stored session_id on every event (including clears); it is
+        included in the wire message AND the instance store only when non-empty,
+        so an id captured during active work persists through idle (an empty
+        session_id never blanks the stored one). Inert until the shell prefers
+        these `inst` fields over its own computed activity (the P2 shell-half).
         """
         with self._instances_lock:
             inst = self._instances.get(slot)

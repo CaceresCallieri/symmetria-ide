@@ -195,9 +195,13 @@ test_main_qml_terminal_wiring.py ~376-379 asserts the relay is absent).
    IDE's `_on_bridge_snapshot` mirror — all **still required by opencode**, which
    reports via its own plugin (not the removed claude hook) and rides the
    shell-half's computed-activity fallback. The strip is gated on opencode
-   local-capture (or dropping opencode), not just on risk. The reconciliation
-   poll (`claude agents --json`) is now claude-pointless but harmless; fold its
-   removal into the eventual strip.
+   local-capture (or dropping opencode), not just on risk. The bridge's
+   `reconcile_claude_sessions` / `check_stuck_working` / `reap_stale_activities`
+   are now **claude-blind** (they iterate `_activities`, empty for claude
+   post-hook-removal) — a cancelled claude agent that fires no hook now relies
+   solely on the ~60s idle `Notification` to clear (the fast CLI-reconcile
+   backstop no longer reaches IDE agents). Rework them to operate on the
+   published `inst` activity, or remove them, in the eventual strip.
    **Live verification still owed** (needs shell reload + a new-code IDE; the
    stable daily-driver is claude-activity-dark until promoted).
 4. **Redesign STT** to the direct IDE socket; remove STT from bridge + IDE;

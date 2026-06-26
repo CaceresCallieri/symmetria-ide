@@ -254,24 +254,33 @@ def test_notify_activity_wire_format(bridge_server, client):
 
 
 def test_notify_activity_omits_empty_session_id(bridge_server, client):
-    # A clear (idle) publish carries no session id, so the field is omitted from
-    # the wire message — the sticky id stored from an earlier event is preserved.
+    # A clear (idle) publish carries no session id: the field is omitted from the
+    # wire message AND the sticky id stored from an earlier event is preserved on
+    # the instance record (two distinct behaviors — wire omission vs preservation).
     client.start()
     bridge_server.wait_for_messages(3)
     client.notify_spawn(_instance(1))
-    client.notify_activity(1, state="", tool="", in_plan_mode=False)
+    client.notify_activity(
+        1, state="working", tool="", in_plan_mode=False, session_id="sess-orig"
+    )
+    client.notify_activity(1, state="", tool="", in_plan_mode=False)  # clear, no id
     _pump_events(
-        lambda: any(
-            m["type"] == "updated" and "activity_state" in m
-            for m in bridge_server.received
+        lambda: (
+            sum(
+                m["type"] == "updated" and "activity_state" in m
+                for m in bridge_server.received
+            )
+            >= 2
         )
     )
-    msg = next(
+    activity_updates = [
         m
         for m in bridge_server.received
         if m["type"] == "updated" and "activity_state" in m
-    )
-    assert "session_id" not in msg
+    ]
+    assert "session_id" not in activity_updates[-1]  # the clear omits it
+    # ... but the captured id survives on the instance record (sticky).
+    assert client._instances[1]["session_id"] == "sess-orig"
 
 
 def test_notify_activity_for_unknown_slot_is_dropped(bridge_server, client):
@@ -307,6 +316,8 @@ def test_notify_activity_carried_in_reconnect_sync(bridge_server, client):
     last_sync = [m for m in bridge_server.received if m["type"] == "sync"][-1]
     inst = next(i for i in last_sync["instances"] if i["buf"] == 1)
     assert inst["activity_state"] == "thinking"
+    assert inst["activity_tool"] == ""
+    assert inst["in_plan_mode"] is False
 
 
 # ---------------------------------------------------------------------------

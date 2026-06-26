@@ -3291,7 +3291,11 @@ class AppController(QObject):
         # rather than computing its own from the global hook. Publish on any
         # activity change OR a freshly-captured session_id; inert until the shell
         # prefers these published fields (the Phase 2 shell-half). The current
-        # entry ("" state when cleared) is what the dashboard should mirror.
+        # entry ("" state when cleared) is what the dashboard should mirror. The
+        # stored session_id always rides along — notify_activity drops it from the
+        # wire when empty — so the bridge's record stays current without a
+        # separate session_id-only message. in_plan_mode is correct on every
+        # event because claude includes permission_mode in every hook payload.
         if activity_changed or session_changed:
             current = self._term_agent_activity.get(slot, {})
             self._agent_bridge.notify_activity(

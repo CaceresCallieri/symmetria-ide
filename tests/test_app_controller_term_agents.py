@@ -659,6 +659,17 @@ def test_local_hook_publishes_plan_mode(controller, bridge):
     assert bridge.activities[-1]["in_plan_mode"] is True
 
 
+def test_session_only_event_publishes_session_id_without_activity(controller, bridge):
+    # The session_changed-only path: an observer event that is the FIRST to carry
+    # a session_id publishes it even though it makes no activity change.
+    controller.spawn_agent("fresh", True)
+    bridge.activities.clear()
+    controller._on_agent_hook(_hook(1, "FileChanged", session_id="sess-first"))
+    assert len(bridge.activities) == 1
+    assert bridge.activities[-1]["session_id"] == "sess-first"
+    assert bridge.activities[-1]["state"] == ""  # observer → no activity change
+
+
 def test_observer_event_without_session_change_does_not_publish(controller, bridge):
     controller.spawn_agent("fresh", True)
     bridge.activities.clear()
