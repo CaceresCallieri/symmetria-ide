@@ -3363,7 +3363,6 @@ class AppController(QObject):
         # call + method were removed. The chip dot is driven directly by
         # `_on_stt_recording` from the IDE's own socket.
 
-    @Slot(dict)
     def _dispatch_inject(self, payload: dict, fail) -> None:
         """Validate an inject request and hand delivery to QML.
 
@@ -3413,9 +3412,9 @@ class AppController(QObject):
     def _on_stt_inject(self, payload: dict) -> None:
         """Direct-channel inject from the IDE socket (inversion P4).
 
-        Same delivery as the bridge path, but a pre-delivery failure resolves the
-        agent-events Future (which unblocks the connection handler's reply) rather
-        than going through the bridge.
+        Validates and delivers via `_dispatch_inject`; a pre-delivery failure
+        resolves the agent-events Future, which unblocks the connection handler
+        waiting to reply to the dictation client.
         """
         self._dispatch_inject(
             payload,

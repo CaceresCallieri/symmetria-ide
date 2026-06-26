@@ -992,3 +992,11 @@ def test_on_stt_recording_non_int_buf_is_tolerated(controller):
     controller._on_stt_recording({"buf": "garbage", "transcribing": True})
     assert controller.sttTargetSlot == 0
     assert controller.sttTranscribing is False
+
+
+def test_on_stt_recording_minus_one_empty_pool_clears(controller):
+    # buf -1 with no agents: the focused-slot fallback resolves to 0, so the
+    # indicator must stay dark and transcribing must not latch.
+    controller._on_stt_recording({"buf": -1, "transcribing": True})
+    assert controller.sttTargetSlot == 0
+    assert controller.sttTranscribing is False

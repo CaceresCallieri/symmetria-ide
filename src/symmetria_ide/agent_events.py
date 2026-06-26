@@ -361,10 +361,10 @@ class AgentEventsServer(QObject):
     ) -> bool:
         """Resolve a pending stt_inject (GUI thread, from agent_inject_done).
 
-        Returns True if `request_id` matched a pending direct-channel inject, so
-        the caller can fall back to the bridge path for a non-matching id during
-        the additive transition. Thread-safe: `set_result` is, and the handler
-        thread awaiting the Future picks the result up.
+        Returns True if `request_id` matched a pending inject — advisory now (all
+        callers ignore it; it remains a tested contract documenting whether the id
+        was live). Thread-safe: `set_result` is, and the handler thread awaiting
+        the Future picks the result up.
         """
         with self._pending_lock:
             future = self._pending_injects.get(request_id)

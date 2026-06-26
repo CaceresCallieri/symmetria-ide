@@ -338,8 +338,8 @@ def test_stop_releases_pending_inject(tmp_path):
 
 
 def test_resolve_inject_unknown_id_returns_false(tmp_path):
-    # The bridge-fallback hinge: resolve_inject reports False for an id it doesn't
-    # own, so agent_inject_done can route the result to the bridge instead.
+    # resolve_inject reports False for an id it doesn't own (advisory contract —
+    # callers no longer branch on it since the bridge fallback was removed).
     server = AgentEventsServer(socket_path=str(tmp_path / "agents.sock"))
     assert server.resolve_inject("no-such-id", True, True, "") is False
 
