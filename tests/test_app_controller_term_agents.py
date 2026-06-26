@@ -995,5 +995,54 @@ def test_inject_missing_request_id_is_ignored(controller, bridge):
 
 
 def test_agent_inject_done_relays_to_bridge(controller, bridge):
+    # Unknown request_id → not a direct-channel inject → falls back to the bridge.
     controller.agent_inject_done("r6", True, True, "")
     assert bridge.inject_results == [("r6", True, True, "")]
+
+
+# ---------------------------------------------------------------------------
+# Direct STT channel (inversion P4): _on_stt_inject + _on_stt_recording
+# ---------------------------------------------------------------------------
+
+
+def test_on_stt_inject_routes_to_slot(controller):
+    # The agent-events server stamps request_id before emitting, so the payload
+    # carries it. Delivery is the same QML path as the bridge inject.
+    controller.spawn_agent("fresh", True)
+    emitted = _capture_inject_emissions(controller)
+    controller._on_stt_inject(
+        {"request_id": "d1", "buf": 1, "text": "hi", "submit": True}
+    )
+    assert emitted == [(1, "hi", True, "d1")]
+
+
+def test_on_stt_inject_no_agent_does_not_touch_bridge(controller, bridge):
+    # A pre-delivery failure on the direct path resolves the agent-events Future
+    # (no pending one here → no-op), and must NOT leak onto the bridge.
+    emitted = _capture_inject_emissions(controller)
+    controller._on_stt_inject({"request_id": "d2", "buf": 1, "text": "hi"})
+    assert emitted == []
+    assert bridge.inject_results == []
+
+
+def test_on_stt_recording_drives_dot(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_stt_recording({"buf": 1, "transcribing": True})
+    assert controller.sttTargetSlot == 1
+    assert controller.sttTranscribing is True
+
+
+def test_on_stt_recording_buf_zero_clears(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_stt_recording({"buf": 1, "transcribing": True})
+    controller._on_stt_recording({"buf": 0})
+    assert controller.sttTargetSlot == 0
+    assert controller.sttTranscribing is False
+
+
+def test_on_stt_recording_minus_one_resolves_focused(controller):
+    controller.spawn_agent("fresh", True)
+    controller.spawn_agent("fresh", True)
+    controller.focus_agent(2)
+    controller._on_stt_recording({"buf": -1, "transcribing": True})
+    assert controller.sttTargetSlot == 2

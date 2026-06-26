@@ -13,6 +13,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -246,6 +247,101 @@ def test_reporter_idle_notification_argv_marker(tmp_path):
         assert received[0]["idle_notification"] is True
     finally:
         server.stop()
+
+
+# ---------------------------------------------------------------------------
+# Direct STT channel (inversion P4): stt_recording + stt_inject request/reply
+# ---------------------------------------------------------------------------
+
+
+def test_stt_recording_is_emitted(tmp_path):
+    path = str(tmp_path / "agents.sock")
+    server = AgentEventsServer(socket_path=path)
+    received: list[dict] = []
+    server.stt_recording_received.connect(received.append)
+    try:
+        server.start()
+        _report(path, {"type": "stt_recording", "buf": 1, "transcribing": True})
+        _pump_events(lambda: len(received) >= 1)
+        assert received[0]["buf"] == 1
+        assert received[0]["transcribing"] is True
+    finally:
+        server.stop()
+
+
+def _run_inject_client(path: str, request: dict, reply: dict) -> threading.Thread:
+    """Connect, send one stt_inject, capture the reply line. Returns the thread."""
+
+    def client() -> None:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(8.0)
+            sock.connect(path)
+            sock.sendall((json.dumps(request) + "\n").encode())
+            reply["msg"] = json.loads(sock.makefile("r").readline())
+
+    t = threading.Thread(target=client, daemon=True)
+    t.start()
+    return t
+
+
+def test_stt_inject_request_reply(tmp_path):
+    from PySide6.QtCore import Qt
+
+    path = str(tmp_path / "agents.sock")
+    server = AgentEventsServer(socket_path=path)
+    seen: list[dict] = []
+
+    # Queued (like production: the resolve runs on the GUI thread via
+    # agent_inject_done, NOT on the handler thread). Simulate the QML paste by
+    # resolving as soon as the inject is delivered here.
+    def on_inject(payload: dict) -> None:
+        seen.append(payload)
+        server.resolve_inject(payload["request_id"], True, True, "")
+
+    server.stt_inject_received.connect(on_inject, Qt.ConnectionType.QueuedConnection)
+    reply: dict = {}
+    try:
+        server.start()
+        t = _run_inject_client(
+            path, {"type": "stt_inject", "buf": 1, "text": "hi", "submit": True}, reply
+        )
+        _pump_events(lambda: "msg" in reply, timeout=8.0)
+        t.join(timeout=2.0)
+        assert reply["msg"] == {
+            "type": "stt_inject_result",
+            "ok": True,
+            "submitted": True,
+            "error": "",
+        }
+        # The client supplied no request_id; the server stamps one and forwards it.
+        assert seen and seen[0].get("request_id")
+    finally:
+        server.stop()
+
+
+def test_stop_releases_pending_inject(tmp_path):
+    # An inject that is never resolved (no QML): stop() must release the blocked
+    # handler with a shutting-down reply so the dictation client never hangs.
+    path = str(tmp_path / "agents.sock")
+    server = AgentEventsServer(socket_path=path)
+    arrived: list[dict] = []
+    server.stt_inject_received.connect(arrived.append)  # captured, NOT resolved
+    reply: dict = {}
+    server.start()
+    t = _run_inject_client(path, {"type": "stt_inject", "buf": 1, "text": "hi"}, reply)
+    _pump_events(lambda: len(arrived) >= 1)  # handler now blocked on the Future
+    server.stop()  # releases pending → handler writes the shutting-down reply
+    _pump_events(lambda: "msg" in reply, timeout=3.0)
+    t.join(timeout=2.0)
+    assert reply["msg"]["ok"] is False
+    assert reply["msg"]["error"] == "shutting-down"
+
+
+def test_resolve_inject_unknown_id_returns_false(tmp_path):
+    # The bridge-fallback hinge: resolve_inject reports False for an id it doesn't
+    # own, so agent_inject_done can route the result to the bridge instead.
+    server = AgentEventsServer(socket_path=str(tmp_path / "agents.sock"))
+    assert server.resolve_inject("no-such-id", True, True, "") is False
 
 
 def test_reporter_without_env_is_silent_noop(tmp_path):

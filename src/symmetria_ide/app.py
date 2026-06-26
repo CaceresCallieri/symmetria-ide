@@ -690,6 +690,16 @@ class AppController(QObject):
         self._agent_events.hook_received.connect(
             self._on_agent_hook, Qt.ConnectionType.QueuedConnection
         )
+        # queued: the STT signals also originate on agent-events handler threads
+        # (inversion P4 — direct STT channel). _on_stt_inject emits
+        # agentInjectRequested → QML paste → agent_inject_done → resolve_inject,
+        # which unblocks the handler thread waiting to reply (§4 P2).
+        self._agent_events.stt_recording_received.connect(
+            self._on_stt_recording, Qt.ConnectionType.QueuedConnection
+        )
+        self._agent_events.stt_inject_received.connect(
+            self._on_stt_inject, Qt.ConnectionType.QueuedConnection
+        )
         # queued: _opencode_sessions_fetched originates on the one-shot
         # session-list worker thread; the QML-facing re-emit must run on
         # the GUI thread (§4 P2).
@@ -3396,40 +3406,40 @@ class AppController(QObject):
             self.sttStateChanged.emit()
 
     @Slot(dict)
-    def _on_bridge_inject(self, payload: dict) -> None:
-        """Validate a bridge-routed inject and hand delivery to QML.
+    def _dispatch_inject(self, payload: dict, fail) -> None:
+        """Validate an inject request and hand delivery to QML.
 
-        Target resolution mirrors orchestrator.nvim's stt_inject: an
-        explicit live slot wins (captured by the shell at recording stop,
-        so a mid-transcription focus switch doesn't redirect the text);
-        absent/dead slot falls back to the currently focused agent. With
-        no live agent at all, fail fast so the requester's toast fires
-        instead of its timeout.
+        Shared by the bridge-routed path (`_on_bridge_inject`, being retired) and
+        the direct IDE-socket path (`_on_stt_inject`, inversion P4). `fail(request_id,
+        error)` reports a PRE-delivery failure back on whichever channel originated
+        the request. Target resolution mirrors orchestrator.nvim's stt_inject: an
+        explicit live slot wins (captured by the shell at recording stop, so a
+        mid-transcription focus switch doesn't redirect the text); absent/dead slot
+        falls back to the focused agent; no live agent at all fails fast so the
+        requester's toast fires instead of its timeout.
         """
         request_id = str(payload.get("request_id") or "")
         if not request_id:
-            # No id to reply to — drop, but loudly: a missing request_id
-            # means a malformed command upstream, not a benign no-op.
-            log.warning("bridge inject: missing request_id (%.80s)", payload)
+            # No id to reply to — drop, but loudly: a missing request_id means a
+            # malformed command upstream, not a benign no-op.
+            log.warning("inject: missing request_id (%.80s)", payload)
             return
         raw_text = payload.get("text")
-        # Strip ESC defensively: the text is typed into a live TUI via a
-        # bracketed paste, and an embedded \x1b[201~ would terminate the
-        # paste early and leak the remainder as keystrokes.
+        # Strip ESC defensively: the text is typed into a live TUI via a bracketed
+        # paste, and an embedded \x1b[201~ would terminate the paste early and leak
+        # the remainder as keystrokes.
         text = (raw_text if isinstance(raw_text, str) else "").replace("\x1b", "")
         if not text:
-            self._agent_bridge.send_inject_result(
-                request_id, False, False, "empty-text"
-            )
+            fail(request_id, "empty-text")
             return
         slot = payload.get("buf")
         if not isinstance(slot, int) or slot not in self._term_agents:
             slot = self._focused_term_agent
         if slot not in self._term_agents:
-            self._agent_bridge.send_inject_result(request_id, False, False, "no-agent")
+            fail(request_id, "no-agent")
             return
         log.info(
-            "bridge inject: slot=%d textLen=%d submit=%s request=%s",
+            "inject: slot=%d textLen=%d submit=%s request=%s",
             slot,
             len(text),
             bool(payload.get("submit")),
@@ -3439,12 +3449,61 @@ class AppController(QObject):
             slot, text, bool(payload.get("submit")), request_id
         )
 
+    def _on_bridge_inject(self, payload: dict) -> None:
+        """Bridge-routed inject (legacy path, retired once the shell goes direct)."""
+        self._dispatch_inject(
+            payload,
+            lambda rid, err: self._agent_bridge.send_inject_result(
+                rid, False, False, err
+            ),
+        )
+
+    @Slot(dict)
+    def _on_stt_inject(self, payload: dict) -> None:
+        """Direct-channel inject from the IDE socket (inversion P4).
+
+        Same delivery as the bridge path, but a pre-delivery failure resolves the
+        agent-events Future (which unblocks the connection handler's reply) rather
+        than going through the bridge.
+        """
+        self._dispatch_inject(
+            payload,
+            lambda rid, err: self._agent_events.resolve_inject(rid, False, False, err),
+        )
+
+    @Slot(dict)
+    def _on_stt_recording(self, payload: dict) -> None:
+        """Drive the STT chip dot from a direct recording-state toggle (P4).
+
+        The direct-channel replacement for `_mirror_stt_state` (snapshot-driven):
+        `{buf, transcribing}` — buf is the target slot, -1 = focused agent, 0 (or
+        any unknown slot) = clear. terminal_pid is implicit (the shell connected
+        to THIS IDE's socket).
+        """
+        slot = 0
+        transcribing = False
+        buf = payload.get("buf")
+        if isinstance(buf, int):
+            if buf in self._term_agents:
+                slot = buf
+            elif buf == -1:
+                slot = self._focused_term_agent
+        if slot:
+            transcribing = bool(payload.get("transcribing", False))
+        if (slot, transcribing) != (self._stt_target_slot, self._stt_transcribing):
+            self._stt_target_slot = slot
+            self._stt_transcribing = transcribing
+            self.sttStateChanged.emit()
+
     @Slot(str, bool, bool, str)
     def agent_inject_done(
         self, request_id: str, ok: bool, submitted: bool, error: str = ""
     ) -> None:
-        """QML callback closing the inject loop — relays the result to the
-        bridge, which relays it to the STT requester."""
+        """QML callback closing the inject loop — routes the result to whichever
+        channel owns this request_id: the direct IDE socket if it has a pending
+        inject for it (the new path), else the bridge (legacy, during transition)."""
+        if self._agent_events.resolve_inject(request_id, ok, submitted, error):
+            return
         self._agent_bridge.send_inject_result(request_id, ok, submitted, error)
 
     @Slot(str)

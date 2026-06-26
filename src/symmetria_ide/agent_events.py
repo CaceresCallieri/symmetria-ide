@@ -34,12 +34,14 @@ agent id.
 
 from __future__ import annotations
 
+import concurrent.futures
 import glob
 import json
 import logging
 import os
 import socket
 import threading
+import uuid
 
 from PySide6.QtCore import QObject, Signal
 
@@ -61,6 +63,12 @@ _ACCEPT_TIMEOUT_SECONDS = 0.5
 # so a connection that stalls past this is abandoned (its own daemon thread, so
 # it never blocks accept()).
 _CONN_TIMEOUT_SECONDS = 1.0
+
+# How long an stt_inject handler waits for the GUI thread (QML bracketed paste +
+# the submit-Enter) to resolve before replying "timeout" to the dictation client.
+# Generous vs _CONN_TIMEOUT_SECONDS because the paste→absorb→Enter round-trip is
+# slower than a one-line read; the STT client's own socket timeout sits above it.
+_INJECT_TIMEOUT_SECONDS = 5.0
 
 
 def _runtime_dir() -> str:
@@ -122,6 +130,19 @@ class AgentEventsServer(QObject):
     # Wired to AppController._on_agent_hook via explicit Qt.QueuedConnection.
     hook_received = Signal(dict)
 
+    # STT recording-state toggle from the shell (inversion P4 — direct channel,
+    # replacing the bridge's snapshot `stt` field): {"type": "stt_recording",
+    # "buf": int, "transcribing": bool}. Fire-and-forget. Wired to
+    # AppController._on_stt_recording via explicit Qt.QueuedConnection.
+    stt_recording_received = Signal(dict)
+
+    # STT injection request from the shell (replacing the bridge `inject` verb):
+    # {"type": "stt_inject", "buf": int, "text": str, "submit": bool} — the
+    # server stamps a "request_id" and forwards this; the connection handler
+    # BLOCKS for the reply (see _handle_inject / resolve_inject). Wired to
+    # AppController._on_stt_inject via explicit Qt.QueuedConnection.
+    stt_inject_received = Signal(dict)
+
     def __init__(
         self, parent: QObject | None = None, *, socket_path: str | None = None
     ) -> None:
@@ -130,6 +151,12 @@ class AgentEventsServer(QObject):
         self._server_sock: socket.socket | None = None
         self._stop_event = threading.Event()
         self._accept_thread: threading.Thread | None = None
+        # request_id -> Future resolved by resolve_inject (GUI thread, from
+        # AppController.agent_inject_done) and awaited by the connection handler
+        # thread so it can write the reply on the same socket. Guarded by the lock
+        # (handler threads register/pop; the GUI thread resolves).
+        self._pending_injects: dict[str, concurrent.futures.Future] = {}
+        self._pending_lock = threading.Lock()
 
     @property
     def socket_path(self) -> str:
@@ -194,6 +221,16 @@ class AgentEventsServer(QObject):
         their own or die with the process.
         """
         self._stop_event.set()
+        # Release any handler thread blocked on an inject reply so it doesn't hang
+        # past shutdown (it will write the error reply and close).
+        with self._pending_lock:
+            pending = list(self._pending_injects.values())
+            self._pending_injects.clear()
+        for future in pending:
+            if not future.done():
+                future.set_result(
+                    {"ok": False, "submitted": False, "error": "shutting-down"}
+                )
         if self._server_sock is not None:
             try:
                 self._server_sock.close()
@@ -239,9 +276,22 @@ class AgentEventsServer(QObject):
             ).start()
 
     def _handle_connection(self, conn: socket.socket) -> None:
-        """Read one reporter connection's JSON lines and emit each."""
+        """Dispatch one connection's JSON messages by `type`.
+
+        Three message kinds share the socket:
+          - `hook` (and anything unknown) — a fire-and-forget activity report;
+            emitted to the GUI thread, no reply.
+          - `stt_recording` — a fire-and-forget recording-state toggle; emitted,
+            no reply.
+          - `stt_inject` — a REQUEST/REPLY: the handler blocks until the GUI
+            thread performs the PTY paste and resolves the result, then writes a
+            `stt_inject_result` line back on this same connection.
+        """
         try:
-            conn.settimeout(_CONN_TIMEOUT_SECONDS)
+            # Injects can take up to _INJECT_TIMEOUT_SECONDS (paste→absorb→Enter);
+            # widen the socket timeout for this connection so the blocking reply
+            # write isn't cut off by the shorter read timeout.
+            conn.settimeout(_INJECT_TIMEOUT_SECONDS + 1.0)
             # `with` so the makefile wrapper closes deterministically: socket.makefile
             # bumps the socket's io-ref count, so the finally's conn.close() alone
             # would defer the fd release to GC of `reader` — exactly the worker-thread
@@ -259,9 +309,15 @@ class AgentEventsServer(QObject):
                         continue
                     if not isinstance(payload, dict):
                         continue
-                    # Queued to the GUI thread; GC suspended around the emit (gotcha
-                    # #10 — a worker collection racing QSGRenderThread mid-paint SEGVs).
-                    emit_gc_safe(self.hook_received, payload)
+                    msg_type = payload.get("type")
+                    # GC suspended around each cross-thread emit (gotcha #10 — a
+                    # worker collection racing QSGRenderThread mid-paint SEGVs).
+                    if msg_type == "stt_inject":
+                        self._handle_inject(conn, payload)
+                    elif msg_type == "stt_recording":
+                        emit_gc_safe(self.stt_recording_received, payload)
+                    else:
+                        emit_gc_safe(self.hook_received, payload)
         except OSError:
             pass  # client vanished / timed out — drop the connection
         finally:
@@ -269,3 +325,50 @@ class AgentEventsServer(QObject):
                 conn.close()
             except OSError:
                 pass
+
+    def _handle_inject(self, conn: socket.socket, payload: dict) -> None:
+        """Forward an stt_inject to the GUI thread and block for the reply.
+
+        Stamps a server-side `request_id`, registers a Future the GUI thread
+        resolves via `resolve_inject` (from `AppController.agent_inject_done`
+        after the QML paste completes), waits for it, and writes a
+        `stt_inject_result` line back on `conn`. A timeout or shutdown resolves
+        the Future with an error so the dictation client never hangs.
+        """
+        request_id = uuid.uuid4().hex
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        with self._pending_lock:
+            self._pending_injects[request_id] = future
+        emit_gc_safe(self.stt_inject_received, {**payload, "request_id": request_id})
+        try:
+            result = future.result(timeout=_INJECT_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError:
+            result = {"ok": False, "submitted": False, "error": "timeout"}
+        except Exception as exc:  # never leave the client without a reply
+            result = {"ok": False, "submitted": False, "error": str(exc)}
+        finally:
+            with self._pending_lock:
+                self._pending_injects.pop(request_id, None)
+        try:
+            conn.sendall(
+                (json.dumps({"type": "stt_inject_result", **result}) + "\n").encode()
+            )
+        except OSError:
+            pass  # client gave up waiting — nothing more to do
+
+    def resolve_inject(
+        self, request_id: str, ok: bool, submitted: bool, error: str = ""
+    ) -> bool:
+        """Resolve a pending stt_inject (GUI thread, from agent_inject_done).
+
+        Returns True if `request_id` matched a pending direct-channel inject, so
+        the caller can fall back to the bridge path for a non-matching id during
+        the additive transition. Thread-safe: `set_result` is, and the handler
+        thread awaiting the Future picks the result up.
+        """
+        with self._pending_lock:
+            future = self._pending_injects.get(request_id)
+        if future is not None and not future.done():
+            future.set_result({"ok": ok, "submitted": submitted, "error": error})
+            return True
+        return False
