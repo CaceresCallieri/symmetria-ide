@@ -79,11 +79,18 @@ def bridge(controller) -> FakeBridge:
 def test_spawn_fresh_dangerous_default_argv(controller):
     controller.spawn_agent("fresh", True)
     argv = controller.agent_spawn_argv(1)
+    # The env wrapper now also exports the IDE agent-socket path, and claude
+    # gets the IDE reporter hook injected via --settings (agent-ownership
+    # inversion). Both reference the controller's own state so the assertion
+    # tracks the real socket path / settings string.
     assert argv == [
         "env",
         f"SYMMETRIA_AGENT_ID={os.getpid()}_1",
+        f"SYMMETRIA_IDE_AGENT_SOCK={controller._agent_events.socket_path}",
         "claude",
         "--dangerously-skip-permissions",
+        "--settings",
+        controller._agent_reporter_settings,
     ]
 
 
@@ -124,12 +131,16 @@ def test_agent_spawn_argv_for_empty_slot_returns_empty(controller):
 
 def test_spawn_opencode_fresh_dangerous_argv(controller):
     controller.spawn_agent("fresh", True, "opencode")
+    # opencode exports the IDE agent-socket env uniformly but gets NO --settings
+    # (no settings_flag) — its agents keep reporting to the shell bridge.
     assert controller.agent_spawn_argv(1) == [
         "env",
         f"SYMMETRIA_AGENT_ID={os.getpid()}_1",
+        f"SYMMETRIA_IDE_AGENT_SOCK={controller._agent_events.socket_path}",
         'OPENCODE_PERMISSION={"*":{"*":"allow"}}',
         "opencode",
     ]
+    assert "--settings" not in controller.agent_spawn_argv(1)
 
 
 def test_spawn_opencode_resume_with_session_id_argv(controller):
@@ -443,6 +454,134 @@ def test_snapshot_emits_only_on_change(controller):
     controller._on_bridge_snapshot(payload)
     controller._on_bridge_snapshot(payload)
     assert len(emissions) == 1
+
+
+# ---------------------------------------------------------------------------
+# Local capture (agent-ownership inversion): reporter hook → _on_agent_hook
+# ---------------------------------------------------------------------------
+
+
+def _hook(slot: int, hook_event: str, **fields) -> dict:
+    """A reporter payload for the controller's agent at `slot`."""
+    return {
+        "type": "hook",
+        "agent_id": f"{os.getpid()}_{slot}",
+        "hook_event_name": hook_event,
+        **fields,
+    }
+
+
+def test_local_hook_drives_activity(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(_hook(1, "PreToolUse", tool_name="Bash"))
+    assert controller.agentActivity[0] == {
+        "state": "working",
+        "tool": "Running",
+        "agentType": "claude",
+    }
+
+
+def test_local_hook_clears_activity_on_stop(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(_hook(1, "PreToolUse", tool_name="Bash"))
+    assert controller.agentActivity[0]["state"] == "working"
+    controller._on_agent_hook(_hook(1, "Stop"))
+    assert controller.agentActivity[0]["state"] == ""
+
+
+def test_local_hook_agent_type_from_slot_harness(controller):
+    controller.spawn_agent("fresh", True, "opencode")
+    # The reporter only runs for claude, but the activity dict's agentType must
+    # reflect the slot's harness so an opencode chip never flashes the claude glyph.
+    controller._on_agent_hook(_hook(1, "UserPromptSubmit"))
+    assert controller.agentActivity[0]["agentType"] == "opencode"
+
+
+def test_local_hook_ignores_foreign_pid(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        {"type": "hook", "agent_id": "99999_1", "hook_event_name": "PreToolUse"}
+    )
+    assert controller.agentActivity[0]["state"] == ""
+
+
+def test_local_hook_ignores_closed_slot(controller):
+    # No agent at slot 1 → the event is dropped without raising.
+    controller._on_agent_hook(_hook(1, "PreToolUse", tool_name="Bash"))
+    assert all(entry["state"] == "" for entry in controller.agentActivity)
+
+
+def test_local_hook_emits_only_on_change(controller):
+    controller.spawn_agent("fresh", True)
+    emissions: list[None] = []
+    controller.agentActivityChanged.connect(lambda: emissions.append(None))
+    controller._on_agent_hook(_hook(1, "PreToolUse", tool_name="Bash"))
+    controller._on_agent_hook(_hook(1, "PreToolUse", tool_name="Bash"))
+    assert len(emissions) == 1
+
+
+# -- session_id backfill --------------------------------------------------
+
+
+def test_local_hook_backfills_session_id(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(_hook(1, "UserPromptSubmit", session_id="sess-abc"))
+    assert controller._term_agents[1]["session_id"] == "sess-abc"
+
+
+def test_local_session_id_is_sticky_across_clear(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(_hook(1, "UserPromptSubmit", session_id="sess-abc"))
+    # A later Stop carrying no session id must NOT wipe the captured one.
+    controller._on_agent_hook(_hook(1, "Stop"))
+    assert controller._term_agents[1]["session_id"] == "sess-abc"
+
+
+# -- local capture is authoritative over the bridge -----------------------
+
+
+def test_local_capture_wins_over_bridge_snapshot(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(_hook(1, "PreToolUse", tool_name="Bash"))
+    assert controller.agentActivity[0]["state"] == "working"
+    # A lagging bridge snapshot for the SAME slot must not overwrite local state.
+    controller._on_bridge_snapshot(
+        _snapshot({"id": f"{os.getpid()}_1", "activity_state": "thinking"})
+    )
+    assert controller.agentActivity[0]["state"] == "working"
+
+
+def test_bridge_snapshot_omitting_local_agent_does_not_wipe_it(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(_hook(1, "PreToolUse", tool_name="Bash"))
+    # A snapshot that doesn't list our agent at all (race / bridge lag) must
+    # leave the locally-captured sparkle intact — the seed-from-local rebuild.
+    controller._on_bridge_snapshot(_snapshot())
+    assert controller.agentActivity[0]["state"] == "working"
+
+
+def test_bridge_drives_slot_until_first_local_report(controller):
+    # Before any local report, the bridge path still fills the slot (Phase 1 is
+    # additive — capture takes over only once the reporter has fired once).
+    controller.spawn_agent("fresh", True)
+    controller._on_bridge_snapshot(
+        _snapshot({"id": f"{os.getpid()}_1", "activity_state": "thinking"})
+    )
+    assert controller.agentActivity[0]["state"] == "thinking"
+    # The first local report claims the slot; the bridge can no longer change it.
+    controller._on_agent_hook(_hook(1, "PreToolUse", tool_name="Bash"))
+    controller._on_bridge_snapshot(
+        _snapshot({"id": f"{os.getpid()}_1", "activity_state": "idle"})
+    )
+    assert controller.agentActivity[0]["state"] == "working"
+
+
+def test_close_agent_releases_local_capture(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(_hook(1, "PreToolUse", tool_name="Bash"))
+    assert 1 in controller._locally_captured_agents
+    controller.close_agent(1)
+    assert 1 not in controller._locally_captured_agents
 
 
 # ---------------------------------------------------------------------------

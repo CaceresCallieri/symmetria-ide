@@ -45,6 +45,15 @@ class AgentHarness:
     # `--mcp-config <path>`; opencode has no per-launch flag (its MCP lives in
     # opencode.json), so it stays None until that path is wired.
     mcp_config_flag: str | None = None
+    # Flag this harness uses to load EXTRA settings at spawn (agent-ownership
+    # inversion — injecting the IDE-owned activity-reporter hook). claude takes
+    # `--settings <file-or-json>` and we pass an inline JSON string (verified:
+    # `claude --help` documents the json form), so no temp file is needed — the
+    # settings are identical for every agent (the reporter learns its per-agent
+    # identity from SYMMETRIA_AGENT_ID in the env, not from the settings).
+    # opencode has no equivalent per-launch flag, so it stays None (its agents
+    # keep reporting to the shell bridge — a known Phase-1 gap).
+    settings_flag: str | None = None
 
 
 HARNESSES: dict[str, AgentHarness] = {
@@ -55,6 +64,7 @@ HARNESSES: dict[str, AgentHarness] = {
         dangerous_flag="--dangerously-skip-permissions",
         flags={"fresh": [], "resume": ["-r"], "continue": ["-c"]},
         mcp_config_flag="--mcp-config",
+        settings_flag="--settings",
     ),
     "opencode": AgentHarness(
         name="opencode",
@@ -85,22 +95,36 @@ def spawn_argv(
     agent_id: str,
     session_id: str = "",
     mcp_config_path: str = "",
+    settings_json: str = "",
+    agent_sock_path: str = "",
 ) -> list[str]:
     """argv for a slot's QMLTermSession.
 
     `env`-wrapper because KSession::setEnvironment is not QML-reachable —
     same technique orchestrator.nvim's termopen uses. SYMMETRIA_AGENT_ID
-    is what BOTH activity reporters key on: claude's hooks
-    (symmetria-agent-hook.py) and opencode's plugin
-    (~/.config/opencode/plugin/symmetria-agent.js) read it and report to
-    the bridge under that id.
+    is what BOTH activity reporters key on: claude's IDE-owned reporter
+    (runtime/symmetria-ide-agent-hook.py) and opencode's plugin
+    (~/.config/opencode/plugin/symmetria-agent.js) read it to tag their
+    reports with the agent's `<ide_pid>_<slot>` id.
 
     `mcp_config_path`, when set AND the harness declares `mcp_config_flag`,
     appends `<flag> <path>` so the agent discovers the IDE's browser MCP
     server (Stage 2c). Empty path or a harness without the flag (opencode
     today) is a no-op.
+
+    `agent_sock_path` (when set) exports `SYMMETRIA_IDE_AGENT_SOCK` so the
+    claude reporter knows which IDE socket to report to; `settings_json`
+    (when set AND the harness declares `settings_flag`) appends
+    `<settings_flag> <json>` to REGISTER that reporter as a claude hook
+    (agent-ownership inversion). Both empty / a harness without the flag
+    (opencode) is a no-op — opencode keeps reporting to the shell bridge.
     """
     argv = ["env", f"SYMMETRIA_AGENT_ID={agent_id}"]
+    # Exported unconditionally when provided (harmless for opencode, which has no
+    # reporter reading it); the settings registration below is what actually
+    # wires claude's hook to this socket.
+    if agent_sock_path:
+        argv.append(f"SYMMETRIA_IDE_AGENT_SOCK={agent_sock_path}")
     if dangerous:
         argv += [f"{key}={value}" for key, value in harness.dangerous_env]
     argv.append(harness.executable)
@@ -108,6 +132,8 @@ def spawn_argv(
         argv.append(harness.dangerous_flag)
     if mcp_config_path and harness.mcp_config_flag:
         argv += [harness.mcp_config_flag, mcp_config_path]
+    if settings_json and harness.settings_flag:
+        argv += [harness.settings_flag, settings_json]
     argv += harness.flags[spawn_type]
     # Resume-by-id: append the session id after the resume flag when one is
     # supplied. opencode REQUIRES it (bare `--session` errors). claude takes

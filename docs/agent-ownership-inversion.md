@@ -1,12 +1,20 @@
 # Agent ownership inversion — design + implementation context
 
-> **STATUS: PLANNED (not started).** This is the durable handoff for a multi-repo
-> refactor decided via discourse on 2026-06-26. It captures both the phased plan
-> AND the exploration findings (so implementation needn't re-explore the IDE +
-> shell + orchestrator.nvim). Plan mirror: `~/.claude/plans/shiny-nibbling-shore.md`.
-> Prerequisite shipped first: the per-project sessionizer (`session_store.py`,
-> `Ctrl+Shift+R`/`Ctrl+Shift+S`, reload-in-place) — see that for the feature this
-> grew out of.
+> **STATUS: Phase 1 SHIPPED (additive, in-tree) 2026-06-26; Phases 2–5 PLANNED.**
+> This is the durable handoff for a multi-repo refactor decided via discourse on
+> 2026-06-26. It captures both the phased plan AND the exploration findings (so
+> implementation needn't re-explore the IDE + shell + orchestrator.nvim). Plan
+> mirror: `~/.claude/plans/shiny-nibbling-shore.md`. Prerequisite shipped first:
+> the per-project sessionizer (`session_store.py`, `Ctrl+Shift+R`/`Ctrl+Shift+S`,
+> reload-in-place) — see that for the feature this grew out of.
+>
+> **Phase 1 is live and purely additive** — local capture runs ALONGSIDE the
+> still-active bridge subscription, so nothing regressed. Verified by 53 unit +
+> integration tests and a headless boot smoke (the socket binds + cleanly stops).
+> What remains is the LIVE claude E2E (spawn a real agent; confirm sparkles
+> animate from the local path with the bridge mentally ignored, and that
+> reload-restore resumes via the locally-captured session_id) — deferred to a
+> user-driven run since it needs a composited session + the real claude CLI.
 
 ## Why (the problem)
 
@@ -133,10 +141,29 @@ test_main_qml_terminal_wiring.py ~376-379 asserts the relay is absent).
 
 ## Phased plan (each phase shippable + testable; no dashboard-dark / STT-dark window)
 
-1. **IDE captures locally (additive):** new `agent_events.py` (socket server),
-   `runtime/symmetria-ide-agent-hook.py` (reporter), per-agent `--settings` writer +
-   `spawn_argv` injection (`SYMMETRIA_IDE_AGENT_SOCK` env), ported state machine
-   (`agent_activity.py`), drive `_term_agent_activity`+`session_id` from socket.
+1. **IDE captures locally (additive) — ✅ SHIPPED 2026-06-26.** New
+   `agent_events.py` (socket server at `$XDG_RUNTIME_DIR/symmetria-ide-agents-<pid>.sock`,
+   accept thread + per-connection handler threads, `emit_gc_safe`),
+   `runtime/symmetria-ide-agent-hook.py` (DUMB reporter — forwards curated raw
+   hook fields, no mapping), `agent_activity.py` (the WHOLE machine: event→state
+   map + subagent-depth + idle-pop + ooo, ported from BOTH the shell hook and the
+   shell bridge — pure/unit-tested), and the AppController wiring (`_on_agent_hook`
+   drives `_term_agent_activity`+`session_id`; `_locally_captured_agents` makes
+   local AUTHORITATIVE via a seed-from-local rebuild in `_on_bridge_snapshot`;
+   `_forget_local_agent` on close).
+   - **Simplification vs the original plan:** `claude --settings` accepts an
+     INLINE JSON string (verified via `claude --help`), and the reporter learns
+     its per-agent identity from `SYMMETRIA_AGENT_ID` in the env — so the settings
+     are identical for every agent. We pass ONE static inline `--settings` string
+     (built by `app._reporter_settings_json`), NOT a per-agent file. No temp file,
+     no orphan-reaping for settings (unlike the browser MCP config, which needs a
+     per-agent header). `agent_harness.AgentHarness.settings_flag` (claude
+     `--settings`, opencode None) + `spawn_argv(settings_json=, agent_sock_path=)`
+     do the injection; `SYMMETRIA_IDE_AGENT_SOCK` rides the env wrapper.
+   - **Phase-1 coexistence is intentional:** the injected hooks ADD to claude's
+     global settings (which still register the shell hook), so BOTH fire — the IDE
+     socket AND the bridge. Phase 3 removes the global hook + the bridge-derived
+     path; `_locally_captured_agents` then becomes unconditional.
 2. **IDE publishes computed state; bridge relays it** (prefer IDE-published activity).
 3. **Cut over** (couple with 2): remove global hook from `~/.claude/settings.json`,
    strip bridge state machine → dumb relay, **revert the `_session_ids` sticky change**,

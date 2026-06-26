@@ -75,6 +75,65 @@ def test_claude_resume_without_id_keeps_bare_picker_flag():
 
 
 # ---------------------------------------------------------------------------
+# IDE activity-reporter injection (--settings + SYMMETRIA_IDE_AGENT_SOCK)
+# ---------------------------------------------------------------------------
+
+
+def test_claude_injects_settings_and_sock_env():
+    settings = '{"hooks":{"Stop":[]}}'
+    argv = spawn_argv(
+        HARNESSES["claude"],
+        "fresh",
+        True,
+        "42_1",
+        settings_json=settings,
+        agent_sock_path="/run/user/1000/symmetria-ide-agents-42.sock",
+    )
+    # The sock env rides the env wrapper, right after the agent id.
+    assert argv[:3] == [
+        "env",
+        "SYMMETRIA_AGENT_ID=42_1",
+        "SYMMETRIA_IDE_AGENT_SOCK=/run/user/1000/symmetria-ide-agents-42.sock",
+    ]
+    # The settings string is passed inline after the --settings flag.
+    assert "--settings" in argv
+    assert argv[argv.index("--settings") + 1] == settings
+
+
+def test_claude_settings_is_single_inline_arg():
+    # The whole JSON must be ONE argv element (inline string form), not split.
+    settings = '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command"}]}]}}'
+    argv = spawn_argv(
+        HARNESSES["claude"], "fresh", False, "42_1", settings_json=settings
+    )
+    assert argv.count("--settings") == 1
+    assert argv[argv.index("--settings") + 1] == settings
+
+
+def test_opencode_ignores_settings_but_keeps_sock_env():
+    # opencode has no settings_flag → no --settings; the sock env is harmless
+    # (no reporter reads it) but exported uniformly.
+    argv = spawn_argv(
+        HARNESSES["opencode"],
+        "fresh",
+        False,
+        "42_1",
+        settings_json='{"hooks":{}}',
+        agent_sock_path="/run/user/1000/symmetria-ide-agents-42.sock",
+    )
+    assert "--settings" not in argv
+    assert (
+        "SYMMETRIA_IDE_AGENT_SOCK=/run/user/1000/symmetria-ide-agents-42.sock" in argv
+    )
+
+
+def test_no_settings_when_json_empty():
+    argv = spawn_argv(HARNESSES["claude"], "fresh", True, "42_1")
+    assert "--settings" not in argv
+    assert not any(a.startswith("SYMMETRIA_IDE_AGENT_SOCK=") for a in argv)
+
+
+# ---------------------------------------------------------------------------
 # parse_opencode_sessions
 # ---------------------------------------------------------------------------
 

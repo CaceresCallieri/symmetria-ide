@@ -21,6 +21,7 @@ import argparse
 import errno
 import gc
 import glob
+import json
 import logging
 import os
 import re
@@ -51,7 +52,9 @@ from PySide6.QtQml import QQmlApplicationEngine, QmlElement
 from PySide6.QtWebEngineQuick import QtWebEngineQuick
 
 from . import agent_harness
+from .agent_activity import AgentActivityMachine
 from .agent_bridge import AgentBridgeClient, emit_gc_safe
+from .agent_events import AgentEventsServer
 from .browser_mcp import BrowserMcpBridge, BrowserMcpServer
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .trace import trace
@@ -588,9 +591,12 @@ class AppController(QObject):
         # Ctrl+1..5 chords. Per-slot record: {spawn_type, dangerous,
         # harness, session_id, cwd, title, spawned_at}.
         self._term_agents: dict[int, dict] = {}
-        # slot -> {state, tool, agentType} — mirrored from the bridge's
-        # consolidated snapshots (hook-driven activity arrives THROUGH
-        # the bridge, never directly). Drives the AgentTopBar sparkles.
+        # slot -> {state, tool, agentType} — drives the AgentTopBar sparkles.
+        # Since the agent-ownership inversion (Phase 1), the AUTHORITATIVE source
+        # is local capture: the IDE reporter hook → `_agent_events` →
+        # `_on_agent_hook` → `_activity_machine`. `_on_bridge_snapshot` still
+        # fills slots that haven't reported locally yet (legacy path, removed in
+        # Phase 3). See `_locally_captured_agents`.
         self._term_agent_activity: dict[int, dict] = {}
         # 0 = no agent focused (empty pool). 1-based slot otherwise.
         self._focused_term_agent: int = 0
@@ -657,6 +663,32 @@ class AppController(QObject):
         # thread; delivery mutates GUI/QML state (§4 P2).
         self._agent_bridge.inject_requested.connect(
             self._on_bridge_inject, Qt.ConnectionType.QueuedConnection
+        )
+        # ----- Local agent capture (agent-ownership inversion, Phase 1) -----
+        # The IDE owns its OWN agents' activity + session_id instead of
+        # round-tripping through the shell bridge: each IDE-spawned claude agent
+        # gets the IDE reporter hook injected (agent_spawn_argv → spawn_argv
+        # --settings), which reports lifecycle events to this server's socket;
+        # the machine turns each event into a sparkle/session-id update. Runs
+        # ALONGSIDE the bridge subscription (still active in Phase 1) but is
+        # AUTHORITATIVE — once a slot has reported locally it joins
+        # `_locally_captured_agents` and `_on_bridge_snapshot` stops driving it.
+        # See docs/agent-ownership-inversion.md.
+        self._activity_machine = AgentActivityMachine()
+        self._agent_events = AgentEventsServer(self)
+        # Static inline --settings JSON registering the reporter; identical for
+        # every agent (per-agent identity rides SYMMETRIA_AGENT_ID in the env).
+        self._agent_reporter_settings = _reporter_settings_json(
+            str(_RUNTIME_DIR / "symmetria-ide-agent-hook.py")
+        )
+        # Slots whose agents have reported locally at least once — local capture
+        # owns their activity/session_id from then on (the bridge preserves
+        # them). Phase 3 removes the bridge path and this set becomes moot.
+        self._locally_captured_agents: set[int] = set()
+        # queued: hook_received originates on an agent-events handler thread;
+        # delivery mutates GUI-thread pool state (§4 P2).
+        self._agent_events.hook_received.connect(
+            self._on_agent_hook, Qt.ConnectionType.QueuedConnection
         )
         # queued: _opencode_sessions_fetched originates on the one-shot
         # session-list worker thread; the QML-facing re-emit must run on
@@ -2454,6 +2486,13 @@ class AppController(QObject):
             self._browser_mcp_server.agent_config_path(
                 agent_id, browser_enabled=self._project_browser_enabled
             ),
+            # Agent-ownership inversion: register the IDE reporter hook (claude
+            # only) + point it at this IDE's agent socket, so the agent's
+            # lifecycle events report DIRECTLY to us (local capture) — see
+            # `_on_agent_hook`. settings_json is the static inline registration;
+            # agent_sock_path exports SYMMETRIA_IDE_AGENT_SOCK in the env wrapper.
+            settings_json=self._agent_reporter_settings,
+            agent_sock_path=self._agent_events.socket_path,
         )
 
     @Slot(int)
@@ -2673,6 +2712,7 @@ class AppController(QObject):
             )
             del self._term_agents[slot]
             self._term_agent_activity.pop(slot, None)
+            self._forget_local_agent(slot)
             self._release_agent_browser_windows(slot)
             self.termAgentsChanged.emit()
             self._agent_bridge.notify_remove(slot)
@@ -2681,6 +2721,7 @@ class AppController(QObject):
         self._agent_order.remove(slot)
         del self._term_agents[slot]
         self._term_agent_activity.pop(slot, None)
+        self._forget_local_agent(slot)
         self._release_agent_browser_windows(slot)
         self.termAgentsChanged.emit()
         self.agentActivityChanged.emit()
@@ -3165,6 +3206,77 @@ class AppController(QObject):
             "inject_via": "bridge",
         }
 
+    def _forget_local_agent(self, slot: int) -> None:
+        """Drop a closed slot's local-capture state (called from close_agent).
+
+        Clears the activity machine's per-agent memory (subagent depth, ordering
+        baseline) and the authoritative-source flag, so a future agent reusing
+        this slot starts clean and the bridge path may transiently drive it again
+        until its first local report.
+        """
+        self._activity_machine.forget(f"{os.getpid()}_{slot}")
+        self._locally_captured_agents.discard(slot)
+
+    @Slot(dict)
+    def _on_agent_hook(self, payload: dict) -> None:
+        """Apply one local reporter hook event to its pool slot (Phase 1).
+
+        The IDE's own agents report lifecycle events to `_agent_events`; this is
+        the AUTHORITATIVE driver of their sparkles + resumable session id (vs the
+        legacy `_on_bridge_snapshot` round-trip). Resolve the slot from the agent
+        id's `<ide_pid>_<slot>`, run the activity machine, update the slot's
+        activity + session_id, and emit only on a real change.
+        """
+        agent_id = str(payload.get("agent_id", ""))
+        prefix = f"{os.getpid()}_"
+        if not agent_id.startswith(prefix):
+            return  # not one of our agents (defensive — only ours report here)
+        try:
+            slot = int(agent_id[len(prefix) :])
+        except ValueError:
+            return
+        if slot not in self._term_agents:
+            return  # event for a slot we've already closed
+        # From now on local capture owns this slot — the bridge snapshot will
+        # PRESERVE rather than overwrite its activity (see _on_bridge_snapshot).
+        # Log the first claim per slot (one-time, low-noise) so the local path is
+        # observable end-to-end: seeing this line proves the IDE reporter →
+        # socket → here wire is live, independent of the bridge.
+        if slot not in self._locally_captured_agents:
+            self._locally_captured_agents.add(slot)
+            log.info(
+                "local capture: slot %d claimed by IDE reporter (agent %s) — "
+                "bridge no longer drives its activity",
+                slot,
+                agent_id,
+            )
+        outcome = self._activity_machine.apply(payload)
+        # session_id backfill — RETAIN, never clear (same sticky semantics as the
+        # bridge path): the resumable id captured while active must survive idle
+        # for session restore. Pure bookkeeping, not surfaced to QML (no signal).
+        if (
+            outcome.session_id
+            and self._term_agents[slot]["session_id"] != outcome.session_id
+        ):
+            self._term_agents[slot]["session_id"] = outcome.session_id
+        if outcome.clear:
+            # idle/offline → drop the activity entry (chip falls back to dormant).
+            if self._term_agent_activity.pop(slot, None) is not None:
+                self.agentActivityChanged.emit()
+        elif outcome.state:
+            new = {
+                "state": outcome.state,
+                "tool": outcome.tool,
+                # The reporter runs for claude only; agentType from the slot's
+                # harness keeps a (future) opencode chip from flashing the claude
+                # glyph and matches the bridge path's fallback.
+                "agentType": self._term_agents[slot]["harness"],
+            }
+            if self._term_agent_activity.get(slot) != new:
+                self._term_agent_activity[slot] = new
+                self.agentActivityChanged.emit()
+        # else: observer/recap/unmapped event — only session_id may have changed.
+
     @Slot(dict)
     def _on_bridge_snapshot(self, payload: dict) -> None:
         """Mirror this IDE's agents' activity out of a bridge snapshot.
@@ -3176,7 +3288,17 @@ class AppController(QObject):
         concern us.
         """
         prefix = f"{os.getpid()}_"
-        new_activity: dict[int, dict] = {}
+        # Local capture is AUTHORITATIVE (agent-ownership inversion): seed the
+        # rebuild with every locally-owned slot's CURRENT activity, so a snapshot
+        # that lags or OMITS our agent can never wipe a locally-set sparkle. A
+        # cleared (popped) local slot has no entry → it stays cleared. The bridge
+        # loop below fills only slots that haven't reported locally yet. Phase 3
+        # deletes this whole bridge-derived path.
+        new_activity: dict[int, dict] = {
+            slot: activity
+            for slot, activity in self._term_agent_activity.items()
+            if slot in self._locally_captured_agents
+        }
         for agent in payload.get("agents", []):
             agent_id = str(agent.get("id", ""))
             if not agent_id.startswith(prefix):
@@ -3187,6 +3309,8 @@ class AppController(QObject):
                 continue
             if slot not in self._term_agents:
                 continue
+            if slot in self._locally_captured_agents:
+                continue  # seeded above; the bridge never touches a local slot
             # Backfill the harness's resumable session id for session restore
             # (claude reports it through the bridge; opencode does not yet).
             # Pure bookkeeping read only at save_session time — not surfaced to
@@ -3813,6 +3937,12 @@ class AppController(QObject):
         # Non-blocking: the client's reader thread owns connect/retry, so
         # a missing bridge (shell down) just means silent backoff.
         self._agent_bridge.start()
+        # Listen for THIS IDE's agents' hook reports on the IDE-owned socket
+        # (agent-ownership inversion). Non-blocking: the accept worker runs on
+        # its own daemon thread; a bind failure is non-fatal (logged, capture
+        # simply absent). Must be listening before any agent spawns so the very
+        # first SessionStart is captured.
+        self._agent_events.start()
         # NB: the browser MCP server is NO LONGER started unconditionally here.
         # Its FastMCP+uvicorn import is ~1s and used to block this startup path
         # (even though the browser-agent capability is per-project, default OFF).
@@ -4242,6 +4372,11 @@ class AppController(QObject):
         # IDE's agents from the dashboard) and join the reader thread
         # before the event loop tears down.
         self._agent_bridge.stop()
+        # Stop the agent-events socket server (joins its accept worker, unlinks
+        # the socket). The agents' own processes are reaped with their KSessions
+        # on engine teardown, so any in-flight reporter just fails its fast
+        # connect — nothing to coordinate here.
+        self._agent_events.stop()
         # Signal the browser MCP server to exit and drop its config file
         # (daemon thread; reaped with the process either way).
         self._browser_mcp_server.stop()
@@ -4740,6 +4875,56 @@ def _socket_is_live(sock_path: str) -> bool:
         return True
     except OSError as exc:
         return exc.errno not in (errno.ECONNREFUSED, errno.ENOENT)
+
+
+# Claude-Code lifecycle events the IDE reporter hook is registered for — the same
+# set the shell's symmetria-agent-hook.py covers, so local capture sees identical
+# events. Notification is registered separately (idle_prompt matcher + marker).
+_REPORTER_HOOK_EVENTS = (
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Stop",
+    "PermissionRequest",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+)
+
+
+def _reporter_settings_json(reporter_path: str) -> str:
+    """Build the inline `--settings` JSON that registers the IDE reporter hook.
+
+    Identical for every agent (per-agent identity rides SYMMETRIA_AGENT_ID in the
+    env, not the settings), so one string serves the whole pool — no per-agent
+    file, unlike the browser MCP config. Mirrors the shell settings.json shape:
+    a bare executable `command` (the reporter ships a shebang + exec bit),
+    `async: true` so a hook never blocks a turn, and a Notification hook scoped to
+    the idle_prompt matcher with an `idle-notification` argv marker the reporter
+    forwards as a flag. These hooks ADD to claude's global settings (which still
+    register the shell hook in Phase 1), so both fire — to the IDE socket and to
+    the bridge respectively.
+    """
+    command = {"type": "command", "command": reporter_path, "async": True}
+    hooks: dict[str, list] = {
+        event: [{"hooks": [command]}] for event in _REPORTER_HOOK_EVENTS
+    }
+    hooks["Notification"] = [
+        {
+            "matcher": "idle_prompt",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{reporter_path} idle-notification",
+                    "async": True,
+                }
+            ],
+        }
+    ]
+    return json.dumps({"hooks": hooks})
 
 
 def _reap_orphan_nvim_sockets() -> None:
