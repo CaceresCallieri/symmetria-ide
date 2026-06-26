@@ -224,6 +224,92 @@ def test_notify_title_for_unknown_slot_is_dropped(bridge_server, client):
 
 
 # ---------------------------------------------------------------------------
+# notify_activity (inversion Phase 2 — publish local activity outward)
+# ---------------------------------------------------------------------------
+
+
+def test_notify_activity_wire_format(bridge_server, client):
+    client.start()
+    bridge_server.wait_for_messages(3)  # hello/sync/subscribe
+    client.notify_spawn(_instance(1))
+    client.notify_activity(
+        1, state="working", tool="Running", in_plan_mode=True, session_id="sess-1"
+    )
+    _pump_events(
+        lambda: any(
+            m["type"] == "updated" and "activity_state" in m
+            for m in bridge_server.received
+        )
+    )
+    msg = next(
+        m
+        for m in bridge_server.received
+        if m["type"] == "updated" and "activity_state" in m
+    )
+    assert msg["buf"] == 1
+    assert msg["activity_state"] == "working"
+    assert msg["activity_tool"] == "Running"
+    assert msg["in_plan_mode"] is True
+    assert msg["session_id"] == "sess-1"
+
+
+def test_notify_activity_omits_empty_session_id(bridge_server, client):
+    # A clear (idle) publish carries no session id, so the field is omitted from
+    # the wire message — the sticky id stored from an earlier event is preserved.
+    client.start()
+    bridge_server.wait_for_messages(3)
+    client.notify_spawn(_instance(1))
+    client.notify_activity(1, state="", tool="", in_plan_mode=False)
+    _pump_events(
+        lambda: any(
+            m["type"] == "updated" and "activity_state" in m
+            for m in bridge_server.received
+        )
+    )
+    msg = next(
+        m
+        for m in bridge_server.received
+        if m["type"] == "updated" and "activity_state" in m
+    )
+    assert "session_id" not in msg
+
+
+def test_notify_activity_for_unknown_slot_is_dropped(bridge_server, client):
+    client.start()
+    bridge_server.wait_for_messages(3)
+    client.notify_activity(9, state="working", tool="Running", in_plan_mode=False)
+    _pump_events(lambda: True, timeout=0.5)
+    assert not any(
+        m["type"] == "updated" and "activity_state" in m for m in bridge_server.received
+    )
+
+
+def test_notify_activity_carried_in_reconnect_sync(bridge_server, client):
+    # Activity stored on the instance must ride a reconnect `sync` so a bridge
+    # restart re-learns the agent's current state without waiting for the next
+    # hook event.
+    client.start()
+    bridge_server.wait_for_messages(3)
+    client.notify_spawn(_instance(1))
+    client.notify_activity(1, state="thinking", tool="", in_plan_mode=False)
+    _pump_events(
+        lambda: any(
+            m["type"] == "updated" and "activity_state" in m
+            for m in bridge_server.received
+        )
+    )
+    # Drop the connection; the reader reconnects and replays hello/sync/subscribe.
+    bridge_server.drop_client()
+    _pump_events(
+        lambda: sum(m["type"] == "sync" for m in bridge_server.received) >= 2,
+        timeout=5.0,
+    )
+    last_sync = [m for m in bridge_server.received if m["type"] == "sync"][-1]
+    inst = next(i for i in last_sync["instances"] if i["buf"] == 1)
+    assert inst["activity_state"] == "thinking"
+
+
+# ---------------------------------------------------------------------------
 # Subscribe feed
 # ---------------------------------------------------------------------------
 

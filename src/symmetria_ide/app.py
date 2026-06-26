@@ -3260,15 +3260,17 @@ class AppController(QObject):
         # session_id backfill — RETAIN, never clear (same sticky semantics as the
         # bridge path): the resumable id captured while active must survive idle
         # for session restore. Pure bookkeeping, not surfaced to QML (no signal).
-        if (
+        session_changed = bool(
             outcome.session_id
             and self._term_agents[slot]["session_id"] != outcome.session_id
-        ):
+        )
+        if session_changed:
             self._term_agents[slot]["session_id"] = outcome.session_id
+        activity_changed = False
         if outcome.clear:
             # idle/offline → drop the activity entry (chip falls back to dormant).
             if self._term_agent_activity.pop(slot, None) is not None:
-                self.agentActivityChanged.emit()
+                activity_changed = True
         elif outcome.state:
             new = {
                 "state": outcome.state,
@@ -3280,8 +3282,25 @@ class AppController(QObject):
             }
             if self._term_agent_activity.get(slot) != new:
                 self._term_agent_activity[slot] = new
-                self.agentActivityChanged.emit()
+                activity_changed = True
         # else: observer/recap/unmapped event — only session_id may have changed.
+        if activity_changed:
+            self.agentActivityChanged.emit()
+        # Phase 2 (inversion): publish the locally-captured activity outward so
+        # the shell dashboard sources it from the IDE (the authoritative owner)
+        # rather than computing its own from the global hook. Publish on any
+        # activity change OR a freshly-captured session_id; inert until the shell
+        # prefers these published fields (the Phase 2 shell-half). The current
+        # entry ("" state when cleared) is what the dashboard should mirror.
+        if activity_changed or session_changed:
+            current = self._term_agent_activity.get(slot, {})
+            self._agent_bridge.notify_activity(
+                slot,
+                state=current.get("state", ""),
+                tool=current.get("tool", ""),
+                in_plan_mode=outcome.in_plan_mode,
+                session_id=self._term_agents[slot]["session_id"],
+            )
 
     @Slot(dict)
     def _on_bridge_snapshot(self, payload: dict) -> None:

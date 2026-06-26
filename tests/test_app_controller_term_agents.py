@@ -24,6 +24,7 @@ class FakeBridge:
         self.removes: list[int] = []
         self.focuses: list[int] = []
         self.titles: list[tuple[int, str]] = []
+        self.activities: list[dict] = []
         self.inject_results: list[tuple[str, bool, bool, str]] = []
         self.start_calls = 0
         self.stop_calls = 0
@@ -39,6 +40,25 @@ class FakeBridge:
 
     def notify_title(self, slot: int, title: str) -> None:
         self.titles.append((slot, title))
+
+    def notify_activity(
+        self,
+        slot: int,
+        *,
+        state: str,
+        tool: str,
+        in_plan_mode: bool,
+        session_id: str = "",
+    ) -> None:
+        self.activities.append(
+            {
+                "slot": slot,
+                "state": state,
+                "tool": tool,
+                "in_plan_mode": in_plan_mode,
+                "session_id": session_id,
+            }
+        )
 
     def send_inject_result(
         self, request_id: str, ok: bool, submitted: bool, error: str = ""
@@ -595,6 +615,55 @@ def test_close_agent_forgets_machine_state_for_slot_reuse(controller):
     controller.spawn_agent("fresh", True)
     controller._on_agent_hook(_hook(1, "SubagentStop"))
     assert controller.agentActivity[0]["state"] == ""
+
+
+# -- Phase 2: local capture publishes activity outward to the bridge ------
+
+
+def test_local_hook_publishes_activity(controller, bridge):
+    controller.spawn_agent("fresh", True)
+    bridge.activities.clear()  # ignore the spawn-time publish, if any
+    controller._on_agent_hook(_hook(1, "PreToolUse", tool_name="Bash"))
+    assert bridge.activities[-1] == {
+        "slot": 1,
+        "state": "working",
+        "tool": "Running",
+        "in_plan_mode": False,
+        "session_id": "",
+    }
+
+
+def test_local_hook_publishes_cleared_state_on_stop(controller, bridge):
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(_hook(1, "PreToolUse", tool_name="Bash"))
+    bridge.activities.clear()
+    controller._on_agent_hook(_hook(1, "Stop"))
+    # The dashboard must see the slot go quiet — published with empty state.
+    assert bridge.activities[-1]["slot"] == 1
+    assert bridge.activities[-1]["state"] == ""
+
+
+def test_local_hook_publishes_session_id(controller, bridge):
+    controller.spawn_agent("fresh", True)
+    bridge.activities.clear()
+    controller._on_agent_hook(_hook(1, "UserPromptSubmit", session_id="sess-abc"))
+    assert bridge.activities[-1]["session_id"] == "sess-abc"
+
+
+def test_local_hook_publishes_plan_mode(controller, bridge):
+    controller.spawn_agent("fresh", True)
+    bridge.activities.clear()
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Bash", permission_mode="plan")
+    )
+    assert bridge.activities[-1]["in_plan_mode"] is True
+
+
+def test_observer_event_without_session_change_does_not_publish(controller, bridge):
+    controller.spawn_agent("fresh", True)
+    bridge.activities.clear()
+    controller._on_agent_hook(_hook(1, "FileChanged"))  # observer no-op, no session
+    assert bridge.activities == []
 
 
 # ---------------------------------------------------------------------------

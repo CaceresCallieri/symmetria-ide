@@ -208,6 +208,49 @@ class AgentBridgeClient(QObject):
                 {"type": "updated", "nvim_pid": self._pid, "buf": slot, "title": title}
             )
 
+    def notify_activity(
+        self,
+        slot: int,
+        *,
+        state: str,
+        tool: str,
+        in_plan_mode: bool,
+        session_id: str = "",
+    ) -> None:
+        """Publish this slot's locally-captured activity outward (inversion P2).
+
+        The IDE is the authoritative owner of its agents' activity, so it PUSHES
+        the computed state/tool/in_plan_mode (and the resumable session_id) to
+        the bridge instead of the bridge deriving them from the global hook.
+        Stored into `_instances[slot]` so a reconnect `sync` replays them, and
+        sent as an `updated` message for live deltas. NOT debounced (unlike
+        titles): activity is already coalesced to one event per transition by the
+        state machine, and sparkle latency matters. `session_id` is sticky —
+        published/stored only when non-empty, so a clear event (which carries
+        none) never blanks a captured id. Inert until the shell prefers these
+        `inst` fields over its own computed activity (the Phase 2 shell-half).
+        """
+        with self._instances_lock:
+            inst = self._instances.get(slot)
+            if inst is None:
+                return  # slot not registered (already closed) — nothing to update
+            inst["activity_state"] = state
+            inst["activity_tool"] = tool
+            inst["in_plan_mode"] = in_plan_mode
+            if session_id:
+                inst["session_id"] = session_id
+        msg = {
+            "type": "updated",
+            "nvim_pid": self._pid,
+            "buf": slot,
+            "activity_state": state,
+            "activity_tool": tool,
+            "in_plan_mode": in_plan_mode,
+        }
+        if session_id:
+            msg["session_id"] = session_id
+        self._send(msg)
+
     def send_inject_result(
         self, request_id: str, ok: bool, submitted: bool, error: str = ""
     ) -> None:
