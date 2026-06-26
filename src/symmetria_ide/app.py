@@ -659,11 +659,10 @@ class AppController(QObject):
         self._agent_bridge.snapshot_received.connect(
             self._on_bridge_snapshot, Qt.ConnectionType.QueuedConnection
         )
-        # queued: inject_requested also originates on the bridge reader
-        # thread; delivery mutates GUI/QML state (§4 P2).
-        self._agent_bridge.inject_requested.connect(
-            self._on_bridge_inject, Qt.ConnectionType.QueuedConnection
-        )
+        # (agent-ownership inversion, Phase 4) STT inject no longer arrives via
+        # the bridge — it's a direct shell→IDE round-trip on _agent_events. The
+        # former inject_requested → _on_bridge_inject wiring was removed; the
+        # subscription above stays for opencode activity snapshots.
         # ----- Local agent capture (agent-ownership inversion, Phase 1) -----
         # The IDE owns its OWN agents' activity + session_id instead of
         # round-tripping through the shell bridge: each IDE-spawned claude agent
@@ -1541,26 +1540,14 @@ class AppController(QObject):
         self.open_in_nvim(path)
         self.hide_fm()
 
-    @Slot(str)
-    def send_editor_keys(self, keys: str) -> None:
-        """Inject a NeoVim keycode string (e.g. `<C-2>`, `<C-S-q>`) into
-        the editor nvim over the RPC control socket.
-
-        Exists for chords the terminal pane CANNOT deliver: the fork's
-        Konsole-era VT engine speaks only the legacy key encoding, where
-        Ctrl+digit has no byte representation and Ctrl+Shift+letter
-        collapses to plain Ctrl+letter (`Vt102Emulation::sendKeyEvent`
-        masks with 0x1f). Ghostty delivers these via the kitty keyboard
-        protocol, which the fork lacks — so Main.qml intercepts the
-        chords at the Qt layer (where key + modifiers are fully
-        distinguishable) and routes them here. `nvim_input` parses the
-        keycode notation directly, no terminal encoding involved —
-        verified empirically that `<C-2>` / `<C-S-q>` mappings fire.
-
-        Thin passthrough to `NvimBackend.input` (async-marshalled,
-        no-op before attach) so QML never touches the backend directly.
-        """
-        self._backend.input(keys)
+    # (Phase 5, agent-ownership inversion) The `send_editor_keys` passthrough
+    # was removed here. It existed only for the orchestrator.nvim chord relay
+    # (Ctrl+1..5 / Ctrl+Shift+Q → nvim_input), retired in the 2026-06-10 hard
+    # cutover when the IDE-native agent surface took those chords; nothing has
+    # called it since. orchestrator.nvim itself is removed in this phase. If a
+    # future need to inject raw keycodes into the editor nvim arises, route
+    # through `NvimBackend.input` directly (it is async-marshalled, no-op before
+    # attach).
 
     # --- File-tree sidebar ----------------------------------------------
 
@@ -3371,49 +3358,22 @@ class AppController(QObject):
         if new_activity != self._term_agent_activity:
             self._term_agent_activity = new_activity
             self.agentActivityChanged.emit()
-        self._mirror_stt_state(payload.get("stt"))
-
-    def _mirror_stt_state(self, stt: dict | None) -> None:
-        """Mirror the snapshot's shell-reported STT target into QML props.
-
-        The shell keys the target by (window pid, buf) — for our agents the
-        window pid IS this process's pid (the IDE declares host_window_pid
-        in hello) and buf is the pool slot. A buf of -1 means "the active
-        agent" (shell semantics for representative targeting), which here
-        resolves to the focused slot — same fallback _on_bridge_inject uses.
-        """
-        slot = 0
-        transcribing = False
-        if isinstance(stt, dict):
-            try:
-                terminal_pid = int(stt.get("terminal_pid", -1))
-                buf = int(stt.get("buf", -1))
-            except (TypeError, ValueError):
-                # Error-path -1 for terminal_pid can never equal os.getpid(),
-                # so the guard below rejects malformed payloads before buf's
-                # legitimate -1 "focused agent" sentinel is ever interpreted.
-                terminal_pid, buf = -1, -1
-            if terminal_pid == os.getpid():
-                if buf in self._term_agents:
-                    slot = buf
-                elif buf == -1:
-                    slot = self._focused_term_agent
-                if slot:
-                    transcribing = bool(stt.get("transcribing", False))
-        if (slot, transcribing) != (self._stt_target_slot, self._stt_transcribing):
-            self._stt_target_slot = slot
-            self._stt_transcribing = transcribing
-            self.sttStateChanged.emit()
+        # (agent-ownership inversion, Phase 4) STT recording state no longer
+        # rides the bridge snapshot — the former `_mirror_stt_state(payload["stt"])`
+        # call + method were removed. The chip dot is driven directly by
+        # `_on_stt_recording` from the IDE's own socket.
 
     @Slot(dict)
     def _dispatch_inject(self, payload: dict, fail) -> None:
         """Validate an inject request and hand delivery to QML.
 
-        Shared by the bridge-routed path (`_on_bridge_inject`, being retired) and
-        the direct IDE-socket path (`_on_stt_inject`, inversion P4). `fail(request_id,
-        error)` reports a PRE-delivery failure back on whichever channel originated
-        the request. Target resolution mirrors orchestrator.nvim's stt_inject: an
-        explicit live slot wins (captured by the shell at recording stop, so a
+        The single inject path since the agent-ownership inversion (Phase 4):
+        the direct IDE-socket request from `_on_stt_inject`. `fail(request_id,
+        error)` resolves the agent-events Future with a PRE-delivery failure so
+        the dictation client gets a structured answer. (`fail` is kept as a
+        parameter rather than inlined so the validation stays decoupled from the
+        reply channel.) Target resolution mirrors orchestrator.nvim's stt_inject:
+        an explicit live slot wins (captured by the shell at recording stop, so a
         mid-transcription focus switch doesn't redirect the text); absent/dead slot
         falls back to the focused agent; no live agent at all fails fast so the
         requester's toast fires instead of its timeout.
@@ -3447,15 +3407,6 @@ class AppController(QObject):
         )
         self.agentInjectRequested.emit(
             slot, text, bool(payload.get("submit")), request_id
-        )
-
-    def _on_bridge_inject(self, payload: dict) -> None:
-        """Bridge-routed inject (legacy path, retired once the shell goes direct)."""
-        self._dispatch_inject(
-            payload,
-            lambda rid, err: self._agent_bridge.send_inject_result(
-                rid, False, False, err
-            ),
         )
 
     @Slot(dict)
@@ -3499,12 +3450,12 @@ class AppController(QObject):
     def agent_inject_done(
         self, request_id: str, ok: bool, submitted: bool, error: str = ""
     ) -> None:
-        """QML callback closing the inject loop — routes the result to whichever
-        channel owns this request_id: the direct IDE socket if it has a pending
-        inject for it (the new path), else the bridge (legacy, during transition)."""
-        if self._agent_events.resolve_inject(request_id, ok, submitted, error):
-            return
-        self._agent_bridge.send_inject_result(request_id, ok, submitted, error)
+        """QML callback closing the inject loop — resolves the direct-channel
+        Future for this request_id, which unblocks the agent-events handler
+        thread waiting to write the result back to the dictation client. A
+        request_id with no pending inject (already timed out / resolved) is a
+        benign no-op (resolve_inject returns False)."""
+        self._agent_events.resolve_inject(request_id, ok, submitted, error)
 
     @Slot(str)
     def on_shell_cwd(self, path: str) -> None:

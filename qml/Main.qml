@@ -223,13 +223,13 @@ Window {
     // Terminal-agent chord family — the IDE-native orchestrator runtime.
     //
     // HARD CUTOVER NOTE (2026-06-10): these chords previously RELAYED to
-    // orchestrator.nvim's keymaps inside the embedded nvim
-    // (`controller.send_editor_keys` → nvim_input — see commit 45a8faa for
-    // the VT-encoding rationale that made the relay necessary). The
-    // IDE-native agent surface now owns them outright: Ctrl+1..5 focuses
-    // the IDE's own agent slots, and orchestrator.nvim's <C-1..5>/<C-S-q>
-    // keymaps are intentionally unreachable from the IDE. Per the
-    // keybind-layer doctrine
+    // orchestrator.nvim's keymaps inside the embedded nvim, via a
+    // send_editor_keys → nvim_input passthrough (see commit 45a8faa for the
+    // VT-encoding rationale that made the relay necessary). The IDE-native
+    // agent surface now owns them outright: Ctrl+1..5 focuses the IDE's own
+    // agent slots. orchestrator.nvim AND the send_editor_keys passthrough were
+    // both REMOVED in Phase 5 of the agent-ownership inversion, so the relay no
+    // longer exists in any form. Per the keybind-layer doctrine
     // (`.claude/memory/project/meta/ide_owns_keybind_layer.md`).
     //
     // Always-enabled (no surface gate): focus_agent auto-switches the

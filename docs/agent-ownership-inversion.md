@@ -1,7 +1,10 @@
 # Agent ownership inversion — design + implementation context
 
-> **STATUS (2026-06-26): Phases 1–3 SHIPPED for claude (functional cutover live);
-> Phase 4 IDE-side SHIPPED (additive); Phase 4 shell-side + Phase 5 PLANNED.**
+> **STATUS (2026-06-26): Phases 1–4 SHIPPED for claude (STT now pure-direct
+> shell→IDE on both sides; bridge STT/inject machinery removed). Phase 5 =
+> IDE fully DECOUPLED from orchestrator.nvim (`send_editor_keys` removed);
+> orchestrator.nvim itself is KEPT as the standalone-nvim runtime (user
+> decision 2026-06-26 — "keep it, just keep the IDE decoupled").**
 > Multi-repo refactor
 > decided via discourse 2026-06-26. Captures the phased plan AND the exploration
 > findings (so implementation needn't re-explore the IDE + shell + orchestrator).
@@ -49,7 +52,8 @@ is backwards.
 - **STT is redesigned** off the bridge onto a **direct shell→IDE channel** (the
   IDE's own socket), so the bridge carries *only* IDE→dashboard records.
 - Non-IDE (plain-terminal) agents are **dropped** from the dashboard; the global
-  Symmetria claude hook is **removed**; **orchestrator.nvim is removed**.
+  Symmetria claude hook is **removed**; the IDE is **decoupled from
+  orchestrator.nvim** (which is KEPT as the standalone-nvim runtime — see Phase 5).
 
 ```
 TODAY:  agent hooks ─► shell bridge (state machine) ─► dashboard
@@ -68,7 +72,8 @@ server": hook reports in, STT in, (future) third-party queries in.
 - Aggregation = **shell as dumb relay** (no new daemon now); protocol IDE-owned + opaque.
 - Activity + session_id = **local capture, one-way publish** (kills the round-trip).
 - STT = **redesigned to a direct shell→IDE socket** (chosen over keeping it 2-way on the bridge).
-- Non-IDE agents **dropped**; global hook **removed**; orchestrator.nvim **removed**.
+- Non-IDE agents **dropped**; global hook **removed**; IDE **decoupled from**
+  orchestrator.nvim (orchestrator.nvim KEPT for standalone nvim — user decision 2026-06-26).
 - IDE socket shaped now to also serve a **future direct-query interface** for third-party dashboards.
 
 ---
@@ -250,18 +255,33 @@ test_main_qml_terminal_wiring.py ~376-379 asserts the relay is absent).
      extracted + shared with the legacy bridge path; `agent_inject_done` routes
      direct-first, bridge-fallback (so both work during the transition). STT
      protocol: buf = slot, -1 = focused, 0 = clear.
-   - **PENDING — shell-side:** `stt-inject.sh` + `AgentService._pushSttState` /
-     `SttJob` connect DIRECTLY to `$XDG_RUNTIME_DIR/symmetria-ide-agents-<ide_pid>.sock`
-     (the shell already has the ide pid = `nvim_pid` at inject time) — send
-     `stt_recording` / `stt_inject`, read the JSON reply. Then remove the bridge's
-     `handle_inject`/`handle_inject_result` + the `stt` snapshot field +
-     `set_stt_state`. NOTE: the shell **agentbar** dot reads LOCAL `AgentService`
-     (per the stt_chip_hub_broadcast memory), so it's unaffected — only the IDE
-     chip dot + injection move. Needs live dictation verification.
-   - **PENDING — IDE cleanup (after shell-side live):** remove `_on_bridge_inject`,
-     the bridge `inject_requested` signal/wiring, and `_mirror_stt_state`. KEEP the
-     bridge subscribe + `_on_bridge_snapshot` (opencode activity).
-5. **Remove orchestrator.nvim** + `send_editor_keys` + stale comments.
+   - **✅ SHIPPED — shell-side:** `stt-inject.sh` (new `try_direct_inject`) +
+     `AgentService` (new `_pushSttRecording` → `scripts/stt-recording.py`) +
+     `SttJob` (env vars `STT_IDE_PID`/`STT_IDE_BUF`, `_targetIdePid`) connect
+     DIRECTLY to `$XDG_RUNTIME_DIR/symmetria-ide-agents-<ide_pid>.sock` (the
+     shell already has the ide pid = `nvim_pid` at inject time). The bridge's
+     `handle_inject`/`handle_inject_result`/`set_stt_state`/`_stt_state`, the
+     `stt` snapshot field, and the parent-control stdin reader were all removed
+     (the bridge is now a pure IDE→dashboard relay; STT never touches it). The
+     shell **agentbar** dot still reads LOCAL `AgentService` (per the
+     stt_chip_hub_broadcast memory) — unaffected. Needs live dictation
+     verification. `inject_via === "bridge"` is KEPT as the IDE-pane capability
+     discriminator (means "use the direct channel"). Remote (SSH) STT dropped.
+   - **✅ SHIPPED — IDE cleanup:** removed `_on_bridge_inject`, the bridge
+     `inject_requested` signal + `send_inject_result` + the reader's inject
+     branch, and `_mirror_stt_state` (+ its `_on_bridge_snapshot` call);
+     `agent_inject_done` now resolves the direct Future only (no bridge
+     fallback). KEPT the bridge subscribe + `_on_bridge_snapshot` (opencode
+     activity). Obsolete snapshot-STT tests migrated to direct-channel tests.
+5. **Decouple the IDE from orchestrator.nvim — ✅ SHIPPED (IDE-side).** Removed
+   `AppController.send_editor_keys` (the dead chord-relay primitive; the relay
+   itself went in the 2026-06-10 hard cutover) + its tests + the stale Main.qml
+   comment. **orchestrator.nvim itself is KEPT** (user decision 2026-06-26): it
+   is deeply wired into the standalone nvim config (auto-session persistence,
+   snacks dashboard, neo-tree, the `<leader>a*` keymap family) and remains the
+   non-IDE nvim runtime. The only requirement was that the IDE not interact with
+   it — now satisfied. `~/projects/orchestrator.nvim` + the dotfiles plugin spec
+   are intentionally LEFT UNTOUCHED.
 
 ## Risks
 - Phases 2+3 coupled (don't leave two activity sources fighting).

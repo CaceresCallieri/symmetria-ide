@@ -24,7 +24,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [GitView history viewer (v0 2026-06-15)](project/active/gitview_history_viewer.md) — read-only "git" surface; comprehension not mutation; agent-correlation + review-frontier are north stars
 - [Markdown preview in IDE (idea)](project/active/markdown_preview_in_ide.md) — future: themed HTML .md preview in the embedded browser, key-toggled
 - [Startup optimization outcomes](project/active/startup_optimization_followups.md) — gc.collect drop SHIPPED (51bf26c, ~20ms); WebEngine import deferral spiked+works but HELD (Qt-deprecated late init)
-- [Agent ownership inversion (P1-3 + P4 IDE-side SHIPPED)](project/active/agent_ownership_inversion.md) — claude agents IDE-owned (cutover live, 3 repos); P4 STT direct channel IDE-side done (shell-side pending, pure-direct); state machine kept for opencode; P5 planned. See docs/agent-ownership-inversion.md
+- [Agent ownership inversion (P1-4 SHIPPED; P5 IDE-decoupled)](project/active/agent_ownership_inversion.md) — claude agents IDE-owned; STT now pure-direct shell→IDE (bridge STT/inject removed); orchestrator.nvim KEPT (IDE just decoupled). Live dictation verify owed. See docs/agent-ownership-inversion.md
 
 ## Project — shipped — `project/shipped/` (past-tense systems; one consolidated bullet)
 

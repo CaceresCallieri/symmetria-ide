@@ -1,19 +1,22 @@
 ---
 name: agent-ownership-inversion
-description: Multi-repo refactor making the IDE the single source of truth for its agents; Phases 1-3 + Phase 4 IDE-side SHIPPED for claude, Phase 4 shell-side + Phase 5 planned
+description: Multi-repo refactor making the IDE the single source of truth for its agents; Phases 1-4 SHIPPED for claude (STT now pure-direct both sides); Phase 5 = IDE decoupled from orchestrator.nvim (which is KEPT for standalone nvim)
 metadata: 
   node_type: memory
   type: project
   originSessionId: dab4cce2-971c-430b-88d7-7b19226fd6bd
 ---
 
-Phases 1-3 SHIPPED for claude (functional cutover live, 2026-06-26); Phase 4 (STT) +
-Phase 5 (orchestrator removal) PLANNED. Make the Symmetria IDE the **single
-authoritative owner** of all state about the agents it spawns: capture session_id +
-activity **locally** (an IDE-injected `claude --settings` reporter hook → an IDE-owned
-socket `$XDG_RUNTIME_DIR/symmetria-ide-agents-<pid>.sock`), drive its own UI from that,
-publish **one-way** to the bridge. **STT** to be redesigned onto a direct shell→IDE
-socket (Phase 4). orchestrator.nvim to be removed (Phase 5).
+Phases 1-4 SHIPPED for claude (2026-06-26); Phase 5 IDE-side SHIPPED (orchestrator.nvim
+KEPT — see below). Make the Symmetria IDE the **single authoritative owner** of all
+state about the agents it spawns: capture session_id + activity **locally** (an
+IDE-injected `claude --settings` reporter hook → an IDE-owned socket
+`$XDG_RUNTIME_DIR/symmetria-ide-agents-<pid>.sock`), drive its own UI from that,
+publish **one-way** to the bridge. **STT** is now a DIRECT shell→IDE round-trip on
+that socket (Phase 4, both sides shipped). **Phase 5:** the IDE was DECOUPLED from
+orchestrator.nvim (`send_editor_keys` removed); orchestrator.nvim itself is KEPT as
+the standalone-nvim runtime (user decision 2026-06-26 — it's deeply wired into the
+nvim config: auto-session, snacks dashboard, neo-tree, `<leader>a*`).
 
 **Shipped:** IDE `a3aebdc`+`b7210af` (P1 local capture: agent_events.py socket server,
 agent_activity.py pure state machine, runtime/symmetria-ide-agent-hook.py dumb reporter,
@@ -36,23 +39,29 @@ opencode, NOT yet done.
 (dev, or promote dev→stable — STABLE daily-driver is claude-activity-dark until promoted);
 confirm claude sparkles+dashboard come from IDE, opencode still works via fallback.
 
-**Phase 4 (STT direct channel) — IDE-side SHIPPED additive (`94afc14`):** decision
-PURE-DIRECT (drop remote/SSH STT, remove bridge inject path entirely). agent_events now
-dispatches by type: stt_recording {buf,transcribing} fire-and-forget → _on_stt_recording
-(chip dot); stt_inject {buf,text,submit} REQUEST/REPLY — server stamps request_id, blocks
-on a Future resolved by resolve_inject←agent_inject_done, writes stt_inject_result back.
-_dispatch_inject shared w/ bridge path; agent_inject_done routes direct-first/bridge-fallback
-(both work during transition). STT buf: slot / -1 focused / 0 clear. **PENDING shell-side:**
-stt-inject.sh + AgentService._pushSttState/SttJob → connect direct to
-$XDG_RUNTIME_DIR/symmetria-ide-agents-<ide_pid>.sock (shell has ide pid=nvim_pid at inject);
-remove bridge handle_inject/handle_inject_result + stt snapshot field + set_stt_state. Shell
-agentbar dot reads LOCAL AgentService (unaffected). **PENDING IDE cleanup (after shell live):**
-remove _on_bridge_inject + inject_requested + _mirror_stt_state; KEEP subscribe (opencode).
+**Phase 4 (STT direct channel) — FULLY SHIPPED (PURE-DIRECT, both sides; remote/SSH
+STT dropped).** IDE-side (`94afc14`): agent_events dispatches by type — stt_recording
+{buf,transcribing} fire-and-forget → _on_stt_recording (chip dot); stt_inject
+{buf,text,submit} REQUEST/REPLY — server stamps request_id, blocks on a Future resolved
+by resolve_inject←agent_inject_done, writes stt_inject_result back. STT buf: slot / -1
+focused / 0 clear. **Shell-side SHIPPED:** stt-inject.sh `try_direct_inject` +
+AgentService `_pushSttRecording`→`scripts/stt-recording.py` + SttJob env
+`STT_IDE_PID`/`STT_IDE_BUF`,`_targetIdePid` connect direct to
+$XDG_RUNTIME_DIR/symmetria-ide-agents-<ide_pid>.sock (ide pid=agent.nvim_pid). The bridge's
+handle_inject/handle_inject_result/set_stt_state/_stt_state + the `stt` snapshot field + the
+parent-control stdin reader were REMOVED (bridge = pure IDE→dashboard relay now; STT never
+touches it). `inject_via==="bridge"` KEPT as the IDE-pane discriminator. **IDE cleanup
+SHIPPED:** removed _on_bridge_inject + bridge inject_requested signal + send_inject_result +
+_mirror_stt_state; agent_inject_done resolves the direct Future only (no bridge fallback);
+KEPT subscribe + _on_bridge_snapshot (opencode). Snapshot-STT tests migrated to direct-channel
+tests. **Validated:** 1004 IDE tests pass, ruff clean, headless boot smoke green, shell
+bridge runtime smoke green. **Live dictation verification still owed (user).**
 
 Full design + the exploration findings (bridge protocol, activity state-machine
 rules, dashboard parity fields, STT flow, injection seam, dead-code inventory, all
 with file:line) live in **`docs/agent-ownership-inversion.md`**. Phased plan mirror:
-`~/.claude/plans/shiny-nibbling-shore.md`. 5 phases, each independently shippable.
+`~/.claude/plans/shiny-nibbling-shore.md`. 5 phases (Phase 5 = IDE-decoupled, not
+orchestrator-removal — see frontmatter).
 
 **Why:** the just-shipped sessionizer ([[startup_optimization_followups]] sibling
 era) forced an edit to the shell's `agent-bridge.py` just to capture an IDE-private

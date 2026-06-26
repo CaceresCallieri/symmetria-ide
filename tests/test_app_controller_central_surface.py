@@ -429,57 +429,10 @@ def test_shutdown_quits_nvim_rpc_gracefully(patched_backends):
 
 
 # ---------------------------------------------------------------------------
-# send_editor_keys — thin passthrough slot for chord relay
+# send_editor_keys — REMOVED (Phase 5, agent-ownership inversion)
+#
+# The thin nvim-keycode passthrough existed only for the orchestrator.nvim
+# chord relay, retired in the 2026-06-10 hard cutover. With orchestrator.nvim
+# removed, the method is gone; test_main_qml_terminal_wiring.test_orchestrator_relay_absent
+# still guards that Main.qml never re-introduces a relay call.
 # ---------------------------------------------------------------------------
-
-
-def test_send_editor_keys_delegates_to_backend(monkeypatch):
-    """send_editor_keys(keys) must pass the keycode string straight through
-    to NvimBackend.input. This is a thin wrapper slot that lets QML call
-    the RPC control channel without importing NvimBackend directly.
-
-    Verified by patching NvimBackend.input and asserting the call arrives
-    with the correct argument.
-    """
-    received: list[str] = []
-
-    def fake_input(self, keys: str) -> None:
-        received.append(keys)
-
-    monkeypatch.setattr(NvimBackend, "input", fake_input)
-
-    ctrl = AppController()
-    try:
-        ctrl.send_editor_keys("<C-2>")
-        ctrl.send_editor_keys("<C-S-q>")
-    finally:
-        ctrl.shutdown()
-
-    assert received == ["<C-2>", "<C-S-q>"]
-
-
-def test_send_editor_keys_empty_string_is_noop(monkeypatch):
-    """NvimBackend.input guards against empty strings (returns early on
-    ``not keys``). send_editor_keys must propagate empty strings to that
-    guard — calling input("") should NOT inject a key into nvim.
-
-    This pins the pass-through contract: any input validation lives in
-    NvimBackend.input, not duplicated in AppController.
-    """
-    received: list[str] = []
-
-    def fake_input(self, keys: str) -> None:
-        received.append(keys)
-
-    monkeypatch.setattr(NvimBackend, "input", fake_input)
-
-    ctrl = AppController()
-    try:
-        ctrl.send_editor_keys("")
-    finally:
-        ctrl.shutdown()
-
-    # NvimBackend.input will be called with "" but will return early
-    # without injecting — the assert here pins that AppController passes
-    # through rather than silently filtering, so the guard lives in one place.
-    assert received == [""]

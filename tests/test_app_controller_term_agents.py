@@ -9,6 +9,7 @@ queued delivery path).
 
 from __future__ import annotations
 
+import concurrent.futures
 import os
 
 import pytest
@@ -25,7 +26,6 @@ class FakeBridge:
         self.focuses: list[int] = []
         self.titles: list[tuple[int, str]] = []
         self.activities: list[dict] = []
-        self.inject_results: list[tuple[str, bool, bool, str]] = []
         self.start_calls = 0
         self.stop_calls = 0
 
@@ -59,11 +59,6 @@ class FakeBridge:
                 "session_id": session_id,
             }
         )
-
-    def send_inject_result(
-        self, request_id: str, ok: bool, submitted: bool, error: str = ""
-    ) -> None:
-        self.inject_results.append((request_id, ok, submitted, error))
 
     def start(self) -> None:
         self.start_calls += 1
@@ -678,119 +673,14 @@ def test_observer_event_without_session_change_does_not_publish(controller, brid
 
 
 # ---------------------------------------------------------------------------
-# STT indicator mirroring (snapshot "stt" field → sttTargetSlot/sttTranscribing)
+# STT indicator mirroring — MIGRATED (agent-ownership inversion, Phase 4)
+#
+# The snapshot-"stt"-field → sttTargetSlot/sttTranscribing mirror
+# (`_mirror_stt_state`) was removed: STT recording state now arrives on the
+# direct IDE socket, not the bridge snapshot. Its coverage lives in the
+# "Direct STT channel" section below (test_on_stt_recording_*), which exercises
+# the same slot-resolution rules (explicit slot, -1 → focused, 0 → clear).
 # ---------------------------------------------------------------------------
-
-
-def _stt_snapshot(stt: dict | None, *agents: dict) -> dict:
-    # Delegate to the canonical snapshot builder so the two can't drift.
-    snap = _snapshot(*agents)
-    snap["stt"] = stt
-    return snap
-
-
-def test_stt_targets_explicit_live_slot(controller):
-    controller.spawn_agent("fresh", True)
-    controller._on_bridge_snapshot(
-        _stt_snapshot({"terminal_pid": os.getpid(), "buf": 1, "transcribing": False})
-    )
-    assert controller.sttTargetSlot == 1
-    assert controller.sttTranscribing is False
-
-
-def test_stt_transcribing_flag_mirrors(controller):
-    controller.spawn_agent("fresh", True)
-    controller._on_bridge_snapshot(
-        _stt_snapshot({"terminal_pid": os.getpid(), "buf": 1, "transcribing": True})
-    )
-    assert controller.sttTranscribing is True
-
-
-def test_stt_buf_minus_one_resolves_to_focused_slot(controller):
-    controller.spawn_agent("fresh", True)
-    controller.spawn_agent("fresh", True)
-    controller.focus_agent(2)
-    controller._on_bridge_snapshot(
-        _stt_snapshot({"terminal_pid": os.getpid(), "buf": -1, "transcribing": False})
-    )
-    assert controller.sttTargetSlot == 2
-
-
-def test_stt_buf_minus_one_with_empty_pool_clears(controller):
-    # No agents spawned: the focused-slot fallback resolves to 0, so the
-    # indicator must stay dark and transcribing must not latch.
-    controller._on_bridge_snapshot(
-        _stt_snapshot({"terminal_pid": os.getpid(), "buf": -1, "transcribing": True})
-    )
-    assert controller.sttTargetSlot == 0
-    assert controller.sttTranscribing is False
-
-
-def test_stt_buf_zero_never_resolves(controller):
-    controller.spawn_agent("fresh", True)
-    controller._on_bridge_snapshot(
-        _stt_snapshot({"terminal_pid": os.getpid(), "buf": 0, "transcribing": True})
-    )
-    assert controller.sttTargetSlot == 0
-    assert controller.sttTranscribing is False
-
-
-def test_stt_foreign_pid_is_ignored(controller):
-    controller.spawn_agent("fresh", True)
-    controller._on_bridge_snapshot(
-        _stt_snapshot({"terminal_pid": 99999, "buf": 1, "transcribing": False})
-    )
-    assert controller.sttTargetSlot == 0
-
-
-def test_stt_dead_slot_is_ignored(controller):
-    controller.spawn_agent("fresh", True)
-    controller._on_bridge_snapshot(
-        _stt_snapshot({"terminal_pid": os.getpid(), "buf": 4, "transcribing": True})
-    )
-    assert controller.sttTargetSlot == 0
-    assert controller.sttTranscribing is False
-
-
-def test_stt_null_clears_previous_target(controller):
-    controller.spawn_agent("fresh", True)
-    active = _stt_snapshot(
-        {"terminal_pid": os.getpid(), "buf": 1, "transcribing": False}
-    )
-    controller._on_bridge_snapshot(active)
-    assert controller.sttTargetSlot == 1
-    controller._on_bridge_snapshot(_stt_snapshot(None))
-    assert controller.sttTargetSlot == 0
-
-
-def test_stt_missing_field_is_tolerated(controller):
-    # Old hub builds emit snapshots without "stt" — must not raise or latch.
-    controller.spawn_agent("fresh", True)
-    controller._on_bridge_snapshot(
-        _stt_snapshot({"terminal_pid": os.getpid(), "buf": 1, "transcribing": False})
-    )
-    controller._on_bridge_snapshot(_snapshot())
-    assert controller.sttTargetSlot == 0
-
-
-def test_stt_emits_only_on_change(controller):
-    controller.spawn_agent("fresh", True)
-    emissions: list[None] = []
-    controller.sttStateChanged.connect(lambda: emissions.append(None))
-    payload = _stt_snapshot(
-        {"terminal_pid": os.getpid(), "buf": 1, "transcribing": False}
-    )
-    controller._on_bridge_snapshot(payload)
-    controller._on_bridge_snapshot(payload)
-    assert len(emissions) == 1
-
-
-def test_stt_malformed_payload_is_ignored(controller):
-    controller.spawn_agent("fresh", True)
-    controller._on_bridge_snapshot(
-        _stt_snapshot({"terminal_pid": "garbage", "buf": "x", "transcribing": True})
-    )
-    assert controller.sttTargetSlot == 0
 
 
 # ---------------------------------------------------------------------------
@@ -923,7 +813,10 @@ def test_cycle_follows_display_order_after_compaction(controller):
 
 
 # ---------------------------------------------------------------------------
-# Bridge-mediated STT injection (_on_bridge_inject routing + validation)
+# STT inject validation (_dispatch_inject — the shared validate-and-deliver
+# step). Since the agent-ownership inversion (Phase 4) it is reached only via
+# the direct channel (_on_stt_inject); the `fail` callback is injected so the
+# validation is tested decoupled from the reply channel.
 #
 # Scope: Python-side validation/routing only. The QML delivery half
 # (bracketed paste, settle timer, busy/no-pane/agent-closed replies in
@@ -940,39 +833,48 @@ def _capture_inject_emissions(controller):
     return emitted
 
 
-def test_inject_routes_to_requested_slot(controller, bridge):
+def test_inject_routes_to_requested_slot(controller):
     controller.spawn_agent("fresh", True)  # slot 1
     controller.spawn_agent("fresh", True)  # slot 2
     emitted = _capture_inject_emissions(controller)
-    controller._on_bridge_inject(
-        {"request_id": "r1", "buf": 2, "text": "hola", "submit": True}
+    fails: list[tuple[str, str]] = []
+    controller._dispatch_inject(
+        {"request_id": "r1", "buf": 2, "text": "hola", "submit": True},
+        lambda rid, err: fails.append((rid, err)),
     )
     assert emitted == [(2, "hola", True, "r1")]
-    assert bridge.inject_results == []  # QML closes the loop, not Python
+    assert fails == []  # QML closes the loop, the fail callback is untouched
 
 
 def test_inject_dead_slot_falls_back_to_focused(controller):
     controller.spawn_agent("fresh", True)  # slot 1, focused
     emitted = _capture_inject_emissions(controller)
-    controller._on_bridge_inject(
-        {"request_id": "r2", "buf": 4, "text": "hola", "submit": False}
+    controller._dispatch_inject(
+        {"request_id": "r2", "buf": 4, "text": "hola", "submit": False},
+        lambda rid, err: None,
     )
     assert emitted == [(1, "hola", False, "r2")]
 
 
-def test_inject_with_no_agents_fails_fast(controller, bridge):
+def test_inject_with_no_agents_fails_fast(controller):
     emitted = _capture_inject_emissions(controller)
-    controller._on_bridge_inject(
-        {"request_id": "r3", "buf": 1, "text": "hola", "submit": True}
+    fails: list[tuple[str, str]] = []
+    controller._dispatch_inject(
+        {"request_id": "r3", "buf": 1, "text": "hola", "submit": True},
+        lambda rid, err: fails.append((rid, err)),
     )
     assert emitted == []
-    assert bridge.inject_results == [("r3", False, False, "no-agent")]
+    assert fails == [("r3", "no-agent")]
 
 
-def test_inject_empty_text_fails_fast(controller, bridge):
+def test_inject_empty_text_fails_fast(controller):
     controller.spawn_agent("fresh", True)
-    controller._on_bridge_inject({"request_id": "r4", "buf": 1, "text": ""})
-    assert bridge.inject_results == [("r4", False, False, "empty-text")]
+    fails: list[tuple[str, str]] = []
+    controller._dispatch_inject(
+        {"request_id": "r4", "buf": 1, "text": ""},
+        lambda rid, err: fails.append((rid, err)),
+    )
+    assert fails == [("r4", "empty-text")]
 
 
 def test_inject_strips_escape_characters(controller):
@@ -980,24 +882,37 @@ def test_inject_strips_escape_characters(controller):
     # (\x1b[201~) and leak the remainder as live keystrokes.
     controller.spawn_agent("fresh", True)
     emitted = _capture_inject_emissions(controller)
-    controller._on_bridge_inject(
-        {"request_id": "r5", "buf": 1, "text": "a\x1b[201~rm -rf", "submit": False}
+    controller._dispatch_inject(
+        {"request_id": "r5", "buf": 1, "text": "a\x1b[201~rm -rf", "submit": False},
+        lambda rid, err: None,
     )
     assert emitted == [(1, "a[201~rm -rf", False, "r5")]
 
 
-def test_inject_missing_request_id_is_ignored(controller, bridge):
+def test_inject_missing_request_id_is_ignored(controller):
     controller.spawn_agent("fresh", True)
     emitted = _capture_inject_emissions(controller)
-    controller._on_bridge_inject({"buf": 1, "text": "hola"})
+    fails: list[tuple[str, str]] = []
+    controller._dispatch_inject(
+        {"buf": 1, "text": "hola"},
+        lambda rid, err: fails.append((rid, err)),
+    )
     assert emitted == []
-    assert bridge.inject_results == []
+    assert fails == []  # no id to reply to → dropped without calling fail
 
 
-def test_agent_inject_done_relays_to_bridge(controller, bridge):
-    # Unknown request_id → not a direct-channel inject → falls back to the bridge.
+def test_agent_inject_done_resolves_pending_direct_inject(controller):
+    # agent_inject_done resolves the agent-events Future for this request_id,
+    # unblocking the connection handler waiting to reply to the dictation client.
+    fut: concurrent.futures.Future = concurrent.futures.Future()
+    controller._agent_events._pending_injects["r6"] = fut
     controller.agent_inject_done("r6", True, True, "")
-    assert bridge.inject_results == [("r6", True, True, "")]
+    assert fut.result(timeout=1) == {"ok": True, "submitted": True, "error": ""}
+
+
+def test_agent_inject_done_unknown_request_id_is_a_no_op(controller):
+    # An id with no pending inject (already resolved / timed out) is benign.
+    controller.agent_inject_done("nope", True, True, "")  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -1016,13 +931,20 @@ def test_on_stt_inject_routes_to_slot(controller):
     assert emitted == [(1, "hi", True, "d1")]
 
 
-def test_on_stt_inject_no_agent_does_not_touch_bridge(controller, bridge):
+def test_on_stt_inject_no_agent_is_a_pre_delivery_failure(controller):
     # A pre-delivery failure on the direct path resolves the agent-events Future
-    # (no pending one here → no-op), and must NOT leak onto the bridge.
+    # (here it's pending, so we can observe the structured failure reply) and
+    # never emits a delivery request.
+    fut: concurrent.futures.Future = concurrent.futures.Future()
+    controller._agent_events._pending_injects["d2"] = fut
     emitted = _capture_inject_emissions(controller)
     controller._on_stt_inject({"request_id": "d2", "buf": 1, "text": "hi"})
     assert emitted == []
-    assert bridge.inject_results == []
+    assert fut.result(timeout=1) == {
+        "ok": False,
+        "submitted": False,
+        "error": "no-agent",
+    }
 
 
 def test_on_stt_recording_drives_dot(controller):
@@ -1046,3 +968,27 @@ def test_on_stt_recording_minus_one_resolves_focused(controller):
     controller.focus_agent(2)
     controller._on_stt_recording({"buf": -1, "transcribing": True})
     assert controller.sttTargetSlot == 2
+
+
+def test_on_stt_recording_dead_slot_is_ignored(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_stt_recording({"buf": 4, "transcribing": True})
+    assert controller.sttTargetSlot == 0
+    assert controller.sttTranscribing is False
+
+
+def test_on_stt_recording_emits_only_on_change(controller):
+    controller.spawn_agent("fresh", True)
+    emissions: list[None] = []
+    controller.sttStateChanged.connect(lambda: emissions.append(None))
+    controller._on_stt_recording({"buf": 1, "transcribing": True})
+    controller._on_stt_recording({"buf": 1, "transcribing": True})
+    assert len(emissions) == 1
+
+
+def test_on_stt_recording_non_int_buf_is_tolerated(controller):
+    # A malformed buf must not raise or latch the indicator.
+    controller.spawn_agent("fresh", True)
+    controller._on_stt_recording({"buf": "garbage", "transcribing": True})
+    assert controller.sttTargetSlot == 0
+    assert controller.sttTranscribing is False
