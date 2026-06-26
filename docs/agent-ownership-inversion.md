@@ -1,20 +1,33 @@
 # Agent ownership inversion — design + implementation context
 
-> **STATUS: Phase 1 SHIPPED (additive, in-tree) 2026-06-26; Phases 2–5 PLANNED.**
-> This is the durable handoff for a multi-repo refactor decided via discourse on
-> 2026-06-26. It captures both the phased plan AND the exploration findings (so
-> implementation needn't re-explore the IDE + shell + orchestrator.nvim). Plan
-> mirror: `~/.claude/plans/shiny-nibbling-shore.md`. Prerequisite shipped first:
-> the per-project sessionizer (`session_store.py`, `Ctrl+Shift+R`/`Ctrl+Shift+S`,
-> reload-in-place) — see that for the feature this grew out of.
+> **STATUS (2026-06-26): Phases 1–3 SHIPPED for claude (functional cutover live);
+> Phase 4 (STT) + Phase 5 (orchestrator removal) PLANNED.** Multi-repo refactor
+> decided via discourse 2026-06-26. Captures the phased plan AND the exploration
+> findings (so implementation needn't re-explore the IDE + shell + orchestrator).
+> Plan mirror: `~/.claude/plans/shiny-nibbling-shore.md`. Grew out of the
+> per-project sessionizer (`session_store.py`, `Ctrl+Shift+R`/`Ctrl+Shift+S`).
 >
-> **Phase 1 is live and purely additive** — local capture runs ALONGSIDE the
-> still-active bridge subscription, so nothing regressed. Verified by 53 unit +
-> integration tests and a headless boot smoke (the socket binds + cleanly stops).
-> What remains is the LIVE claude E2E (spawn a real agent; confirm sparkles
-> animate from the local path with the bridge mentally ignored, and that
-> reload-restore resumes via the locally-captured session_id) — deferred to a
-> user-driven run since it needs a composited session + the real claude CLI.
+> **What's live:** the IDE captures its own **claude** agents' activity +
+> session_id locally (Phase 1), publishes it to the bridge (Phase 2 IDE-side),
+> the bridge prefers those published fields (Phase 2 shell-side), and the global
+> `symmetria-agent-hook.py` is removed from `~/.claude/settings.json` (Phase 3
+> functional cutover). Commits: IDE `a3aebdc`+`b7210af`+`d1df640`; shell bridge
+> `a88138a0`; dotfiles `a329a67`.
+>
+> **Correction to the original Phase 3 plan — the bridge state machine is NOT
+> stripped, deliberately.** opencode agents report via their own plugin (NOT the
+> removed claude hook), the IDE injects no reporter for opencode (`settings_flag`
+> is None), and the shell-half *falls back* to the bridge's computed activity
+> exactly when `inst` carries none — which is the opencode case. So the state
+> machine + the IDE's `_on_bridge_snapshot` mirror MUST stay until opencode also
+> has local capture; stripping them now would break opencode. The "dumb relay"
+> end-state is therefore gated on opencode local-capture (or dropping opencode).
+>
+> **Pending live verification (user-driven):** reload the shell (so the bridge
+> runs prefer-inst), run an IDE with the new code (dev, or promote dev→stable —
+> the **stable daily-driver shows no claude activity until promoted**), then
+> confirm: a claude agent's sparkles + dashboard activity come from the IDE, and
+> opencode still works via the bridge fallback.
 
 ## Why (the problem)
 
@@ -164,10 +177,29 @@ test_main_qml_terminal_wiring.py ~376-379 asserts the relay is absent).
      global settings (which still register the shell hook), so BOTH fire — the IDE
      socket AND the bridge. Phase 3 removes the global hook + the bridge-derived
      path; `_locally_captured_agents` then becomes unconditional.
-2. **IDE publishes computed state; bridge relays it** (prefer IDE-published activity).
-3. **Cut over** (couple with 2): remove global hook from `~/.claude/settings.json`,
-   strip bridge state machine → dumb relay, **revert the `_session_ids` sticky change**,
-   IDE stops deriving its state from snapshots.
+2. **IDE publishes computed state; bridge prefers it — ✅ SHIPPED 2026-06-26.**
+   IDE-side (`a88138a0` is shell; IDE is `d1df640`): `AgentBridgeClient.notify_activity`
+   stores activity_state/tool/in_plan_mode/session_id on the instance record (so a
+   reconnect `sync` replays them) + sends an `updated` delta; `_on_agent_hook`
+   publishes on any activity change / fresh session_id. Shell-side
+   (`agent-bridge.py` `a88138a0`): `_snapshot_line` PREFERS the published `inst`
+   fields (present-key check, so a published idle `""` wins) and falls back to the
+   computed `_activities`/`_session_ids`; the `updated` whitelist widened to carry
+   them. Additive — opencode + non-publishers behave as before.
+3. **Cut over (functional) — ✅ SHIPPED 2026-06-26 for claude.** Removed the 12
+   `symmetria-agent-hook.py` registrations from `~/.claude/settings.json`
+   (dotfiles `a329a67`; kept claude-sudo-askpass / hypr-config-check /
+   stop-timestamp). claude agents are now IDE-owned end-to-end.
+   **NOT done, deliberately (corrects the original plan):** stripping the bridge
+   state machine, reverting the `_session_ids` sticky change, and removing the
+   IDE's `_on_bridge_snapshot` mirror — all **still required by opencode**, which
+   reports via its own plugin (not the removed claude hook) and rides the
+   shell-half's computed-activity fallback. The strip is gated on opencode
+   local-capture (or dropping opencode), not just on risk. The reconciliation
+   poll (`claude agents --json`) is now claude-pointless but harmless; fold its
+   removal into the eventual strip.
+   **Live verification still owed** (needs shell reload + a new-code IDE; the
+   stable daily-driver is claude-activity-dark until promoted).
 4. **Redesign STT** to the direct IDE socket; remove STT from bridge + IDE;
    IDE bridge connection becomes publish-only.
 5. **Remove orchestrator.nvim** + `send_editor_keys` + stale comments.

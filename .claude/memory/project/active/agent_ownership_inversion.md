@@ -1,29 +1,40 @@
 ---
 name: agent-ownership-inversion
-description: Multi-repo refactor making the IDE the single source of truth for its agents; Phase 1 SHIPPED (additive), Phases 2-5 planned
+description: Multi-repo refactor making the IDE the single source of truth for its agents; Phases 1-3 SHIPPED for claude (functional cutover live), Phase 4-5 planned
 metadata: 
   node_type: memory
   type: project
   originSessionId: dab4cce2-971c-430b-88d7-7b19226fd6bd
 ---
 
-Phase 1 SHIPPED (additive, 2026-06-26); Phases 2-5 PLANNED (decided via discourse
-2026-06-26). Make the Symmetria IDE the **single authoritative owner** of all state
-about the agents it spawns: capture session_id + activity **locally** (an IDE-injected
-`claude --settings` hook → an IDE-owned socket
-`$XDG_RUNTIME_DIR/symmetria-ide-agents-<pid>.sock`), drive its own UI from that, and
-publish a **one-way, IDE-defined feed** outward. The shell's `agent-bridge.py` becomes
-a **dumb schema-neutral relay** for the dashboard. **STT is redesigned** onto a direct
-shell→IDE socket (off the bridge). Non-IDE agents dropped; global Symmetria claude hook
-removed; **orchestrator.nvim removed**.
+Phases 1-3 SHIPPED for claude (functional cutover live, 2026-06-26); Phase 4 (STT) +
+Phase 5 (orchestrator removal) PLANNED. Make the Symmetria IDE the **single
+authoritative owner** of all state about the agents it spawns: capture session_id +
+activity **locally** (an IDE-injected `claude --settings` reporter hook → an IDE-owned
+socket `$XDG_RUNTIME_DIR/symmetria-ide-agents-<pid>.sock`), drive its own UI from that,
+publish **one-way** to the bridge. **STT** to be redesigned onto a direct shell→IDE
+socket (Phase 4). orchestrator.nvim to be removed (Phase 5).
 
-**Phase 1 (live, additive):** `src/symmetria_ide/agent_events.py` (socket server),
-`agent_activity.py` (the whole state machine, pure), `runtime/symmetria-ide-agent-hook.py`
-(dumb reporter), `agent_harness.settings_flag`/`spawn_argv` injection, AppController
-`_on_agent_hook` + `_locally_captured_agents` (local AUTHORITATIVE; bridge preserved via
-seed-from-local rebuild). KEY: `--settings` takes INLINE JSON → one static string for
-all agents, no per-agent file. NOT committed yet as of this writing. Live claude E2E
-still pending (needs composited session). Bridge path still active (removed in Phase 3).
+**Shipped:** IDE `a3aebdc`+`b7210af` (P1 local capture: agent_events.py socket server,
+agent_activity.py pure state machine, runtime/symmetria-ide-agent-hook.py dumb reporter,
+agent_harness.settings_flag + spawn_argv inline-`--settings` injection, `_on_agent_hook`
++ `_locally_captured_agents` seed-from-local) + `d1df640` (P2 IDE-side
+`AgentBridgeClient.notify_activity` publish). Shell `a88138a0` (P2 shell-side:
+`_snapshot_line` PREFERS published `inst` activity, falls back to computed; `updated`
+whitelist widened). Dotfiles `a329a67` (P3: removed 12 symmetria-agent-hook.py regs from
+~/.claude/settings.json; kept claude-sudo-askpass etc). KEY: `--settings` takes INLINE
+JSON → one static string for all agents, no per-agent file.
+
+**Correction to original plan — state machine NOT stripped (deliberate):** opencode
+reports via its own plugin (not the removed claude hook) + IDE injects no reporter for it,
+so it rides the shell-half's computed-activity FALLBACK. The bridge state machine + IDE
+`_on_bridge_snapshot` mirror MUST stay until opencode local-capture lands; stripping now
+breaks opencode. So the `_session_ids` sticky revert + dumb-relay strip are gated on
+opencode, NOT yet done.
+
+**Live verification owed:** reload shell (bridge runs prefer-inst) + run new-code IDE
+(dev, or promote dev→stable — STABLE daily-driver is claude-activity-dark until promoted);
+confirm claude sparkles+dashboard come from IDE, opencode still works via fallback.
 
 Full design + the exploration findings (bridge protocol, activity state-machine
 rules, dashboard parity fields, STT flow, injection seam, dead-code inventory, all
