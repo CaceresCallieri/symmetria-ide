@@ -34,9 +34,10 @@ class AgentHarness:
     # Env pairs exported when spawning dangerous (opencode). (k, v) tuples
     # because frozen dataclass fields must stay immutable.
     dangerous_env: tuple[tuple[str, str], ...] = ()
-    # spawn_type -> CLI flags. `resume` flags get the session id appended
-    # when `resume_requires_id` (opencode `--session <id>`); claude's bare
-    # `-r` opens its own interactive picker instead.
+    # spawn_type -> CLI flags. For `resume`, the session id is appended after
+    # the flag whenever one is supplied (opencode `--session <id>` REQUIRES it;
+    # claude `-r <id>` resumes non-interactively). A bare claude `-r` (no id)
+    # opens claude's own interactive picker.
     flags: dict[str, list[str]] = field(default_factory=dict)
     resume_requires_id: bool = False
     # Flag this harness uses to load an extra MCP config file at spawn (Phase
@@ -108,7 +109,15 @@ def spawn_argv(
     if mcp_config_path and harness.mcp_config_flag:
         argv += [harness.mcp_config_flag, mcp_config_path]
     argv += harness.flags[spawn_type]
-    if spawn_type == "resume" and harness.resume_requires_id:
+    # Resume-by-id: append the session id after the resume flag when one is
+    # supplied. opencode REQUIRES it (bare `--session` errors). claude takes
+    # it OPTIONALLY — `-r <id>` resumes that exact session non-interactively
+    # (what session restore replays to re-home a conversation), while a bare
+    # `-r` (empty id) opens claude's own interactive picker. Gating on a
+    # truthy session_id (not `resume_requires_id`) is what unlocks claude's
+    # non-interactive resume without changing opencode (its picker always
+    # supplies an id).
+    if spawn_type == "resume" and session_id:
         argv.append(session_id)
     return argv
 

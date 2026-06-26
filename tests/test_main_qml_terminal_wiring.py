@@ -419,7 +419,10 @@ def test_agent_scrollback_chords_present(main_qml: str):
     assert (
         "enabled: controller.agentSurfaceVisible && !treeScope.activeFocus" in main_qml
     )
-    assert "simulateWheel(" in main_qml
+    # Scrollback routes through the fork's dedicated `scrollPageFraction` slot
+    # (NOT `simulateWheel`, which would re-encode as VT keys and reach claude's
+    # own pager) — see the scrollFocusedAgent comment in Main.qml.
+    assert "scrollPageFraction(" in main_qml
 
 
 def test_agent_surface_pool_structure(main_qml: str):

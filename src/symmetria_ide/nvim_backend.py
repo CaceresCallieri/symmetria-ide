@@ -89,6 +89,11 @@ class NvimBackend(QObject):
     minimap_diagnostics_event = Signal(dict)
     minimap_git_event = Signal(dict)
     closed = Signal()
+    # Emitted (worker thread) once the RPC channel is attached + subscribed.
+    # Session restore waits on this to replay saved editor buffers, since the
+    # worker may attach AFTER AppController.start() has returned. Fires on
+    # every (re)attach — consumers guard one-shot work themselves.
+    attached = Signal()
 
     # rpcnotify channel name -> the Signal attribute that relays it. The
     # worker subscribes to every key and re-emits args[0] on the matching
@@ -138,6 +143,14 @@ class NvimBackend(QObject):
     def stop_event(self) -> threading.Event:
         """Shutdown signal — set as teardown begins or the worker exits."""
         return self._stop_event
+
+    @property
+    def is_attached(self) -> bool:
+        """True once the RPC channel is live (the worker has attached). Lets
+        session restore choose between an immediate replay (already attached —
+        the manual Ctrl+Shift+S path) and waiting on the `attached` signal
+        (the reload path, where the worker is still connecting)."""
+        return self._nvim is not None
 
     # --- Lifecycle -----------------------------------------------------
 
@@ -263,6 +276,9 @@ class NvimBackend(QObject):
                 nvim.exec_lua(f"if _G.{fn} then _G.{fn}() end")
             except Exception:  # noqa: BLE001
                 log.debug("initial re-push %s failed", fn, exc_info=True)
+        # Channel is live + subscribed — let the GUI thread replay any pending
+        # session-restore editor buffers (queued connection handles the hop).
+        self.attached.emit()
 
     def _on_request(self, name: str, args: list[Any]) -> Any:  # noqa: ARG002
         """nvim sends no requests to a plain RPC client — no-op (nil reply)."""
@@ -410,3 +426,155 @@ class NvimBackend(QObject):
             nvim.async_call(_do)
         except Exception:  # noqa: BLE001
             log.exception("async_call(checktime) failed")
+
+    # --- Session save/restore support ----------------------------------
+    #
+    # These three are the editor side of the IDE's sessionizer. Unlike the
+    # fire-and-forget control methods above, `query_buffers` and `save_all`
+    # are SYNCHRONOUS (sync-over-async — the inverse of gotcha #1): the GUI
+    # thread schedules the work on the loop thread via async_call, then blocks
+    # on a threading.Event until it completes. They run only at teardown /
+    # restore, where a brief GUI-thread block is fine — and `save_all` MUST
+    # block, or teardown's `qa!` would force-quit before `:wall` lands and
+    # discard the very edits "Save & close" promised to keep.
+
+    @staticmethod
+    def _collect_buffers(nvim: pynvim.Nvim) -> list[dict]:
+        """Enumerate listed, loaded, named buffers (runs on the loop thread).
+
+        Returns one dict per buffer: `{path, modified, active, line, col}`.
+        Cursor `line`/`col` are the live values for the ACTIVE buffer only
+        (others default to 1/0) — inactive cursors come back free at restore
+        via nvim's own shada `'"` mark, written by the graceful `qa!`. One
+        enumeration serves two callers: the manifest (all paths + active
+        cursor) and the dirty-buffer modal (`[b for b in … if b['modified']]`).
+        """
+        try:
+            cur_handle = nvim.current.buffer.handle
+        except Exception:  # noqa: BLE001
+            cur_handle = -1
+        try:
+            cur_line, cur_col = nvim.current.window.cursor
+        except Exception:  # noqa: BLE001
+            cur_line, cur_col = 1, 0
+        out: list[dict] = []
+        for buf in nvim.buffers:
+            try:
+                if not buf.valid or not nvim.api.buf_is_loaded(buf):
+                    continue
+                name = buf.name
+                if not name or not buf.options["buflisted"]:
+                    continue
+                active = buf.handle == cur_handle
+                out.append(
+                    {
+                        "path": name,
+                        "modified": bool(buf.options["modified"]),
+                        "active": active,
+                        "line": int(cur_line) if active else 1,
+                        "col": int(cur_col) if active else 0,
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("query_buffers: skipping a buffer", exc_info=True)
+        return out
+
+    def query_buffers(self, timeout: float = 2.0) -> list[dict]:
+        """Snapshot open buffers `[{path, modified, active, line, col}]`.
+
+        Synchronous: blocks the calling (GUI) thread until the loop thread
+        replies or `timeout` elapses. Returns `[]` before attach, on timeout,
+        or on error — callers treat that as "no editor state / nothing dirty".
+        """
+        nvim = self._nvim
+        if nvim is None:
+            return []
+        result: list[dict] = []
+        done = threading.Event()
+
+        def _do() -> None:
+            try:
+                result.extend(self._collect_buffers(nvim))
+            except Exception:  # noqa: BLE001
+                log.exception("query_buffers failed")
+            finally:
+                done.set()
+
+        try:
+            nvim.async_call(_do)
+        except Exception:  # noqa: BLE001
+            log.exception("async_call(query_buffers) failed")
+            return []
+        if not done.wait(timeout):
+            log.warning("query_buffers timed out after %.1fs", timeout)
+            return []
+        return result
+
+    def save_all(self, timeout: float = 5.0) -> bool:
+        """Write every modified buffer (`:wall`); block until it lands.
+
+        SYNCHRONOUS by necessity: this backs the "Save & close" teardown
+        action, and the subsequent `qa!` would discard unsaved work if `:wall`
+        had not completed first. Returns True on success, False before attach /
+        on timeout / on error.
+        """
+        nvim = self._nvim
+        if nvim is None:
+            return False
+        done = threading.Event()
+        ok = [False]
+
+        def _do() -> None:
+            try:
+                nvim.command("silent! wall")
+                ok[0] = True
+            except Exception:  # noqa: BLE001
+                log.exception("nvim wall failed")
+            finally:
+                done.set()
+
+        try:
+            nvim.async_call(_do)
+        except Exception:  # noqa: BLE001
+            log.exception("async_call(wall) failed")
+            return False
+        if not done.wait(timeout):
+            log.warning("save_all timed out after %.1fs", timeout)
+            return False
+        return ok[0]
+
+    def restore_buffers(
+        self, files: list[str], active: str = "", line: int = 1, col: int = 0
+    ) -> None:
+        """Reopen `files`, display `active`, restore its cursor (fire-and-forget).
+
+        `badd` adds each file to the buffer list without displaying it; `edit`
+        then shows the active one (so the window lands where the user left it).
+        The cursor is clamped to the buffer's line count. No-op before attach
+        or with an empty list. Marshalled via async_call (gotcha #1); does not
+        block — restore can settle asynchronously after the surface is shown.
+        """
+        nvim = self._nvim
+        if nvim is None or not files:
+            return
+        target = active or files[0]
+
+        def _do() -> None:
+            try:
+                for path in files:
+                    if path and path != target:
+                        nvim.api.cmd({"cmd": "badd", "args": [path]}, {})
+                nvim.api.cmd({"cmd": "edit", "args": [target]}, {})
+                try:
+                    total = nvim.api.buf_line_count(0)
+                    clamped = max(1, min(int(line), total))
+                    nvim.api.win_set_cursor(0, [clamped, max(0, int(col))])
+                except Exception:  # noqa: BLE001
+                    log.debug("restore_buffers: cursor restore skipped", exc_info=True)
+            except Exception:  # noqa: BLE001
+                log.exception("restore_buffers failed")
+
+        try:
+            nvim.async_call(_do)
+        except Exception:  # noqa: BLE001
+            log.exception("async_call(restore_buffers) failed")

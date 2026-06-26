@@ -60,10 +60,16 @@ def test_opencode_resume_appends_session_id():
     assert argv[-2:] == ["--session", "ses_abc"]
 
 
-def test_claude_resume_does_not_append_session_id():
-    # claude's bare `-r` opens its own picker — a session id passed in
-    # (e.g. by a confused caller) must not leak into the argv.
+def test_claude_resume_with_id_appends_for_noninteractive_resume():
+    # `-r <id>` resumes that exact session non-interactively — what session
+    # restore replays to re-home a claude conversation without a manual pick.
     argv = spawn_argv(HARNESSES["claude"], "resume", False, "42_1", "ses_abc")
+    assert argv[-2:] == ["-r", "ses_abc"]
+
+
+def test_claude_resume_without_id_keeps_bare_picker_flag():
+    # No id → bare `-r`, which opens claude's own interactive picker.
+    argv = spawn_argv(HARNESSES["claude"], "resume", False, "42_1")
     assert argv[-1] == "-r"
     assert "ses_abc" not in argv
 

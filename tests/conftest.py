@@ -28,6 +28,20 @@ def qt_app():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _isolate_xdg_state(monkeypatch, tmp_path_factory):
+    """Redirect ``XDG_STATE_HOME`` to a throwaway dir for every test.
+
+    ``AppController.shutdown()`` now persists a session manifest (``session_store``)
+    and ``tree_state_cache`` writes its expansion cache — both under
+    ``XDG_STATE_HOME``. Without this, any test that constructs + tears down a
+    controller (or touches those caches) would pollute the developer's real
+    ``~/.local/state/symmetria-ide``. Function-scoped + autouse so it covers
+    every test; tests that need a specific path still override it via their own
+    ``monkeypatch.setenv`` (last writer wins)."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("xdg_state")))
+
+
 def construction_source(cls) -> str:
     """Return ``__init__`` source concatenated with every ``_init_*`` helper.
 

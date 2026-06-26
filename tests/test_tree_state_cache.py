@@ -23,6 +23,7 @@ import json
 import pytest
 
 from symmetria_ide import tree_state_cache as tsc
+from symmetria_ide.state_paths import repo_hash
 
 
 @pytest.fixture
@@ -200,9 +201,9 @@ def test_repo_hash_is_stable_and_path_sensitive(tmp_path):
     The 16-char truncation is large enough that any plausible per-user
     project set won't see collisions, but verify the basic contract.
     """
-    h1 = tsc._repo_hash("/home/jc/projects/a")
-    h2 = tsc._repo_hash("/home/jc/projects/a")
-    h3 = tsc._repo_hash("/home/jc/projects/b")
+    h1 = repo_hash("/home/jc/projects/a")
+    h2 = repo_hash("/home/jc/projects/a")
+    h3 = repo_hash("/home/jc/projects/b")
     assert h1 == h2
     assert h1 != h3
     assert len(h1) == 16
@@ -217,7 +218,7 @@ def test_xdg_state_home_is_honoured(tmp_path, monkeypatch):
     tsc.save_expanded(str(repo), [])
     expected = custom / "symmetria-ide" / "projects"
     assert expected.exists()
-    assert (expected / f"{tsc._repo_hash(str(repo))}.json").exists()
+    assert (expected / f"{repo_hash(str(repo))}.json").exists()
 
 
 def test_empty_repo_root_is_noop(state_dir):

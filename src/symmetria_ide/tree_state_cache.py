@@ -38,7 +38,6 @@ State file layout (`$XDG_STATE_HOME/symmetria-ide/projects/<hash>.json`):
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -46,6 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .fs_atomic import atomic_write_json
+from .state_paths import repo_hash, state_dir
 
 log = logging.getLogger(__name__)
 
@@ -55,33 +55,14 @@ log = logging.getLogger(__name__)
 KNOWN_VERSION = 1
 
 
-def _state_dir() -> Path:
-    """Resolve the directory holding per-project cache files.
-
-    Honours `$XDG_STATE_HOME`; falls back to `~/.local/state` per
-    the XDG base directory spec. The `projects/` subfolder is
-    created on demand — callers don't need to mkdir.
-    """
-    base = os.environ.get("XDG_STATE_HOME") or os.path.join(
-        os.path.expanduser("~"), ".local", "state"
-    )
-    out = Path(base) / "symmetria-ide" / "projects"
-    out.mkdir(parents=True, exist_ok=True)
-    return out
-
-
-def _repo_hash(repo_root: str) -> str:
-    """Stable filename digest for a repo root path.
-
-    NOT a security primitive — collision-resistant enough that the
-    per-user state dir won't see filename clashes for any realistic
-    number of projects.
-    """
-    return hashlib.sha256(repo_root.encode("utf-8")).hexdigest()[:16]
-
-
 def _cache_path(repo_root: str) -> Path:
-    return _state_dir() / f"{_repo_hash(repo_root)}.json"
+    """Per-project cache file path under the shared state dir.
+
+    The XDG-state-dir resolution and the repo-root hashing both live in
+    `state_paths` (shared with `session_store`) so the subfolder layout and
+    the digest scheme cannot drift between the two on-disk caches.
+    """
+    return state_dir("projects") / f"{repo_hash(repo_root)}.json"
 
 
 def load_expanded(repo_root: str) -> list[str]:

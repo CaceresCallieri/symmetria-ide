@@ -71,6 +71,7 @@ from .session_models import (  # noqa: F401 — side-effect: @QmlElement registr
 )
 from .project_browser_marker import browser_agents_enabled, set_browser_agents
 from .tree_state_cache import load_expanded, save_expanded
+from . import session_store
 from .whichkey_models import (  # noqa: F401 — side-effect: @QmlElement registration
     WhichKeyModel,
     WhichKeyState,
@@ -408,6 +409,11 @@ class AppController(QObject):
     # The cached flag it notifies is the gate that decides whether spawned
     # agents get the browser MCP at all (see _refresh_project_browser_enabled).
     projectBrowserEnabledChanged = Signal()
+    # Session save/restore (the IDE sessionizer) — indicator availability.
+    savedSessionAvailableChanged = Signal()
+    # Teardown funnel → QML confirm dialogs (close button + Ctrl+Shift+R).
+    dirtyTeardownRequested = Signal(list)  # payload: unsaved buffer paths
+    cleanTeardownRequested = Signal()
     # Bridge-mediated STT injection into an agent pane: (slot, text,
     # submit, request_id). Python cannot drive QMLTermSession (KSession is
     # not Python-wrappable — see "The terminal panes" in CLAUDE.md), so the
@@ -473,6 +479,15 @@ class AppController(QObject):
         # Main.qml reads it to tell a genuine WM/Super+Q close apart from
         # the re-entrant `closing` that Qt.quit() raises on Wayland.
         self._quit_authorized = False
+        # Session save/restore + reload-in-place state. `_reload_requested` is
+        # read by run() AFTER app.exec() returns, to decide whether to
+        # os.execvpe the (updated) binary. `_pending_reload` carries the
+        # close-vs-reload intent through the teardown-dialog round trip.
+        # `_pending_editor_restore` stashes the saved editor buffers until the
+        # nvim RPC `attached` signal (or an immediate replay) can apply them.
+        self._reload_requested = False
+        self._pending_reload = False
+        self._pending_editor_restore: dict | None = None
         # NeoVim runs as a TUI inside a QMLTermWidget editor surface (spawned
         # by the QMLTermSession in Main.qml with `nvim --listen <sock>`).
         # `_backend` is an RPC-only connection to that socket: control
@@ -706,6 +721,15 @@ class AppController(QObject):
         # scope shortcut in Main.qml). Lua's `:SymmetriaAnchor` /
         # `:SymmetriaUnanchor` user commands emit through this channel.
         self._backend.anchor_event.connect(self._on_anchor_event)
+        # Session restore replays saved editor buffers once the RPC channel is
+        # live (the worker may attach after start() returns). Queued — the
+        # signal originates on the pynvim worker thread (§4 P2).
+        self._backend.attached.connect(
+            self._restore_editor_buffers, Qt.ConnectionType.QueuedConnection
+        )
+        # The cold-launch saved-session indicator tracks the displayed project:
+        # re-notify whenever the project root changes (chained signal).
+        self.displayedRootChanged.connect(self.savedSessionAvailableChanged)
         # Shell-driven cwd updates now arrive via the QMLTermSession's native
         # `currentDir` (polled by a Timer in Main.qml → `on_shell_cwd`), not a
         # terminal reader thread / OSC 7 signal. The shell's exit is handled in
@@ -3163,6 +3187,16 @@ class AppController(QObject):
                 continue
             if slot not in self._term_agents:
                 continue
+            # Backfill the harness's resumable session id for session restore
+            # (claude reports it through the bridge; opencode does not yet).
+            # Pure bookkeeping read only at save_session time — not surfaced to
+            # QML, so no signal emit. RETAIN, never clear: the bridge drops
+            # session_id from the snapshot once an agent goes idle (its
+            # activity entry is popped), so the value captured while it was
+            # active must survive here. See session_store / restore_session.
+            sid = str(agent.get("session_id", "") or "")
+            if sid and self._term_agents[slot]["session_id"] != sid:
+                self._term_agents[slot]["session_id"] = sid
             new_activity[slot] = {
                 "state": agent.get("activity_state", ""),
                 "tool": agent.get("activity_tool", ""),
@@ -3862,6 +3896,14 @@ class AppController(QObject):
             spawn_type, _, harness = spawn_type.partition(":")
             log.info("SYMMETRIA_IDE_SPAWN_AGENT=%s — spawning at launch", spawn_request)
             self.spawn_agent(spawn_type, True, harness or "claude")
+        # Reload-in-place restore: a reload re-execs with SYMMETRIA_IDE_RESTORE=1,
+        # asking us to rebuild the workspace saved during the previous teardown.
+        # Cold launches do NOT auto-restore — they only light the
+        # savedSessionAvailable indicator and wait for the Ctrl+Shift+S sessions
+        # view. The one-shot smoke env-vars above are stripped from the reload
+        # env (_reload_env), so they never fire alongside a restore.
+        if os.environ.get("SYMMETRIA_IDE_RESTORE") == "1":
+            self.restore_session()
         self.backendReady.emit()
 
     @Property(bool)  # imperative read in Main.qml's onClosing — never bound
@@ -3893,7 +3935,293 @@ class AppController(QObject):
         self._quit_authorized = True
         QGuiApplication.quit()
 
+    # --- Session save / restore (the IDE sessionizer) ------------------
+    #
+    # One implicit session per project root, keyed by displayedRoot. Saved on
+    # every quit (at the top of shutdown(), below — so the WM close, the reload
+    # chord, nvim :qa, and SIGTERM all persist uniformly). Restored either
+    # automatically on a reload (SYMMETRIA_IDE_RESTORE=1, from start()) or on
+    # demand at cold launch via the Ctrl+Shift+S sessions view.
+
+    @Property(bool, notify=savedSessionAvailableChanged)
+    def savedSessionAvailable(self) -> bool:
+        """True iff a restorable saved session exists for the current project.
+
+        Drives the cold-launch indicator and gates the Ctrl+Shift+S restore.
+        Reads through session_store (which rejects corrupt/forward-version
+        files), so the indicator only promises what restore can deliver."""
+        return session_store.exists(self.displayedRoot)
+
+    @property
+    def reload_requested(self) -> bool:
+        """Read by run() after app.exec() returns to decide whether to
+        os.execvpe the (updated) binary. Plain Python property — never bound in
+        QML (the reload decision is consumed on the Python side)."""
+        return self._reload_requested
+
+    @Slot(result="QVariantList")
+    def saved_session_agents(self) -> list:
+        """Agent descriptors from the saved session for the current project.
+
+        The Ctrl+Shift+S sessions view reads this to show what would restore
+        (harness + title, so the user can locate the conversation). Empty list
+        when there's no saved session."""
+        manifest = session_store.load(self.displayedRoot)
+        if not manifest:
+            return []
+        out: list[dict] = []
+        for entry in manifest.get("agents") or []:
+            if isinstance(entry, dict):
+                out.append(
+                    {
+                        "harness": str(entry.get("harness", "")),
+                        "title": str(entry.get("title", "")),
+                        "session_id": str(entry.get("session_id", "")),
+                    }
+                )
+        return out
+
+    def _build_session_manifest(self) -> dict:
+        """Snapshot the live workspace into a session_store manifest dict.
+
+        Agents and browsers are recorded in DISPLAY order; the focused ones as
+        1-based positions in those lists (internal slots are ephemeral across a
+        reload — display position is the stable identity, matching Ctrl+N)."""
+        agents: list[dict] = []
+        focused_agent_pos = 0
+        for slot in self._agent_order:
+            inst = self._term_agents.get(slot)
+            if not inst:
+                continue
+            agents.append(
+                {
+                    "harness": inst["harness"],
+                    "spawn_type": inst["spawn_type"],
+                    "session_id": inst.get("session_id", ""),
+                    "dangerous": inst["dangerous"],
+                    "title": inst.get("title", ""),
+                }
+            )
+            if slot == self._focused_term_agent:
+                focused_agent_pos = len(agents)
+
+        browsers: list[dict] = []
+        focused_browser_pos = 0
+        for slot in self._browser_order:
+            url = self._browser_tabs.get(slot, {}).get("url", "")
+            if not url or url == "about:blank":
+                continue
+            browsers.append({"url": url})
+            if slot == self._focused_browser:
+                focused_browser_pos = len(browsers)
+
+        return {
+            "anchored": self._anchored,
+            "central_surface": self._central_surface,
+            "focused_agent": focused_agent_pos,
+            "focused_browser": focused_browser_pos,
+            "agents": agents,
+            "browsers": browsers,
+            "editor": self._capture_editor_state(),
+        }
+
+    def _capture_editor_state(self) -> dict:
+        """Open editor files + the active buffer's cursor (via the nvim RPC).
+
+        Returns empty lists when nvim is gone (e.g. the :qa quit path already
+        closed the RPC) — restore then simply has no editor to rebuild."""
+        files: list[str] = []
+        active, line, col = "", 1, 0
+        for buf in self._backend.query_buffers():
+            path = buf.get("path", "")
+            if not path:
+                continue
+            files.append(path)
+            if buf.get("active"):
+                active = path
+                line = int(buf.get("line", 1))
+                col = int(buf.get("col", 0))
+        return {"files": files, "active": active, "line": line, "col": col}
+
+    def save_session(self) -> None:
+        """Persist the live workspace for the current project, or clear a stale
+        manifest when there's nothing worth restoring.
+
+        Called at the top of shutdown() so it captures nvim buffer state while
+        the RPC is still alive — it MUST run before _backend.stop() sends qa!.
+        The empty→delete branch keeps savedSessionAvailable honest: a project
+        closed with no agents/browsers/files won't light the indicator next
+        launch."""
+        root = self.displayedRoot
+        if not root:
+            return
+        manifest = self._build_session_manifest()
+        has_content = bool(
+            manifest["agents"] or manifest["browsers"] or manifest["editor"]["files"]
+        )
+        if has_content:
+            session_store.save(root, manifest)
+        else:
+            session_store.delete(root)
+        self.savedSessionAvailableChanged.emit()
+
+    @Slot()
+    def restore_session(self) -> None:
+        """Rebuild the saved workspace for the current project.
+
+        Order matters: re-anchor first (so displayedRoot — and the cwd agents
+        inherit — is correct), then agents (display order), then browsers, then
+        defer the editor to the `attached` signal, then finally apply the saved
+        central surface (after the pools exist so the surface has content).
+        No-op when there's no saved session."""
+        root = self.displayedRoot
+        manifest = session_store.load(root)
+        if not manifest:
+            log.info("restore_session: no saved session for %s", root)
+            return
+        log.info("restore_session: rebuilding workspace for %s", root)
+
+        if manifest.get("anchored") and root:
+            self.anchor_to_path(root)
+
+        for entry in manifest.get("agents") or []:
+            if not isinstance(entry, dict):
+                continue
+            harness = str(entry.get("harness", "claude")) or "claude"
+            session_id = str(entry.get("session_id", "") or "")
+            dangerous = bool(entry.get("dangerous", True))
+            # Resume by id when we captured one; otherwise the conversation is
+            # unidentifiable (an un-captured claude / a fresh opencode), so we
+            # respawn fresh rather than open an interactive picker at launch.
+            spawn_type = "resume" if session_id else "fresh"
+            self.spawn_agent(spawn_type, dangerous, harness, session_id)
+        focused_agent = manifest.get("focused_agent", 0)
+        if isinstance(focused_agent, int) and 1 <= focused_agent <= len(
+            self._agent_order
+        ):
+            self.focus_agent(self._agent_order[focused_agent - 1])
+
+        for entry in manifest.get("browsers") or []:
+            if not isinstance(entry, dict):
+                continue
+            url = str(entry.get("url", "") or "")
+            if url:
+                # focus=False: don't yank the surface mid-restore; the saved
+                # central surface is applied last.
+                self.open_browser(url, focus=False)
+        focused_browser = manifest.get("focused_browser", 0)
+        if isinstance(focused_browser, int) and 1 <= focused_browser <= len(
+            self._browser_order
+        ):
+            # Set focus WITHOUT focus_browser (which would switch to the browser
+            # surface) — the saved surface wins below.
+            self._focused_browser = self._browser_order[focused_browser - 1]
+            self.focusedBrowserChanged.emit()
+
+        editor = manifest.get("editor") or {}
+        if isinstance(editor, dict) and editor.get("files"):
+            self._pending_editor_restore = editor
+            # Already attached (manual Ctrl+Shift+S, nvim long up) → replay now;
+            # the per-(re)attach `attached` signal won't fire again. Not yet
+            # attached (reload, worker still connecting) → the queued `attached`
+            # slot replays it. One-shot, so at most one of the two runs.
+            if self._backend.is_attached:
+                self._restore_editor_buffers()
+
+        surface = manifest.get("central_surface")
+        if isinstance(surface, str):
+            self.set_central_surface(surface)
+
+        self.savedSessionAvailableChanged.emit()
+
+    @Slot()
+    def _restore_editor_buffers(self) -> None:
+        """Replay the stashed editor buffers once the nvim RPC is attached.
+
+        Connected to NvimBackend.attached (queued) AND called directly at the
+        end of restore_session for the already-attached case. One-shot: the
+        pending payload is cleared on first run so the per-(re)attach signal
+        can't replay it twice."""
+        editor = self._pending_editor_restore
+        if not editor:
+            return
+        self._pending_editor_restore = None
+        files = editor.get("files") or []
+        if not files:
+            return
+        self._backend.restore_buffers(
+            files,
+            str(editor.get("active", "")),
+            int(editor.get("line", 1)),
+            int(editor.get("col", 0)),
+        )
+
+    # --- Teardown funnel (close button + reload chord) -----------------
+
+    @Slot(bool)
+    def request_teardown(self, reload: bool) -> None:
+        """Single funnel for closing OR reloading the IDE.
+
+        Records the close-vs-reload intent, then asks the editor for unsaved
+        buffers (the ONE dirty-check), and routes to the right confirmation:
+          - dirty buffers → the 3-way unsaved-changes dialog (save / discard /
+            hold), for both close and reload;
+          - clean + reload → proceed immediately (a deliberate chord needs no
+            confirm);
+          - clean + close → the existing 'Close this session?' confirm.
+        The actual quit happens in the teardown_* slots the dialog calls."""
+        self._pending_reload = reload
+        try:
+            dirty = [
+                b["path"]
+                for b in self._backend.query_buffers()
+                if b.get("modified") and b.get("path")
+            ]
+        except Exception:  # noqa: BLE001
+            log.exception("request_teardown: dirty-buffer query failed")
+            dirty = []
+        if dirty:
+            self.dirtyTeardownRequested.emit(dirty)
+        elif reload:
+            self._proceed_teardown()
+        else:
+            self.cleanTeardownRequested.emit()
+
+    @Slot()
+    def teardown_save_all(self) -> None:
+        """3-way 'Save & close/reload': write every buffer (blocking) then go.
+
+        save_all() is synchronous so the writes land before shutdown()'s qa!
+        would otherwise discard them."""
+        self._backend.save_all()
+        self._proceed_teardown()
+
+    @Slot()
+    def teardown_discard(self) -> None:
+        """3-way 'Discard & close/reload' AND the clean-close confirm: proceed
+        without writing buffers (nothing dirty in the clean case; in the dirty
+        case the user chose to drop the edits). The session manifest is still
+        saved by shutdown()."""
+        self._proceed_teardown()
+
+    def _proceed_teardown(self) -> None:
+        """Arm reload (if requested) then quit through the single choke point.
+
+        Does NOT save the session here — shutdown() (fired by aboutToQuit) is
+        the single save site, so EVERY quit path (incl. nvim :qa and SIGTERM,
+        which bypass this funnel) persists the session uniformly."""
+        if self._pending_reload:
+            self._reload_requested = True
+        self.authorize_and_quit()
+
     def shutdown(self) -> None:
+        # Save the session FIRST — before any teardown. This is the single save
+        # site for EVERY quit path (WM close, reload chord, nvim :qa, SIGTERM
+        # all funnel through aboutToQuit → here), and it MUST run while the nvim
+        # RPC is still alive: _backend.stop() below sends qa!, after which
+        # editor capture would come back empty. Do NOT move this below any
+        # *.stop() call. See save_session / session_store.
+        self.save_session()
         # Tell the shell bridge we're going away (goodbye removes this
         # IDE's agents from the dashboard) and join the reader thread
         # before the event loop tears down.
@@ -4429,6 +4757,36 @@ def _reap_orphan_nvim_sockets() -> None:
         log.debug("reaped orphan nvim socket dir: %s", d)
 
 
+def _reload_env() -> dict[str, str]:
+    """Environment for the reload re-exec (os.execvpe).
+
+    A COPY of the current environment, so the dev/stable identity is preserved
+    verbatim: PYTHONPATH (the launcher-set src path `-m symmetria_ide` needs),
+    SYMMETRIA_IDE_APP_ID (dev vs stable window class), and
+    SYMMETRIA_IDE_QMLTERMWIDGET_PATH (its empty-string-vs-unset distinction is
+    load-bearing) all ride along untouched in the copy.
+
+    Two adjustments:
+      - SET SYMMETRIA_IDE_RESTORE=1 so the new process auto-restores the
+        session we just saved (cold launches, lacking it, only offer restore).
+      - POP QTWEBENGINE_REMOTE_DEBUGGING so run()'s probe reserves a FRESH CDP
+        port (the old number is being torn down with us), and POP the one-shot
+        launch hooks so they don't double-fire on top of the restore.
+    """
+    env = dict(os.environ)
+    env["SYMMETRIA_IDE_RESTORE"] = "1"
+    for key in (
+        "QTWEBENGINE_REMOTE_DEBUGGING",
+        "SYMMETRIA_IDE_SPAWN_AGENT",
+        "SYMMETRIA_IDE_AGENT_PROMPT",
+        "SYMMETRIA_IDE_AGENT_VIEW",
+        "SYMMETRIA_IDE_SCREENSHOT",
+        "SYMMETRIA_IDE_TEST_KEYS",
+    ):
+        env.pop(key, None)
+    return env
+
+
 def run() -> int:
     trace("run_entered")
     configure_logging()
@@ -4597,4 +4955,27 @@ def run() -> int:
     gc.freeze()
 
     trace("exec_entered")
-    return app.exec()
+    exit_code = app.exec()
+    trace("exec_returned")
+    # Reload-in-place: a Ctrl+Shift+R (or any reload teardown) set this latch
+    # before quitting. app.exec() returning is NOT enough to re-exec safely —
+    # the KSession terminal children (the live `claude`/shell/nvim PTYs) and the
+    # persistent WebEngineProfile's Chromium SingletonLock are released only
+    # when the QML engine is DESTROYED, and gc.freeze() above froze the
+    # engine↔controller↔app reference cycle so a plain return would not reliably
+    # refcount-collect it. shiboken6.delete forces a synchronous engine dtor
+    # (scene teardown → KSession dtors reap the children → WebEngine lock
+    # released), so the re-exec'd process never inherits a live claude (double
+    # resume) or trips a held profile lock. See AppController.save_session /
+    # restore_session and _reload_env.
+    if controller.reload_requested:
+        log.info("reload: re-exec %s into %s", sys.executable, controller.displayedRoot)
+        import shiboken6
+
+        shiboken6.delete(engine)
+        os.execvpe(
+            sys.executable,
+            [sys.executable, "-m", "symmetria_ide", controller.displayedRoot],
+            _reload_env(),
+        )
+    return exit_code

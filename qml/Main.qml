@@ -308,6 +308,37 @@ Window {
         }
     }
 
+    // Reload-in-place (Ctrl+Shift+R): save the session, quit, re-exec the
+    // (possibly updated) binary, and auto-restore — pick up a new build
+    // without losing the workspace. Routes through the teardown funnel, so
+    // unsaved buffers prompt the 3-way dialog first; a clean tree reloads
+    // straight away. Modal guard like the other popups.
+    Shortcut {
+        sequences: ["Ctrl+Shift+R"]
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (agentSessionPicker.visible || agentSpawnMenu.visible
+                    || mcpMenu.visible || sessionsMenu.visible
+                    || closeConfirmDialog.visible || unsavedChangesDialog.visible)
+                return;
+            controller.request_teardown(true);
+        }
+    }
+
+    // Saved-session view (Ctrl+Shift+S): see / restore the saved session for
+    // this project (the agents that were running + their titles).
+    Shortcut {
+        sequences: ["Ctrl+Shift+S"]
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (agentSessionPicker.visible || agentSpawnMenu.visible
+                    || mcpMenu.visible || sessionsMenu.visible
+                    || closeConfirmDialog.visible || unsavedChangesDialog.visible)
+                return;
+            sessionsMenu.open();
+        }
+    }
+
     // Close the focused slot. Shared between the agent and browser pools —
     // whichever surface is visible owns the chord (the two are never visible
     // together, so there is no ambiguity).
@@ -2405,10 +2436,41 @@ Window {
         title: "Close this session?"
         message: "This window's agents and editor will be closed."
         confirmText: "Close"
-        // Route through the choke point (NOT Qt.quit) so onClosing's guard
-        // sees an authorized teardown on the re-entrant `closing`.
-        onConfirmed: controller.authorize_and_quit()
+        // Route through the teardown funnel's proceed primitive (NOT Qt.quit /
+        // bare authorize_and_quit) so the close honours the close-vs-reload
+        // intent set in request_teardown. The session is saved by shutdown()
+        // on the way out regardless of this branch.
+        onConfirmed: controller.teardown_discard()
         onCancelled: root._restoreCentralFocus()
+    }
+
+    // 3-way unsaved-changes gate (opened by request_teardown when buffers are
+    // dirty, for both close and reload). save / discard route to the matching
+    // teardown_* slot; hold aborts and returns focus to work.
+    UnsavedChangesDialog {
+        id: unsavedChangesDialog
+        onSaveChanges: controller.teardown_save_all()
+        onDiscardChanges: controller.teardown_discard()
+        onHeld: root._restoreCentralFocus()
+    }
+
+    // Saved-session view (Ctrl+Shift+S) — see / restore the project's session.
+    SessionsMenu {
+        id: sessionsMenu
+        onDismissed: root._restoreCentralFocus()
+    }
+
+    // Teardown funnel → the right confirmation. request_teardown does the one
+    // dirty-buffer check, then: dirty → the 3-way dialog; clean close → the
+    // confirm; clean reload proceeds without a dialog (in the slot itself).
+    Connections {
+        target: controller
+        function onCleanTeardownRequested() {
+            closeConfirmDialog.open();
+        }
+        function onDirtyTeardownRequested(paths) {
+            unsavedChangesDialog.open(paths);
+        }
     }
 
     // === IDE-wide fuzzy file finder (Ctrl+F, or `f` in the tree) ===
@@ -2541,6 +2603,14 @@ Window {
             closeConfirmDialog.reassert();
             return;
         }
+        if (unsavedChangesDialog.visible) {
+            unsavedChangesDialog.reassert();
+            return;
+        }
+        if (sessionsMenu.visible) {
+            sessionsMenu.reassert();
+            return;
+        }
         if (agentSpawnMenu.visible) {
             agentSpawnMenu.reassert();
             return;
@@ -2622,7 +2692,17 @@ Window {
             mcpMenu.dismiss();
         if (agentSessionPicker.visible)
             agentSessionPicker.dismiss();
-        closeConfirmDialog.open();
+        if (sessionsMenu.visible)
+            sessionsMenu.dismiss();
+        // A visible unsavedChangesDialog means a teardown is already in flight;
+        // request_teardown below re-runs the dirty-check and re-opens the right
+        // dialog, so dismissing the stale one keeps a single live modal.
+        if (unsavedChangesDialog.visible)
+            unsavedChangesDialog.dismiss();
+        // Route through the teardown funnel (was closeConfirmDialog.open()): it
+        // does the dirty-buffer check and opens the confirm OR the 3-way dialog
+        // via the Connections above. A WM close is reload:false.
+        controller.request_teardown(false);
     }
 
     // Responsive-sidebar focus recovery. When `treeVisible` flips to false
