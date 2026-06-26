@@ -49,6 +49,8 @@ def main() -> None:
     if not raw:
         return
     event = json.loads(raw)
+    if not isinstance(event, dict):
+        return  # a non-object payload has no hook fields — mirror the server-side guard
 
     # Curated passthrough — exactly the fields agent_activity.AgentActivityMachine
     # reads. We forward raw values (no mapping) so all interpretation stays in the

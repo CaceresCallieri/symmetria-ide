@@ -43,6 +43,13 @@ log = logging.getLogger(__name__)
 # an OBSERVER-ONLY event — known, but carrying no lifecycle transition — which we
 # silently ignore, versus an event ABSENT from this map, which we log as unmapped
 # so a genuinely new lifecycle signal surfaces rather than being dropped quietly.
+#
+# NOTE: only the subset the reporter actually REGISTERS reaches us via local
+# capture — see `app._REPORTER_HOOK_EVENTS` (+ the idle-marked Notification). The
+# remaining entries (StopFailure, PostToolBatch, PermissionDenied,
+# UserPromptExpansion, PostCompact, the bare observer events) are forward-compat /
+# shell-parity coverage, kept so a future reporter that registers them needs no
+# change here.
 EVENT_STATE_MAP: dict[str, str] = {
     # Session lifecycle
     "SessionStart": "starting",
@@ -273,4 +280,7 @@ class AgentActivityMachine:
                 int(lag_ms),
             )
         if event_ts_ns:
-            self._last_event_ts_ns[agent_id] = event_ts_ns
+            # High-water mark, not last-write: a late (out-of-order) event must not
+            # LOWER the baseline, or a later-but-still-stale event would slip past
+            # the check above. max() keeps the detector honest.
+            self._last_event_ts_ns[agent_id] = max(prev_ts, event_ts_ns)

@@ -68,7 +68,13 @@ def _runtime_dir() -> str:
 
 
 def default_socket_path(pid: int | None = None) -> str:
-    """The agent socket path for `pid` (this process by default)."""
+    """The agent socket path for `pid` (this process by default).
+
+    Assumes `$XDG_RUNTIME_DIR` is short — AF_UNIX paths cap at ~108 bytes, and the
+    normal value (`/run/user/<uid>`) leaves ample room. An unusually long override
+    could exceed the limit; `start()` already treats the resulting bind failure as
+    non-fatal (logged, local capture absent), so the failure mode is graceful.
+    """
     return os.path.join(
         _runtime_dir(),
         f"{_SOCKET_PREFIX}{pid if pid is not None else os.getpid()}.sock",
@@ -145,6 +151,15 @@ class AgentEventsServer(QObject):
         if self._accept_thread is not None and self._accept_thread.is_alive():
             log.warning("AgentEventsServer.start: already running")
             return
+        # Defensive: if a prior accept thread died abnormally while _server_sock
+        # was still set, close it before rebinding so we don't leak its fd (and
+        # the old, now-unlinked socket).
+        if self._server_sock is not None:
+            try:
+                self._server_sock.close()
+            except OSError:
+                pass
+            self._server_sock = None
         reap_orphan_sockets()
         # Unlink any stale file at our exact path first (a prior process with this
         # pid that was hard-killed) — bind() on an existing AF_UNIX path fails
@@ -227,21 +242,26 @@ class AgentEventsServer(QObject):
         """Read one reporter connection's JSON lines and emit each."""
         try:
             conn.settimeout(_CONN_TIMEOUT_SECONDS)
-            reader = conn.makefile("r", encoding="utf-8", errors="replace")
-            for line in reader:
-                text = line.strip()
-                if not text:
-                    continue
-                try:
-                    payload = json.loads(text)
-                except json.JSONDecodeError:
-                    log.warning("agent-events: bad JSON (%.100s)", text)
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                # Queued to the GUI thread; GC suspended around the emit (gotcha
-                # #10 — a worker collection racing QSGRenderThread mid-paint SEGVs).
-                emit_gc_safe(self.hook_received, payload)
+            # `with` so the makefile wrapper closes deterministically: socket.makefile
+            # bumps the socket's io-ref count, so the finally's conn.close() alone
+            # would defer the fd release to GC of `reader` — exactly the worker-thread
+            # GC timing the project avoids (gotcha #10). Releasing it here also keeps
+            # fds from transiently piling up under a burst of short connections.
+            with conn.makefile("r", encoding="utf-8", errors="replace") as reader:
+                for line in reader:
+                    text = line.strip()
+                    if not text:
+                        continue
+                    try:
+                        payload = json.loads(text)
+                    except json.JSONDecodeError:
+                        log.warning("agent-events: bad JSON (%.100s)", text)
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    # Queued to the GUI thread; GC suspended around the emit (gotcha
+                    # #10 — a worker collection racing QSGRenderThread mid-paint SEGVs).
+                    emit_gc_safe(self.hook_received, payload)
         except OSError:
             pass  # client vanished / timed out — drop the connection
         finally:

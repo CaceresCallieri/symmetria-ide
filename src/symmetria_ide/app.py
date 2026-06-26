@@ -3239,6 +3239,12 @@ class AppController(QObject):
             return  # event for a slot we've already closed
         # From now on local capture owns this slot — the bridge snapshot will
         # PRESERVE rather than overwrite its activity (see _on_bridge_snapshot).
+        # The claim happens on the FIRST event regardless of whether it yields a
+        # state change. This is deliberate and safe: in practice SessionStart is
+        # the first hook and DOES set a real state, and even if the first event
+        # were a no-op (observer/unmapped), the seed-from-local rebuild in
+        # _on_bridge_snapshot preserves the slot's last value rather than wiping
+        # it (a claimed-but-empty slot simply isn't seeded, so it stays as-is).
         # Log the first claim per slot (one-time, low-noise) so the local path is
         # observable end-to-end: seeing this line proves the IDE reporter →
         # socket → here wire is live, independent of the bridge.

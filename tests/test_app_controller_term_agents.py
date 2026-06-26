@@ -584,6 +584,19 @@ def test_close_agent_releases_local_capture(controller):
     assert 1 not in controller._locally_captured_agents
 
 
+def test_close_agent_forgets_machine_state_for_slot_reuse(controller):
+    # close_agent must clear the activity machine's per-agent memory (subagent
+    # depth), or a respawn into the same slot would inherit stale nesting.
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(_hook(1, "SubagentStart"))  # depth 0→1
+    controller.close_agent(1)
+    # Respawn into the freed slot; the prior SubagentStart must be forgotten, so
+    # this stop is unpaired (recap drop) → no activity, not a "thinking".
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(_hook(1, "SubagentStop"))
+    assert controller.agentActivity[0]["state"] == ""
+
+
 # ---------------------------------------------------------------------------
 # STT indicator mirroring (snapshot "stt" field → sttTargetSlot/sttTranscribing)
 # ---------------------------------------------------------------------------
