@@ -251,6 +251,16 @@ class NvimBackend(QObject):
             if not self._stop_event.is_set():
                 log.exception("nvim rpc loop crashed")
         finally:
+            # Null the handle FIRST so is_attached / query_buffers / save_all /
+            # restore_buffers immediately treat a closed channel as detached.
+            # The :qa / EOFError path otherwise leaves a dead pynvim object
+            # behind: shutdown() runs save_session() (→ query_buffers) BEFORE
+            # _backend.stop() nulls it, so without this the query would
+            # async_call onto a stopped loop and block its full timeout on
+            # every nvim-initiated quit. Atomic under the GIL (stop() captures
+            # its own local first); a later stop() reading None just skips a
+            # redundant qa!.
+            self._nvim = None
             # Set unconditionally — covers cooperative stop() and the
             # crash/closed paths so stop_event.wait() always unblocks.
             self._stop_event.set()
@@ -278,6 +288,9 @@ class NvimBackend(QObject):
                 log.debug("initial re-push %s failed", fn, exc_info=True)
         # Channel is live + subscribed — let the GUI thread replay any pending
         # session-restore editor buffers (queued connection handles the hop).
+        # Emitted WITHOUT the gotcha-#10 GC-suspend wrapper on purpose: it is
+        # one-shot and carries no payload (no allocation to race the render
+        # thread), unlike the per-notification emits in _on_notification.
         self.attached.emit()
 
     def _on_request(self, name: str, args: list[Any]) -> Any:  # noqa: ARG002
@@ -479,12 +492,18 @@ class NvimBackend(QObject):
                 log.debug("query_buffers: skipping a buffer", exc_info=True)
         return out
 
-    def query_buffers(self, timeout: float = 2.0) -> list[dict]:
+    def query_buffers(self, timeout: float = 2.0) -> list[dict] | None:
         """Snapshot open buffers `[{path, modified, active, line, col}]`.
 
         Synchronous: blocks the calling (GUI) thread until the loop thread
-        replies or `timeout` elapses. Returns `[]` before attach, on timeout,
-        or on error — callers treat that as "no editor state / nothing dirty".
+        replies or `timeout` elapses. Returns:
+          - `[]` when there is no live channel (`_nvim is None`) — a genuine
+            "no editor / nothing to report".
+          - `None` when the channel is present but the query is INCONCLUSIVE
+            (timed out, or the dispatch raised) — i.e. nvim is alive but
+            unresponsive. Callers MUST distinguish this from `[]`: treating an
+            inconclusive result as "clean / no edits" risks silently dropping
+            unsaved work at teardown (see request_teardown).
         """
         nvim = self._nvim
         if nvim is None:
@@ -504,10 +523,10 @@ class NvimBackend(QObject):
             nvim.async_call(_do)
         except Exception:  # noqa: BLE001
             log.exception("async_call(query_buffers) failed")
-            return []
+            return None
         if not done.wait(timeout):
             log.warning("query_buffers timed out after %.1fs", timeout)
-            return []
+            return None
         return result
 
     def save_all(self, timeout: float = 5.0) -> bool:

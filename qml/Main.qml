@@ -246,10 +246,9 @@ Window {
             sequences: ["Ctrl+" + (index + 1)]
             context: Qt.ApplicationShortcut
             onActivated: {
-                // Modal guard: opening the spawn menu (or yanking focus
-                // via focus_agent) over the session picker would stack
-                // two z-40 modals fighting for the key catcher.
-                if (agentSessionPicker.visible)
+                // Modal guard: don't switch/spawn agents while ANY modal
+                // overlay is open (it would stack / yank focus — ping-pong).
+                if (root._anyModalVisible())
                     return;
                 var order = controller.agentOrder;
                 if (index < order.length)
@@ -274,12 +273,12 @@ Window {
         context: Qt.ApplicationShortcut
         onActivated: {
             // Modal guard (same rationale as _restoreCentralFocus): with
-            // the menu already open — possibly over a NON-agent surface,
-            // via Ctrl+N-on-empty — the go branch would focus_agent and
-            // yank focus out of the modal, leaving it visible but deaf.
-            // open() is idempotent and re-asserts the key catcher.
-            if (agentSessionPicker.visible)
-                return; // same modal guard as the Ctrl+N chords
+            // another modal open, the go branch would focus_agent and yank
+            // focus out of it, leaving it visible but deaf. The spawn menu
+            // itself is exempt — the branch below re-asserts it (open() is
+            // idempotent).
+            if (root._anyModalVisible() && !agentSpawnMenu.visible)
+                return;
             if (agentSpawnMenu.visible
                     || controller.focusedAgent === 0
                     || controller.agentSurfaceVisible)
@@ -300,9 +299,7 @@ Window {
         sequences: ["Ctrl+Shift+M"]
         context: Qt.ApplicationShortcut
         onActivated: {
-            if (agentSessionPicker.visible
-                    || agentSpawnMenu.visible
-                    || closeConfirmDialog.visible)
+            if (root._anyModalVisible())
                 return;
             mcpMenu.open();
         }
@@ -317,9 +314,7 @@ Window {
         sequences: ["Ctrl+Shift+R"]
         context: Qt.ApplicationShortcut
         onActivated: {
-            if (agentSessionPicker.visible || agentSpawnMenu.visible
-                    || mcpMenu.visible || sessionsMenu.visible
-                    || closeConfirmDialog.visible || unsavedChangesDialog.visible)
+            if (root._anyModalVisible())
                 return;
             controller.request_teardown(true);
         }
@@ -331,9 +326,7 @@ Window {
         sequences: ["Ctrl+Shift+S"]
         context: Qt.ApplicationShortcut
         onActivated: {
-            if (agentSessionPicker.visible || agentSpawnMenu.visible
-                    || mcpMenu.visible || sessionsMenu.visible
-                    || closeConfirmDialog.visible || unsavedChangesDialog.visible)
+            if (root._anyModalVisible())
                 return;
             sessionsMenu.open();
         }
@@ -2585,6 +2578,19 @@ Window {
                 Qt.callLater(() => editor.forceActiveFocus());
             }
         }
+    }
+
+    /// Single source of truth for "is a self-healing modal overlay open?".
+    /// The spawn menu, session picker, MCP menu, close-confirm, unsaved-changes
+    /// dialog, and sessions view are all z40/z50 ModalOverlays whose key
+    /// catcher re-grabs focus every tick; opening another over one — or yanking
+    /// focus via focus_agent — makes the two ping-pong and go deaf. Every
+    /// modal-opening / focus-stealing chord guards on THIS so the list can't
+    /// drift per chord. (The fuzzy finder is excluded — no per-tick self-heal.)
+    function _anyModalVisible() {
+        return agentSpawnMenu.visible || agentSessionPicker.visible
+            || mcpMenu.visible || closeConfirmDialog.visible
+            || unsavedChangesDialog.visible || sessionsMenu.visible;
     }
 
     /// Shared focus dispatch: pull active focus into the visible central

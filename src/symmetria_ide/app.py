@@ -3996,7 +3996,6 @@ class AppController(QObject):
             agents.append(
                 {
                     "harness": inst["harness"],
-                    "spawn_type": inst["spawn_type"],
                     "session_id": inst.get("session_id", ""),
                     "dangerous": inst["dangerous"],
                     "title": inst.get("title", ""),
@@ -4032,7 +4031,9 @@ class AppController(QObject):
         closed the RPC) — restore then simply has no editor to rebuild."""
         files: list[str] = []
         active, line, col = "", 1, 0
-        for buf in self._backend.query_buffers():
+        # `query_buffers()` returns None when inconclusive (nvim unresponsive);
+        # for capture that's the same as "no editor to record" → treat as [].
+        for buf in self._backend.query_buffers() or []:
             path = buf.get("path", "")
             if not path:
                 continue
@@ -4084,12 +4085,25 @@ class AppController(QObject):
         if manifest.get("anchored") and root:
             self.anchor_to_path(root)
 
+        # Conversations already running in the pool (a mid-session Ctrl+Shift+S
+        # restore): respawning `claude -r <same id>` would put two processes on
+        # one session (double-resume), so skip any session already live.
+        live_session_ids = {
+            inst.get("session_id", "")
+            for inst in self._term_agents.values()
+            if inst.get("session_id")
+        }
         for entry in manifest.get("agents") or []:
             if not isinstance(entry, dict):
                 continue
             harness = str(entry.get("harness", "claude")) or "claude"
             session_id = str(entry.get("session_id", "") or "")
             dangerous = bool(entry.get("dangerous", True))
+            if session_id and session_id in live_session_ids:
+                log.info(
+                    "restore_session: skipping already-live session %s", session_id
+                )
+                continue
             # Resume by id when we captured one; otherwise the conversation is
             # unidentifiable (an un-captured claude / a fresh opencode), so we
             # respawn fresh rather than open an interactive picker at launch.
@@ -4171,15 +4185,17 @@ class AppController(QObject):
           - clean + close → the existing 'Close this session?' confirm.
         The actual quit happens in the teardown_* slots the dialog calls."""
         self._pending_reload = reload
-        try:
-            dirty = [
-                b["path"]
-                for b in self._backend.query_buffers()
-                if b.get("modified") and b.get("path")
-            ]
-        except Exception:  # noqa: BLE001
-            log.exception("request_teardown: dirty-buffer query failed")
-            dirty = []
+        buffers = self._backend.query_buffers()
+        if buffers is None:
+            # Inconclusive: nvim is alive but didn't answer before the timeout.
+            # We can't confirm the tree is clean, so DON'T risk silently
+            # dropping unsaved edits — route to the unsaved-changes dialog
+            # (an empty path list renders as "couldn't verify") and let the
+            # user decide. See NvimBackend.query_buffers' None contract.
+            log.warning("request_teardown: buffer query inconclusive; prompting")
+            self.dirtyTeardownRequested.emit([])
+            return
+        dirty = [b["path"] for b in buffers if b.get("modified") and b.get("path")]
         if dirty:
             self.dirtyTeardownRequested.emit(dirty)
         elif reload:
@@ -4969,13 +4985,20 @@ def run() -> int:
     # resume) or trips a held profile lock. See AppController.save_session /
     # restore_session and _reload_env.
     if controller.reload_requested:
-        log.info("reload: re-exec %s into %s", sys.executable, controller.displayedRoot)
+        # Capture argv + env BEFORE deleting the engine (displayedRoot reads
+        # controller state we don't want to touch post-teardown), then delete
+        # and re-exec. Guard execvpe: a failed exec (e.g. a missing interpreter)
+        # must degrade to a clean exit, not an uncaught traceback out of run()
+        # with the engine already gone.
+        reload_argv = [sys.executable, "-m", "symmetria_ide", controller.displayedRoot]
+        reload_env = _reload_env()
+        log.info("reload: re-exec %s into %s", sys.executable, reload_argv[-1])
         import shiboken6
 
         shiboken6.delete(engine)
-        os.execvpe(
-            sys.executable,
-            [sys.executable, "-m", "symmetria_ide", controller.displayedRoot],
-            _reload_env(),
-        )
+        try:
+            os.execvpe(sys.executable, reload_argv, reload_env)
+        except OSError:
+            log.exception("reload: execvpe failed — exiting instead of re-launching")
+            return exit_code
     return exit_code

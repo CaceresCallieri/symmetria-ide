@@ -70,9 +70,14 @@ ModalOverlay {
 
     Text {
         anchors.horizontalCenter: parent.horizontalCenter
-        text: root.paths.length === 1
-            ? "1 file has unsaved changes"
-            : root.paths.length + " files have unsaved changes"
+        // Empty list = the editor query was inconclusive (nvim unresponsive);
+        // request_teardown routes here to be safe rather than risk dropping
+        // unsaved edits, so say so instead of "0 files".
+        text: root.paths.length === 0
+            ? "couldn't verify unsaved changes — save to be safe"
+            : (root.paths.length === 1
+                ? "1 file has unsaved changes"
+                : root.paths.length + " files have unsaved changes")
         color: Theme.color.text.dim
         font.family: Theme.font.family
         font.pixelSize: Theme.font.size.xs

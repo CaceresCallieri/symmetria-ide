@@ -34,12 +34,11 @@ the rest verbatim::
       "central_surface": "agent",
       "focused_agent": 1,
       "focused_browser": 0,
-      "agents": [
-        {"slot": 1, "display_order": 1, "harness": "claude",
-         "spawn_type": "resume", "session_id": "<uuid>",
+      "agents": [           # list order == display order
+        {"harness": "claude", "session_id": "<uuid>",
          "dangerous": true, "title": "..."}
       ],
-      "browsers": [{"order": 1, "url": "https://..."}],
+      "browsers": [{"url": "https://..."}],   # list order == display order
       "editor": {"active": "/abs/file.py", "line": 42, "col": 3,
                  "files": ["/abs/a.py", "/abs/b.py"]}
     }

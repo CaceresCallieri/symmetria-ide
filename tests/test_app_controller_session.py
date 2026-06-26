@@ -41,6 +41,26 @@ class FakeBridge:
         pass
 
 
+class FakeBackend:
+    """Stand-in for NvimBackend's session-restore surface (no nvim, no threads)."""
+
+    def __init__(self, is_attached: bool = False) -> None:
+        self.is_attached = is_attached
+        self.restore_calls: list[tuple] = []
+
+    def query_buffers(self, timeout: float = 2.0):
+        return []
+
+    def restore_buffers(self, files, active: str = "", line: int = 1, col: int = 0):
+        self.restore_calls.append((list(files), active, line, col))
+
+    def save_all(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+
 @pytest.fixture
 def controller(monkeypatch, tmp_path):
     # session_store writes under XDG_STATE_HOME/symmetria-ide/sessions/.
@@ -272,3 +292,91 @@ def test_teardown_save_all_writes_then_proceeds(controller, monkeypatch):
 
     # wall MUST land before the quit (else qa! discards the saved edits).
     assert calls == ["wall", "quit"]
+
+
+def test_request_teardown_inconclusive_query_prompts(controller, monkeypatch):
+    c = controller
+    # query_buffers returning None = inconclusive (nvim alive but unresponsive).
+    monkeypatch.setattr(c._backend, "query_buffers", lambda: None)
+    seen = []
+    c.dirtyTeardownRequested.connect(lambda paths: seen.append(list(paths)))
+    c.cleanTeardownRequested.connect(lambda: seen.append("clean"))
+
+    c.request_teardown(False)
+
+    # Inconclusive must NOT be treated as clean — route to the unsaved dialog
+    # (empty list renders as "couldn't verify"), never silently proceed.
+    assert seen == [[]]
+
+
+# --- _reload_env (reload re-exec env hygiene) ------------------------------
+
+
+def test_reload_env_sets_restore_and_strips_oneshot(monkeypatch):
+    from symmetria_ide import app as app_module
+
+    monkeypatch.setenv("PYTHONPATH", "/x/src")
+    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "12345")
+    monkeypatch.setenv("SYMMETRIA_IDE_SPAWN_AGENT", "fresh")
+    monkeypatch.setenv("SYMMETRIA_IDE_AGENT_PROMPT", "hi")
+    monkeypatch.setenv("SYMMETRIA_IDE_AGENT_VIEW", "1")
+    monkeypatch.setenv("SYMMETRIA_IDE_SCREENSHOT", "/tmp/x.png")
+    monkeypatch.setenv("SYMMETRIA_IDE_TEST_KEYS", "iHi")
+
+    env = app_module._reload_env()
+
+    assert env["SYMMETRIA_IDE_RESTORE"] == "1"
+    assert env["PYTHONPATH"] == "/x/src"  # dev/stable identity rides through
+    for popped in (
+        "QTWEBENGINE_REMOTE_DEBUGGING",
+        "SYMMETRIA_IDE_SPAWN_AGENT",
+        "SYMMETRIA_IDE_AGENT_PROMPT",
+        "SYMMETRIA_IDE_AGENT_VIEW",
+        "SYMMETRIA_IDE_SCREENSHOT",
+        "SYMMETRIA_IDE_TEST_KEYS",
+    ):
+        assert popped not in env
+
+
+# --- editor restore (one-shot + attached-vs-deferred) ----------------------
+
+
+def test_restore_session_replays_editor_when_attached(controller):
+    c = controller
+    c._backend = FakeBackend(is_attached=True)
+    session_store.save(
+        c.displayedRoot,
+        {
+            "editor": {
+                "files": ["/a.py", "/b.py"],
+                "active": "/b.py",
+                "line": 10,
+                "col": 2,
+            }
+        },
+    )
+
+    c.restore_session()
+
+    # Already attached → replay immediately, exactly once, and clear the latch.
+    assert c._backend.restore_calls == [(["/a.py", "/b.py"], "/b.py", 10, 2)]
+    assert c._pending_editor_restore is None
+
+
+def test_restore_session_defers_editor_until_attached(controller):
+    c = controller
+    c._backend = FakeBackend(is_attached=False)
+    session_store.save(
+        c.displayedRoot,
+        {"editor": {"files": ["/a.py"], "active": "/a.py", "line": 1, "col": 0}},
+    )
+
+    c.restore_session()
+    # Not attached yet → deferred, nothing replayed, latch armed.
+    assert c._backend.restore_calls == []
+    assert c._pending_editor_restore is not None
+
+    c._restore_editor_buffers()  # simulate the queued `attached` signal
+    assert len(c._backend.restore_calls) == 1
+    c._restore_editor_buffers()  # one-shot: must not replay again
+    assert len(c._backend.restore_calls) == 1
