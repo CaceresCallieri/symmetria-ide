@@ -1,6 +1,6 @@
 ---
 name: agent-ownership-inversion
-description: Multi-repo refactor making the IDE the single source of truth for its agents; Phases 1-3 SHIPPED for claude (functional cutover live), Phase 4-5 planned
+description: Multi-repo refactor making the IDE the single source of truth for its agents; Phases 1-3 + Phase 4 IDE-side SHIPPED for claude, Phase 4 shell-side + Phase 5 planned
 metadata: 
   node_type: memory
   type: project
@@ -35,6 +35,19 @@ opencode, NOT yet done.
 **Live verification owed:** reload shell (bridge runs prefer-inst) + run new-code IDE
 (dev, or promote dev→stable — STABLE daily-driver is claude-activity-dark until promoted);
 confirm claude sparkles+dashboard come from IDE, opencode still works via fallback.
+
+**Phase 4 (STT direct channel) — IDE-side SHIPPED additive (`94afc14`):** decision
+PURE-DIRECT (drop remote/SSH STT, remove bridge inject path entirely). agent_events now
+dispatches by type: stt_recording {buf,transcribing} fire-and-forget → _on_stt_recording
+(chip dot); stt_inject {buf,text,submit} REQUEST/REPLY — server stamps request_id, blocks
+on a Future resolved by resolve_inject←agent_inject_done, writes stt_inject_result back.
+_dispatch_inject shared w/ bridge path; agent_inject_done routes direct-first/bridge-fallback
+(both work during transition). STT buf: slot / -1 focused / 0 clear. **PENDING shell-side:**
+stt-inject.sh + AgentService._pushSttState/SttJob → connect direct to
+$XDG_RUNTIME_DIR/symmetria-ide-agents-<ide_pid>.sock (shell has ide pid=nvim_pid at inject);
+remove bridge handle_inject/handle_inject_result + stt snapshot field + set_stt_state. Shell
+agentbar dot reads LOCAL AgentService (unaffected). **PENDING IDE cleanup (after shell live):**
+remove _on_bridge_inject + inject_requested + _mirror_stt_state; KEEP subscribe (opencode).
 
 Full design + the exploration findings (bridge protocol, activity state-machine
 rules, dashboard parity fields, STT flow, injection seam, dead-code inventory, all

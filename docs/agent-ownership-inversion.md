@@ -1,7 +1,8 @@
 # Agent ownership inversion — design + implementation context
 
 > **STATUS (2026-06-26): Phases 1–3 SHIPPED for claude (functional cutover live);
-> Phase 4 (STT) + Phase 5 (orchestrator removal) PLANNED.** Multi-repo refactor
+> Phase 4 IDE-side SHIPPED (additive); Phase 4 shell-side + Phase 5 PLANNED.**
+> Multi-repo refactor
 > decided via discourse 2026-06-26. Captures the phased plan AND the exploration
 > findings (so implementation needn't re-explore the IDE + shell + orchestrator).
 > Plan mirror: `~/.claude/plans/shiny-nibbling-shore.md`. Grew out of the
@@ -204,8 +205,30 @@ test_main_qml_terminal_wiring.py ~376-379 asserts the relay is absent).
    published `inst` activity, or remove them, in the eventual strip.
    **Live verification still owed** (needs shell reload + a new-code IDE; the
    stable daily-driver is claude-activity-dark until promoted).
-4. **Redesign STT** to the direct IDE socket; remove STT from bridge + IDE;
-   IDE bridge connection becomes publish-only.
+4. **Redesign STT** to the direct IDE socket. **Decision (user, 2026-06-26):
+   PURE-DIRECT — drop remote (SSH) STT, remove the bridge inject path entirely**
+   (the direct local socket can't reach a remote IDE; remote agents were accepted
+   as a casualty). Correction: "IDE bridge connection becomes publish-only" is
+   gated on opencode (subscribe stays for opencode activity, like the strip).
+   - **✅ SHIPPED — IDE-side (additive, `94afc14`):** `agent_events` dispatches by
+     type — `stt_recording {buf,transcribing}` fire-and-forget → `_on_stt_recording`
+     (chip dot); `stt_inject {buf,text,submit}` REQUEST/REPLY → server stamps a
+     request_id, blocks on a Future the GUI thread resolves (`resolve_inject` ←
+     `agent_inject_done`), writes `stt_inject_result` back. `_dispatch_inject`
+     extracted + shared with the legacy bridge path; `agent_inject_done` routes
+     direct-first, bridge-fallback (so both work during the transition). STT
+     protocol: buf = slot, -1 = focused, 0 = clear.
+   - **PENDING — shell-side:** `stt-inject.sh` + `AgentService._pushSttState` /
+     `SttJob` connect DIRECTLY to `$XDG_RUNTIME_DIR/symmetria-ide-agents-<ide_pid>.sock`
+     (the shell already has the ide pid = `nvim_pid` at inject time) — send
+     `stt_recording` / `stt_inject`, read the JSON reply. Then remove the bridge's
+     `handle_inject`/`handle_inject_result` + the `stt` snapshot field +
+     `set_stt_state`. NOTE: the shell **agentbar** dot reads LOCAL `AgentService`
+     (per the stt_chip_hub_broadcast memory), so it's unaffected — only the IDE
+     chip dot + injection move. Needs live dictation verification.
+   - **PENDING — IDE cleanup (after shell-side live):** remove `_on_bridge_inject`,
+     the bridge `inject_requested` signal/wiring, and `_mirror_stt_state`. KEEP the
+     bridge subscribe + `_on_bridge_snapshot` (opencode activity).
 5. **Remove orchestrator.nvim** + `send_editor_keys` + stale comments.
 
 ## Risks
