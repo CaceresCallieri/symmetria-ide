@@ -103,19 +103,51 @@ None for opencode). `reap_orphan_configs` (~115-142) parses leading pid, reaps i
 shape = the `~/.claude/settings.json` form (`{Event:[{matcher?,hooks:[{type:"command",command,async}]}]}`).
 Injected hooks ADD to globals (so pre-Phase-3 both fire, to different destinations).
 
-### D. STT path (current) — bridge-mediated, two-way
-Shell `set_stt_state` (agent-bridge.py ~262-283) broadcasts `stt` in every snapshot
-(~486). Shell `stt-inject.sh` (~170-229) sends `{type:"inject", target_nvim_pid,
-buf, text, submit}` → bridge `handle_inject` (~573) routes to the IDE's publisher
-writer, waits for result (~3s). IDE `_on_bridge_inject` (app.py ~3245-3289) →
-`agentInjectRequested(slot,text,submit,request_id)` → QML PTY write →
-`agent_inject_done` (~3295) → `send_inject_result` (agent_bridge.py ~211). IDE
-`_mirror_stt_state` (~3213-3243) drives `sttTargetSlot`/`sttTranscribing` chip dot.
-→ Redesign: IDE socket accepts `stt_recording {buf,on}` + `stt_inject {buf,text,submit}`
-and replies; shell connects DIRECTLY to `symmetria-ide-agents-<target_pid>.sock`
-(pid from the agent id's `<ide_pid>_<slot>`). Remove all STT from the bridge + the
-IDE `_on_bridge_inject`/`inject_requested`/`_mirror_stt_state`-from-snapshot;
-IDE bridge connection becomes publish-only (drop `subscribe`).
+### D. STT path — current bridge-mediated flow + the SHELL-SIDE edit map
+**IDE-side is already migrated** (the direct channel ships in `94afc14` — see Phase 4
+in the phased plan). What follows is the SHELL-side ground truth (re-verified
+2026-06-26 by an explorer over `~/.config/quickshell/symmetria`) so the shell-side
+can be edited WITHOUT re-exploring. Line numbers are approximate — verify before edit.
+
+**Current flow (record → dictate → inject → result):**
+1. `services/SttJob.qml` `_captureTargetWindow()` (~370-385) reads Hyprland's active
+   toplevel (address/class/pid); `_resolveAgentTarget()` (~397-426) calls
+   `AgentService.activeAgentForTerminal(targetWindowPid)` → the representative agent.
+   Agent fields used (~408-420): `inject_via` ("bridge"|""), `nvim_pid` (= the IDE pid
+   when inject_via=="bridge"), `buf` (slot), `nvim_socket`.
+2. Recording state: SttJob (~424) calls `AgentService.setSttTarget(terminalPid, buf ?? -1)`
+   → `AgentService.qml` `setSttTarget` (~282-286) sets `_sttTargetTerminalPid`/`_sttTargetBufId`
+   then `_pushSttState()` (~302-310) writes `{type:"stt_state", terminal_pid, buf, transcribing}`
+   to the **bridge process stdin**. Bridge `stdin_reader` (~1601-1633) → `set_stt_state`
+   (agent-bridge.py ~262-283) → stored in `_stt_state`, carried as the top-level `stt`
+   field in every snapshot (~521).
+3. Inject: SttJob spawns `stt-inject.sh` with env (~753-762): `STT_EXPECTED_TEXT`,
+   `STT_NVIM_SOCKET`, `STT_NVIM_ACTIVE_BUF`, `STT_BRIDGE_PID` (= the IDE pid),
+   `STT_BRIDGE_BUF`. `stt-inject.sh` (bridge path ~181-188) sends `{type:"inject",
+   request_id, target_nvim_pid, buf, text, submit}` to the bridge socket, `settimeout(5.0)`
+   reads the reply. Bridge `handle_inject` (~602-648) forwards to the target IDE's publisher
+   writer via `_publisher_writers[target_nvim_pid]` (3s timeout, ~635-638); IDE replies →
+   `handle_inject_result` (~650-664) relays it back to the requester.
+4. IDE end (now the LEGACY path, being retired): `_on_bridge_inject` →
+   `agentInjectRequested` → QML bracketed paste → `agent_inject_done`.
+
+**Shell-side edit map (PENDING — pure-direct):**
+- `stt-inject.sh`: instead of the bridge path, connect to
+  `$XDG_RUNTIME_DIR/symmetria-ide-agents-<STT_BRIDGE_PID>.sock`, send `{type:"stt_inject",
+  buf, text, submit}`, read the `{type:"stt_inject_result", ok, submitted, error}` reply.
+  (The IDE stamps its own request_id internally — the shell needn't send one.)
+- `AgentService.qml` `_pushSttState`: instead of writing to bridge stdin, send
+  `{type:"stt_recording", buf, transcribing}` directly to the same per-IDE socket
+  (buf=slot, -1=focused, 0=clear). Needs the IDE pid — available as the agent's `nvim_pid`.
+- Bridge `agent-bridge.py`: remove `handle_inject`/`handle_inject_result`, the `stt`
+  snapshot field, and `set_stt_state`. The shell **agentbar** dot reads LOCAL
+  `AgentService` (per [stt_chip_hub_broadcast]) — unaffected; only the bridge-relayed
+  copy (consumed by the IDE) goes away, replaced by the direct channel.
+- **Gotcha:** `inject_via` is "bridge" for IDE agents; the shell still uses it to pick
+  the direct path. **remote agents (`remote`/`_remote_clients`) are DROPPED for STT**
+  (user decision — a local socket can't reach a remote IDE).
+→ Then IDE cleanup: remove `_on_bridge_inject`, the `inject_requested` signal/wiring,
+  and `_mirror_stt_state`. KEEP `subscribe` + `_on_bridge_snapshot` (opencode activity).
 
 ### E. Activity state machine (port into IDE) — shell `agent-bridge.py`
 Hook event → state: SessionStart→`starting` (source=clear→`clearing`),
