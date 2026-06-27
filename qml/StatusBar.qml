@@ -243,56 +243,11 @@ Rectangle {
                     }
                 }
 
-                // --- Focused Claude agent: model · effort · context% ---
-                // From the status-line tap (controller.agentModels/Efforts/
-                // ContextPct, indexed slot-1). QML re-binds when the list, the
-                // focused slot, OR agentActivity (the harness gate) changes.
-                // Empty/unknown values hide their own item, so OpenCode agents
-                // (no tap) show nothing even before claudeAgentActive rules out
-                // the whole cluster.
-                Text {
-                    visible: root.claudeAgentActive
-                             && (controller.agentModels[controller.focusedAgent - 1] || "") !== ""
-                    text: controller.agentModels[controller.focusedAgent - 1] || ""
-                    color: Theme.color.text.normal
-                    font.family: Theme.font.family
-                    font.pixelSize: Theme.font.size.sm
-                    Layout.alignment: Qt.AlignLeft | Qt.AlignVCenter
-                    renderType: Text.NativeRendering
-                }
-                Text {
-                    visible: root.claudeAgentActive
-                             && (controller.agentEfforts[controller.focusedAgent - 1] || "") !== ""
-                    text: ":" + (controller.agentEfforts[controller.focusedAgent - 1] || "")
-                    color: Theme.color.text.dim
-                    font.family: Theme.font.family
-                    font.pixelSize: Theme.font.size.sm
-                    Layout.alignment: Qt.AlignLeft | Qt.AlignVCenter
-                    renderType: Text.NativeRendering
-                }
-                Row {
-                    visible: root.claudeAgentActive
-                             && controller.agentContextPct[controller.focusedAgent - 1] >= 0
-                    spacing: Theme.spacing.xs
-                    Layout.alignment: Qt.AlignLeft | Qt.AlignVCenter
-                    Text {
-                        text: "ctx"
-                        color: Theme.color.text.dim
-                        font.family: Theme.font.family
-                        font.pixelSize: Theme.font.size.sm
-                        renderType: Text.NativeRendering
-                    }
-                    Text {
-                        // `|| 0` guards the hidden state (focusedAgent === 0 →
-                        // agentContextPct[-1] → undefined → "undefined%"); the Row
-                        // is hidden then, but the binding still evaluates.
-                        text: (controller.agentContextPct[controller.focusedAgent - 1] || 0) + "%"
-                        color: root._usageColor(controller.agentContextPct[controller.focusedAgent - 1])
-                        font.family: Theme.font.family
-                        font.pixelSize: Theme.font.size.sm
-                        renderType: Text.NativeRendering
-                    }
-                }
+                // The focused-agent info (model · effort · context% · 5h/7d
+                // usage) is NOT inline here — it's consolidated into one CENTERED
+                // group (`agentInfo` below, a sibling of this RowLayout) so all
+                // agent data sits together in the middle of the bar while project
+                // + branch stay flush-left.
 
                 // File path (relative to cwd where possible).
                 // Gated on `editorActive` so it disappears in terminal /
@@ -336,29 +291,6 @@ Rectangle {
                     Layout.fillHeight: true
                 }
 
-                // --- Account-global usage (5h / 7d) ---
-                // Universal data, Claude-gated visibility: the freshest rate-limit
-                // observation across all agents AND all IDE instances
-                // (account_usage_store, last-write-wins). Right-aligned, shown ONLY
-                // while a Claude agent is focused. The countdown ticks locally from
-                // the reset epoch (Timer above), so even a snapshot observed in
-                // another IDE instance shows an accurate, live timer.
-                Row {
-                    visible: root.claudeAgentActive && controller.accountUsageValid
-                    spacing: Theme.spacing.md
-                    Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
-                    UsageChip {
-                        label: "5h"
-                        pct: controller.accountUsage5hPct
-                        resetEpoch: controller.accountUsage5hReset
-                    }
-                    UsageChip {
-                        label: "7d"
-                        pct: controller.accountUsage7dPct
-                        resetEpoch: controller.accountUsage7dReset
-                    }
-                }
-
                 // Cursor position — pinned to the right edge of
                 // `editorColumn` (which matches mainContent's right
                 // edge above). Hidden outside editor mode for the
@@ -374,6 +306,80 @@ Rectangle {
                     font.pixelSize: Theme.font.size.sm
                     Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
                     renderType: Text.NativeRendering
+                }
+            }
+
+            // --- Focused-agent info, CENTERED ---
+            // All agent data (model · effort · context% · 5h/7d usage) grouped
+            // together and centered in the bar, while project + branch stay
+            // flush-left in the RowLayout above. A SIBLING of that RowLayout
+            // (not a row item) so it anchors to editorColumn's true horizontal
+            // centre regardless of the left content's width; it overlays the
+            // RowLayout's trailing spacer (empty on the agent surface), so there
+            // is no collision. Visible only while a Claude agent is focused.
+            Row {
+                id: agentInfo
+                visible: root.claudeAgentActive
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Theme.spacing.md
+
+                // model + effort, tight: ":effort" abuts the model with no gap,
+                // matching the terminal status line's "Opus 4.8:xhigh".
+                Row {
+                    spacing: 0
+                    visible: (controller.agentModels[controller.focusedAgent - 1] || "") !== ""
+                    Text {
+                        text: controller.agentModels[controller.focusedAgent - 1] || ""
+                        color: Theme.color.text.normal
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
+                        renderType: Text.NativeRendering
+                    }
+                    Text {
+                        visible: (controller.agentEfforts[controller.focusedAgent - 1] || "") !== ""
+                        text: ":" + (controller.agentEfforts[controller.focusedAgent - 1] || "")
+                        color: Theme.color.text.dim
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
+                        renderType: Text.NativeRendering
+                    }
+                }
+
+                // context %
+                Row {
+                    spacing: Theme.spacing.xs
+                    visible: controller.agentContextPct[controller.focusedAgent - 1] >= 0
+                    Text {
+                        text: "ctx"
+                        color: Theme.color.text.dim
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
+                        renderType: Text.NativeRendering
+                    }
+                    Text {
+                        text: (controller.agentContextPct[controller.focusedAgent - 1] || 0) + "%"
+                        color: root._usageColor(controller.agentContextPct[controller.focusedAgent - 1] || 0)
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
+                        renderType: Text.NativeRendering
+                    }
+                }
+
+                // account usage (5h / 7d) — universal data, shown only when valid
+                Row {
+                    spacing: Theme.spacing.md
+                    visible: controller.accountUsageValid
+                    UsageChip {
+                        label: "5h"
+                        pct: controller.accountUsage5hPct
+                        resetEpoch: controller.accountUsage5hReset
+                    }
+                    UsageChip {
+                        label: "7d"
+                        pct: controller.accountUsage7dPct
+                        resetEpoch: controller.accountUsage7dReset
+                    }
                 }
             }
         }
