@@ -140,16 +140,19 @@ QtObject {
             readonly property color badgeLabel: "#131313"
         }
 
-        // Account-usage thresholds — StatusBar's 5h/7d rate-limit segment.
+        // Account-usage thresholds — StatusBar's 5h/7d + context segment.
         // ALIAS the editor `mode.*` hues so the palette stays single-sourced
         // (same provenance pattern as permissionMode / diagnostic / gitDiff).
-        // Mirrors the bash status line's tiers (status-line.sh::get_usage_color):
+        // Green→amber→red so the colour itself signals "how close to the limit":
         //   good — < 50% used  (mode.insert, green)
-        //   warn — 50–80% used (mode.command, blue — the calm mid tier)
+        //   warn — 50–80% used (mode.normal, amber — "reaching a considerable
+        //          amount"; NOT mode.command/blue, which read as calm, not warning)
         //   crit — ≥ 80% used  (mode.replace, red)
+        // Matches the bash status line's tiers (status-line.sh::get_usage_color,
+        // which uses yellow for the mid tier).
         readonly property QtObject usage: QtObject {
             readonly property color good: theme.color.mode.insert
-            readonly property color warn: theme.color.mode.command
+            readonly property color warn: theme.color.mode.normal
             readonly property color crit: theme.color.mode.replace
         }
 
