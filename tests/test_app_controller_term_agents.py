@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import time
 
 import pytest
 
@@ -1000,3 +1001,98 @@ def test_on_stt_recording_minus_one_empty_pool_clears(controller):
     controller._on_stt_recording({"buf": -1, "transcribing": True})
     assert controller.sttTargetSlot == 0
     assert controller.sttTranscribing is False
+
+
+# ---------------------------------------------------------------------------
+# Failed-start detection: an agent whose process dies within
+# _AGENT_FAST_DEATH_SECONDS of spawn surfaces a toast (agentSpawnFailed)
+# instead of silently flapping the chip. See on_agent_finished.
+# ---------------------------------------------------------------------------
+
+
+def _capture_spawn_failed(controller) -> list[tuple[str, str]]:
+    captured: list[tuple[str, str]] = []
+    controller.agentSpawnFailed.connect(
+        lambda title, detail: captured.append((title, detail))
+    )
+    return captured
+
+
+def test_fast_death_emits_spawn_failed_and_cleans_up(controller, bridge):
+    # A just-spawned agent whose process exits immediately (lifetime ≈ 0, well
+    # under the threshold) is a FAILED START: alert AND clean removal.
+    captured = _capture_spawn_failed(controller)
+    controller.spawn_agent("fresh", True)
+    assert controller.agentOrder == [1]
+
+    controller.on_agent_finished(1)
+
+    assert len(captured) == 1
+    title, detail = captured[0]
+    assert "#1" in title
+    assert "claude" in title
+    assert detail  # a non-empty explanation (memory note or generic)
+    # Still cleaned up exactly like a normal close.
+    assert controller.agentOrder == []
+    assert bridge.removes == [1]
+
+
+def test_slow_exit_does_not_emit_spawn_failed(controller, bridge):
+    # An agent that lived past the threshold before exiting (normal /exit or a
+    # long session) must NOT raise the failed-start alert — only get removed.
+    captured = _capture_spawn_failed(controller)
+    controller.spawn_agent("fresh", True)
+    controller._term_agents[1]["spawn_mono"] = (
+        time.monotonic() - controller._AGENT_FAST_DEATH_SECONDS - 10
+    )
+
+    controller.on_agent_finished(1)
+
+    assert captured == []
+    assert controller.agentOrder == []
+    assert bridge.removes == [1]
+
+
+def test_user_close_then_finished_does_not_false_alert(controller, bridge):
+    # Ctrl+Shift+Q path: close_agent removes the slot, then the Loader teardown
+    # fires onFinished. on_agent_finished must no-op (slot already gone) — no
+    # false failed-start alert and no double remove.
+    captured = _capture_spawn_failed(controller)
+    controller.spawn_agent("fresh", True)
+
+    controller.close_agent(1)  # explicit user close
+    controller.on_agent_finished(1)  # late onFinished from the teardown
+
+    assert captured == []
+    assert bridge.removes == [1]  # exactly one remove
+
+
+def test_fast_death_reports_display_position_not_internal_slot(controller):
+    # The alert numbers agents by dense display position (the chip number),
+    # not the internal slot — so the second agent reads "#2".
+    captured = _capture_spawn_failed(controller)
+    controller.spawn_agent("fresh", True)
+    controller.spawn_agent("fresh", True)
+    assert controller.agentOrder == [1, 2]
+
+    controller.on_agent_finished(2)
+
+    assert len(captured) == 1
+    assert "#2" in captured[0][0]
+
+
+def test_on_agent_finished_unknown_slot_is_a_no_op(controller, bridge):
+    captured = _capture_spawn_failed(controller)
+    controller.on_agent_finished(3)  # never spawned
+    assert captured == []
+    assert bridge.removes == []
+
+
+def test_memory_pressure_note_returns_bool_and_string(controller):
+    # Smoke test the real /proc/meminfo parse: returns a (bool, str) pair and
+    # never raises on this host.
+    from symmetria_ide.app import _memory_pressure_note
+
+    low, note = _memory_pressure_note()
+    assert isinstance(low, bool)
+    assert isinstance(note, str)

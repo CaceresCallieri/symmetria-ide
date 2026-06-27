@@ -2420,6 +2420,33 @@ Window {
         onDismissed: root._restoreCentralFocus()
     }
 
+    // Transient agent spawn-failure toast (non-modal). The controller emits
+    // agentSpawnFailed when a freshly-spawned agent's process dies within
+    // seconds — a FAILED START, most often the heavyweight claude OOM-killed
+    // before it could initialise. Without this the chip just flaps (appear →
+    // vanish in ~250ms), which reads as a mystery; the toast names the cause
+    // (including live memory pressure) so the user can act instead of chasing
+    // a phantom IDE bug. Anchored just above the status bar, centered; clicks
+    // fall through (no focus steal — keyboard-first).
+    Toast {
+        id: spawnFailedToast
+        z: 50 // above every central surface and the modals (z 40)
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: Theme.size.statusBarHeight + Theme.spacing.lg
+
+        Connections {
+            target: controller
+            // GUI-thread signal (emitted from on_agent_finished, itself a
+            // QML-invoked slot) → a direct connection is correct here; no
+            // Qt.QueuedConnection needed (project-standards §4 P2 covers only
+            // cross-thread emits).
+            function onAgentSpawnFailed(title, detail) {
+                spawnFailedToast.show(title, detail);
+            }
+        }
+    }
+
     // Window-close confirmation (Hyprland Super+Q / WM close). Closing the
     // IDE reaps every terminal-agent + the editor session at once, so the
     // close request is vetoed in `onClosing` below and routed here first —

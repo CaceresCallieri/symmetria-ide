@@ -377,6 +377,13 @@ class AppController(QObject):
     # slot N was already the visible agent). Sibling of
     # focusTreeRequested / focusEditorRequested / focusTerminalRequested.
     focusAgentRequested = Signal(int)
+    # One-shot user-facing alert: a freshly-spawned agent's process exited
+    # within `_AGENT_FAST_DEATH_SECONDS` of launch (a FAILED START — most often
+    # the system OOM-killing the heavyweight claude before it initialised).
+    # Carries (title, detail); detail includes live memory context when the
+    # system is under pressure. Main.qml surfaces it as a transient Toast so
+    # the user sees WHY the chip vanished instead of a mystery ~250ms flap.
+    agentSpawnFailed = Signal(str, str)
     # Embedded browser pool (the agentic-browser surface — QtWebEngine
     # WebEngineViews on the "browser" central surface). Mirrors the
     # terminal-agent pool's signal shape: `browserTabsChanged` covers slot
@@ -453,6 +460,18 @@ class AppController(QObject):
     # 5 matches the originally planned `<C-1>..<C-5>` keybind surface;
     # Track-2 may extend it.
     _MAX_INSTANCES: int = 5
+
+    # An agent whose process exits this soon after spawn is treated as a
+    # FAILED START rather than a normal close: a healthy agent the user keeps
+    # lives far longer, so a sub-threshold exit is overwhelmingly a startup
+    # failure (the heavyweight claude OOM-killed before it initialised, a
+    # missing binary, an immediate crash). `on_agent_finished` surfaces these
+    # via a transient toast instead of the silent chip flap (appear→vanish in
+    # ~250ms) that reads as a mystery. A user's own Ctrl+Shift+Q close never
+    # trips this — close_agent removes the slot BEFORE onFinished fires, so the
+    # check no-ops (see on_agent_finished's not-in-pool guard). Tuned above
+    # claude's ~1-3s interactive startup so a real session never false-positives.
+    _AGENT_FAST_DEATH_SECONDS: float = 5.0
 
     # Focus-chain spatial graph for the <C-h/j/k/l> spillover bridge.
     # When nvim spills over from the editor at an edge, this table
@@ -2412,6 +2431,11 @@ class AppController(QObject):
             "cwd": cwd,
             "title": "",
             "spawned_at": int(time.time()),
+            # Monotonic stamp for FAILED-START detection in on_agent_finished.
+            # Separate from spawned_at (wall-clock seconds, used for the bridge
+            # payload + sort): monotonic is immune to clock adjustments and has
+            # the sub-second resolution the ~250ms OOM-death window needs.
+            "spawn_mono": time.monotonic(),
         }
         # Display ordering: new agents always APPEND — the newest agent
         # is the highest chip number, and closing compacts (agentOrder).
@@ -2741,15 +2765,62 @@ class AppController(QObject):
 
     @Slot(int)
     def on_agent_finished(self, slot: int) -> None:
-        """QML callback when a slot's claude process exits on its own
-        (user typed /exit, or the process crashed). Same bookkeeping as
-        an explicit close; the no-op guard makes it idempotent with a
-        close that already removed the slot (closing flips the Loader
-        off, which fires onFinished as the session tears down).
+        """QML callback when a slot's agent process exits on its own
+        (user typed /exit, or the process crashed / was OOM-killed). Same
+        bookkeeping as an explicit close; the no-op guard makes it
+        idempotent with a close that already removed the slot (closing
+        flips the Loader off, which fires onFinished as the session tears
+        down).
+
+        A user's own Ctrl+Shift+Q close can NEVER reach the failed-start
+        branch below: close_agent removes the slot from _term_agents BEFORE
+        the Loader teardown fires onFinished, so the guard returns first.
+        The branch therefore fires only for a process that died while still
+        registered — exactly the startup-failure / crash case.
         """
-        if slot in self._term_agents:
-            log.info("on_agent_finished: slot %d exited", slot)
-            self.close_agent(slot)
+        inst = self._term_agents.get(slot)
+        if inst is None:
+            return
+        lifetime = time.monotonic() - inst.get("spawn_mono", 0.0)
+        log.info("on_agent_finished: slot %d exited (lifetime %.1fs)", slot, lifetime)
+        if lifetime < self._AGENT_FAST_DEATH_SECONDS:
+            self._alert_agent_spawn_failed(slot, inst, lifetime)
+        self.close_agent(slot)
+
+    def _alert_agent_spawn_failed(self, slot: int, inst: dict, lifetime: float) -> None:
+        """Emit the user-facing toast for an agent that died at startup.
+
+        Builds a short title + a detail line that, when the system is under
+        memory pressure (the dominant cause — a fresh ~350MB claude OOM-killed
+        before it could initialise), names the live RAM/swap figures so the
+        user knows to free memory rather than chase a phantom IDE bug. Display
+        position (the dense chip number) is read BEFORE close_agent compacts
+        the order.
+        """
+        display_pos = (
+            self._agent_order.index(slot) + 1 if slot in self._agent_order else slot
+        )
+        harness = inst.get("harness", "claude")
+        title = f"Agent #{display_pos} ({harness}) failed to start"
+        low, mem_note = _memory_pressure_note()
+        if low:
+            detail = (
+                f"{mem_note} The agent was likely killed before it could "
+                "initialise — close some apps or agents and retry."
+            )
+        else:
+            detail = (
+                f"The {harness} process exited {lifetime:.1f}s after launch. "
+                f"Check that `{harness}` runs in this project."
+            )
+        log.warning(
+            "agent slot %d (%s) exited %.1fs after spawn — likely failed start: %s",
+            slot,
+            harness,
+            lifetime,
+            detail,
+        )
+        self.agentSpawnFailed.emit(title, detail)
 
     # Leading decoration claude prefixes to its OSC titles ("✳ Claude
     # Code"). Stripped before display: the chip already renders the
@@ -4963,6 +5034,38 @@ def _reporter_settings_json(reporter_path: str) -> str:
         }
     ]
     return json.dumps({"hooks": hooks})
+
+
+def _memory_pressure_note() -> tuple[bool, str]:
+    """Describe system memory pressure for an agent spawn-failure toast.
+
+    Returns ``(is_low, note)``. ``is_low`` is True only when BOTH reclaimable
+    RAM and swap headroom are scarce — the condition under which a fresh
+    heavyweight agent (claude is a ~350MB Node binary) gets OOM-killed at
+    startup. Either alone is benign: a box with gigabytes free and no swap is
+    fine, and one swapping lightly with ample RAM is fine. Linux-only
+    (``/proc/meminfo``); any read/parse failure returns ``(False, "")`` so the
+    caller falls back to a generic message rather than crashing.
+    """
+    try:
+        fields: dict[str, int] = {}
+        with open("/proc/meminfo", encoding="ascii") as meminfo:
+            for line in meminfo:
+                key, _, rest = line.partition(":")
+                fields[key] = int(rest.strip().split()[0])  # value is in kB
+    except (OSError, ValueError, IndexError):
+        return (False, "")
+    mem_avail_mb = fields.get("MemAvailable", 0) / 1024
+    swap_total = fields.get("SwapTotal", 0)
+    swap_free = fields.get("SwapFree", 0)
+    swap_free_mb = swap_free / 1024
+    swap_pct = (100.0 * swap_free / swap_total) if swap_total else 100.0
+    low = mem_avail_mb < 1024 and swap_free_mb < 512
+    note = (
+        f"System memory is critically low (RAM {mem_avail_mb:.0f} MB free, "
+        f"swap {swap_pct:.0f}% free)."
+    )
+    return (low, note)
 
 
 def _reap_orphan_nvim_sockets() -> None:
