@@ -9,6 +9,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Popups use the FM scale-pop entrance](feedback/popup_animation.md) — bind scale/opacity off visible + Theme.anim tokens; never hand-roll durations
 - [Clay chrome surfaces](feedback/clay_chrome_surfaces.md) — new chrome uses PillSurface/PillCard + Theme.depth, gate depth via `elevated`; no flat Rectangles
 - [MCP enablement is per-project](feedback/mcp_enablement_per_project.md) — costly agent MCP gates per PROJECT (default off, IDE-owned), never per agent
+- [Prefer peer over shell coordination](feedback/prefer_peer_over_shell_coordination.md) — cross-IDE state via shared file/socket, NOT the shell bridge; survives shell swap/outage
 
 ## Project — meta — `project/meta/` (identity, governance, key decisions)
 

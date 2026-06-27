@@ -130,6 +130,14 @@ class AgentEventsServer(QObject):
     # Wired to AppController._on_agent_hook via explicit Qt.QueuedConnection.
     hook_received = Signal(dict)
 
+    # One parsed Claude status-line tap: {"type": "status_line", "agent_id": ...,
+    # "model", "effort", "context_pct", "rate_limits", "observed_at_ns", ...}.
+    # Emitted by the ~/.claude/status-line.sh tap (symmetria-statusline-tap.py) so
+    # the IDE renders model / effort / context% / account usage natively instead
+    # of relying on the in-terminal status line. Fire-and-forget; wired to
+    # AppController._on_status_line via explicit Qt.QueuedConnection.
+    status_line_received = Signal(dict)
+
     # STT recording-state toggle from the shell (inversion P4 — direct channel,
     # replacing the bridge's snapshot `stt` field): {"type": "stt_recording",
     # "buf": int, "transcribing": bool}. Fire-and-forget. Wired to
@@ -278,9 +286,13 @@ class AgentEventsServer(QObject):
     def _handle_connection(self, conn: socket.socket) -> None:
         """Dispatch one connection's JSON messages by `type`.
 
-        Three message kinds share the socket:
+        Message kinds sharing the socket:
           - `hook` (and anything unknown) — a fire-and-forget activity report;
             emitted to the GUI thread, no reply.
+          - `status_line` — a fire-and-forget Claude status-line tap (model /
+            effort / context% / account usage); emitted, no reply. MUST be
+            dispatched explicitly: it falls into the `hook` branch otherwise and
+            the activity machine would choke on a non-hook payload.
           - `stt_recording` — a fire-and-forget recording-state toggle; emitted,
             no reply.
           - `stt_inject` — a REQUEST/REPLY: the handler blocks until the GUI
@@ -316,6 +328,8 @@ class AgentEventsServer(QObject):
                         self._handle_inject(conn, payload)
                     elif msg_type == "stt_recording":
                         emit_gc_safe(self.stt_recording_received, payload)
+                    elif msg_type == "status_line":
+                        emit_gc_safe(self.status_line_received, payload)
                     else:
                         emit_gc_safe(self.hook_received, payload)
         except OSError:

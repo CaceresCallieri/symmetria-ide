@@ -89,11 +89,13 @@ def test_claude_injects_settings_and_sock_env():
         settings_json=settings,
         agent_sock_path="/run/user/1000/symmetria-ide-agents-42.sock",
     )
-    # The sock env rides the env wrapper, right after the agent id.
-    assert argv[:3] == [
+    # The sock env rides the env wrapper, right after the agent id, followed by
+    # the status-line capability advert.
+    assert argv[:4] == [
         "env",
         "SYMMETRIA_AGENT_ID=42_1",
         "SYMMETRIA_IDE_AGENT_SOCK=/run/user/1000/symmetria-ide-agents-42.sock",
+        "SYMMETRIA_IDE_STATUSLINE_TAP=1",
     ]
     # The settings string is passed inline after the --settings flag.
     assert "--settings" in argv
@@ -131,6 +133,19 @@ def test_no_settings_when_json_empty():
     argv = spawn_argv(HARNESSES["claude"], "fresh", True, "42_1")
     assert "--settings" not in argv
     assert not any(a.startswith("SYMMETRIA_IDE_AGENT_SOCK=") for a in argv)
+    # The status-line advert rides the sock — absent when there's no sock.
+    assert "SYMMETRIA_IDE_STATUSLINE_TAP=1" not in argv
+
+
+def test_statusline_tap_advert_rides_the_sock():
+    argv = spawn_argv(
+        HARNESSES["claude"],
+        "fresh",
+        True,
+        "42_1",
+        agent_sock_path="/run/user/1000/symmetria-ide-agents-42.sock",
+    )
+    assert "SYMMETRIA_IDE_STATUSLINE_TAP=1" in argv
 
 
 # ---------------------------------------------------------------------------

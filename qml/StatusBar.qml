@@ -46,6 +46,88 @@ Rectangle {
                                          && !controller.fmVisible
                                          && controller.editorVisible
 
+    // True only when a CLAUDE agent is the visible surface. The status-line
+    // fields (model / effort / context%) and the account-usage segment gate on
+    // this: their data is Claude-specific, so showing it in the editor, FM,
+    // terminal, or an OpenCode agent would be misleading. `agentActivity[slot-1]
+    // .agentType` carries the focused harness (defaults to "claude" pre-activity;
+    // app.py::agentActivity).
+    readonly property bool claudeAgentActive: controller.agentVisible
+        && controller.focusedAgent >= 1
+        && (controller.agentActivity[controller.focusedAgent - 1] || {}).agentType === "claude"
+
+    // Live "now" (ms) for the rate-limit reset countdown — the Timer below ticks
+    // it while the usage segment is visible. Date.now() is fine in QML/JS (the
+    // ban is workflow-script-only).
+    property double nowMs: 0
+
+    // Usage threshold colour — mirrors status-line.sh::get_usage_color.
+    function _usageColor(pct) {
+        if (pct >= 80) return Theme.color.usage.crit
+        if (pct >= 50) return Theme.color.usage.warn
+        return Theme.color.usage.good
+    }
+
+    // Compact countdown to a unix-epoch (seconds) reset; ports
+    // status-line.sh::format_reset_countdown. "" when absent, "now" when elapsed.
+    function _resetCountdown(resetEpochSec) {
+        if (!resetEpochSec || resetEpochSec <= 0)
+            return ""
+        var diff = Math.floor(resetEpochSec - root.nowMs / 1000)
+        if (diff <= 0)
+            return "now"
+        var d = Math.floor(diff / 86400)
+        var h = Math.floor((diff % 86400) / 3600)
+        var m = Math.floor((diff % 3600) / 60)
+        if (d > 0) return d + "d" + h + "h"
+        if (h > 0) return h + "h" + m + "m"
+        return m + "m"
+    }
+
+    Timer {
+        // Minute-precision countdown; 30s keeps the displayed "Xm" honest without
+        // burning cycles. Only runs while the (Claude-gated) usage segment shows.
+        interval: 30000
+        repeat: true
+        running: root.claudeAgentActive && controller.accountUsageValid
+        triggeredOnStart: true   // seed nowMs the moment it starts
+        onTriggered: root.nowMs = Date.now()
+    }
+
+    // One 5h/7d usage chip — "<label> <pct>% ⟲<countdown>". Inline component so
+    // the two chips share one definition (DRY) instead of a copy-paste pair.
+    component UsageChip: Row {
+        id: chip
+        property string label: ""
+        property int pct: 0
+        property int resetEpoch: 0
+        spacing: Theme.spacing.xs
+
+        Text {
+            text: chip.label
+            color: Theme.color.text.dim
+            font.family: Theme.font.family
+            font.pixelSize: Theme.font.size.sm
+            renderType: Text.NativeRendering
+        }
+        Text {
+            text: chip.pct + "%"
+            color: root._usageColor(chip.pct)
+            font.family: Theme.font.family
+            font.pixelSize: Theme.font.size.sm
+            renderType: Text.NativeRendering
+        }
+        Text {
+            readonly property string cd: root._resetCountdown(chip.resetEpoch)
+            visible: cd !== ""
+            text: "⟲" + cd
+            color: Theme.color.text.dim
+            font.family: Theme.font.family
+            font.pixelSize: Theme.font.size.xs
+            renderType: Text.NativeRendering
+        }
+    }
+
     // The surface switcher (terminal / editor / agents) lived here
     // centered until 2026-06-11 — it now sits at the left edge of
     // AgentTopBar.qml, freeing the bottom bar's center for capsules.
@@ -153,6 +235,54 @@ Rectangle {
                     }
                 }
 
+                // --- Focused Claude agent: model · effort · context% ---
+                // From the status-line tap (controller.agentModels/Efforts/
+                // ContextPct, indexed slot-1). QML re-binds when the list, the
+                // focused slot, OR agentActivity (the harness gate) changes.
+                // Empty/unknown values hide their own item, so OpenCode agents
+                // (no tap) show nothing even before claudeAgentActive rules out
+                // the whole cluster.
+                Text {
+                    visible: root.claudeAgentActive
+                             && (controller.agentModels[controller.focusedAgent - 1] || "") !== ""
+                    text: controller.agentModels[controller.focusedAgent - 1] || ""
+                    color: Theme.color.text.normal
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.sm
+                    Layout.alignment: Qt.AlignLeft | Qt.AlignVCenter
+                    renderType: Text.NativeRendering
+                }
+                Text {
+                    visible: root.claudeAgentActive
+                             && (controller.agentEfforts[controller.focusedAgent - 1] || "") !== ""
+                    text: ":" + (controller.agentEfforts[controller.focusedAgent - 1] || "")
+                    color: Theme.color.text.dim
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.sm
+                    Layout.alignment: Qt.AlignLeft | Qt.AlignVCenter
+                    renderType: Text.NativeRendering
+                }
+                Row {
+                    visible: root.claudeAgentActive
+                             && controller.agentContextPct[controller.focusedAgent - 1] >= 0
+                    spacing: Theme.spacing.xs
+                    Layout.alignment: Qt.AlignLeft | Qt.AlignVCenter
+                    Text {
+                        text: "ctx"
+                        color: Theme.color.text.dim
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
+                        renderType: Text.NativeRendering
+                    }
+                    Text {
+                        text: (controller.agentContextPct[controller.focusedAgent - 1]) + "%"
+                        color: root._usageColor(controller.agentContextPct[controller.focusedAgent - 1])
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
+                        renderType: Text.NativeRendering
+                    }
+                }
+
                 // File path (relative to cwd where possible).
                 // Gated on `editorActive` so it disappears in terminal /
                 // agent / FM mode — when nvim has no real buffer open
@@ -193,6 +323,29 @@ Rectangle {
                 Item {
                     Layout.fillWidth: !root.editorActive
                     Layout.fillHeight: true
+                }
+
+                // --- Account-global usage (5h / 7d) ---
+                // Universal data, Claude-gated visibility: the freshest rate-limit
+                // observation across all agents AND all IDE instances
+                // (account_usage_store, last-write-wins). Right-aligned, shown ONLY
+                // while a Claude agent is focused. The countdown ticks locally from
+                // the reset epoch (Timer above), so even a snapshot observed in
+                // another IDE instance shows an accurate, live timer.
+                Row {
+                    visible: root.claudeAgentActive && controller.accountUsageValid
+                    spacing: Theme.spacing.md
+                    Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                    UsageChip {
+                        label: "5h"
+                        pct: controller.accountUsage5hPct
+                        resetEpoch: controller.accountUsage5hReset
+                    }
+                    UsageChip {
+                        label: "7d"
+                        pct: controller.accountUsage7dPct
+                        resetEpoch: controller.accountUsage7dReset
+                    }
                 }
 
                 // Cursor position — pinned to the right edge of

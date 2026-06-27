@@ -104,6 +104,7 @@ def test_spawn_fresh_dangerous_default_argv(controller):
         "env",
         f"SYMMETRIA_AGENT_ID={os.getpid()}_1",
         f"SYMMETRIA_IDE_AGENT_SOCK={controller._agent_events.socket_path}",
+        "SYMMETRIA_IDE_STATUSLINE_TAP=1",
         "claude",
         "--dangerously-skip-permissions",
         "--settings",
@@ -154,6 +155,7 @@ def test_spawn_opencode_fresh_dangerous_argv(controller):
         "env",
         f"SYMMETRIA_AGENT_ID={os.getpid()}_1",
         f"SYMMETRIA_IDE_AGENT_SOCK={controller._agent_events.socket_path}",
+        "SYMMETRIA_IDE_STATUSLINE_TAP=1",
         'OPENCODE_PERMISSION={"*":{"*":"allow"}}',
         "opencode",
     ]
@@ -1177,3 +1179,170 @@ def test_memory_pressure_note_skips_malformed_lines(monkeypatch):
     low, note = _memory_pressure_note()
     assert low is True  # parsed despite the bad lines
     assert "195 MB" in note  # 200000 kB / 1024, rounded
+
+
+# ---------------------------------------------------------------------------
+# Status-line tap → _on_status_line (per-agent fields + account usage)
+# ---------------------------------------------------------------------------
+
+
+class FakeUsageStore:
+    """Captures publishes; hermetic (no real shared file written/watched)."""
+
+    def __init__(self) -> None:
+        self.published: list[dict] = []
+        self._current: dict | None = None
+
+    def publish(self, usage: dict) -> None:
+        self.published.append(dict(usage))
+        self._current = dict(usage)
+
+    def read_current(self) -> dict | None:
+        return self._current
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+
+@pytest.fixture
+def usage_controller(controller):
+    # Swap the real (default-path) store for a hermetic fake so nothing touches
+    # /run/user/$UID/symmetria-ide-account-usage.json during tests.
+    controller._account_usage_store = FakeUsageStore()
+    return controller
+
+
+def _status_line(slot: int, **fields) -> dict:
+    return {"type": "status_line", "agent_id": f"{os.getpid()}_{slot}", **fields}
+
+
+def test_status_line_stores_per_agent_fields(usage_controller):
+    c = usage_controller
+    c.spawn_agent("fresh", True)
+    c._on_status_line(_status_line(1, model="Opus 4.8", effort="high", context_pct=42))
+    assert c.agentModels[0] == "Opus 4.8"
+    assert c.agentEfforts[0] == "high"
+    assert c.agentContextPct[0] == 42
+
+
+def test_status_line_context_default_is_minus_one(usage_controller):
+    c = usage_controller
+    c.spawn_agent("fresh", True)
+    # No context_pct reported → property default -1 (so QML hides "unknown").
+    assert c.agentContextPct[0] == -1
+
+
+def test_status_line_ignores_foreign_pid(usage_controller):
+    c = usage_controller
+    c.spawn_agent("fresh", True)
+    c._on_status_line({"type": "status_line", "agent_id": "99999_1", "model": "X"})
+    assert c.agentModels[0] == ""
+
+
+def test_status_line_ignores_unknown_slot(usage_controller):
+    c = usage_controller
+    c.spawn_agent("fresh", True)
+    c._on_status_line(_status_line(4, model="X"))
+    assert all(m == "" for m in c.agentModels)
+
+
+def test_status_line_emits_status_changed_only_on_change(usage_controller):
+    c = usage_controller
+    c.spawn_agent("fresh", True)
+    emissions: list[None] = []
+    c.agentStatusChanged.connect(lambda: emissions.append(None))
+    payload = _status_line(1, model="Opus 4.8", effort="high", context_pct=42)
+    c._on_status_line(payload)
+    c._on_status_line(dict(payload))  # identical re-send → no emit
+    assert len(emissions) == 1
+
+
+def test_account_usage_freshest_wins(usage_controller):
+    c = usage_controller
+    c.spawn_agent("fresh", True)
+    rl = {
+        "five_hour": {"pct": 20, "resets_at": 100},
+        "seven_day": {"pct": 50, "resets_at": 200},
+    }
+    c._on_status_line(_status_line(1, rate_limits=rl, observed_at_ns=1000))
+    assert c.accountUsageValid is True
+    assert c.accountUsage5hPct == 20
+    assert c.accountUsage7dPct == 50
+    assert c.accountUsage5hReset == 100
+    # An OLDER observation must NOT overwrite the freshest.
+    older = {
+        "five_hour": {"pct": 99, "resets_at": 1},
+        "seven_day": {"pct": 99, "resets_at": 1},
+    }
+    c._on_status_line(_status_line(1, rate_limits=older, observed_at_ns=500))
+    assert c.accountUsage5hPct == 20  # unchanged
+    # A NEWER one wins.
+    newer = {
+        "five_hour": {"pct": 33, "resets_at": 9},
+        "seven_day": {"pct": 44, "resets_at": 9},
+    }
+    c._on_status_line(_status_line(1, rate_limits=newer, observed_at_ns=2000))
+    assert c.accountUsage5hPct == 33
+    assert c.accountUsage7dPct == 44
+
+
+def test_account_usage_coerces_float_percentage(usage_controller):
+    c = usage_controller
+    c.spawn_agent("fresh", True)
+    rl = {"five_hour": {"pct": 23.5, "resets_at": 100}}
+    c._on_status_line(_status_line(1, rate_limits=rl, observed_at_ns=1000))
+    assert c.accountUsage5hPct == 23  # truncated, like the bash status line
+
+
+def test_account_usage_publishes_to_peer_when_fresher(usage_controller):
+    c = usage_controller
+    c.spawn_agent("fresh", True)
+    rl = {"five_hour": {"pct": 20, "resets_at": 100}}
+    c._on_status_line(_status_line(1, rate_limits=rl, observed_at_ns=1000))
+    assert len(c._account_usage_store.published) == 1
+    assert c._account_usage_store.published[0]["observed_at_ns"] == 1000
+    # An older observation neither adopts nor re-publishes.
+    c._on_status_line(_status_line(1, rate_limits=rl, observed_at_ns=500))
+    assert len(c._account_usage_store.published) == 1
+
+
+def test_account_usage_invalid_before_any_observation(controller):
+    # Uses the real store (never started/written) — purely reads the in-memory
+    # default, so no file I/O.
+    assert controller.accountUsageValid is False
+
+
+def test_on_shared_usage_adopts_fresher_peer_value(usage_controller):
+    c = usage_controller
+    # A peer IDE wrote a value fresher than anything local.
+    c._account_usage_store._current = {
+        "five_pct": 77,
+        "five_reset": 5,
+        "seven_pct": 88,
+        "seven_reset": 6,
+        "observed_at_ns": 9999,
+    }
+    c._on_shared_usage_changed()
+    assert c.accountUsage5hPct == 77
+    assert c.accountUsage7dPct == 88
+    assert c.accountUsageValid is True
+
+
+def test_on_shared_usage_ignores_staler_peer_value(usage_controller):
+    c = usage_controller
+    c.spawn_agent("fresh", True)
+    rl = {"five_hour": {"pct": 20, "resets_at": 100}}
+    c._on_status_line(_status_line(1, rate_limits=rl, observed_at_ns=5000))
+    # Peer file is staler than what we've already observed locally → no adopt.
+    c._account_usage_store._current = {
+        "five_pct": 99,
+        "five_reset": 1,
+        "seven_pct": 99,
+        "seven_reset": 1,
+        "observed_at_ns": 1000,
+    }
+    c._on_shared_usage_changed()
+    assert c.accountUsage5hPct == 20  # local fresher value retained

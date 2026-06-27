@@ -125,6 +125,14 @@ def spawn_argv(
     # wires claude's hook to this socket.
     if agent_sock_path:
         argv.append(f"SYMMETRIA_IDE_AGENT_SOCK={agent_sock_path}")
+        # Capability advert: this IDE renders the Claude status-line tap natively
+        # (model/effort/context%/usage). The global ~/.claude/status-line.sh gates
+        # its tap on this var, so an IDE on OLDER code (e.g. a not-yet-promoted
+        # stable build that lacks the `status_line` handler) never gets tapped —
+        # it would otherwise log every tap as an "unmapped" activity event. Rides
+        # with the sock (the tap needs the socket to send to). Inert for opencode
+        # (no opencode status-line integration yet).
+        argv.append("SYMMETRIA_IDE_STATUSLINE_TAP=1")
     if dangerous:
         argv += [f"{key}={value}" for key, value in harness.dangerous_env]
     argv.append(harness.executable)

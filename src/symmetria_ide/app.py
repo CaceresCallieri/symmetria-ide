@@ -52,6 +52,7 @@ from PySide6.QtQml import QQmlApplicationEngine, QmlElement
 from PySide6.QtWebEngineQuick import QtWebEngineQuick
 
 from . import agent_harness
+from .account_usage_store import AccountUsageStore
 from .agent_activity import AgentActivityMachine
 from .agent_bridge import AgentBridgeClient, emit_gc_safe
 from .agent_events import AgentEventsServer
@@ -365,6 +366,14 @@ class AppController(QObject):
     termAgentsChanged = Signal()
     focusedAgentChanged = Signal()
     agentActivityChanged = Signal()
+    # Per-agent status-line fields (model / effort / context%) captured from the
+    # Claude status-line tap. Separate from termAgentsChanged/agentActivityChanged
+    # so the StatusBar's model/effort/ctx bindings don't re-evaluate on slot
+    # occupancy or sparkle churn (and vice-versa).
+    agentStatusChanged = Signal()
+    # Account-global usage (5h / 7d rate limits) — the freshest observation across
+    # this IDE's agents AND (via the shared peer file) every other IDE instance.
+    accountUsageChanged = Signal()
     # STT recording/transcribing indicator for the AgentTopBar chips. The
     # shell pushes its STT target into the bridge hub, the hub carries it
     # in snapshots as the top-level "stt" field, and _on_bridge_snapshot
@@ -610,6 +619,19 @@ class AppController(QObject):
         # Ctrl+1..5 chords. Per-slot record: {spawn_type, dangerous,
         # harness, session_id, cwd, title, spawned_at}.
         self._term_agents: dict[int, dict] = {}
+        # Account-global rate-limit usage (5h / 7d) — the freshest observation
+        # seen, merged across THIS IDE's agents (status-line taps) AND every other
+        # IDE instance (the shared peer file, account_usage_store). `observed_at_ns`
+        # is the last-write-wins merge key; 0 = nothing observed yet → the
+        # StatusBar usage segment stays hidden (accountUsageValid False). Per-agent
+        # status-line fields (model/effort/context_pct) ride inside _term_agents.
+        self._account_usage: dict = {
+            "five_pct": 0,
+            "five_reset": 0,
+            "seven_pct": 0,
+            "seven_reset": 0,
+            "observed_at_ns": 0,
+        }
         # slot -> {state, tool, agentType} — drives the AgentTopBar sparkles.
         # Since the agent-ownership inversion (Phase 1), the AUTHORITATIVE source
         # is local capture: the IDE reporter hook → `_agent_events` →
@@ -708,6 +730,18 @@ class AppController(QObject):
         self._agent_events.hook_received.connect(
             self._on_agent_hook, Qt.ConnectionType.QueuedConnection
         )
+        # queued: status_line_received also originates on an agent-events handler
+        # thread; _on_status_line mutates GUI-thread pool + account-usage state
+        # (§4 P2).
+        self._agent_events.status_line_received.connect(
+            self._on_status_line, Qt.ConnectionType.QueuedConnection
+        )
+        # Cross-IDE account-usage peer channel (shared tmpfs file, NOT the shell
+        # bridge — see account_usage_store / the prefer-peer-over-shell memory).
+        # Its `changed` fires on the GUI thread (QFileSystemWatcher), so a plain
+        # connection is correct.
+        self._account_usage_store = AccountUsageStore(self)
+        self._account_usage_store.changed.connect(self._on_shared_usage_changed)
         # queued: the STT signals also originate on agent-events handler threads
         # (inversion P4 — direct STT channel). _on_stt_inject emits
         # agentInjectRequested → QML paste → agent_inject_done → resolve_inject,
@@ -2302,6 +2336,54 @@ class AppController(QObject):
             for slot in range(1, self._MAX_INSTANCES + 1)
         ]
 
+    @Property("QVariantList", notify=agentStatusChanged)
+    def agentModels(self) -> list:
+        """Per-slot model display name (status-line tap), indexed `slot - 1`."""
+        return [
+            self._term_agents.get(slot, {}).get("model", "")
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
+    @Property("QVariantList", notify=agentStatusChanged)
+    def agentEfforts(self) -> list:
+        """Per-slot reasoning-effort level (status-line tap), indexed `slot - 1`."""
+        return [
+            self._term_agents.get(slot, {}).get("effort", "")
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
+    @Property("QVariantList", notify=agentStatusChanged)
+    def agentContextPct(self) -> list:
+        """Per-slot context-window usage % (status-line tap), indexed `slot - 1`;
+        -1 = not yet observed (so the StatusBar can distinguish "0%" from "unknown")."""
+        return [
+            self._term_agents.get(slot, {}).get("context_pct", -1)
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
+    # -- Account-global usage (5h / 7d) — see _account_usage / accountUsageChanged.
+    @Property(bool, notify=accountUsageChanged)
+    def accountUsageValid(self) -> bool:
+        """True once any agent has reported rate limits (observed_at_ns > 0)."""
+        return self._account_usage["observed_at_ns"] > 0
+
+    @Property(int, notify=accountUsageChanged)
+    def accountUsage5hPct(self) -> int:
+        return int(self._account_usage["five_pct"])
+
+    @Property(int, notify=accountUsageChanged)
+    def accountUsage5hReset(self) -> int:
+        """5h reset as a unix epoch (seconds); StatusBar ticks the countdown locally."""
+        return int(self._account_usage["five_reset"])
+
+    @Property(int, notify=accountUsageChanged)
+    def accountUsage7dPct(self) -> int:
+        return int(self._account_usage["seven_pct"])
+
+    @Property(int, notify=accountUsageChanged)
+    def accountUsage7dReset(self) -> int:
+        return int(self._account_usage["seven_reset"])
+
     @Property(int, notify=focusedAgentChanged)
     def focusedAgent(self) -> int:
         """1-based focused slot; 0 = none (empty pool)."""
@@ -3285,6 +3367,121 @@ class AppController(QObject):
         self._activity_machine.forget(f"{os.getpid()}_{slot}")
         self._locally_captured_agents.discard(slot)
 
+    @staticmethod
+    def _coerce_int(value, default: int = 0) -> int:
+        """Tolerant int coercion: `used_percentage` may be a float (23.5) and
+        epochs/values may arrive as strings; non-numeric → `default`."""
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    @Slot(dict)
+    def _on_status_line(self, payload: dict) -> None:
+        """Apply one Claude status-line tap to its pool slot + account usage.
+
+        The tap (`~/.claude/status-line.sh` → `symmetria-statusline-tap.py`)
+        reports model / effort / context% per agent plus the account-global rate
+        limits. Per-agent fields update the slot record (the StatusBar reads them
+        for the focused Claude agent); the rate limits feed the freshest-wins
+        account-usage merge that's shared cross-IDE via `account_usage_store`.
+        Slot routing mirrors `_on_agent_hook` (`<ide_pid>_<slot>` id).
+        """
+        agent_id = str(payload.get("agent_id", ""))
+        prefix = f"{os.getpid()}_"
+        if not agent_id.startswith(prefix):
+            return  # not one of our agents (defensive — only ours tap this socket)
+        try:
+            slot = int(agent_id[len(prefix) :])
+        except ValueError:
+            return
+        if slot not in self._term_agents:
+            return  # tap for a slot we've already closed
+
+        # Per-agent fields → slot record. Emit only on a real change: the tap is
+        # change-gated bash-side, but model/effort never move mid-session and the
+        # bindings shouldn't churn on an identical re-send.
+        rec = self._term_agents[slot]
+        status_changed = False
+        if "model" in payload and rec.get("model", "") != payload["model"]:
+            rec["model"] = str(payload["model"])
+            status_changed = True
+        if "effort" in payload and rec.get("effort", "") != payload["effort"]:
+            rec["effort"] = str(payload["effort"])
+            status_changed = True
+        if "context_pct" in payload:
+            ctx = self._coerce_int(payload["context_pct"], -1)
+            if rec.get("context_pct", -1) != ctx:
+                rec["context_pct"] = ctx
+                status_changed = True
+        if status_changed:
+            self.agentStatusChanged.emit()
+
+        # Account-global usage → freshest-wins merge, then publish outward so peer
+        # IDE instances converge (the shared-file half of Stage 2).
+        self._ingest_account_usage(
+            payload.get("rate_limits"), payload.get("observed_at_ns")
+        )
+
+    def _ingest_account_usage(self, rate_limits, observed_at_ns) -> None:
+        """Flatten a tap's nested `rate_limits` into a candidate and adopt-if-newer.
+
+        Absent/malformed rate_limits (API-key sessions carry none) → no-op. When
+        the candidate advances our freshest, publish it to the shared peer file so
+        other IDE instances adopt it too.
+        """
+        if not isinstance(rate_limits, dict):
+            return
+        ts = self._coerce_int(observed_at_ns, 0)
+        if ts <= 0:
+            return
+        five = rate_limits.get("five_hour") or {}
+        seven = rate_limits.get("seven_day") or {}
+        candidate = {
+            "five_pct": self._coerce_int(five.get("pct")),
+            "five_reset": self._coerce_int(five.get("resets_at")),
+            "seven_pct": self._coerce_int(seven.get("pct")),
+            "seven_reset": self._coerce_int(seven.get("resets_at")),
+            "observed_at_ns": ts,
+        }
+        if self._adopt_account_usage(candidate):
+            # We advanced the global freshest → share it with peer IDEs.
+            self._account_usage_store.publish(candidate)
+
+    def _adopt_account_usage(self, candidate: dict) -> bool:
+        """Adopt `candidate` iff its `observed_at_ns` beats the current freshest.
+
+        The single merge point for BOTH sources — local taps (`_ingest_account_usage`)
+        and the shared peer file (`_on_shared_usage_changed`) — so `_account_usage`
+        always holds the global `max(observed_at_ns)`. Returns True (and emits
+        `accountUsageChanged`) when it adopted; an equal/older ts is a no-op, which
+        is what keeps our own peer-file write from looping the watcher.
+        """
+        ts = self._coerce_int(candidate.get("observed_at_ns"), 0)
+        if ts <= self._account_usage["observed_at_ns"]:
+            return False
+        self._account_usage = {
+            "five_pct": self._coerce_int(candidate.get("five_pct")),
+            "five_reset": self._coerce_int(candidate.get("five_reset")),
+            "seven_pct": self._coerce_int(candidate.get("seven_pct")),
+            "seven_reset": self._coerce_int(candidate.get("seven_reset")),
+            "observed_at_ns": ts,
+        }
+        self.accountUsageChanged.emit()
+        return True
+
+    @Slot()
+    def _on_shared_usage_changed(self) -> None:
+        """A peer IDE wrote the shared usage file — adopt it if it's fresher.
+
+        Pure read-and-maybe-adopt: we never re-publish here (only LOCAL taps
+        publish), so there's no write loop. Our own writes come back as an equal
+        `observed_at_ns` → `_adopt_account_usage` no-ops.
+        """
+        current = self._account_usage_store.read_current()
+        if current is not None:
+            self._adopt_account_usage(current)
+
     @Slot(dict)
     def _on_agent_hook(self, payload: dict) -> None:
         """Apply one local reporter hook event to its pool slot (Phase 1).
@@ -4052,6 +4249,11 @@ class AppController(QObject):
         # simply absent). Must be listening before any agent spawns so the very
         # first SessionStart is captured.
         self._agent_events.start()
+        # Cross-IDE account-usage peer file: begin watching, then adopt whatever a
+        # peer last wrote so a freshly-launched IDE shows usage IMMEDIATELY — before
+        # any of its own agents transact (the persistence win of a file channel).
+        self._account_usage_store.start()
+        self._on_shared_usage_changed()
         # NB: the browser MCP server is NO LONGER started unconditionally here.
         # Its FastMCP+uvicorn import is ~1s and used to block this startup path
         # (even though the browser-agent capability is per-project, default OFF).
@@ -4486,6 +4688,7 @@ class AppController(QObject):
         # on engine teardown, so any in-flight reporter just fails its fast
         # connect — nothing to coordinate here.
         self._agent_events.stop()
+        self._account_usage_store.stop()
         # Signal the browser MCP server to exit and drop its config file
         # (daemon thread; reaped with the process either way).
         self._browser_mcp_server.stop()
