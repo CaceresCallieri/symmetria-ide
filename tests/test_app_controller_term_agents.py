@@ -1309,6 +1309,33 @@ def test_account_usage_publishes_to_peer_when_fresher(usage_controller):
     assert len(c._account_usage_store.published) == 1
 
 
+def test_stop_hook_records_done_at(controller):
+    # The agent finishing a turn (Stop hook) stamps agentDoneAt for the status
+    # bar's "done HH:MM" — mirroring the bash stop-timestamp.sh signal.
+    controller.spawn_agent("fresh", True)
+    assert controller.agentDoneAt[0] == 0
+    controller._on_agent_hook(
+        {
+            "agent_id": f"{os.getpid()}_1",
+            "hook_event_name": "Stop",
+            "session_id": "s1",
+        }
+    )
+    assert controller.agentDoneAt[0] > 0
+
+
+def test_non_stop_hook_leaves_done_at_unset(controller):
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        {
+            "agent_id": f"{os.getpid()}_1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+        }
+    )
+    assert controller.agentDoneAt[0] == 0
+
+
 def test_account_usage_invalid_before_any_observation(controller):
     # Uses the real store (never started/written) — purely reads the in-memory
     # default, so no file I/O.

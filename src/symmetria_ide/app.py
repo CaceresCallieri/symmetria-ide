@@ -2361,6 +2361,16 @@ class AppController(QObject):
             for slot in range(1, self._MAX_INSTANCES + 1)
         ]
 
+    @Property("QVariantList", notify=agentStatusChanged)
+    def agentDoneAt(self) -> list:
+        """Per-slot unix epoch (seconds) the agent last finished a turn (the
+        `Stop` hook), indexed `slot - 1`; 0 = not finished yet. The StatusBar
+        renders it as 'done HH:MM'."""
+        return [
+            self._term_agents.get(slot, {}).get("done_at", 0)
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
     # -- Account-global usage (5h / 7d) — see _account_usage / accountUsageChanged.
     @Property(bool, notify=accountUsageChanged)
     def accountUsageValid(self) -> bool:
@@ -3536,6 +3546,14 @@ class AppController(QObject):
                 slot,
                 agent_id,
             )
+        # Record when the agent last FINISHED a turn (the "Stop" hook — the same
+        # signal the bash status line's stop-timestamp.sh captures), so the status
+        # bar can show "done HH:MM". Stored as an epoch (QML formats it); it's
+        # per-agent status shown alongside model/effort, so it rides
+        # agentStatusChanged, not the activity/sparkle signal.
+        if payload.get("hook_event_name") == "Stop":
+            self._term_agents[slot]["done_at"] = time.time()
+            self.agentStatusChanged.emit()
         outcome = self._activity_machine.apply(payload)
         # session_id backfill — RETAIN, never clear (same sticky semantics as the
         # bridge path): the resumable id captured while active must survive idle

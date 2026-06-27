@@ -366,6 +366,29 @@ Rectangle {
                     }
                 }
 
+                // last-finished time ("done HH:MM") — the agent's last Stop hook,
+                // mirroring the bash status line's stop-timestamp.sh. agentDoneAt
+                // is an epoch; Qt.formatTime renders 24h HH:mm. Hidden until the
+                // agent has finished at least one turn.
+                Row {
+                    spacing: Theme.spacing.xs
+                    visible: (controller.agentDoneAt[controller.focusedAgent - 1] || 0) > 0
+                    Text {
+                        text: "done"
+                        color: Theme.color.text.dim
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
+                        renderType: Text.NativeRendering
+                    }
+                    Text {
+                        text: Qt.formatTime(new Date((controller.agentDoneAt[controller.focusedAgent - 1] || 0) * 1000), "HH:mm")
+                        color: Theme.color.text.normal
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
+                        renderType: Text.NativeRendering
+                    }
+                }
+
                 // account usage (5h / 7d) — universal data, shown only when valid
                 Row {
                     spacing: Theme.spacing.md
