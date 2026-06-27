@@ -121,6 +121,27 @@ class GitStats:
     untracked_count: int = 0
 
 
+@dataclass(slots=True, frozen=True)
+class GitBranchSync:
+    """Ahead/behind commit counts of the current branch vs. its upstream.
+
+    Populated from the ``# branch.ab +<ahead> -<behind>`` header that
+    ``git status --porcelain=v2 --branch`` emits ONLY when the current branch
+    has an upstream. Both default to 0, which is also the value when there is
+    no upstream (a local-only branch), a detached HEAD, or an unborn branch —
+    git omits the ``branch.ab`` line in all those states, so "no upstream" and
+    "fully in sync" both render as no indicator. ``ahead`` is the count of
+    local commits not yet on the remote (the "unpushed" number the status bar
+    shows); ``behind`` is remote commits not yet pulled — only meaningful
+    after a ``git fetch``, since git can't know about remote commits it hasn't
+    seen. Frozen so the cross-thread publish moves one immutable value, same
+    discipline as GitStats / GitStatus.
+    """
+
+    ahead: int = 0
+    behind: int = 0
+
+
 # Human-readable tooltips, indexed by (char, state).
 # Unlisted combinations fall back to a generic "<state> (<char>)" at parse time
 # so we never crash on a status code we haven't catalogued yet.
@@ -266,6 +287,52 @@ def parse_porcelain_v2(blob: bytes) -> dict[str, GitStatus]:
         # rather than crashing — favors forward compatibility over strictness.
 
     return result
+
+
+def parse_branch_header(blob: bytes) -> tuple[GitBranchSync, str]:
+    """Extract ``(ahead/behind sync, upstream ref)`` from porcelain v2 headers.
+
+    Reads the leading ``# branch.*`` header block of
+    ``git status --porcelain=v2 -z --branch`` output:
+
+      ``# branch.upstream origin/main``   → upstream = ``"origin/main"``
+      ``# branch.ab +4 -1``               → ``GitBranchSync(ahead=4, behind=1)``
+
+    With ``-z`` each header is its own NUL-terminated record (same framing the
+    file records use), so we split on NUL exactly like ``parse_porcelain_v2``.
+    Both lines are ABSENT when the branch has no upstream — the returned sync
+    stays ``(0, 0)`` and upstream ``""``. The ``branch.ab`` count fields are
+    signed (``+ahead`` / ``-behind``); ``int()`` parses the signs directly and
+    we negate ``behind`` back to a positive count.
+
+    Scanning stops at the first non-header record so we never walk the
+    (potentially large) file list — the headers always come first.
+    """
+    sync = GitBranchSync()
+    upstream = ""
+    if not blob:
+        return (sync, upstream)
+    for chunk in blob.split(b"\x00"):
+        if not chunk:
+            continue
+        if not chunk.startswith(b"#"):
+            break  # headers lead the output; first file record ends the block
+        rec = chunk.decode("utf-8", errors="replace")
+        if rec.startswith("# branch.upstream "):
+            upstream = rec[len("# branch.upstream ") :].strip()
+        elif rec.startswith("# branch.ab "):
+            # rec == "# branch.ab +<ahead> -<behind>" → 4 whitespace tokens.
+            parts = rec.split()
+            if len(parts) >= 4:
+                try:
+                    ahead = int(parts[2])
+                    behind = -int(parts[3])
+                except ValueError:
+                    ahead, behind = 0, 0
+                # max(0, ...) guards against a malformed sign producing a
+                # nonsensical negative count.
+                sync = GitBranchSync(ahead=max(0, ahead), behind=max(0, behind))
+    return (sync, upstream)
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +621,12 @@ class GitController(QObject):
 
     statusChanged = Signal()
     statsChanged = Signal()
+    # Fired (on the GUI thread, from `_publish`) whenever the ahead/behind
+    # counts vs. the branch's upstream change. SEPARATE from `statusChanged`
+    # because the two move independently: a `git push` zeroes `ahead` without
+    # touching the working-tree file map, so a binding on `statusChanged`
+    # alone would leave the status bar's `↑N` stale after a push.
+    branchSyncChanged = Signal()
     repoRootChanged = Signal()
     # Fired (on the GUI thread) once per debounce window whenever the
     # working tree or `.git` state settles after a change — i.e. the same
@@ -589,6 +662,14 @@ class GitController(QObject):
         # Worker writes via `_publish`; GUI thread reads via the `stats`
         # property (which copies under the lock into a QVariantMap).
         self._stats: GitStats = GitStats()
+        # Ahead/behind vs. upstream (porcelain `# branch.ab`) + the raw
+        # upstream ref string (`# branch.upstream`, e.g. "origin/main").
+        # Worker writes both in `_publish`; the GUI thread reads `_branch_sync`
+        # via the `aheadCount`/`behindCount` properties and `_upstream_ref` in
+        # `_install_watcher` (to derive the remote ref file to watch). Both
+        # guarded by `_lock` like `_stats` / `_resolved_root`.
+        self._branch_sync: GitBranchSync = GitBranchSync()
+        self._upstream_ref: str = ""
         # Absolute-path membership map of every gitignored file + directory
         # in the working tree. Computed via a single
         # ``git ls-files --others --ignored --exclude-standard --directory``
@@ -715,6 +796,25 @@ class GitController(QObject):
             "untrackedCount": s.untracked_count,
         }
 
+    @Property(int, notify=branchSyncChanged)
+    def aheadCount(self) -> int:
+        """Local commits not yet pushed to the branch's upstream.
+
+        0 when in sync, when there is no upstream, or on a detached/unborn
+        HEAD — the status bar shows the `↑N` indicator only when this is > 0.
+        """
+        with self._lock:
+            return self._branch_sync.ahead
+
+    @Property(int, notify=branchSyncChanged)
+    def behindCount(self) -> int:
+        """Upstream commits not yet merged locally (meaningful post-`fetch`).
+
+        Companion to `aheadCount`; the status bar renders `↓N` only when > 0.
+        """
+        with self._lock:
+            return self._branch_sync.behind
+
     @Property("QVariant", notify=statusChanged)
     def ignoredPathSet(self) -> dict | None:
         """Absolute-path membership set of gitignored entries in the worktree.
@@ -833,8 +933,11 @@ class GitController(QObject):
             self._stats = GitStats()
             self._resolved_root = ""
             self._ignored_set = {}
+            self._branch_sync = GitBranchSync()
+            self._upstream_ref = ""
         self.statusChanged.emit()
         self.statsChanged.emit()
+        self.branchSyncChanged.emit()
         self._wake_worker()
 
     @Slot(str, result="QVariantMap")
@@ -971,7 +1074,7 @@ class GitController(QObject):
         with self._lock:
             repo_root = self._repo_root
         if not repo_root:
-            self._publish({}, "", GitStats(), {})
+            self._publish({}, "", GitStats(), {}, GitBranchSync(), "")
             return
 
         resolved = self._resolve_repo_root(repo_root)
@@ -982,14 +1085,16 @@ class GitController(QObject):
             # STOPS being one mid-session (`.git` deleted) — without the
             # emit, the working-tree observer would keep firing into a
             # permanently-empty scan loop.
-            self._publish({}, "", GitStats(), {})
+            self._publish({}, "", GitStats(), {}, GitBranchSync(), "")
             self._watcherRefreshRequested.emit("")
             return
 
-        new_map = self._run_status(resolved)
+        new_map, branch_sync, upstream = self._run_status(resolved)
         if new_map is None:
             # Scan failed; preserve previous map rather than blink to empty
-            # on a transient error (timeout, fsmonitor hiccup).
+            # on a transient error (timeout, fsmonitor hiccup). The branch
+            # sync is intentionally NOT published here — a transient git
+            # failure shouldn't zero a valid `↑N`; the previous value holds.
             return
 
         staged_ns = self._run_numstat_staged(resolved) or {}
@@ -1010,7 +1115,7 @@ class GitController(QObject):
         # Best-effort: on subprocess failure we publish an empty set
         # (the FM falls back to its per-dir check-ignore path).
         new_ignored = self._run_ignored_set(resolved)
-        self._publish(new_map, resolved, new_stats, new_ignored)
+        self._publish(new_map, resolved, new_stats, new_ignored, branch_sync, upstream)
 
         # Hand the watcher rebuild back to the GUI thread — QFileSystemWatcher
         # is not thread-safe and lives on `self`'s thread.
@@ -1036,11 +1141,18 @@ class GitController(QObject):
             return ""
         return proc.stdout.decode("utf-8", errors="replace").strip()
 
-    def _run_status(self, cwd: str) -> dict[str, GitStatus] | None:
-        """Run ``git status --porcelain=v2 -z`` and parse the output.
+    def _run_status(
+        self, cwd: str
+    ) -> tuple[dict[str, GitStatus] | None, GitBranchSync, str]:
+        """Run ``git status --porcelain=v2 -z --branch`` and parse the output.
 
-        Returns ``None`` on subprocess failure so the caller can preserve
-        the previous map. Returns an empty dict on a clean tree.
+        Returns ``(file_map, branch_sync, upstream_ref)``. ``file_map`` is
+        ``None`` on subprocess failure (the caller preserves the previous map)
+        and an empty dict on a clean tree. ``branch_sync`` + ``upstream_ref``
+        come from the same single ``git status`` invocation's ``--branch``
+        headers — no extra subprocess — and fall back to ``(GitBranchSync(),
+        "")`` on failure so the ahead/behind indicator clears rather than
+        freezes on the last good value.
         """
         try:
             proc = subprocess.run(
@@ -1059,7 +1171,7 @@ class GitController(QObject):
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             log.warning("git status failed for %s: %s", cwd, exc)
-            return None
+            return (None, GitBranchSync(), "")
         if proc.returncode != 0:
             log.warning(
                 "git status exited %d for %s: %s",
@@ -1067,8 +1179,9 @@ class GitController(QObject):
                 cwd,
                 proc.stderr.decode("utf-8", errors="replace").strip(),
             )
-            return None
-        return parse_porcelain_v2(proc.stdout)
+            return (None, GitBranchSync(), "")
+        branch_sync, upstream = parse_branch_header(proc.stdout)
+        return (parse_porcelain_v2(proc.stdout), branch_sync, upstream)
 
     def _run_numstat_staged(self, cwd: str) -> dict[str, tuple[int, int]] | None:
         """Run ``git diff --cached --numstat -z`` and parse the output.
@@ -1231,6 +1344,8 @@ class GitController(QObject):
         resolved: str,
         new_stats: GitStats,
         new_ignored: dict[str, bool],
+        new_sync: GitBranchSync,
+        new_upstream: str,
     ) -> None:
         """Swap the map + stats under the lock and emit change signals.
 
@@ -1238,22 +1353,30 @@ class GitController(QObject):
         cross-thread signal dispatch — same hazard as nvim_backend's
         ``_dispatch_redraw`` per gotcha #10 (Python 3.14 cyclic GC racing
         the Qt receiver-side wrapper allocation). One ``gc.disable`` window
-        covers both signals so the protection is unbroken across them.
+        covers all signals so the protection is unbroken across them.
         """
         with self._lock:
             old_map = self._status_map
             old_stats = self._stats
             old_root = self._resolved_root
             old_ignored = self._ignored_set
+            old_sync = self._branch_sync
             self._status_map = new_map
             self._stats = new_stats
             self._resolved_root = resolved
             self._ignored_set = new_ignored
+            self._branch_sync = new_sync
+            # `_upstream_ref` is read by `_install_watcher` (GUI thread) to
+            # derive the remote-tracking ref file to watch; no signal — the
+            # watcher rebuild is driven by the `_watcherRefreshRequested`
+            # emit that `_do_scan` fires right after this call returns.
+            self._upstream_ref = new_upstream
 
         map_or_root_changed = (
             old_map != new_map or old_root != resolved or old_ignored != new_ignored
         )
         stats_changed = old_stats != new_stats
+        sync_changed = old_sync != new_sync
 
         if map_or_root_changed:
             # Counting non-aggregate entries for the log line — directory
@@ -1269,13 +1392,15 @@ class GitController(QObject):
             else:
                 log.info("git scan: cleared (not in a repo)")
 
-        if map_or_root_changed or stats_changed:
+        if map_or_root_changed or stats_changed or sync_changed:
             gc.disable()
             try:
                 if map_or_root_changed:
                     self.statusChanged.emit()
                 if stats_changed:
                     self.statsChanged.emit()
+                if sync_changed:
+                    self.branchSyncChanged.emit()
             finally:
                 gc.enable()
 
@@ -1387,7 +1512,7 @@ class GitController(QObject):
         return ""
 
     def _install_watcher(self, git_dir: str) -> None:
-        """Add the four trigger files to the watcher, if they exist."""
+        """Add the .git trigger files to the watcher, if they exist."""
         candidates = [
             os.path.join(git_dir, "index"),
             os.path.join(git_dir, "HEAD"),
@@ -1399,9 +1524,41 @@ class GitController(QObject):
         if ref_path:
             candidates.append(ref_path)
 
+        # Watch the upstream remote-tracking ref + packed-refs so a `git push`
+        # refreshes the ahead/behind counts. A push updates
+        # refs/remotes/<remote>/<branch> (loose) OR rewrites packed-refs
+        # (packed) — NEITHER is among the files above, and WorktreeWatcher
+        # explicitly skips `.git`, so without these the status bar's `↑N`
+        # would stay stale until the next unrelated scan trigger (a commit,
+        # save, or branch switch). The loose ref may be absent when refs are
+        # packed (the existence filter drops it); packed-refs is the companion
+        # trigger that covers the packed case. Re-derived every refresh, so a
+        # branch's upstream becoming set on a later scan gets picked up.
+        with self._lock:
+            upstream = self._upstream_ref
+        remote_ref = self._upstream_ref_path(git_dir, upstream)
+        if remote_ref:
+            candidates.append(remote_ref)
+        candidates.append(os.path.join(git_dir, "packed-refs"))
+
         existing = [p for p in candidates if os.path.exists(p)]
         if existing:
             self._watcher.addPaths(existing)
+
+    @staticmethod
+    def _upstream_ref_path(git_dir: str, upstream: str) -> str:
+        """Map a ``# branch.upstream`` value to its loose remote-tracking ref.
+
+        ``"origin/main"`` → ``<git_dir>/refs/remotes/origin/main``. Branch
+        names with slashes (``origin/feature/x``) split into nested path
+        components correctly. Returns ``""`` when there is no upstream. The
+        returned path may not exist on disk (the ref could be packed) — the
+        caller filters on existence and watches ``packed-refs`` as the
+        companion trigger for that case.
+        """
+        if not upstream:
+            return ""
+        return os.path.join(git_dir, "refs", "remotes", *upstream.split("/"))
 
     @staticmethod
     def _current_branch_ref(git_dir: str) -> str:

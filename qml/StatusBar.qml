@@ -222,7 +222,8 @@ Rectangle {
                     renderType: Text.NativeRendering
                 }
 
-                // Branch — prefixed with a git-like glyph.
+                // Branch — prefixed with a git-like glyph, followed by the
+                // ahead/behind commit counts vs. the branch's upstream.
                 Row {
                     visible: statusState.branch !== ""
                     spacing: Theme.spacing.xs
@@ -237,6 +238,32 @@ Rectangle {
                     Text {
                         text: statusState.branch
                         color: Theme.color.text.normal
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
+                        renderType: Text.NativeRendering
+                    }
+                    // Unpushed (↑) / unpulled (↓) commit counts. Sourced from
+                    // GitController's porcelain `# branch.ab` header — a
+                    // DIFFERENT producer than the branch NAME above (the nvim
+                    // `branch` capsule on statusState), but both describe the
+                    // same repo in normal operation (nvim's cwd tracks
+                    // displayedRoot, which drives gitController.repoRoot). Each
+                    // shows only when non-zero, so a fully-synced branch renders
+                    // just the name — matching the reference. `↑N` is the
+                    // "commits you haven't pushed" count; `↓N` (meaningful only
+                    // after a fetch) is its symmetric companion.
+                    Text {
+                        visible: gitController.aheadCount > 0
+                        text: "↑" + gitController.aheadCount
+                        color: Theme.color.accent.primary
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
+                        renderType: Text.NativeRendering
+                    }
+                    Text {
+                        visible: gitController.behindCount > 0
+                        text: "↓" + gitController.behindCount
+                        color: Theme.color.accent.primary
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.sm
                         renderType: Text.NativeRendering

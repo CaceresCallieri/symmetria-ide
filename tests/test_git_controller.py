@@ -12,6 +12,8 @@ format spec is summarised in its module docstring.
 
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import QModelIndex
 
 from symmetria_ide.git_controller import (
@@ -21,6 +23,7 @@ from symmetria_ide.git_controller import (
     STATE_STAGED,
     STATE_UNSTAGED,
     STATE_UNTRACKED,
+    GitBranchSync,
     GitController,
     GitStats,
     GitStatus,
@@ -28,6 +31,7 @@ from symmetria_ide.git_controller import (
     _add_directory_aggregates,
     _compute_stats,
     _merge_numstat_into_map,
+    parse_branch_header,
     parse_numstat_blob,
     parse_porcelain_v2,
 )
@@ -94,6 +98,95 @@ def test_only_branch_headers_returns_empty_map() -> None:
         b"# branch.ab +0 -0",
     )
     assert parse_porcelain_v2(blob) == {}
+
+
+# ---------------------------------------------------------------------------
+# parse_branch_header — ahead/behind + upstream from the `--branch` headers.
+# ---------------------------------------------------------------------------
+
+
+def test_branch_header_ahead_and_behind() -> None:
+    blob = _join(
+        b"# branch.oid abc123",
+        b"# branch.head main",
+        b"# branch.upstream origin/main",
+        b"# branch.ab +4 -2",
+    )
+    sync, upstream = parse_branch_header(blob)
+    assert sync == GitBranchSync(ahead=4, behind=2)
+    assert upstream == "origin/main"
+
+
+def test_branch_header_ahead_only() -> None:
+    # The canonical "I have unpushed commits" case from the reference image.
+    blob = _join(
+        b"# branch.head vigilia",
+        b"# branch.upstream origin/vigilia",
+        b"# branch.ab +4 -0",
+    )
+    sync, _ = parse_branch_header(blob)
+    assert sync.ahead == 4
+    assert sync.behind == 0
+
+
+def test_branch_header_behind_only() -> None:
+    blob = _join(b"# branch.upstream origin/main", b"# branch.ab +0 -3")
+    sync, _ = parse_branch_header(blob)
+    assert sync == GitBranchSync(ahead=0, behind=3)
+
+
+def test_branch_header_no_upstream_defaults_to_zero() -> None:
+    # A local-only branch: git omits both branch.upstream AND branch.ab.
+    blob = _join(b"# branch.oid abc123", b"# branch.head local-only")
+    sync, upstream = parse_branch_header(blob)
+    assert sync == GitBranchSync()
+    assert upstream == ""
+
+
+def test_branch_header_empty_blob_defaults() -> None:
+    sync, upstream = parse_branch_header(b"")
+    assert sync == GitBranchSync()
+    assert upstream == ""
+
+
+def test_branch_header_stops_at_first_file_record() -> None:
+    # Headers lead the output; the parser must read the ab line and then stop
+    # at the first file record rather than mis-reading file data as a header.
+    blob = _join(
+        b"# branch.upstream origin/main",
+        b"# branch.ab +1 -0",
+        _ordinary(".M", "src/foo.py"),
+        _ordinary("M.", "src/bar.py"),
+    )
+    sync, upstream = parse_branch_header(blob)
+    assert sync == GitBranchSync(ahead=1, behind=0)
+    assert upstream == "origin/main"
+
+
+def test_branch_header_upstream_with_slashes() -> None:
+    # Remote-tracking names can contain slashes in the branch component.
+    blob = _join(b"# branch.upstream origin/feature/new-thing", b"# branch.ab +2 -0")
+    _, upstream = parse_branch_header(blob)
+    assert upstream == "origin/feature/new-thing"
+
+
+def test_branch_header_malformed_ab_defaults_to_zero() -> None:
+    # A garbled ab line must not crash — fall back to a zero sync.
+    blob = _join(b"# branch.upstream origin/main", b"# branch.ab garbage")
+    sync, _ = parse_branch_header(blob)
+    assert sync == GitBranchSync()
+
+
+def test_upstream_ref_path_maps_to_remote_tracking_ref() -> None:
+    assert GitController._upstream_ref_path(
+        "/repo/.git", "origin/main"
+    ) == os.path.join("/repo/.git", "refs", "remotes", "origin", "main")
+    # Nested branch name splits into nested ref path components.
+    assert GitController._upstream_ref_path(
+        "/repo/.git", "origin/feature/x"
+    ) == os.path.join("/repo/.git", "refs", "remotes", "origin", "feature", "x")
+    # No upstream → empty (caller skips watching a remote ref).
+    assert GitController._upstream_ref_path("/repo/.git", "") == ""
 
 
 def test_missing_trailing_nul_still_parses() -> None:
@@ -878,10 +971,12 @@ def test_publish_suppresses_signal_on_equal_map() -> None:
         received: list[None] = []
         controller.statusChanged.connect(lambda: received.append(None))
         # Publish the SAME map + same stats — should be a no-op.
-        controller._publish({"src/foo.py": status}, "/repo", GitStats(), {})
+        controller._publish(
+            {"src/foo.py": status}, "/repo", GitStats(), {}, GitBranchSync(), ""
+        )
         assert len(received) == 0, "statusChanged must not fire when map is unchanged"
         # Publish a DIFFERENT map — should fire.
-        controller._publish({}, "", GitStats(), {})
+        controller._publish({}, "", GitStats(), {}, GitBranchSync(), "")
         assert len(received) == 1, "statusChanged must fire when map changes"
     finally:
         controller.stop()
@@ -1463,7 +1558,12 @@ def test_publish_emits_stats_changed_on_stats_change() -> None:
         controller.statsChanged.connect(lambda: stats_received.append(None))
         # Same map, NEW stats — statsChanged only.
         controller._publish(
-            {"src/foo.py": status}, "/repo", GitStats(unstaged_add=10), {}
+            {"src/foo.py": status},
+            "/repo",
+            GitStats(unstaged_add=10),
+            {},
+            GitBranchSync(),
+            "",
         )
         assert len(status_received) == 0
         assert len(stats_received) == 1
@@ -1494,7 +1594,12 @@ def test_publish_suppresses_stats_changed_on_equal_stats() -> None:
         controller.statsChanged.connect(lambda: stats_received.append(None))
         # Publish the SAME map AND SAME stats — both signals must be suppressed.
         controller._publish(
-            {"src/foo.py": status}, "/repo", GitStats(unstaged_add=5), {}
+            {"src/foo.py": status},
+            "/repo",
+            GitStats(unstaged_add=5),
+            {},
+            GitBranchSync(),
+            "",
         )
         assert len(status_received) == 0, (
             "statusChanged must not fire when map is unchanged"
@@ -1502,6 +1607,50 @@ def test_publish_suppresses_stats_changed_on_equal_stats() -> None:
         assert len(stats_received) == 0, (
             "statsChanged must not fire when stats are unchanged"
         )
+    finally:
+        controller.stop()
+
+
+def test_publish_branch_sync_emits_independently_of_status() -> None:
+    # A `git push` zeroes `ahead` WITHOUT changing the file map — the whole
+    # reason branchSyncChanged is separate from statusChanged. Verify it fires
+    # on a sync change with an unchanged map, exposes the new counts, and is
+    # suppressed on a no-change re-publish.
+    controller = GitController()
+    try:
+        status = GitStatus(
+            path="src/foo.py", char="M", state=STATE_UNSTAGED, tooltip="Modified"
+        )
+        with controller._lock:
+            controller._status_map = {"src/foo.py": status}
+            controller._resolved_root = "/repo"
+            controller._branch_sync = GitBranchSync(ahead=4, behind=0)
+        status_received: list[None] = []
+        sync_received: list[None] = []
+        controller.statusChanged.connect(lambda: status_received.append(None))
+        controller.branchSyncChanged.connect(lambda: sync_received.append(None))
+        # Same map, NEW sync (a push landed: ahead 4 → 0) — sync signal only.
+        controller._publish(
+            {"src/foo.py": status},
+            "/repo",
+            GitStats(),
+            {},
+            GitBranchSync(ahead=0, behind=0),
+            "origin/main",
+        )
+        assert len(status_received) == 0, "map unchanged → no statusChanged"
+        assert len(sync_received) == 1, "sync changed → branchSyncChanged fires"
+        assert controller.aheadCount == 0
+        # Re-publish the SAME sync — must be suppressed.
+        controller._publish(
+            {"src/foo.py": status},
+            "/repo",
+            GitStats(),
+            {},
+            GitBranchSync(ahead=0, behind=0),
+            "origin/main",
+        )
+        assert len(sync_received) == 1, "unchanged sync → no extra emit"
     finally:
         controller.stop()
 
