@@ -52,7 +52,13 @@ Rectangle {
     // terminal, or an OpenCode agent would be misleading. `agentActivity[slot-1]
     // .agentType` carries the focused harness (defaults to "claude" pre-activity;
     // app.py::agentActivity).
-    readonly property bool claudeAgentActive: controller.agentVisible
+    //
+    // MUST be `agentSurfaceVisible` (centralSurface == "agent"), NOT `agentVisible`
+    // — the latter is the parked SDK AgentPane overlay flag (env-gated, ~always
+    // False), so binding to it hid the whole cluster permanently. (`editorActive`
+    // above gets away with `!agentVisible` only because its decisive term is
+    // `editorVisible`.)
+    readonly property bool claudeAgentActive: controller.agentSurfaceVisible
         && controller.focusedAgent >= 1
         && (controller.agentActivity[controller.focusedAgent - 1] || {}).agentType === "claude"
 
