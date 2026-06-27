@@ -1235,6 +1235,20 @@ def test_status_line_context_default_is_minus_one(usage_controller):
     assert c.agentContextPct[0] == -1
 
 
+def test_status_line_stores_context_display_tokens(usage_controller):
+    c = usage_controller
+    c.spawn_agent("fresh", True)
+    c._on_status_line(_status_line(1, context_pct=14, context_display="137k/1000k"))
+    assert c.agentContextPct[0] == 14
+    assert c.agentContextDisplay[0] == "137k/1000k"
+
+
+def test_status_line_context_display_default_empty(usage_controller):
+    c = usage_controller
+    c.spawn_agent("fresh", True)
+    assert c.agentContextDisplay[0] == ""
+
+
 def test_status_line_ignores_foreign_pid(usage_controller):
     c = usage_controller
     c.spawn_agent("fresh", True)

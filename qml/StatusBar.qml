@@ -350,13 +350,24 @@ Rectangle {
                     }
                 }
 
-                // context %
+                // context: "Ctx <used/limit> <pct>%" — the token counts are the
+                // important part (mirrors the bash line's "Ctx: 34k/1000k (3%)").
+                // agentContextDisplay carries the bash-formatted "used/limit";
+                // the pct keeps the threshold colour.
                 Row {
                     spacing: Theme.spacing.xs
                     visible: controller.agentContextPct[controller.focusedAgent - 1] >= 0
                     Text {
-                        text: "ctx"
+                        text: "Ctx"
                         color: Theme.color.text.dim
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.sm
+                        renderType: Text.NativeRendering
+                    }
+                    Text {
+                        visible: (controller.agentContextDisplay[controller.focusedAgent - 1] || "") !== ""
+                        text: controller.agentContextDisplay[controller.focusedAgent - 1] || ""
+                        color: Theme.color.text.normal
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.sm
                         renderType: Text.NativeRendering
@@ -393,22 +404,20 @@ Rectangle {
                     }
                 }
 
-                // account usage (5h / 7d) — universal data, shown only when valid.
-                // sm gap keeps the two chips reading as ONE "sessions" module,
-                // distinct from the xl gap to the module before it.
-                Row {
-                    spacing: Theme.spacing.sm
+                // account usage — 5h (session) and 7d (weekly) are SEPARATE
+                // modules now (each a direct agentInfo child, so each gets the xl
+                // inter-module gap) so the two limits stand clearly apart.
+                UsageChip {
                     visible: controller.accountUsageValid
-                    UsageChip {
-                        label: "5h"
-                        pct: controller.accountUsage5hPct
-                        resetEpoch: controller.accountUsage5hReset
-                    }
-                    UsageChip {
-                        label: "7d"
-                        pct: controller.accountUsage7dPct
-                        resetEpoch: controller.accountUsage7dReset
-                    }
+                    label: "5h"
+                    pct: controller.accountUsage5hPct
+                    resetEpoch: controller.accountUsage5hReset
+                }
+                UsageChip {
+                    visible: controller.accountUsageValid
+                    label: "7d"
+                    pct: controller.accountUsage7dPct
+                    resetEpoch: controller.accountUsage7dReset
                 }
             }
         }

@@ -2362,6 +2362,15 @@ class AppController(QObject):
         ]
 
     @Property("QVariantList", notify=agentStatusChanged)
+    def agentContextDisplay(self) -> list:
+        """Per-slot context token usage as the bash-formatted "used/limit" string
+        (e.g. "34k/1000k"), indexed `slot - 1`; "" = not yet observed."""
+        return [
+            self._term_agents.get(slot, {}).get("context_display", "")
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
+    @Property("QVariantList", notify=agentStatusChanged)
     def agentDoneAt(self) -> list:
         """Per-slot unix epoch (seconds) the agent last finished a turn (the
         `Stop` hook), indexed `slot - 1`; 0 = not finished yet. The StatusBar
@@ -3437,6 +3446,11 @@ class AppController(QObject):
             ctx = self._coerce_int(payload["context_pct"], -1)
             if rec.get("context_pct", -1) != ctx:
                 rec["context_pct"] = ctx
+                status_changed = True
+        if "context_display" in payload:
+            disp = str(payload["context_display"])
+            if rec.get("context_display", "") != disp:
+                rec["context_display"] = disp
                 status_changed = True
         if status_changed:
             self.agentStatusChanged.emit()
