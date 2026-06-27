@@ -1699,6 +1699,16 @@ def test_sentinel_backstop_backs_off_then_lapses_on_resolve(tmp_path) -> None:
     and it stands down once a repo resolves."""
     controller = GitController()
     try:
+        # Stub the worker wakeup so the LIVE worker thread never runs during
+        # this test. A real wake lets the worker clear `_scan_wakeup` and —
+        # worse — publish a not-a-repo scan that clobbers our manually-set
+        # `_resolved_root` back to "", a timing dependency. We record wake
+        # requests and assert on those instead. (`_on_sentinel_backstop` is
+        # the only thing the test drives that calls `_wake_worker`; `stop()`
+        # in the finally sets the events directly, so teardown still works.)
+        wake_calls: list[int] = []
+        controller._wake_worker = lambda: wake_calls.append(1)
+
         controller._repo_root = str(tmp_path)  # has a root, not yet a repo
         controller._ensure_repo_sentinel_backstop()
         assert controller._sentinel_backstop_delay_ms == 1000
@@ -1706,9 +1716,8 @@ def test_sentinel_backstop_backs_off_then_lapses_on_resolve(tmp_path) -> None:
 
         # Each firing while still not-a-repo asks the worker to re-scan and
         # backs the delay off.
-        controller._scan_wakeup.clear()
         controller._on_sentinel_backstop()
-        assert controller._scan_wakeup.is_set()  # worker re-scan requested
+        assert wake_calls == [1]  # worker re-scan requested once
         assert controller._sentinel_backstop_delay_ms == 2000
         controller._on_sentinel_backstop()
         assert controller._sentinel_backstop_delay_ms == 4000
@@ -1717,12 +1726,13 @@ def test_sentinel_backstop_backs_off_then_lapses_on_resolve(tmp_path) -> None:
         controller._ensure_repo_sentinel_backstop()
         assert controller._sentinel_backstop_delay_ms == 4000
 
-        # Once a repo resolves, the next firing lapses without re-arming.
+        # Once a repo resolves, the next firing lapses without re-arming and
+        # without waking the worker.
         with controller._lock:
             controller._resolved_root = str(tmp_path)
-        controller._scan_wakeup.clear()
+        wakes_before = len(wake_calls)
         controller._on_sentinel_backstop()
-        assert not controller._scan_wakeup.is_set()
+        assert len(wake_calls) == wakes_before  # lapsed — no wake
         assert controller._sentinel_backstop_delay_ms == 0
     finally:
         controller.stop()
@@ -1734,6 +1744,10 @@ def test_sentinel_backstop_caps_at_max_delay(tmp_path) -> None:
 
     controller = GitController()
     try:
+        # Stub the worker wakeup so the 20 firings don't run the live worker
+        # (which would fork ~20 real `git rev-parse`/`status` subprocesses
+        # against tmp_path); we only care about the backoff math here.
+        controller._wake_worker = lambda: None
         controller._repo_root = str(tmp_path)
         controller._ensure_repo_sentinel_backstop()
         for _ in range(20):  # far past the cap

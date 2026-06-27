@@ -1325,13 +1325,21 @@ class GitController(QObject):
         failure, partial-init race). GUI-thread only (reached from
         `_refresh_watcher_for_root`, a queued slot).
 
-        No-op on the directory watch when `_repo_root` is unset or not a real
-        directory (e.g. a path since deleted) — the backstop still runs so
-        recovery isn't lost if the directory reappears.
+        No-op on the directory watch when `_repo_root` is not a real directory
+        (e.g. a path since deleted) — the backstop still runs so recovery isn't
+        lost if it reappears. The empty-`_repo_root` branch here is defensive
+        only: `_refresh_watcher_for_root("")` is reached solely with `_repo_root`
+        SET (a resolve that failed on a real asked path), because `_do_scan`
+        early-returns for an empty `_repo_root` without ever arming the sentinel.
         """
         root = self._repo_root
         if root and os.path.isdir(root):
-            self._watcher.addPath(root)
+            if not self._watcher.addPath(root):
+                # Arm failure (inotify watch limit, transient inaccessibility).
+                # The backstop covers recovery, but leave a breadcrumb: the
+                # opened-before-init bug was first diagnosed via /proc inotify
+                # inspection, and a missing sentinel watch is the tell.
+                log.debug("git sentinel: failed to watch %s; backstop will cover", root)
         self._ensure_repo_sentinel_backstop()
 
     def _ensure_repo_sentinel_backstop(self) -> None:
@@ -1534,9 +1542,14 @@ class GitController(QObject):
         directory settles to a cheap once-a-minute poll. GUI-thread only
         (QTimer.timeout).
         """
+        # The lock guards only `_resolved_root` (worker-written). `_repo_root`
+        # is GUI-thread-owned — its sole writer `set_repo_root` runs here on
+        # the GUI thread too — so it's read outside the lock (matching
+        # `_arm_repo_sentinel`); reading it under the lock would imply a
+        # cross-thread guarantee that doesn't exist.
         with self._lock:
             resolved = self._resolved_root
-            has_root = bool(self._repo_root)
+        has_root = bool(self._repo_root)
         if resolved or not has_root:
             # Sentinel/worktree path already won the race, or there's no root
             # left to watch — let the timer lapse.
