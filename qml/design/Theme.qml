@@ -530,6 +530,9 @@ QtObject {
         readonly property int sm: 6
         readonly property int md: 10
         readonly property int lg: 14
+        readonly property int xl: 20   // between distinct modules (e.g. the status
+                                       // bar's agent groups), where the gap itself
+                                       // is the separator — no pipe glyph needed
     }
 
     // ─── Radius ──────────────────────────────────────────────────

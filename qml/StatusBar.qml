@@ -322,7 +322,11 @@ Rectangle {
                 visible: root.claudeAgentActive
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: Theme.spacing.md
+                // Generous inter-MODULE gap (model:effort | ctx | Done at |
+                // sessions) — the wide gap is the separator, replacing the
+                // terminal line's " | ". Intra-module gaps stay tight (0 / xs /
+                // sm) so each group reads as one unit.
+                spacing: Theme.spacing.xl
 
                 // model + effort, tight: ":effort" abuts the model with no gap,
                 // matching the terminal status line's "Opus 4.8:xhigh".
@@ -366,15 +370,15 @@ Rectangle {
                     }
                 }
 
-                // last-finished time ("done HH:MM") — the agent's last Stop hook,
-                // mirroring the bash status line's stop-timestamp.sh. agentDoneAt
-                // is an epoch; Qt.formatTime renders 24h HH:mm. Hidden until the
-                // agent has finished at least one turn.
+                // last-finished time ("Done at HH:MM") — the agent's last Stop
+                // hook, mirroring the bash status line's stop-timestamp.sh.
+                // agentDoneAt is an epoch; Qt.formatTime renders 24h HH:mm. Hidden
+                // until the agent has finished at least one turn.
                 Row {
                     spacing: Theme.spacing.xs
                     visible: (controller.agentDoneAt[controller.focusedAgent - 1] || 0) > 0
                     Text {
-                        text: "done"
+                        text: "Done at"
                         color: Theme.color.text.dim
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.sm
@@ -389,9 +393,11 @@ Rectangle {
                     }
                 }
 
-                // account usage (5h / 7d) — universal data, shown only when valid
+                // account usage (5h / 7d) — universal data, shown only when valid.
+                // sm gap keeps the two chips reading as ONE "sessions" module,
+                // distinct from the xl gap to the module before it.
                 Row {
-                    spacing: Theme.spacing.md
+                    spacing: Theme.spacing.sm
                     visible: controller.accountUsageValid
                     UsageChip {
                         label: "5h"
