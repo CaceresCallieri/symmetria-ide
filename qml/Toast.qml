@@ -15,6 +15,14 @@
 // toolkit's scale-pop + fade (Theme.anim.*) — the same motion language as the
 // modals (see feedback/popup-animation). Claymorphism frame via PillCard; all
 // colour / typography / motion bind against `Theme` — no local literals.
+//
+// LIMITATION (v1): single-instance, latest-wins. A fresh show() before the
+// previous toast hides overwrites its title/detail and restarts the timer, so
+// several near-simultaneous failures (e.g. a batch of agents OOM-killed at
+// once) collapse to one message. Acceptable today because the spawn-failure
+// detail is near-identical across a memory-pressure cascade (the user still
+// learns "out of memory"); revisit with a count ("N agents failed") or a queue
+// if a consumer needs every message shown.
 
 import QtQuick
 

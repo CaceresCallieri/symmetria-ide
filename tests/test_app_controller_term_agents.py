@@ -10,6 +10,7 @@ queued delivery path).
 from __future__ import annotations
 
 import concurrent.futures
+import io
 import os
 import time
 
@@ -1068,17 +1069,23 @@ def test_user_close_then_finished_does_not_false_alert(controller, bridge):
 
 
 def test_fast_death_reports_display_position_not_internal_slot(controller):
-    # The alert numbers agents by dense display position (the chip number),
-    # not the internal slot — so the second agent reads "#2".
+    # The alert numbers agents by dense DISPLAY position (the chip number), not
+    # the frozen internal slot. Force the two to diverge: free a middle slot so
+    # the next spawn reuses that internal slot but lands LAST in display order.
     captured = _capture_spawn_failed(controller)
-    controller.spawn_agent("fresh", True)
-    controller.spawn_agent("fresh", True)
-    assert controller.agentOrder == [1, 2]
+    controller.spawn_agent("fresh", True)  # internal slot 1
+    controller.spawn_agent("fresh", True)  # internal slot 2
+    controller.spawn_agent("fresh", True)  # internal slot 3
+    controller.close_agent(2)  # frees internal slot 2
+    controller.spawn_agent("fresh", True)  # reuses slot 2, appended last
+    assert controller.agentOrder == [1, 3, 2]  # internal slot 2 → display #3
 
     controller.on_agent_finished(2)
 
     assert len(captured) == 1
-    assert "#2" in captured[0][0]
+    # Internal slot is 2, but its display position is 3 → the title must read #3.
+    assert "#3" in captured[0][0]
+    assert "#2" not in captured[0][0]
 
 
 def test_on_agent_finished_unknown_slot_is_a_no_op(controller, bridge):
@@ -1096,3 +1103,77 @@ def test_memory_pressure_note_returns_bool_and_string(controller):
     low, note = _memory_pressure_note()
     assert isinstance(low, bool)
     assert isinstance(note, str)
+
+
+def _patch_meminfo(monkeypatch, content: str) -> None:
+    """Feed synthetic /proc/meminfo to _memory_pressure_note via builtins.open.
+
+    The helper calls open() exactly once and monkeypatch reverts at teardown,
+    so the global patch window contains only that read.
+    """
+    monkeypatch.setattr("builtins.open", lambda *a, **k: io.StringIO(content))
+
+
+def test_memory_pressure_note_low_ram_and_swap_is_low(monkeypatch):
+    from symmetria_ide.app import _memory_pressure_note
+
+    _patch_meminfo(
+        monkeypatch,
+        "MemAvailable:   200000 kB\nSwapTotal: 16000000 kB\nSwapFree:    50000 kB\n",
+    )
+    low, note = _memory_pressure_note()
+    assert low is True
+    assert "RAM" in note and "swap" in note
+
+
+def test_memory_pressure_note_no_swap_avoids_100pct_wording(monkeypatch):
+    # Regression for the no-swap message bug: a box with no swap configured,
+    # under RAM pressure, must NOT read "swap 100% free" (which would contradict
+    # the low-memory warning) — it says "no swap configured" instead.
+    from symmetria_ide.app import _memory_pressure_note
+
+    _patch_meminfo(
+        monkeypatch,
+        "MemAvailable:   100000 kB\nSwapTotal:        0 kB\nSwapFree:         0 kB\n",
+    )
+    low, note = _memory_pressure_note()
+    assert low is True
+    assert "100% free" not in note
+    assert "no swap configured" in note
+
+
+def test_memory_pressure_note_ample_ram_is_not_low(monkeypatch):
+    # Plenty of reclaimable RAM → not low even with zero swap.
+    from symmetria_ide.app import _memory_pressure_note
+
+    _patch_meminfo(
+        monkeypatch,
+        "MemAvailable: 8000000 kB\nSwapTotal:        0 kB\nSwapFree:         0 kB\n",
+    )
+    low, _note = _memory_pressure_note()
+    assert low is False
+
+
+def test_memory_pressure_note_unreadable_file_degrades(monkeypatch):
+    from symmetria_ide.app import _memory_pressure_note
+
+    def _boom(*_a, **_k):
+        raise OSError("nope")
+
+    monkeypatch.setattr("builtins.open", _boom)
+    assert _memory_pressure_note() == (False, "")
+
+
+def test_memory_pressure_note_skips_malformed_lines(monkeypatch):
+    # A colon-less line and a value-less line must be skipped, not abort the
+    # whole parse — the real fields still come through.
+    from symmetria_ide.app import _memory_pressure_note
+
+    _patch_meminfo(
+        monkeypatch,
+        "garbage line no colon\nMemAvailable:   200000 kB\nWeird:\n"
+        "SwapTotal: 16000000 kB\nSwapFree:    50000 kB\n",
+    )
+    low, note = _memory_pressure_note()
+    assert low is True  # parsed despite the bad lines
+    assert "195 MB" in note  # 200000 kB / 1024, rounded

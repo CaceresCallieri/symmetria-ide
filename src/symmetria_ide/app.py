@@ -5036,35 +5036,51 @@ def _reporter_settings_json(reporter_path: str) -> str:
     return json.dumps({"hooks": hooks})
 
 
+# A fresh agent spawn is at real OOM risk only when reclaimable RAM AND swap
+# headroom are BOTH scarce — either alone is benign (a box with gigabytes free
+# and no swap is fine; one swapping lightly with ample RAM is fine). Tuned for
+# claude's ~350MB Node footprint; named so the heuristic is greppable.
+_LOW_MEM_AVAIL_MB = 1024
+_LOW_SWAP_FREE_MB = 512
+
+
 def _memory_pressure_note() -> tuple[bool, str]:
     """Describe system memory pressure for an agent spawn-failure toast.
 
-    Returns ``(is_low, note)``. ``is_low`` is True only when BOTH reclaimable
-    RAM and swap headroom are scarce — the condition under which a fresh
-    heavyweight agent (claude is a ~350MB Node binary) gets OOM-killed at
-    startup. Either alone is benign: a box with gigabytes free and no swap is
-    fine, and one swapping lightly with ample RAM is fine. Linux-only
-    (``/proc/meminfo``); any read/parse failure returns ``(False, "")`` so the
-    caller falls back to a generic message rather than crashing.
+    Returns ``(is_low, note)``. ``is_low`` is True only when both reclaimable
+    RAM and swap headroom are scarce (see ``_LOW_MEM_AVAIL_MB`` /
+    ``_LOW_SWAP_FREE_MB``) — the condition under which a fresh heavyweight agent
+    gets OOM-killed at startup. Linux-only (``/proc/meminfo``); an unreadable
+    file returns ``(False, "")`` so the caller falls back to a generic message
+    rather than crashing, and an individual malformed line is skipped rather
+    than discarding the whole parse.
     """
     try:
-        fields: dict[str, int] = {}
-        with open("/proc/meminfo", encoding="ascii") as meminfo:
-            for line in meminfo:
-                key, _, rest = line.partition(":")
-                fields[key] = int(rest.strip().split()[0])  # value is in kB
-    except (OSError, ValueError, IndexError):
+        meminfo_lines = open("/proc/meminfo", encoding="ascii")
+    except OSError:
         return (False, "")
+    fields: dict[str, int] = {}
+    with meminfo_lines:
+        for line in meminfo_lines:
+            key, sep, rest = line.partition(":")
+            if not sep:
+                continue
+            try:
+                fields[key] = int(rest.strip().split()[0])  # value is in kB
+            except (ValueError, IndexError):
+                continue  # a malformed line never aborts the whole read
     mem_avail_mb = fields.get("MemAvailable", 0) / 1024
     swap_total = fields.get("SwapTotal", 0)
     swap_free = fields.get("SwapFree", 0)
     swap_free_mb = swap_free / 1024
-    swap_pct = (100.0 * swap_free / swap_total) if swap_total else 100.0
-    low = mem_avail_mb < 1024 and swap_free_mb < 512
-    note = (
-        f"System memory is critically low (RAM {mem_avail_mb:.0f} MB free, "
-        f"swap {swap_pct:.0f}% free)."
-    )
+    low = mem_avail_mb < _LOW_MEM_AVAIL_MB and swap_free_mb < _LOW_SWAP_FREE_MB
+    # Describe swap honestly: a system with no swap configured must NOT read as
+    # "swap 100% free" (which would contradict the low-memory warning) — say so.
+    if swap_total <= 0:
+        swap_desc = "no swap configured"
+    else:
+        swap_desc = f"swap {100.0 * swap_free / swap_total:.0f}% free"
+    note = f"System memory is critically low (RAM {mem_avail_mb:.0f} MB free, {swap_desc})."
     return (low, note)
 
 
