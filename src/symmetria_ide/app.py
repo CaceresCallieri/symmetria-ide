@@ -3395,20 +3395,34 @@ class AppController(QObject):
             slot = int(agent_id[len(prefix) :])
         except ValueError:
             return
+        # Account-global usage → freshest-wins merge BEFORE the per-slot guard:
+        # rate limits are account-global, not slot-specific, so a tap that races
+        # slot teardown (or lands a tick before the slot record exists) must not
+        # drop a fresh observation. _ingest also publishes outward so peer IDE
+        # instances converge (the shared-file half of Stage 2).
+        self._ingest_account_usage(
+            payload.get("rate_limits"), payload.get("observed_at_ns")
+        )
+
         if slot not in self._term_agents:
-            return  # tap for a slot we've already closed
+            return  # tap for a slot we've already closed — per-agent fields N/A
 
         # Per-agent fields → slot record. Emit only on a real change: the tap is
         # change-gated bash-side, but model/effort never move mid-session and the
-        # bindings shouldn't churn on an identical re-send.
+        # bindings shouldn't churn on an identical re-send. Coerce BEFORE comparing
+        # (we store the coerced value), so a non-str payload can't defeat the gate.
         rec = self._term_agents[slot]
         status_changed = False
-        if "model" in payload and rec.get("model", "") != payload["model"]:
-            rec["model"] = str(payload["model"])
-            status_changed = True
-        if "effort" in payload and rec.get("effort", "") != payload["effort"]:
-            rec["effort"] = str(payload["effort"])
-            status_changed = True
+        if "model" in payload:
+            model = str(payload["model"])
+            if rec.get("model", "") != model:
+                rec["model"] = model
+                status_changed = True
+        if "effort" in payload:
+            effort = str(payload["effort"])
+            if rec.get("effort", "") != effort:
+                rec["effort"] = effort
+                status_changed = True
         if "context_pct" in payload:
             ctx = self._coerce_int(payload["context_pct"], -1)
             if rec.get("context_pct", -1) != ctx:
@@ -3417,18 +3431,19 @@ class AppController(QObject):
         if status_changed:
             self.agentStatusChanged.emit()
 
-        # Account-global usage → freshest-wins merge, then publish outward so peer
-        # IDE instances converge (the shared-file half of Stage 2).
-        self._ingest_account_usage(
-            payload.get("rate_limits"), payload.get("observed_at_ns")
-        )
-
     def _ingest_account_usage(self, rate_limits, observed_at_ns) -> None:
         """Flatten a tap's nested `rate_limits` into a candidate and adopt-if-newer.
 
         Absent/malformed rate_limits (API-key sessions carry none) → no-op. When
         the candidate advances our freshest, publish it to the shared peer file so
         other IDE instances adopt it too.
+
+        Unit contract with the producer (`~/.claude/symmetria-statusline-tap.py`
+        in the dotfiles repo — the contract owner): `pct` is a number 0–100 and
+        `resets_at` is a unix epoch in SECONDS (the QML countdown does
+        `resets_at - Date.now()/1000`). If the tap ever emits epoch-ms or a
+        "42%"-style string the countdown/percentage silently degrade rather than
+        crash — fix the tap, not here.
         """
         if not isinstance(rate_limits, dict):
             return

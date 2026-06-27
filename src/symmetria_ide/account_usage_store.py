@@ -142,7 +142,11 @@ class AccountUsageStore(QObject):
         return read(self._path)
 
     def publish(self, usage: dict) -> None:
-        """Publish iff newer; re-arm the file watch (atomic rename drops it)."""
+        """Publish iff newer; on a successful write, re-arm the file watch.
+
+        Only a write that wins (newer ts) renames the file, and only a rename
+        drops the watch — so the re-arm is correctly conditional on the write.
+        """
         if publish_if_newer(self._path, usage):
             self._ensure_file_watched()
 
@@ -165,9 +169,15 @@ class AccountUsageStore(QObject):
 
     def _on_dir_changed(self, _path: str) -> None:
         # The runtime dir churns (sockets, etc.); only react when OUR file's
-        # watch state actually changes — i.e. it just appeared. A re-add returns
-        # True only when it wasn't already watched, so this fires `changed`
-        # exactly once on first appearance, not on every sibling's churn.
+        # watch state actually changes — i.e. it just appeared and isn't yet
+        # watched. This guard makes a sibling's churn a no-op.
+        #
+        # After an atomic rename, BOTH fileChanged and directoryChanged can fire
+        # and Qt does not guarantee their order. If directoryChanged lands first
+        # (the file was momentarily unwatched by the rename), this re-adds + emits,
+        # then fileChanged emits again — a double `changed`. That is harmless by
+        # design: the second _on_shared_usage_changed read is an equal-ts no-op in
+        # _adopt_account_usage. So "emit once" is the common case, not a guarantee.
         path = str(self._path)
         if os.path.exists(path) and path not in self._watcher.files():
             self._watcher.addPath(path)

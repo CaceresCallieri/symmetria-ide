@@ -57,9 +57,11 @@ Rectangle {
         && (controller.agentActivity[controller.focusedAgent - 1] || {}).agentType === "claude"
 
     // Live "now" (ms) for the rate-limit reset countdown — the Timer below ticks
-    // it while the usage segment is visible. Date.now() is fine in QML/JS (the
-    // ban is workflow-script-only).
-    property double nowMs: 0
+    // it while the usage segment is visible. Seeded with Date.now() (not 0) so the
+    // very first paint has a sane baseline; a 0 seed would render a ~19000-day
+    // countdown for one frame before the Timer's triggeredOnStart corrects it.
+    // Date.now() is fine in QML/JS (the ban is workflow-script-only).
+    property double nowMs: Date.now()
 
     // Usage threshold colour — mirrors status-line.sh::get_usage_color.
     function _usageColor(pct) {
@@ -275,7 +277,10 @@ Rectangle {
                         renderType: Text.NativeRendering
                     }
                     Text {
-                        text: (controller.agentContextPct[controller.focusedAgent - 1]) + "%"
+                        // `|| 0` guards the hidden state (focusedAgent === 0 →
+                        // agentContextPct[-1] → undefined → "undefined%"); the Row
+                        // is hidden then, but the binding still evaluates.
+                        text: (controller.agentContextPct[controller.focusedAgent - 1] || 0) + "%"
                         color: root._usageColor(controller.agentContextPct[controller.focusedAgent - 1])
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.sm
