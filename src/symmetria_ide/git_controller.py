@@ -503,6 +503,20 @@ _DEBOUNCE_MS = 200
 # very large monorepos; the rev-parse should be near-instant.
 _RESOLVE_TIMEOUT_SEC = 5.0
 _SCAN_TIMEOUT_SEC = 10.0
+# Backstop for the not-a-repo → repo transition (canonically: a directory
+# opened BEFORE `git init` ran in it). The directory SENTINEL watch (see
+# `_arm_repo_sentinel`) is the primary, event-driven detector; this
+# backed-off re-resolve covers the two cases the watch alone can miss —
+# the sentinel watch failing to arm, and the `git init` partial-init race
+# where `.git` exists but `rev-parse` momentarily fails AND subsequent
+# writes land INSIDE `.git` (not as children of the watched root, so the
+# directory watch won't re-fire). Backed-off so a genuinely-never-a-repo
+# directory settles to ~one `git rev-parse` per minute while a directory
+# that becomes a repo recovers within ~1-2s. Deliberately self-contained:
+# no nvim capsule, no editor-save signal — only the filesystem — so this
+# recovery path survives the eventual nvim deprecation untouched.
+_SENTINEL_BACKSTOP_MIN_MS = 1000
+_SENTINEL_BACKSTOP_MAX_MS = 60_000
 
 
 class GitController(QObject):
@@ -611,6 +625,15 @@ class GitController(QObject):
         # inode (see `.git/index.lock → .git/index` rename).
         self._watcher = QFileSystemWatcher(self)
         self._watcher.fileChanged.connect(self._on_watched_changed)
+        # Directory-change wire: armed ONLY in the not-a-repo state, where
+        # `_refresh_watcher_for_root` watches the project root itself as a
+        # SENTINEL so that a `.git` appearing inside it (`git init`, clone,
+        # the dir being replaced) wakes a re-scan that resolves and arms the
+        # real watcher set. In the repo state no directories are watched
+        # (only `.git` trigger FILES via `_install_watcher`), so this never
+        # fires there. Self-contained recovery for a directory opened before
+        # it became a repo — no nvim capsule, no editor save required.
+        self._watcher.directoryChanged.connect(self._on_watched_dir_changed)
 
         # Debounce: bursts of file events (a single `git commit` touches
         # index, HEAD, MERGE_HEAD, refs/heads/<branch> in quick succession)
@@ -627,6 +650,15 @@ class GitController(QObject):
         # emit per window. No extra per-slot code — they all already funnel
         # through this one timer. Fires on the GUI thread (QTimer.timeout).
         self._debounce.timeout.connect(self.workingTreeChanged)
+
+        # Not-a-repo → repo recovery backstop. See `_SENTINEL_BACKSTOP_*`
+        # and `_arm_repo_sentinel`. Single-shot + manual re-arm so the
+        # backoff delay can grow between attempts; `_sentinel_backstop_delay_ms`
+        # carries the current delay. GUI-thread timer (parent=self).
+        self._sentinel_backstop = QTimer(self)
+        self._sentinel_backstop.setSingleShot(True)
+        self._sentinel_backstop.timeout.connect(self._on_sentinel_backstop)
+        self._sentinel_backstop_delay_ms = 0
 
         # Worker→GUI marshaling for watcher rebuild. Explicit QueuedConnection
         # is the project-standards §4 P2 pattern — worker emits, GUI slot runs.
@@ -791,6 +823,10 @@ class GitController(QObject):
         # over-expansion of `.venv` / `node_modules` etc. before the new
         # scan catches up.
         self._clear_watcher()
+        # A project switch resets the not-a-repo recovery backstop — the new
+        # root's first scan re-arms it from the base delay if it, too, isn't
+        # a repo yet.
+        self._cancel_repo_sentinel_backstop()
         self._worktree_watcher.set_root("")
         with self._lock:
             self._status_map = {}
@@ -895,6 +931,9 @@ class GitController(QObject):
         self._scan_wakeup.set()
         self._worker.join(timeout=1.0)
         self._worktree_watcher.stop()
+        # GUI-thread timer; stand it down so a pending backstop can't wake a
+        # joined worker after shutdown. Called on the GUI thread (shutdown).
+        self._sentinel_backstop.stop()
 
     # -- Worker thread -----------------------------------------------------
 
@@ -1260,10 +1299,58 @@ class GitController(QObject):
         # values, so the per-scan call is free in the steady state.
         self._worktree_watcher.set_root(resolved)
         if not resolved:
+            # Not a git repo (yet). Arm the directory SENTINEL on the asked
+            # root so a `.git` appearing inside it recovers us, plus the
+            # backed-off re-resolve backstop. This is what lets a directory
+            # opened BEFORE `git init` ever show real status: without it the
+            # one-shot resolve found no repo and NOTHING re-checked, freezing
+            # the panel "clean" for the life of the instance even as the repo
+            # filled with commits (the bug this whole path fixes).
+            self._arm_repo_sentinel()
             return
+        # A repo resolved — the recovery machinery has done its job; stand the
+        # backstop down so it stops re-resolving.
+        self._cancel_repo_sentinel_backstop()
         git_dir = self._git_dir_for(resolved)
         if git_dir:
             self._install_watcher(git_dir)
+
+    def _arm_repo_sentinel(self) -> None:
+        """Watch the asked-for root dir while it is NOT yet a repo.
+
+        A single QFileSystemWatcher directory entry on `_repo_root` —
+        `directoryChanged` fires when a child (notably `.git`) is created,
+        routing through `_on_watched_dir_changed`. Pairs with the backed-off
+        re-resolve backstop for the cases the watch alone can miss (arm
+        failure, partial-init race). GUI-thread only (reached from
+        `_refresh_watcher_for_root`, a queued slot).
+
+        No-op on the directory watch when `_repo_root` is unset or not a real
+        directory (e.g. a path since deleted) — the backstop still runs so
+        recovery isn't lost if the directory reappears.
+        """
+        root = self._repo_root
+        if root and os.path.isdir(root):
+            self._watcher.addPath(root)
+        self._ensure_repo_sentinel_backstop()
+
+    def _ensure_repo_sentinel_backstop(self) -> None:
+        """Ensure the not-a-repo re-resolve backstop is counting down.
+
+        Idempotent: if already active (possibly at a backed-off delay), leave
+        it — re-arming on every not-a-repo re-scan would pin the delay at the
+        base value and defeat the backoff. Kicks it off from cold at the base
+        delay. GUI-thread only.
+        """
+        if self._sentinel_backstop.isActive():
+            return
+        self._sentinel_backstop_delay_ms = _SENTINEL_BACKSTOP_MIN_MS
+        self._sentinel_backstop.start(self._sentinel_backstop_delay_ms)
+
+    def _cancel_repo_sentinel_backstop(self) -> None:
+        """Stop the backstop — a repo resolved or the root switched."""
+        self._sentinel_backstop.stop()
+        self._sentinel_backstop_delay_ms = 0
 
     @staticmethod
     def _git_dir_for(repo_root: str) -> str:
@@ -1358,6 +1445,22 @@ class GitController(QObject):
             self._watcher.addPath(path)
         self._debounce.start()
 
+    @Slot(str)
+    def _on_watched_dir_changed(self, path: str) -> None:
+        """A watched directory changed — re-scan once a `.git` exists.
+
+        Only the not-a-repo sentinel watches a directory, so this fires
+        solely while we're waiting for a repo to appear. Gate on `.git`
+        existing so unrelated top-level churn during scaffolding (pnpm
+        install, file creation) doesn't fork `git rev-parse` on every write
+        — `.git` may be a dir (ordinary repo) or a file (worktree/submodule),
+        so test `exists`, not `isdir`. The partial-init race (`.git`
+        mid-creation) is covered by the backstop, not this gate. Debounce
+        coalesces; the woken scan re-resolves and arms the real watchers.
+        """
+        if os.path.exists(os.path.join(path, ".git")):
+            self._debounce.start()
+
     @Slot()
     def _on_worktree_changed(self) -> None:
         """Working-tree change observed — debounce into one scan.
@@ -1419,6 +1522,31 @@ class GitController(QObject):
     def _wake_worker(self) -> None:
         """Set the wakeup event so the worker exits its wait and scans."""
         self._scan_wakeup.set()
+
+    @Slot()
+    def _on_sentinel_backstop(self) -> None:
+        """Re-resolve while not-a-repo; back off and re-arm if still none.
+
+        Wakes the worker for a full scan (which re-resolves the root). If the
+        directory became a repo, `_refresh_watcher_for_root` cancels this
+        timer and arms the real watchers; otherwise we re-arm at a doubled
+        delay (capped at `_SENTINEL_BACKSTOP_MAX_MS`) so a permanent non-repo
+        directory settles to a cheap once-a-minute poll. GUI-thread only
+        (QTimer.timeout).
+        """
+        with self._lock:
+            resolved = self._resolved_root
+            has_root = bool(self._repo_root)
+        if resolved or not has_root:
+            # Sentinel/worktree path already won the race, or there's no root
+            # left to watch — let the timer lapse.
+            self._sentinel_backstop_delay_ms = 0
+            return
+        self._wake_worker()
+        self._sentinel_backstop_delay_ms = min(
+            self._sentinel_backstop_delay_ms * 2, _SENTINEL_BACKSTOP_MAX_MS
+        )
+        self._sentinel_backstop.start(self._sentinel_backstop_delay_ms)
 
 
 # ---------------------------------------------------------------------------

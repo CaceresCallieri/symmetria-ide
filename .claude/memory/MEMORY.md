@@ -29,6 +29,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 ## Project — shipped — `project/shipped/` (past-tense systems; one consolidated bullet)
 
 - [Phase 2.5 — terminal pane + project anchor](project/shipped/phase25_current_state.md) — anchor (D1), PTY terminal (D2), OSC 7 cwd sync (D3) — all shipped 2026-05-18
+- [GitController cold-start recovery](project/shipped/gitcontroller_cold_start_recovery.md) — dir opened pre-`git init` froze status "clean"; sentinel watch + backed-off re-resolve, no nvim
 
 ## Reference — host — `reference/host/` (Hyprland, QuickShell, OS-level)
 
@@ -52,6 +53,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [ApplicationShortcut masks terminal keys](reference/qt-pyside/applicationshortcut_masks_terminal_keys.md) — chrome Shortcut eats keys before QMLTermWidget; suspect it when a key fails in-IDE but works in Ghostty
 - [QtWebEngine CDP drives chrome-devtools-mcp](reference/qt-pyside/qtwebengine_cdp_devtools_mcp.md) — QTWEBENGINE_REMOTE_DEBUGGING + --browserUrl: all 29 tools work; Puppeteer attaches, Playwright fails #36961
 - [Startup performance](reference/qt-pyside/startup_perf.md) — SYMMETRIA_IDE_TRACE waterfall + interleaved A/B; fixed browser-MCP GUI-thread import (~1s) + eager WebEngine (~430ms)
+- [processEvents() shared-app SEGV](reference/qt-pyside/processevents_shared_app_segv.md) — never pump the session app in tests; runs prior tests' deleteLater → gotcha #10 crash; hand-deliver queued slots
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
 

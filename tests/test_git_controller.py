@@ -1626,3 +1626,187 @@ def test_ignored_path_set_returns_empty_dict_for_clean_repo() -> None:
         assert result is not None
     finally:
         controller.stop()
+
+
+# ---------------------------------------------------------------------------
+# Not-a-repo → repo recovery (the cold-start / opened-before-`git init` bug).
+#
+# A directory opened BEFORE it became a git repo used to resolve "not a repo"
+# once, tear down every watcher, and never re-check — freezing the status
+# panel "clean" for the life of the instance. The fix is a self-contained
+# recovery path (directory sentinel watch + backed-off re-resolve backstop)
+# that needs NO external signal: no nvim capsule, no editor save, only the
+# filesystem. These tests drive the worker methods directly for determinism
+# (a live event loop would make watcher/timer assertions flaky).
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_watcher_arms_repo_sentinel_when_not_a_repo(tmp_path) -> None:
+    """A failed resolve (`resolved == ""`) with a real asked-for directory
+    arms the SENTINEL: a directory watch on the root + the backstop timer."""
+    controller = GitController()
+    try:
+        controller._repo_root = str(tmp_path)  # a real dir, not a git repo
+        controller._refresh_watcher_for_root("")  # not-a-repo branch
+        assert str(tmp_path) in controller._watcher.directories()
+        assert controller._sentinel_backstop.isActive()
+    finally:
+        controller.stop()
+
+
+def test_refresh_watcher_clears_sentinel_when_repo_resolves(tmp_path) -> None:
+    """When the root resolves as a repo, the sentinel dir watch is dropped,
+    the `.git` trigger files are watched, and the backstop is cancelled."""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=str(tmp_path), check=True, capture_output=True)
+    controller = GitController()
+    try:
+        controller._repo_root = str(tmp_path)
+        controller._refresh_watcher_for_root("")  # arm sentinel first
+        assert str(tmp_path) in controller._watcher.directories()
+        assert controller._sentinel_backstop.isActive()
+        # Now the same root resolves as a repo.
+        controller._refresh_watcher_for_root(str(tmp_path))
+        assert str(tmp_path) not in controller._watcher.directories()
+        assert not controller._sentinel_backstop.isActive()
+        # `.git/HEAD` exists right after `git init`, so the .git watcher armed.
+        assert any(".git" in f for f in controller._watcher.files())
+    finally:
+        controller.stop()
+
+
+def test_watched_dir_changed_only_debounces_when_git_exists(tmp_path) -> None:
+    """The sentinel's directoryChanged handler ignores unrelated top-level
+    churn (no `.git` yet) and only wakes a re-scan once `.git` appears —
+    so scaffolding writes don't fork `git rev-parse` on every file."""
+    controller = GitController()
+    try:
+        d = str(tmp_path)
+        assert not controller._debounce.isActive()
+        controller._on_watched_dir_changed(d)  # no .git yet
+        assert not controller._debounce.isActive()
+        (tmp_path / ".git").mkdir()
+        controller._on_watched_dir_changed(d)  # .git now present
+        assert controller._debounce.isActive()
+    finally:
+        controller.stop()
+
+
+def test_sentinel_backstop_backs_off_then_lapses_on_resolve(tmp_path) -> None:
+    """The backstop doubles its delay each not-a-repo firing (so a permanent
+    non-repo settles to a cheap poll), re-arming is idempotent while active,
+    and it stands down once a repo resolves."""
+    controller = GitController()
+    try:
+        controller._repo_root = str(tmp_path)  # has a root, not yet a repo
+        controller._ensure_repo_sentinel_backstop()
+        assert controller._sentinel_backstop_delay_ms == 1000
+        assert controller._sentinel_backstop.isActive()
+
+        # Each firing while still not-a-repo asks the worker to re-scan and
+        # backs the delay off.
+        controller._scan_wakeup.clear()
+        controller._on_sentinel_backstop()
+        assert controller._scan_wakeup.is_set()  # worker re-scan requested
+        assert controller._sentinel_backstop_delay_ms == 2000
+        controller._on_sentinel_backstop()
+        assert controller._sentinel_backstop_delay_ms == 4000
+
+        # Re-arming must NOT reset the backed-off delay (defeats backoff).
+        controller._ensure_repo_sentinel_backstop()
+        assert controller._sentinel_backstop_delay_ms == 4000
+
+        # Once a repo resolves, the next firing lapses without re-arming.
+        with controller._lock:
+            controller._resolved_root = str(tmp_path)
+        controller._scan_wakeup.clear()
+        controller._on_sentinel_backstop()
+        assert not controller._scan_wakeup.is_set()
+        assert controller._sentinel_backstop_delay_ms == 0
+    finally:
+        controller.stop()
+
+
+def test_sentinel_backstop_caps_at_max_delay(tmp_path) -> None:
+    """Backoff never exceeds the cap, so steady-state polling stays cheap."""
+    from symmetria_ide.git_controller import _SENTINEL_BACKSTOP_MAX_MS
+
+    controller = GitController()
+    try:
+        controller._repo_root = str(tmp_path)
+        controller._ensure_repo_sentinel_backstop()
+        for _ in range(20):  # far past the cap
+            controller._on_sentinel_backstop()
+        assert controller._sentinel_backstop_delay_ms == _SENTINEL_BACKSTOP_MAX_MS
+    finally:
+        controller.stop()
+
+
+def test_status_recovers_after_git_init_without_any_capsule(tmp_path) -> None:
+    """Headline integration test: a directory opened as a NON-repo recovers
+    real git status after `git init`, driven purely by the filesystem — no
+    nvim capsule, no editor save, no `set_repo_root` re-fire.
+
+    We drive `_do_scan` directly (the worker would, but `set_repo_root`
+    would race it) and verify both halves of the recovery: the SYNCHRONOUS
+    status-map publish, and the watcher-refresh signal `_do_scan` emits. We
+    deliver that signal to `_refresh_watcher_for_root` BY HAND rather than
+    pumping the event loop — `QCoreApplication.processEvents()` on the
+    shared session app would also run deferred `deleteLater`s from earlier
+    QML-heavy test modules, tripping the Python-3.14 GC/Qt teardown SEGV
+    (gotcha #10). Hand-delivery exercises the exact payload the real
+    QueuedConnection carries, deterministically and without that hazard.
+    """
+    import os
+    import subprocess
+
+    (tmp_path / "file.txt").write_text("hello\n")
+    controller = GitController()
+    try:
+        # Spy on the watcher-refresh emit with a synchronous (direct, same-
+        # thread) connection — proves `_do_scan` fires it with the right
+        # payload, no event loop needed.
+        refresh_payloads: list[str] = []
+        controller._watcherRefreshRequested.connect(refresh_payloads.append)
+
+        # Point at the dir WITHOUT waking the worker thread (set_repo_root
+        # would, racing our direct _do_scan); drive the scan ourselves.
+        controller._repo_root = str(tmp_path)
+        controller._do_scan()
+
+        # Not a repo yet: empty status (synchronous), and the refresh emit
+        # carried "" — delivering it arms the sentinel.
+        assert controller._resolved_root == ""
+        assert controller.statusForPath(str(tmp_path / "file.txt")) == {}
+        assert refresh_payloads[-1] == ""
+        controller._refresh_watcher_for_root(refresh_payloads[-1])
+        assert str(tmp_path) in controller._watcher.directories()
+        assert controller._sentinel_backstop.isActive()
+
+        # The directory BECOMES a repo, purely on the filesystem.
+        subprocess.run(
+            ["git", "init"], cwd=str(tmp_path), check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "add", "-A"], cwd=str(tmp_path), check=True, capture_output=True
+        )
+
+        # Re-scan — what the sentinel/backstop wakes. Still no capsule.
+        controller._do_scan()
+
+        # Recovered: real root resolved, status populated (synchronous), and
+        # the refresh emit now carries the real root — delivering it stands
+        # the sentinel + backstop down and arms the real watcher set.
+        assert controller._resolved_root != ""
+        result = controller.statusForPath(
+            os.path.join(controller._resolved_root, "file.txt")
+        )
+        assert result != {}
+        assert result["path"] == "file.txt"
+        assert refresh_payloads[-1] == controller._resolved_root
+        controller._refresh_watcher_for_root(refresh_payloads[-1])
+        assert str(tmp_path) not in controller._watcher.directories()
+        assert not controller._sentinel_backstop.isActive()
+    finally:
+        controller.stop()
