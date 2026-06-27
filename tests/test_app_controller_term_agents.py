@@ -1268,7 +1268,9 @@ def test_status_line_emits_status_changed_only_on_change(usage_controller):
     c.spawn_agent("fresh", True)
     emissions: list[None] = []
     c.agentStatusChanged.connect(lambda: emissions.append(None))
-    payload = _status_line(1, model="Opus 4.8", effort="high", context_pct=42)
+    payload = _status_line(
+        1, model="Opus 4.8", effort="high", context_pct=42, context_display="34k/200k"
+    )
     c._on_status_line(payload)
     c._on_status_line(dict(payload))  # identical re-send → no emit
     assert len(emissions) == 1
@@ -1328,6 +1330,10 @@ def test_stop_hook_records_done_at(controller):
     # bar's "done HH:MM" — mirroring the bash stop-timestamp.sh signal.
     controller.spawn_agent("fresh", True)
     assert controller.agentDoneAt[0] == 0
+    # The agentStatusChanged emit is the load-bearing path that makes QML
+    # re-render "Done at" — assert it fires, not just that the value is stored.
+    emissions: list[None] = []
+    controller.agentStatusChanged.connect(lambda: emissions.append(None))
     controller._on_agent_hook(
         {
             "agent_id": f"{os.getpid()}_1",
@@ -1336,6 +1342,7 @@ def test_stop_hook_records_done_at(controller):
         }
     )
     assert controller.agentDoneAt[0] > 0
+    assert len(emissions) == 1
 
 
 def test_non_stop_hook_leaves_done_at_unset(controller):

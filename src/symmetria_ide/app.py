@@ -2328,57 +2328,48 @@ class AppController(QObject):
         """
         return [slot in self._term_agents for slot in range(1, self._MAX_INSTANCES + 1)]
 
+    def _slot_field(self, key: str, default):
+        """Per-slot value of `key` from each agent record, indexed `slot - 1`
+        (len == _MAX_INSTANCES). The shared body behind the per-slot status
+        @Property lists below — one extraction for six callsites."""
+        return [
+            self._term_agents.get(slot, {}).get(key, default)
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
     @Property("QVariantList", notify=termAgentsChanged)
     def agentTitles(self) -> list:
         """Per-slot OSC titles, indexed `slot - 1`; "" = no title yet."""
-        return [
-            self._term_agents.get(slot, {}).get("title", "")
-            for slot in range(1, self._MAX_INSTANCES + 1)
-        ]
+        return self._slot_field("title", "")
 
     @Property("QVariantList", notify=agentStatusChanged)
     def agentModels(self) -> list:
         """Per-slot model display name (status-line tap), indexed `slot - 1`."""
-        return [
-            self._term_agents.get(slot, {}).get("model", "")
-            for slot in range(1, self._MAX_INSTANCES + 1)
-        ]
+        return self._slot_field("model", "")
 
     @Property("QVariantList", notify=agentStatusChanged)
     def agentEfforts(self) -> list:
         """Per-slot reasoning-effort level (status-line tap), indexed `slot - 1`."""
-        return [
-            self._term_agents.get(slot, {}).get("effort", "")
-            for slot in range(1, self._MAX_INSTANCES + 1)
-        ]
+        return self._slot_field("effort", "")
 
     @Property("QVariantList", notify=agentStatusChanged)
     def agentContextPct(self) -> list:
         """Per-slot context-window usage % (status-line tap), indexed `slot - 1`;
         -1 = not yet observed (so the StatusBar can distinguish "0%" from "unknown")."""
-        return [
-            self._term_agents.get(slot, {}).get("context_pct", -1)
-            for slot in range(1, self._MAX_INSTANCES + 1)
-        ]
+        return self._slot_field("context_pct", -1)
 
     @Property("QVariantList", notify=agentStatusChanged)
     def agentContextDisplay(self) -> list:
         """Per-slot context token usage as the bash-formatted "used/limit" string
         (e.g. "34k/1000k"), indexed `slot - 1`; "" = not yet observed."""
-        return [
-            self._term_agents.get(slot, {}).get("context_display", "")
-            for slot in range(1, self._MAX_INSTANCES + 1)
-        ]
+        return self._slot_field("context_display", "")
 
     @Property("QVariantList", notify=agentStatusChanged)
     def agentDoneAt(self) -> list:
         """Per-slot unix epoch (seconds) the agent last finished a turn (the
         `Stop` hook), indexed `slot - 1`; 0 = not finished yet. The StatusBar
         renders it as 'done HH:MM'."""
-        return [
-            self._term_agents.get(slot, {}).get("done_at", 0)
-            for slot in range(1, self._MAX_INSTANCES + 1)
-        ]
+        return self._slot_field("done_at", 0)
 
     # -- Account-global usage (5h / 7d) — see _account_usage / accountUsageChanged.
     @Property(bool, notify=accountUsageChanged)

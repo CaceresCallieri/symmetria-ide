@@ -365,8 +365,9 @@ Rectangle {
                         renderType: Text.NativeRendering
                     }
                     Text {
-                        visible: (controller.agentContextDisplay[controller.focusedAgent - 1] || "") !== ""
-                        text: controller.agentContextDisplay[controller.focusedAgent - 1] || ""
+                        readonly property string disp: controller.agentContextDisplay[controller.focusedAgent - 1] || ""
+                        visible: disp !== ""
+                        text: disp
                         color: Theme.color.text.normal
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.sm
