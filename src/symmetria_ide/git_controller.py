@@ -305,8 +305,14 @@ def parse_branch_header(blob: bytes) -> tuple[GitBranchSync, str]:
     signed (``+ahead`` / ``-behind``); ``int()`` parses the signs directly and
     we negate ``behind`` back to a positive count.
 
-    Scanning stops at the first non-header record so we never walk the
-    (potentially large) file list — the headers always come first.
+    The loop ITERATES only the header block: it breaks at the first non-header
+    record (headers always lead the output), so it neither inspects the
+    file-record tail nor over-scans, and relies on that break to terminate.
+    ``blob.split`` does still materialize the whole record list up front — only
+    the per-record work is short-circuited, not the allocation — but the blob
+    is small relative to the status scan that produced it and
+    ``parse_porcelain_v2`` splits it again anyway, so a header-only scan isn't
+    worth the added complexity.
     """
     sync = GitBranchSync()
     upstream = ""
@@ -641,10 +647,14 @@ class GitController(QObject):
     # rewrites their files. See the wire in `AppController.__init__`.
     workingTreeChanged = Signal()
     # Internal worker→GUI signal that asks the GUI thread to rebuild the
-    # QFileSystemWatcher entries for a newly-resolved repo root. Connected
-    # with explicit QueuedConnection in __init__ — the watcher is GUI-thread-
-    # owned and must never be touched from the worker.
-    _watcherRefreshRequested = Signal(str)
+    # QFileSystemWatcher entries for a newly-resolved repo root. Carries BOTH
+    # the resolved root AND the upstream ref string (`origin/main`, "" when
+    # none) so the GUI-side install works off a consistent snapshot of the
+    # scan that queued it — reading the upstream live from shared state under
+    # a rapid repo-switch could arm the watcher for root A with root B's
+    # upstream. Connected with explicit QueuedConnection in __init__ — the
+    # watcher is GUI-thread-owned and must never be touched from the worker.
+    _watcherRefreshRequested = Signal(str, str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -662,14 +672,14 @@ class GitController(QObject):
         # Worker writes via `_publish`; GUI thread reads via the `stats`
         # property (which copies under the lock into a QVariantMap).
         self._stats: GitStats = GitStats()
-        # Ahead/behind vs. upstream (porcelain `# branch.ab`) + the raw
-        # upstream ref string (`# branch.upstream`, e.g. "origin/main").
-        # Worker writes both in `_publish`; the GUI thread reads `_branch_sync`
-        # via the `aheadCount`/`behindCount` properties and `_upstream_ref` in
-        # `_install_watcher` (to derive the remote ref file to watch). Both
-        # guarded by `_lock` like `_stats` / `_resolved_root`.
+        # Ahead/behind vs. upstream (porcelain `# branch.ab`). Worker writes in
+        # `_publish`; the GUI thread reads via the `aheadCount`/`behindCount`
+        # properties. Guarded by `_lock` like `_stats` / `_resolved_root`. The
+        # raw upstream ref string (`# branch.upstream`) is NOT stored here — it
+        # is needed only on the GUI thread to derive the remote ref file to
+        # watch, so it rides the `_watcherRefreshRequested` signal as a
+        # snapshot rather than living in shared state (see that signal's note).
         self._branch_sync: GitBranchSync = GitBranchSync()
-        self._upstream_ref: str = ""
         # Absolute-path membership map of every gitignored file + directory
         # in the working tree. Computed via a single
         # ``git ls-files --others --ignored --exclude-standard --directory``
@@ -934,7 +944,6 @@ class GitController(QObject):
             self._resolved_root = ""
             self._ignored_set = {}
             self._branch_sync = GitBranchSync()
-            self._upstream_ref = ""
         self.statusChanged.emit()
         self.statsChanged.emit()
         self.branchSyncChanged.emit()
@@ -1074,7 +1083,7 @@ class GitController(QObject):
         with self._lock:
             repo_root = self._repo_root
         if not repo_root:
-            self._publish({}, "", GitStats(), {}, GitBranchSync(), "")
+            self._publish({}, "", GitStats(), {}, GitBranchSync())
             return
 
         resolved = self._resolve_repo_root(repo_root)
@@ -1085,8 +1094,8 @@ class GitController(QObject):
             # STOPS being one mid-session (`.git` deleted) — without the
             # emit, the working-tree observer would keep firing into a
             # permanently-empty scan loop.
-            self._publish({}, "", GitStats(), {}, GitBranchSync(), "")
-            self._watcherRefreshRequested.emit("")
+            self._publish({}, "", GitStats(), {}, GitBranchSync())
+            self._watcherRefreshRequested.emit("", "")
             return
 
         new_map, branch_sync, upstream = self._run_status(resolved)
@@ -1115,11 +1124,13 @@ class GitController(QObject):
         # Best-effort: on subprocess failure we publish an empty set
         # (the FM falls back to its per-dir check-ignore path).
         new_ignored = self._run_ignored_set(resolved)
-        self._publish(new_map, resolved, new_stats, new_ignored, branch_sync, upstream)
+        self._publish(new_map, resolved, new_stats, new_ignored, branch_sync)
 
         # Hand the watcher rebuild back to the GUI thread — QFileSystemWatcher
-        # is not thread-safe and lives on `self`'s thread.
-        self._watcherRefreshRequested.emit(resolved)
+        # is not thread-safe and lives on `self`'s thread. `upstream` rides
+        # along so `_install_watcher` arms the remote-ref watch off the same
+        # scan's snapshot rather than a live shared-state read.
+        self._watcherRefreshRequested.emit(resolved, upstream)
 
     def _resolve_repo_root(self, asked: str) -> str:
         """Run ``git rev-parse --show-toplevel`` and return the real root.
@@ -1345,7 +1356,6 @@ class GitController(QObject):
         new_stats: GitStats,
         new_ignored: dict[str, bool],
         new_sync: GitBranchSync,
-        new_upstream: str,
     ) -> None:
         """Swap the map + stats under the lock and emit change signals.
 
@@ -1366,11 +1376,6 @@ class GitController(QObject):
             self._resolved_root = resolved
             self._ignored_set = new_ignored
             self._branch_sync = new_sync
-            # `_upstream_ref` is read by `_install_watcher` (GUI thread) to
-            # derive the remote-tracking ref file to watch; no signal — the
-            # watcher rebuild is driven by the `_watcherRefreshRequested`
-            # emit that `_do_scan` fires right after this call returns.
-            self._upstream_ref = new_upstream
 
         map_or_root_changed = (
             old_map != new_map or old_root != resolved or old_ignored != new_ignored
@@ -1411,11 +1416,14 @@ class GitController(QObject):
     # -- GUI-thread slots --------------------------------------------------
 
     @Slot(str)
-    def _refresh_watcher_for_root(self, resolved: str) -> None:
+    def _refresh_watcher_for_root(self, resolved: str, upstream: str) -> None:
         """Install QFileSystemWatcher entries for the given repo root.
 
         Called via QueuedConnection from the worker's `_watcherRefreshRequested`
-        emit, so runs on the GUI thread where `_watcher` lives.
+        emit, so runs on the GUI thread where `_watcher` lives. `upstream` is
+        the scan's snapshot of the branch's upstream ref (`origin/main`, "" when
+        none), passed through so the remote-ref watch is armed off a consistent
+        snapshot rather than a live shared-state read (see the signal's note).
         """
         self._clear_watcher()
         # Re-point the recursive working-tree observer at the same moment
@@ -1438,7 +1446,7 @@ class GitController(QObject):
         self._cancel_repo_sentinel_backstop()
         git_dir = self._git_dir_for(resolved)
         if git_dir:
-            self._install_watcher(git_dir)
+            self._install_watcher(git_dir, upstream)
 
     def _arm_repo_sentinel(self) -> None:
         """Watch the asked-for root dir while it is NOT yet a repo.
@@ -1511,8 +1519,13 @@ class GitController(QObject):
                     return gitdir
         return ""
 
-    def _install_watcher(self, git_dir: str) -> None:
-        """Add the .git trigger files to the watcher, if they exist."""
+    def _install_watcher(self, git_dir: str, upstream: str) -> None:
+        """Add the .git trigger files to the watcher, if they exist.
+
+        ``upstream`` is the branch's upstream ref (`origin/main`, "" when none),
+        snapshotted from the scan that queued this refresh — used to derive the
+        remote-tracking ref file to watch.
+        """
         candidates = [
             os.path.join(git_dir, "index"),
             os.path.join(git_dir, "HEAD"),
@@ -1534,8 +1547,6 @@ class GitController(QObject):
         # packed (the existence filter drops it); packed-refs is the companion
         # trigger that covers the packed case. Re-derived every refresh, so a
         # branch's upstream becoming set on a later scan gets picked up.
-        with self._lock:
-            upstream = self._upstream_ref
         remote_ref = self._upstream_ref_path(git_dir, upstream)
         if remote_ref:
             candidates.append(remote_ref)

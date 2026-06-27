@@ -171,8 +171,15 @@ def test_branch_header_upstream_with_slashes() -> None:
 
 
 def test_branch_header_malformed_ab_defaults_to_zero() -> None:
-    # A garbled ab line must not crash — fall back to a zero sync.
+    # A garbled ab line must not crash — fall back to a zero sync. Two distinct
+    # malformed shapes, each hitting a different guard in parse_branch_header:
+    #   (a) too few tokens — fails the `len(parts) >= 4` check before parsing.
     blob = _join(b"# branch.upstream origin/main", b"# branch.ab garbage")
+    sync, _ = parse_branch_header(blob)
+    assert sync == GitBranchSync()
+    #   (b) four tokens but non-numeric counts — reaches int() and trips the
+    #       `except ValueError` fallback. This is the path (a) cannot exercise.
+    blob = _join(b"# branch.upstream origin/main", b"# branch.ab +x -y")
     sync, _ = parse_branch_header(blob)
     assert sync == GitBranchSync()
 
@@ -972,11 +979,11 @@ def test_publish_suppresses_signal_on_equal_map() -> None:
         controller.statusChanged.connect(lambda: received.append(None))
         # Publish the SAME map + same stats — should be a no-op.
         controller._publish(
-            {"src/foo.py": status}, "/repo", GitStats(), {}, GitBranchSync(), ""
+            {"src/foo.py": status}, "/repo", GitStats(), {}, GitBranchSync()
         )
         assert len(received) == 0, "statusChanged must not fire when map is unchanged"
         # Publish a DIFFERENT map — should fire.
-        controller._publish({}, "", GitStats(), {}, GitBranchSync(), "")
+        controller._publish({}, "", GitStats(), {}, GitBranchSync())
         assert len(received) == 1, "statusChanged must fire when map changes"
     finally:
         controller.stop()
@@ -1563,7 +1570,6 @@ def test_publish_emits_stats_changed_on_stats_change() -> None:
             GitStats(unstaged_add=10),
             {},
             GitBranchSync(),
-            "",
         )
         assert len(status_received) == 0
         assert len(stats_received) == 1
@@ -1599,7 +1605,6 @@ def test_publish_suppresses_stats_changed_on_equal_stats() -> None:
             GitStats(unstaged_add=5),
             {},
             GitBranchSync(),
-            "",
         )
         assert len(status_received) == 0, (
             "statusChanged must not fire when map is unchanged"
@@ -1636,7 +1641,6 @@ def test_publish_branch_sync_emits_independently_of_status() -> None:
             GitStats(),
             {},
             GitBranchSync(ahead=0, behind=0),
-            "origin/main",
         )
         assert len(status_received) == 0, "map unchanged → no statusChanged"
         assert len(sync_received) == 1, "sync changed → branchSyncChanged fires"
@@ -1648,7 +1652,6 @@ def test_publish_branch_sync_emits_independently_of_status() -> None:
             GitStats(),
             {},
             GitBranchSync(ahead=0, behind=0),
-            "origin/main",
         )
         assert len(sync_received) == 1, "unchanged sync → no extra emit"
     finally:
@@ -1796,7 +1799,7 @@ def test_refresh_watcher_arms_repo_sentinel_when_not_a_repo(tmp_path) -> None:
     controller = GitController()
     try:
         controller._repo_root = str(tmp_path)  # a real dir, not a git repo
-        controller._refresh_watcher_for_root("")  # not-a-repo branch
+        controller._refresh_watcher_for_root("", "")  # not-a-repo branch
         assert str(tmp_path) in controller._watcher.directories()
         assert controller._sentinel_backstop.isActive()
     finally:
@@ -1812,11 +1815,11 @@ def test_refresh_watcher_clears_sentinel_when_repo_resolves(tmp_path) -> None:
     controller = GitController()
     try:
         controller._repo_root = str(tmp_path)
-        controller._refresh_watcher_for_root("")  # arm sentinel first
+        controller._refresh_watcher_for_root("", "")  # arm sentinel first
         assert str(tmp_path) in controller._watcher.directories()
         assert controller._sentinel_backstop.isActive()
-        # Now the same root resolves as a repo.
-        controller._refresh_watcher_for_root(str(tmp_path))
+        # Now the same root resolves as a repo (fresh init → no upstream).
+        controller._refresh_watcher_for_root(str(tmp_path), "")
         assert str(tmp_path) not in controller._watcher.directories()
         assert not controller._sentinel_backstop.isActive()
         # `.git/HEAD` exists right after `git init`, so the .git watcher armed.
@@ -1930,8 +1933,13 @@ def test_status_recovers_after_git_init_without_any_capsule(tmp_path) -> None:
         # Spy on the watcher-refresh emit with a synchronous (direct, same-
         # thread) connection — proves `_do_scan` fires it with the right
         # payload, no event loop needed.
-        refresh_payloads: list[str] = []
-        controller._watcherRefreshRequested.connect(refresh_payloads.append)
+        # The signal carries (resolved_root, upstream); capture both as a tuple
+        # so the hand-delivery below feeds _refresh_watcher_for_root the exact
+        # payload the real QueuedConnection would.
+        refresh_payloads: list[tuple[str, str]] = []
+        controller._watcherRefreshRequested.connect(
+            lambda resolved, upstream: refresh_payloads.append((resolved, upstream))
+        )
 
         # Point at the dir WITHOUT waking the worker thread (set_repo_root
         # would, racing our direct _do_scan); drive the scan ourselves.
@@ -1942,8 +1950,8 @@ def test_status_recovers_after_git_init_without_any_capsule(tmp_path) -> None:
         # carried "" — delivering it arms the sentinel.
         assert controller._resolved_root == ""
         assert controller.statusForPath(str(tmp_path / "file.txt")) == {}
-        assert refresh_payloads[-1] == ""
-        controller._refresh_watcher_for_root(refresh_payloads[-1])
+        assert refresh_payloads[-1] == ("", "")
+        controller._refresh_watcher_for_root(*refresh_payloads[-1])
         assert str(tmp_path) in controller._watcher.directories()
         assert controller._sentinel_backstop.isActive()
 
@@ -1967,8 +1975,10 @@ def test_status_recovers_after_git_init_without_any_capsule(tmp_path) -> None:
         )
         assert result != {}
         assert result["path"] == "file.txt"
-        assert refresh_payloads[-1] == controller._resolved_root
-        controller._refresh_watcher_for_root(refresh_payloads[-1])
+        # Refresh emit now carries the real root (still no upstream on a fresh
+        # init), and delivering it stands the sentinel down + arms the real set.
+        assert refresh_payloads[-1] == (controller._resolved_root, "")
+        controller._refresh_watcher_for_root(*refresh_payloads[-1])
         assert str(tmp_path) not in controller._watcher.directories()
         assert not controller._sentinel_backstop.isActive()
     finally:
