@@ -2329,7 +2329,7 @@ Window {
             // branch (returns null above).
             return {
                 char: s.char,
-                color: _colorForState(s.state),
+                color: _colorForOperation(s.char),
                 tooltip: s.tooltip,
                 // Resolved-root-relative path (= GitStatusListModel.displayName).
                 // The git viewer's changes tree keys its working-diff request
@@ -2342,22 +2342,38 @@ Window {
             };
         }
 
-        function _colorForState(state) {
-            switch (state) {
-            case "unstaged":
-                return FmUi.FmTheme.gitStatus.unstagedRed;
-            case "staged":
-                return FmUi.FmTheme.gitStatus.stagedGreen;
-            case "untracked":
+        // Operation-based badge colour: key on the porcelain status CHAR (the
+        // KIND of change), NOT the staged/unstaged state. This is the 2026-06-27
+        // switch away from index-state colouring — modified (amber) now reads
+        // distinct from deleted (red), where the old scheme painted both
+        // "unstaged red". The staged/unstaged axis is surfaced separately by the
+        // Active Changes summary (GitStatusPanel), not by badge colour. Mirrors
+        // the FM standalone's `_gitStatusObj` so both surfaces render git status
+        // identically; `state` is retained on the payload only for the tooltip.
+        function _colorForOperation(char) {
+            switch (char) {
+            case "M":            // modified
+            case "T":            // type-changed — a modification in kind
+                return FmUi.FmTheme.gitStatus.modifiedAmber;
+            case "A":            // added (staged new file)
+                return FmUi.FmTheme.gitStatus.addedGreen;
+            case "D":            // deleted
+                return FmUi.FmTheme.gitStatus.deletedRed;
+            case "?":            // untracked
                 return FmUi.FmTheme.gitStatus.untrackedBlue;
-            case "renamed":
-                return FmUi.FmTheme.gitStatus.renamedYellow;
-            case "conflicted":
+            case "R":            // renamed
+            case "C":            // copied
+                return FmUi.FmTheme.gitStatus.renamedOrange;
+            case "U":            // unmerged / conflicted
                 return FmUi.FmTheme.gitStatus.conflictedMagenta;
-            case "ignored":
+            case "!":            // ignored
                 return FmUi.FmTheme.gitStatus.ignoredGray;
             default:
-                return FmUi.FmTheme.gitStatus.unstagedRed;
+                // Unknown char — fall back to amber (modified) rather than red,
+                // so an unrecognised status stays visible without implying
+                // deletion. `_classify_xy`'s "." sentinel is the only path here
+                // and porcelain never emits it in practice.
+                return FmUi.FmTheme.gitStatus.modifiedAmber;
             }
         }
     }

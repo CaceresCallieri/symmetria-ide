@@ -231,22 +231,28 @@ FocusScope {
             }
 
             Repeater {
-                // Colors carried inline on each bucket item — the panel
-                // no longer needs a `_colorForState` helper since the
-                // per-row badge palette now lives entirely inside the
-                // embedded FileTreeView (via `statusProvider`). Three
-                // hardcoded lookups against `FmUi.FmTheme.gitStatus` keep
-                // the bucket header visually unified with the row badges.
+                // Bucket rows summarise WORK-BY-SIDE (staged / unstaged /
+                // untracked) — an index-state axis distinct from the per-file
+                // badges' operation axis. Since the 2026-06-27 switch to
+                // operation-based badge colour, the side glyphs are deliberately
+                // NEUTRAL (text.normal): the ● / ○ / ✦ SHAPES carry the
+                // staged/unstaged/untracked distinction, while COLOUR is reserved
+                // for the operation grammar — green +adds, red −dels below — so
+                // "green = additions, red = deletions" reads the same here as on
+                // the badges. (These glyphs formerly borrowed
+                // stagedGreen/unstagedRed/untrackedBlue, which made green mean
+                // "staged" here but "added" on the badges — one colour, two
+                // meanings. Don't reintroduce per-bucket fills.)
                 model: [
-                    {icon: "●", color: FmUi.FmTheme.gitStatus.stagedGreen,
+                    {icon: "●",
                      add: (root.stats && root.stats.stagedAdd) || 0,
                      del: (root.stats && root.stats.stagedDel) || 0,
                      n:   (root.stats && root.stats.stagedFiles) || 0},
-                    {icon: "○", color: FmUi.FmTheme.gitStatus.unstagedRed,
+                    {icon: "○",
                      add: (root.stats && root.stats.unstagedAdd) || 0,
                      del: (root.stats && root.stats.unstagedDel) || 0,
                      n:   (root.stats && root.stats.unstagedFiles) || 0},
-                    {icon: "✦", color: FmUi.FmTheme.gitStatus.untrackedBlue,
+                    {icon: "✦",
                      add: (root.stats && root.stats.untrackedLines) || 0,
                      del: 0,
                      n:   (root.stats && root.stats.untrackedCount) || 0},
@@ -257,7 +263,7 @@ FocusScope {
 
                     Text {
                         text: modelData.icon
-                        color: modelData.color
+                        color: Theme.color.text.normal
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.xs
                     }
