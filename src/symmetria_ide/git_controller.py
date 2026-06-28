@@ -63,7 +63,7 @@ log = logging.getLogger(__name__)
 STATE_UNSTAGED = "unstaged"  # red    — worktree changes not yet staged
 STATE_STAGED = "staged"  # green  — staged for next commit
 STATE_UNTRACKED = "untracked"  # blue   — new file, never added to git
-STATE_RENAMED = "renamed"  # yellow — staged rename or copy
+STATE_RENAMED = "renamed"  # orange — staged rename or copy
 STATE_CONFLICTED = "conflicted"  # magenta — unmerged
 STATE_IGNORED = "ignored"  # gray   — listed in .gitignore (rarely rendered)
 
@@ -241,7 +241,7 @@ def parse_porcelain_v2(blob: bytes) -> dict[str, GitStatus]:
             orig_path = fields[i].decode("utf-8", errors="replace")
             i += 1
             char, state = _classify_xy(xy[0], xy[1])
-            # Rename/copy use the same yellow palette regardless of staging
+            # Rename/copy use the same orange palette regardless of staging
             # side (porcelain only emits these as staged: X=R/C, Y=.).
             if char in ("R", "C"):
                 state = STATE_RENAMED

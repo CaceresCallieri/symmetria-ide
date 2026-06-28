@@ -2299,7 +2299,7 @@ Window {
     //
     // This adapter is a thin QtObject that:
     //   1. Forwards `statusForPath(absolute)` calls to `gitController`.
-    //   2. Maps the returned state name to the corresponding
+    //   2. Maps the returned char (the porcelain operation char) to the
     //      `FmUi.FmTheme.gitStatus.*` palette value — so badge colours
     //      stay consistent with whatever the FM ships, and we never
     //      hardcode hex values on the IDE side.
