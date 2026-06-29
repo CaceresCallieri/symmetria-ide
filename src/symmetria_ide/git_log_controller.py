@@ -238,8 +238,19 @@ class GitLogController(QObject):
         self._current_file_diff_path: str = ""
         self._current_file_diff_text: str = ""
 
-        # Guards `_commits`, `_resolved_root`, `_has_more`, and the diff fields
-        # against the worker mutating them while the GUI thread reads.
+        # Coalesces redundant page-0 reloads. `reload()` is wired to
+        # GitController.workingTreeChanged (see AppController.__init__), which
+        # fires once per 200ms debounce window on EVERY working-tree edit, not
+        # just HEAD moves. Flag-gating `reload()` collapses a burst of fires
+        # into ONE outstanding `git log` fetch instead of queueing N identical
+        # subprocesses behind the single worker. Set under `_lock` in
+        # `reload()`, cleared at the TOP of `_do_log` so a change arriving while
+        # a fetch is in flight still re-arms a fresh reload.
+        self._reload_pending: bool = False
+
+        # Guards `_commits`, `_resolved_root`, `_has_more`, the diff fields, and
+        # `_reload_pending` against the worker mutating them while the GUI
+        # thread reads.
         self._lock = threading.Lock()
 
         # Worker lifecycle: a request queue + a stop event. The sentinel pushed
@@ -325,6 +336,10 @@ class GitLogController(QObject):
             self._current_diff_text = ""
             self._current_file_diff_path = ""
             self._current_file_diff_text = ""
+            # A project switch re-enqueues its own page-0 load below; reset the
+            # coalescing flag so a reload pending from the OLD repo can't gate
+            # a later reload for the NEW one.
+            self._reload_pending = False
         self.repoRootChanged.emit()
         self.logChanged.emit()
         self.commitDiffChanged.emit()
@@ -335,9 +350,21 @@ class GitLogController(QObject):
 
     @Slot()
     def reload(self) -> None:
-        """Re-fetch page 0 for the current repo (replace the commit list)."""
-        if self._repo_root:
-            self._queue.put((_REQ_LOG, self._repo_root, 0))
+        """Re-fetch page 0 for the current repo (replace the commit list).
+
+        Coalesced: if a flag-gated reload is already outstanding, this is a
+        no-op. The wire from ``GitController.workingTreeChanged`` fires once per
+        debounce window during active editing, so without this gate a burst of
+        edits would queue N identical ``git log`` subprocesses behind the single
+        worker. The flag is cleared at the top of ``_do_log``, so a change
+        arriving while a fetch is in flight still re-arms a fresh reload.
+        """
+        with self._lock:
+            if self._reload_pending or not self._repo_root:
+                return
+            self._reload_pending = True
+            root = self._repo_root
+        self._queue.put((_REQ_LOG, root, 0))
 
     @Slot()
     def load_more(self) -> None:
@@ -425,6 +452,12 @@ class GitLogController(QObject):
 
     def _do_log(self, *, asked_root: str, skip: int) -> None:
         """Resolve the repo, fetch one page, apply it under the race guard."""
+        # Clear the coalescing flag BEFORE fetching: any reload request that
+        # arrives during this fetch must be free to queue a fresh one (clearing
+        # after would drop a change landing mid-flight). Harmless for the
+        # load_more/set_repo_root callers, which never set the flag.
+        with self._lock:
+            self._reload_pending = False
         resolved = self._resolve_repo_root(asked_root)
         rows = self._run_log(resolved, skip=skip) if resolved else []
         has_more = len(rows) == _PAGE_SIZE

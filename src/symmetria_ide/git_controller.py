@@ -1043,8 +1043,12 @@ class GitController(QObject):
         self._scan_wakeup.set()
         self._worker.join(timeout=1.0)
         self._worktree_watcher.stop()
-        # GUI-thread timer; stand it down so a pending backstop can't wake a
-        # joined worker after shutdown. Called on the GUI thread (shutdown).
+        # GUI-thread timers; stand them down so a pending fire can't, after
+        # shutdown has begun, wake the joined scan worker OR — via the
+        # `workingTreeChanged` → GitLogController.reload wire — queue a `git log`
+        # into the still-alive history worker between this stop() and the log
+        # controller's. Called on the GUI thread (shutdown).
+        self._debounce.stop()
         self._sentinel_backstop.stop()
 
     # -- Worker thread -----------------------------------------------------
