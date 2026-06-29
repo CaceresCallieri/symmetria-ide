@@ -937,6 +937,28 @@ class AppController(QObject):
         # (QTimer.timeout) and checktime() marshals to nvim's loop via
         # async_call itself, so no QueuedConnection is needed here.
         self._git_controller.workingTreeChanged.connect(self._backend.checktime)
+        # Real-time history freshness. `GitLogController` (the "git" surface's
+        # committed-log viewer) is request-driven and owns NO watcher of its
+        # own — by design, history is one-shot-per-request. Left unwired it
+        # freezes at the first page-0 load and drifts from reality the instant
+        # HEAD moves: a commit, merge, reset, rebase, branch switch, or push in
+        # ANY pane (the terminal/lazygit, an agent, or the embedded nvim). The
+        # symptom is the history panel disagreeing with `git log` — a commit
+        # graph from minutes ago, undermining trust in the surface entirely.
+        # `workingTreeChanged` is the right beat: it fires once per debounce
+        # window whenever the working tree OR `.git` state settles, so it covers
+        # every graph-moving op (the `.git` trigger-file watcher already tracks
+        # HEAD/MERGE_HEAD/refs/heads/<branch>/upstream/packed-refs) — strictly
+        # more complete than `statusChanged`, which would miss a same-tree
+        # branch switch or a push. Reusing this signal (vs. a second `.git`
+        # watcher inside GitLogController) keeps that subtle watcher set in ONE
+        # place. The reload is a cheap off-GUI-thread `git log -z` whose
+        # `new_rows == self._rows` model guard makes a no-change refetch a UI
+        # no-op, so firing it on plain working-tree edits (not just commits) is
+        # harmless. Same-thread: `workingTreeChanged` fires on the GUI thread
+        # (QTimer.timeout) and `reload()` only reads `_repo_root` + enqueues,
+        # so no QueuedConnection is needed (matches the `checktime` wire above).
+        self._git_controller.workingTreeChanged.connect(self._git_log_controller.reload)
         # Drive `repoRoot` from `displayedRoot` (NOT raw `cwd`). This is
         # the ONE place where the anchor concept leaks below the pure
         # view-transformation line into actual behavior: when anchored,
