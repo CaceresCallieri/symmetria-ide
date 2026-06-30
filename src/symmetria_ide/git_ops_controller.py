@@ -59,7 +59,7 @@ import subprocess
 import threading
 from queue import Queue
 
-from PySide6.QtCore import Property, QObject, Signal, Slot
+from PySide6.QtCore import QObject, Signal, Slot
 
 log = logging.getLogger(__name__)
 
@@ -86,8 +86,8 @@ _REBASE_CONFIG_VALUES = frozenset({"true", "interactive", "merges", "preserve"})
 class GitOpsController(QObject):
     """Async ``git pull`` / ``git push`` for the git surface, with status feedback.
 
-    QML-facing surface: ``pull()`` / ``push()`` slots, ``busy`` property, and
-    the ``operationStarted`` / ``operationFinished`` signals the toast binds to.
+    QML-facing surface: ``pull()`` / ``push()`` slots and the
+    ``operationStarted`` / ``operationFinished`` signals the toast binds to.
     Identity-stable like the sibling git controllers — the anchored root changes
     internally, the object does not.
     """
@@ -96,7 +96,6 @@ class GitOpsController(QObject):
     operationStarted = Signal(str)
     # (op, ok, message) — fired on the WORKER thread; connect QUEUED.
     operationFinished = Signal(str, bool, str)
-    busyChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -122,13 +121,12 @@ class GitOpsController(QObject):
         )
         self._worker.start()
 
-    # -- QML-facing properties --------------------------------------------
-
-    @Property(bool, notify=busyChanged)
-    def busy(self) -> bool:
-        """True while a pull/push is in flight (request accepted, not yet done)."""
-        with self._lock:
-            return self._busy
+    # NOTE: `_busy` is an INTERNAL single-flight gate only — deliberately NOT
+    # exposed as a QML property. A `busy` Q_PROPERTY would need a notify signal
+    # emitted from the worker thread, and a QML binding on it would then drive
+    # cross-thread binding re-evaluation — the exact hazard `operationFinished`
+    # avoids via QueuedConnection. If a future UI needs "busy", expose it with a
+    # GUI-thread-marshaled notify, not a raw worker-thread emit.
 
     # -- Wiring (Python side) ---------------------------------------------
 
@@ -175,10 +173,9 @@ class GitOpsController(QObject):
                 op, False, "No git repository for this project."
             )
             return
-        # Accepted: announce "running" and hand off to the worker. These emits
-        # are on the GUI thread (direct connection is correct — the cross-thread
-        # emit is operationFinished, from the worker).
-        self.busyChanged.emit()
+        # Accepted: announce "running" and hand off to the worker. The
+        # operationStarted emit is on the GUI thread (direct connection is
+        # correct — the cross-thread emit is operationFinished, from the worker).
         self.operationStarted.emit(op)
         self._queue.put((op, root))
 
@@ -188,16 +185,20 @@ class GitOpsController(QObject):
         """Signal the worker to exit and join it.
 
         Idempotent — a second call returns early rather than re-pushing the
-        sentinel and re-joining a dead thread. The join budget covers a
-        possibly-mid-flight network op, so it's the op timeout (not 1s like the
-        read-only workers): we'd rather wait for a push to finish than abandon
-        its worker mid-emit at teardown.
+        sentinel and re-joining a dead thread. The join budget is short (2s, in
+        the spirit of the read-only workers' ≤1s) ON PURPOSE: ``stop()`` runs on
+        the GUI thread during shutdown, so a wedged network op (dead remote,
+        auth hang) must NOT block IDE-close for the full 120s op timeout. The
+        worker is ``daemon=True``, so the OS reaps it on process exit — and the
+        "clean emit at teardown" rationale is moot here (the app is quitting; no
+        toast will be shown), unlike the read-only workers whose late emit could
+        still touch a live receiver.
         """
         if self._stop_event.is_set():
             return
         self._stop_event.set()
         self._queue.put(_STOP)
-        self._worker.join(timeout=_OP_TIMEOUT_SEC + 1.0)
+        self._worker.join(timeout=2.0)
 
     # -- Worker thread -----------------------------------------------------
 
@@ -223,13 +224,11 @@ class GitOpsController(QObject):
             finally:
                 with self._lock:
                     self._busy = False
-                # gc.disable around the cross-thread emits — gotcha #10 (Python
+                # gc.disable around the cross-thread emit — gotcha #10 (Python
                 # 3.14 cyclic GC racing the Qt receiver-side wrapper allocation
-                # while the worker is mid signal-dispatch). One window covers
-                # both emits.
+                # while the worker is mid signal-dispatch).
                 gc.disable()
                 try:
-                    self.busyChanged.emit()
                     self.operationFinished.emit(op, ok, message)
                 finally:
                     gc.enable()

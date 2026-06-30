@@ -1,6 +1,6 @@
 """Tests for `GitOpsController` — the git surface's pull/push (mutation) lane.
 
-Two layers, mirroring the sibling git tests:
+Three layers, mirroring the sibling git tests:
 
   - Pure module-level helpers (`_tail_lines`, `_join_streams`) — no Qt, no
     subprocess, no repo. Same "this input produces this string" style as
@@ -10,13 +10,22 @@ Two layers, mirroring the sibling git tests:
     the not-a-repo guard, and the push/pull success summaries. Same
     instantiate-in-try/finally-stop() pattern as the `_count_untracked_lines`
     tests in `test_git_controller.py`.
+  - Dispatch/worker contract: the single-flight `_busy` gate, the no-repo
+    failure emit, and `_busy` recovery after a worker exception. These capture
+    signals via an explicit `DirectConnection` (the emit runs in the emitting
+    thread, so a `threading.Event` is set synchronously) — NO event loop / NO
+    `processEvents`, per the shared-app SEGV memo in `.claude/memory`.
 
 See `src/symmetria_ide/git_ops_controller.py`.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
+import threading
+
+from PySide6.QtCore import Qt
 
 from symmetria_ide.git_ops_controller import (
     _MESSAGE_CHAR_CAP,
@@ -121,6 +130,25 @@ def test_pull_rebase_flag_maps_config_values(tmp_path) -> None:
         assert controller._pull_rebase_flag(str(work)) == "--rebase"
         _git(work, "config", "pull.rebase", "merges")
         assert controller._pull_rebase_flag(str(work)) == "--rebase"
+        _git(work, "config", "pull.rebase", "preserve")
+        assert controller._pull_rebase_flag(str(work)) == "--rebase"
+    finally:
+        controller.stop()
+
+
+def test_pull_rebase_flag_unset_defaults_to_no_rebase(tmp_path, monkeypatch) -> None:
+    # The real-world DEFAULT (no pull.rebase anywhere) must resolve to merge,
+    # i.e. --no-rebase (lazygit `auto`). Neutralize the host's global/system git
+    # config so "unset" is genuinely unset — otherwise `git config --get
+    # pull.rebase` could read the host's global value and make this flaky.
+    # `_run_git` shells out without an explicit env, inheriting os.environ,
+    # which monkeypatch.setenv mutates for this process.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    work = _make_repo_with_remote(tmp_path)
+    controller = GitOpsController()
+    try:
+        assert controller._pull_rebase_flag(str(work)) == "--no-rebase"
     finally:
         controller.stop()
 
@@ -188,5 +216,91 @@ def test_do_push_publishes_a_new_commit(tmp_path) -> None:
         assert ok is True
         assert message  # a concise summary of git's push output
         assert "up-to-date" not in message.lower()
+    finally:
+        controller.stop()
+
+
+# ---------------------------------------------------------------------------
+# Dispatch / worker contract — the single-flight gate, no-repo emit, and
+# busy-recovery-after-exception (the riskiest, previously-untested paths).
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_with_no_repo_root_emits_failure() -> None:
+    # No repo root set → _dispatch emits operationFinished(ok=False)
+    # SYNCHRONOUSLY on the calling thread (the GUI-thread no-repo path) without
+    # enqueuing work or latching _busy.
+    controller = GitOpsController()
+    captured: list = []
+    controller.operationFinished.connect(
+        lambda op, ok, msg: captured.append((op, ok, msg)),
+        Qt.ConnectionType.DirectConnection,
+    )
+    try:
+        controller.pull()
+        assert len(captured) == 1
+        op, ok, _msg = captured[0]
+        assert op == "pull"
+        assert ok is False
+        assert controller._queue.empty()
+        with controller._lock:
+            assert controller._busy is False
+    finally:
+        controller.stop()
+
+
+def test_single_flight_drops_second_request() -> None:
+    # While an op is in flight (_busy True), a second dispatch is dropped: no
+    # operationStarted fires and nothing is enqueued. A repo root IS set, so
+    # the drop is due to the gate (checked first), not the no-repo guard.
+    controller = GitOpsController()
+    started: list = []
+    controller.operationStarted.connect(
+        lambda op: started.append(op), Qt.ConnectionType.DirectConnection
+    )
+    try:
+        controller.set_repo_root("/some/repo/path")
+        with controller._lock:
+            controller._busy = True  # simulate an op already running
+        controller.pull()
+        assert started == []
+        assert controller._queue.empty()
+    finally:
+        # Release the simulated gate before stop() (no real worker op is
+        # running; this is just hygiene so the flag isn't left set).
+        with controller._lock:
+            controller._busy = False
+        controller.stop()
+
+
+def test_busy_cleared_after_worker_exception(tmp_path, monkeypatch) -> None:
+    # If _do_pull raises inside the worker, the finally MUST clear _busy and
+    # still emit operationFinished(ok=False) — otherwise the controller wedges
+    # (the single-flight gate would drop every future op forever).
+    controller = GitOpsController()
+    done = threading.Event()
+    captured: list = []
+
+    def _capture(op, ok, msg) -> None:
+        captured.append((op, ok, msg))
+        done.set()
+
+    # DirectConnection → _capture runs in the WORKER thread that emits, so the
+    # Event is set without needing a main-thread event loop / processEvents.
+    controller.operationFinished.connect(_capture, Qt.ConnectionType.DirectConnection)
+
+    def _boom(_root) -> tuple[bool, str]:
+        raise RuntimeError("boom")
+
+    try:
+        monkeypatch.setattr(controller, "_do_pull", _boom)
+        controller.set_repo_root(str(tmp_path))
+        controller.pull()
+        assert done.wait(timeout=5.0), "worker never emitted operationFinished"
+        op, ok, _msg = captured[0]
+        assert op == "pull"
+        assert ok is False
+        with controller._lock:
+            assert controller._busy is False
     finally:
         controller.stop()

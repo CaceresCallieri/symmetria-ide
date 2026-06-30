@@ -188,7 +188,11 @@ FocusScope {
             case Qt.Key_Escape:
                 // Dismiss a stuck git-ops error toast. Harmless no-op when none
                 // is showing (the host just calls hide() on an already-hidden
-                // toast). The git surface has no other Esc behaviour to swallow.
+                // toast). NOTE: this accept is UNCONDITIONAL — Esc is swallowed
+                // here whether or not a toast is up. Deliberate today (the git
+                // surface has no other Esc behaviour), but it WILL mask any
+                // future Esc binding added to this surface; gate the accept on
+                // toast visibility if such a binding ever lands.
                 root.dismissStatusRequested();
                 event.accepted = true;
                 break;

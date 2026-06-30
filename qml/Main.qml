@@ -2481,7 +2481,11 @@ Window {
     // rare overlap to one card.
     Toast {
         id: gitOpsToast
-        z: 50 // above every central surface and the modals (z 40)
+        // z:50 sits above the z:40 spawn/MCP modals. The push/close
+        // ConfirmDialogs are ALSO z:50 — toast and confirm virtually never
+        // coexist, and if they did, declaration order (confirms declared after)
+        // decides paint order, not z.
+        z: 50
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
         anchors.bottomMargin: Theme.size.statusBarHeight + Theme.spacing.lg

@@ -262,6 +262,9 @@ FocusScope {
                     onCurrentFileChanged: root._requestCurrentDiff()
                     onToggleRequested: root.toggleMode()
                     onFileActivated: (path) => root.fileActivated(path)
+                    // Esc here also dismisses a stuck git-ops error toast, so
+                    // it's keyboard-dismissible from either sub-view.
+                    onDismissStatusRequested: root.dismissStatusRequested()
                 }
             }
 

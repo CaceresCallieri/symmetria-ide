@@ -65,6 +65,13 @@ FocusScope {
     // Carries the absolute path; the host routes it to open-in-nvim.
     signal fileActivated(string absolutePath)
 
+    // Esc → dismiss a stuck git-ops error toast. Mirrors CommitListView so the
+    // persistent error toast is keyboard-dismissible from EITHER sub-view (the
+    // error severity never auto-hides — non-negotiable #1, keyboard-first). The
+    // host bubbles it to Main → gitOpsToast.hide(). Pull/push themselves are
+    // intentionally NOT bound here — they live only in the history sub-view.
+    signal dismissStatusRequested()
+
     // Bumped on every worktree scan so `currentFile` recomputes even when the
     // SELECTION hasn't moved — otherwise the detail header's ±counts / tooltip
     // would go stale on an in-place edit of the already-selected file (the
@@ -142,6 +149,10 @@ FocusScope {
     Keys.onPressed: function (event) {
         if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
             root.toggleRequested();
+            event.accepted = true;
+        } else if (event.key === Qt.Key_Escape) {
+            // Dismiss a stuck git-ops error toast (no-op when none is showing).
+            root.dismissStatusRequested();
             event.accepted = true;
         }
     }

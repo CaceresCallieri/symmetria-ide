@@ -2045,17 +2045,22 @@ class AppController(QObject):
 
     @Slot(str, bool, str)
     def _on_git_op_finished(self, op: str, ok: bool, message: str) -> None:  # noqa: ARG002
-        """Refresh the read-only git surfaces after a successful pull/push.
+        """Refresh the read-only git surfaces after any pull/push attempt.
 
         Connected QUEUED to `GitOpsController.operationFinished` (the worker
-        thread emits it). On success, poke the status controller (re-scan the
-        working tree + recompute ↑N/↓N) and reload the commit log so the
-        history viewer reflects the new HEAD/upstream immediately. On failure
-        there's nothing to refresh — the repo state is unchanged. The toast
-        (Main.qml) owns the user-facing message; this slot is state-only.
+        thread emits it). Poke the status controller (re-scan the working tree +
+        recompute ↑N/↓N) and reload the commit log so the history viewer
+        reflects the new HEAD/upstream/working-tree state immediately.
+
+        Fires on FAILURE too, deliberately: a failed merge/rebase `git pull`
+        exits non-zero yet still mutates the working tree (conflict markers, a
+        rebase-in-progress, MERGE_HEAD), so the changes view + status badges
+        must refresh to surface that — waiting for the worktree-watcher debounce
+        would leave a stale "clean" picture. Both refreshes are
+        coalesced/idempotent (the log reload no-ops when HEAD hasn't moved, e.g.
+        a rejected push), so firing them on a no-op failure is harmless. The
+        toast (Main.qml) owns the user-facing message; this slot is state-only.
         """
-        if not ok:
-            return
         self._git_controller.poke()
         self._git_log_controller.reload()
 
