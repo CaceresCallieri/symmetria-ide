@@ -65,6 +65,7 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
 )
 from .git_controller import GitController, GitStatusListModel
 from .git_log_controller import GitLogController, GitLogListModel
+from .git_ops_controller import GitOpsController
 from .minimap_model import MinimapModel
 from .minimap_view import MinimapView  # noqa: F401 — side-effect: @QmlElement registration
 from .editor_font import DEFAULT_FONT_POINT_SIZE, default_font
@@ -922,6 +923,26 @@ class AppController(QObject):
         # surface (the history viewer) — see qml/githistory/.
         self._git_log_controller = GitLogController(self)
         self._git_log_model = GitLogListModel(self._git_log_controller, self)
+        # ----- Git OPERATIONS provider (the surface's first MUTATIONS) ------
+        # The mutating/network counterpart to the two read-only controllers
+        # above: `git pull` / `git push`, driven by p / P in the history view.
+        # Its OWN worker thread (not the log controller's queue) so a
+        # multi-second push never blocks commit-diff navigation. Shares the
+        # anchored root via `_sync_git_repo_root` below; feedback rides
+        # operationStarted/operationFinished into the git-ops toast (Main.qml).
+        self._git_ops_controller = GitOpsController(self)
+        # On a SUCCESSFUL pull/push, eagerly refresh the read-only surfaces.
+        # The `.git`/worktree watchers WOULD pick these up on their own (a pull
+        # moves HEAD + the working tree; a push moves the upstream remote-ref,
+        # which the watcher set explicitly includes), but the explicit poke
+        # makes the ↑N/↓N counts + the commit log update the instant the op
+        # lands rather than one watcher-debounce later. Both refreshes are
+        # coalesced/idempotent, so firing them is cheap. Cross-thread:
+        # operationFinished is emitted on the ops worker, so connect QUEUED
+        # (project-standards §4 P2) — the slot pokes GUI-thread-owned objects.
+        self._git_ops_controller.operationFinished.connect(
+            self._on_git_op_finished, Qt.ConnectionType.QueuedConnection
+        )
         # Real-time external-reload: when the working tree settles after a
         # change (agent Edit/Write picked up by the recursive watcher, a
         # shell-pane append, an editor-save poke, or a branch switch), tell
@@ -1920,6 +1941,16 @@ class AppController(QObject):
         """Flat list model of commits for the history viewer's list pane."""
         return self._git_log_model
 
+    @Property(QObject, constant=True)
+    def gitOpsController(self) -> QObject:
+        """The `GitOpsController` (pull/push) exposed to QML.
+
+        Drives the history view's p/P actions + the git-ops toast. Identity-
+        stable like the sibling git controllers — the anchored root changes
+        internally, the object doesn't.
+        """
+        return self._git_ops_controller
+
     @Property(list, notify=expandedPathsCacheChanged)
     def expandedPathsCache(self) -> list[str]:
         """Saved expanded-paths list for the current displayed root.
@@ -2008,6 +2039,25 @@ class AppController(QObject):
         # The history viewer tracks the SAME anchored root — one anchor, both
         # the status badges and the log. Also idempotent on equal values.
         self._git_log_controller.set_repo_root(self.displayedRoot)
+        # Pull/push target the same anchored root — one anchor, every git
+        # surface. Idempotent on equal values.
+        self._git_ops_controller.set_repo_root(self.displayedRoot)
+
+    @Slot(str, bool, str)
+    def _on_git_op_finished(self, op: str, ok: bool, message: str) -> None:  # noqa: ARG002
+        """Refresh the read-only git surfaces after a successful pull/push.
+
+        Connected QUEUED to `GitOpsController.operationFinished` (the worker
+        thread emits it). On success, poke the status controller (re-scan the
+        working tree + recompute ↑N/↓N) and reload the commit log so the
+        history viewer reflects the new HEAD/upstream immediately. On failure
+        there's nothing to refresh — the repo state is unchanged. The toast
+        (Main.qml) owns the user-facing message; this slot is state-only.
+        """
+        if not ok:
+            return
+        self._git_controller.poke()
+        self._git_log_controller.reload()
 
     @Slot()
     def _sync_nvim_cwd(self) -> None:
@@ -4765,6 +4815,10 @@ class AppController(QObject):
         self._git_controller.stop()
         # Same join-before-teardown rationale for the history worker.
         self._git_log_controller.stop()
+        # And the ops worker. Its join budget is the op timeout (it may be
+        # mid-push), so stop it here alongside the other git workers — before
+        # nvim's shutdown handshake takes the event loop.
+        self._git_ops_controller.stop()
         # Ask nvim to quit GRACEFULLY over the RPC socket (`_backend.stop()`
         # sends `qa!` + closes the client) so it writes shada/swap cleanly.
         # The terminal widgets (editor nvim + shell) are owned by their
@@ -4947,6 +5001,7 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # subtree stays extraction-ready for a future Symmetria.Git.UI module).
     ctx.setContextProperty("gitLogController", controller.gitLogController)
     ctx.setContextProperty("gitLogModel", controller.gitLogModel)
+    ctx.setContextProperty("gitOpsController", controller.gitOpsController)
     # NB: previously this block also exposed `sessionHost` and
     # `sessionModel` as context properties pointing at the focused
     # slot. Those have been removed for two reasons:

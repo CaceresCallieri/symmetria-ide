@@ -1212,6 +1212,10 @@ Window {
                     focus: visible
                     logController: gitLogController
                     logModel: gitLogModel
+                    // Pull/push (p / P in the history list) — the surface's
+                    // first mutating actions. pull() dispatches directly; push
+                    // bubbles up (below) to a confirm dialog.
+                    opsController: gitOpsController
                     // Live working-tree file list for the "changes" sub-view —
                     // the same GitStatusListModel the Active Changes side panel
                     // renders, reused rather than re-scanned.
@@ -1235,6 +1239,11 @@ Window {
                         controller.open_in_nvim(absolutePath);
                         controller.set_central_surface("editor");
                     }
+                    // Push intent → the confirm gate (branch/ahead context +
+                    // the modal live at Main scope). Esc on the list → clear a
+                    // stuck git-ops error toast.
+                    onPushRequested: pushConfirmDialog.open()
+                    onDismissStatusRequested: gitOpsToast.hide()
                 }
 
                 // REGRESSION NOTE: a 2026-05-23 experiment wrapped AgentPane
@@ -2463,6 +2472,39 @@ Window {
         }
     }
 
+    // Git pull/push status toast — the feedback for the history view's p / P.
+    // "running" while the op is in flight (calm-blue spinner), "success" green
+    // + auto-hide on completion, "error" red + PERSISTENT (the user's explicit
+    // ask: a git error must not fade before it's read). Same anchor as the
+    // spawn toast — the two virtually never coexist (git ops happen on the git
+    // surface; spawn failures while spawning agents), and latest-wins keeps a
+    // rare overlap to one card.
+    Toast {
+        id: gitOpsToast
+        z: 50 // above every central surface and the modals (z 40)
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: Theme.size.statusBarHeight + Theme.spacing.lg
+
+        Connections {
+            target: gitOpsController
+            // operationStarted — GUI-thread emit the instant the op is accepted.
+            function onOperationStarted(op) {
+                gitOpsToast.show(op === "push" ? "Pushing…" : "Pulling…", "", "running");
+            }
+            // operationFinished — emitted on the ops WORKER thread, delivered
+            // here queued. `message` is git's concise output tail. Success →
+            // green auto-hide; failure → red persistent (stays until dismissed).
+            function onOperationFinished(op, ok, message) {
+                if (ok)
+                    gitOpsToast.show(op === "push" ? "Pushed" : "Pulled", message, "success");
+                else
+                    gitOpsToast.show((op === "push" ? "Push" : "Pull") + " failed",
+                                     message, "error");
+            }
+        }
+    }
+
     // Window-close confirmation (Hyprland Super+Q / WM close). Closing the
     // IDE reaps every terminal-agent + the editor session at once, so the
     // close request is vetoed in `onClosing` below and routed here first —
@@ -2477,6 +2519,35 @@ Window {
         // intent set in request_teardown. The session is saved by shutdown()
         // on the way out regardless of this branch.
         onConfirmed: controller.teardown_discard()
+        onCancelled: root._restoreCentralFocus()
+    }
+
+    // Push confirmation (uppercase P in the history list). Push is outward-
+    // facing — it publishes commits to the remote — so it's gated behind a
+    // deliberate Enter, which doubles as a "here's what you're about to push"
+    // summary (branch + ahead count). The branch name comes from the nvim
+    // `branch` capsule (statusState) and the ahead count from GitController's
+    // porcelain `# branch.ab` header — the same two producers the status bar
+    // pairs. Pull has no confirm (it's local-affecting + lazygit-auto safe).
+    ConfirmDialog {
+        id: pushConfirmDialog
+        title: "Push to remote?"
+        confirmText: "Push"
+        message: {
+            var b = statusState.branch !== ""
+                ? "'" + statusState.branch + "'" : "the current branch";
+            var ahead = gitController.aheadCount;
+            if (ahead > 0)
+                return "Push " + b + " — ↑" + ahead
+                    + (ahead === 1 ? " commit" : " commits") + " ahead of upstream.";
+            return "Push " + b + " to its upstream?\n"
+                + "Nothing ahead of upstream — this may be a no-op.";
+        }
+        // Host-first: dispatch the push, THEN re-home focus onto the git list.
+        onConfirmed: {
+            gitOpsController.push();
+            root._restoreCentralFocus();
+        }
         onCancelled: root._restoreCentralFocus()
     }
 
@@ -2633,7 +2704,8 @@ Window {
     function _anyModalVisible() {
         return agentSpawnMenu.visible || agentSessionPicker.visible
             || mcpMenu.visible || closeConfirmDialog.visible
-            || unsavedChangesDialog.visible || sessionsMenu.visible;
+            || unsavedChangesDialog.visible || sessionsMenu.visible
+            || pushConfirmDialog.visible;
     }
 
     /// Shared focus dispatch: pull active focus into the visible central
@@ -2668,6 +2740,10 @@ Window {
             mcpMenu.reassert();
             return;
         }
+        if (pushConfirmDialog.visible) {
+            pushConfirmDialog.reassert();
+            return;
+        }
         if (agentSessionPicker.visible) {
             // reassert(), not open() — open() re-fetches the session list.
             agentSessionPicker.reassert();
@@ -2687,6 +2763,11 @@ Window {
             agentPane.forceActiveFocus();
         else if (controller.agentSurfaceVisible)
             controller.focus_agent(controller.focusedAgent);
+        else if (controller.gitVisible)
+            // Re-home focus onto the git surface's active sub-view list (so a
+            // dismissed push-confirm / re-activated window lands keys back on
+            // the history list, not the hidden editor).
+            gitHistoryView.focusContent();
         else if (controller.terminalVisible)
             terminalView.forceActiveFocus();
         else

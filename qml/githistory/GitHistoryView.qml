@@ -48,6 +48,9 @@ FocusScope {
     property var logController: null
     property var logModel: null
     property var statusModel: null
+    // Mutating/network git ops (pull/push) — the surface's first write actions.
+    // Injected like the read controllers so the subtree stays extraction-ready.
+    property var opsController: null
 
     // FM file-tree inputs for the "changes" master pane — forwarded to
     // WorkingFileTreeView's embedded FmUi.FileTreeView. Same three the Active
@@ -61,6 +64,14 @@ FocusScope {
     // (Enter / double-click). Main.qml routes it to open-in-nvim + surface
     // swap so "I've read this diff, take me to edit it" is one keystroke.
     signal fileActivated(string absolutePath)
+
+    // Push needs a confirm dialog (a Main-level modal) and the branch/ahead
+    // context (statusState/gitController globals Main owns), so push intent
+    // bubbles to Main rather than being handled here. Pull has no such needs —
+    // it's dispatched directly to opsController below. `dismissStatusRequested`
+    // (Esc on the history list) bubbles to Main to hide the git-ops toast.
+    signal pushRequested()
+    signal dismissStatusRequested()
 
     // Which sub-view is active. Initial value "changes" (working tree first)
     // per the surface's "what's uncommitted" framing; Tab toggles between the
@@ -298,6 +309,11 @@ FocusScope {
                             root.logController.request_diff(commitList.currentCommit.hash);
                     }
                     onToggleRequested: root.toggleMode()
+                    // p → pull directly (no confirm); P → bubble push intent up
+                    // to Main for the confirm dialog; Esc → bubble toast dismiss.
+                    onPullRequested: if (root.opsController) root.opsController.pull()
+                    onPushRequested: root.pushRequested()
+                    onDismissStatusRequested: root.dismissStatusRequested()
                 }
             }
 

@@ -33,6 +33,16 @@ FocusScope {
     // key, so it must be intercepted and accepted at the focus point).
     signal toggleRequested()
 
+    // Remote-sync intents — pure intents (this view holds no controller for
+    // them), routed by the host (GitHistoryView) to GitOpsController.pull() /
+    // a push-confirm dialog. `p` pulls, `P` (Shift) pushes — keyboard-first
+    // git sync from the history view, the surface's first mutating actions.
+    signal pullRequested()
+    signal pushRequested()
+    // Esc dismisses a stuck git-ops status toast (the persistent error case).
+    // Bubbled to the host → Main.qml hides the toast.
+    signal dismissStatusRequested()
+
     // The highlighted row's data, surfaced for the detail pane. Null when the
     // list is empty (clean reset / no repo). Re-evaluates whenever the
     // ListView's currentItem swaps, which fires `currentCommitChanged`.
@@ -165,6 +175,22 @@ FocusScope {
                     view.currentIndex = Math.max(0, view.currentIndex - root._halfPage);
                     event.accepted = true;
                 }
+                break;
+            case Qt.Key_P:
+                // p → pull, P (Shift) → push. Pure intents; the host routes
+                // pull straight to GitOpsController and push through a confirm.
+                if (event.modifiers & Qt.ShiftModifier)
+                    root.pushRequested();
+                else
+                    root.pullRequested();
+                event.accepted = true;
+                break;
+            case Qt.Key_Escape:
+                // Dismiss a stuck git-ops error toast. Harmless no-op when none
+                // is showing (the host just calls hide() on an already-hidden
+                // toast). The git surface has no other Esc behaviour to swallow.
+                root.dismissStatusRequested();
+                event.accepted = true;
                 break;
             }
         }

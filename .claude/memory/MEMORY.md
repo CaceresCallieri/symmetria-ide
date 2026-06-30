@@ -22,7 +22,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 
 - [Framework pivot REVERSED (2026-06-07)](project/active/framework_pivot.md) — Tauri pivot abandoned; staying native QML to reuse FM's Symmetria.FileManager.UI module. Plan QML, not web.
 - [Phase 2 SDK pane (parked+env-gated 2026-06-10)](project/active/phase2_current_state.md) — terminal-agent runtime superseded it; mounts only via SYMMETRIA_IDE_SDK_PANE=1
-- [GitView history viewer (v0 2026-06-15)](project/active/gitview_history_viewer.md) — read-only "git" surface; comprehension not mutation; agent-correlation + review-frontier are north stars
+- [GitView history viewer](project/active/gitview_history_viewer.md) — comprehension-first "git" surface; pull/push (transport) now in scope via GitOpsController, no authoring mutations
 - [Markdown preview in IDE (idea)](project/active/markdown_preview_in_ide.md) — future: themed HTML .md preview in the embedded browser, key-toggled
 - [Startup optimization outcomes](project/active/startup_optimization_followups.md) — gc.collect drop SHIPPED (51bf26c, ~20ms); WebEngine import deferral spiked+works but HELD (Qt-deprecated late init)
 - [Agent ownership inversion (P1-4 SHIPPED; P5 IDE-decoupled)](project/active/agent_ownership_inversion.md) — claude agents IDE-owned; STT now pure-direct shell→IDE (bridge STT/inject removed); orchestrator.nvim KEPT (IDE just decoupled). Live dictation verify owed. See docs/agent-ownership-inversion.md

@@ -7,11 +7,18 @@ metadata:
   originSessionId: 3ef6783a-0332-48f6-ba9e-150a4a3e5ddc
 ---
 
-The IDE's git frontend is a **read-only history comprehension surface**, NOT a
-lazygit-style mutation tool. Thesis: when agents author the commits, the
-developer loses the understanding that comes free from writing code — the
-**cognitive gap**. GitView exists to shrink it: browse/read/navigate history,
-never stage/commit/rebase (agents do that; mutations stay in nvim/shell).
+The IDE's git frontend is a **comprehension-first** surface. Thesis: when agents
+author the commits, the developer loses the understanding that comes free from
+writing code — the **cognitive gap**. GitView exists to shrink it: browse/read/
+navigate history. **Boundary refined 2026-06-29:** the line is no longer
+"read-only, never mutate" but **no AUTHORING mutations** — stage/commit/rebase
+(content creation) stay in nvim/shell; **TRANSPORT/sync ops are now in scope**.
+First mutations shipped: `git pull` (`p`) / `git push` (`P`) from the history
+list, via `src/symmetria_ide/git_ops_controller.py` (`GitOpsController` — its own
+worker-thread lane, NOT the read-only log/status controllers) + a status toast
+(qml/Toast.qml gained severity states: running/success/error, error persists).
+Rationale the boundary holds: sync moves *existing* commits between local/remote
+(navigation), it doesn't author content, so it doesn't undercut the thesis.
 
 **v0 (shipped 2026-06-15) — the comprehension spine:**
 - New `"git"` central surface (sibling of editor/terminal/agent); `Ctrl+Shift+G`
@@ -46,7 +53,11 @@ read-only-on-purpose rationale and the roadmap are not). Relates to
 [[multi_instance_topology]] (many agent-driven repos open at once) and
 [[ide_owns_keybind_layer]] (IDE owns the chord/surface layer).
 
-**How to apply:** when extending GitView, add read/comprehension features
-(blame, file history, catch-up range diff, agent grouping, review frontier) —
-do NOT add staging/commit/rebase. Build on `GitLogController`'s request/worker
-pattern; keep the QML bound to injected providers for extraction-readiness.
+**How to apply:** when extending GitView, prefer read/comprehension features
+(blame, file history, catch-up range diff, agent grouping, review frontier). For
+new ACTIONS, allow transport/sync (pull/push shipped; fetch/prune are natural
+next) but still do NOT add AUTHORING mutations (stage/commit/rebase) — those stay
+in nvim/shell. New mutating/network actions belong in `GitOpsController` (its own
+worker lane + operationStarted/Finished → toast), NOT the read-only controllers;
+new keys live in `CommitListView` as pure intents routed by `GitHistoryView`.
+Keep the QML bound to injected providers for extraction-readiness.
