@@ -652,6 +652,13 @@ class AppController(QObject):
         # short-delay clear here (slot -> single-shot QTimer); any real hook event
         # for that slot cancels it (the event sets the true state instead).
         self._pending_interrupt_clears: dict[int, QTimer] = {}
+        # True while a QML input-capturing overlay (spawn menu, session/MCP menus,
+        # confirm dialogs, fuzzy finder) holds focus. Such an overlay consumes
+        # Escape to close itself, so the keystroke never reaches the agent
+        # terminal and is NOT an interrupt — `on_terminal_escape` must not arm a
+        # clear then. Pushed from Main.qml (set_modal_overlay_open) on every
+        # overlay visibility change. See agent_interrupt.py.
+        self._modal_overlay_open: bool = False
         # 0 = no agent focused (empty pool). 1-based slot otherwise.
         self._focused_term_agent: int = 0
         # STT indicator mirrored from snapshot "stt" (0 = no dictation
@@ -3727,6 +3734,13 @@ class AppController(QObject):
         Runs entirely on the GUI thread (Qt delivers key events there; the QTimer
         fires there too) — no cross-thread / GC-suspension concerns (gotcha #10).
         """
+        if self._modal_overlay_open:
+            # An input-capturing QML overlay (spawn menu, picker, dialog, fuzzy
+            # finder) is open; THIS Escape closes that overlay and never reaches
+            # the agent's terminal, so it cannot be an interrupt. Suppressing the
+            # arm here is correctness, not just polish — the app-level event
+            # filter sees the key before QML consumes it. See set_modal_overlay_open.
+            return
         slot = self._focused_term_agent
         activity = self._term_agent_activity.get(slot)
         if not should_arm_interrupt_clear(
@@ -3746,6 +3760,13 @@ class AppController(QObject):
             self._pending_interrupt_clears[slot] = timer
         timer.start()  # (re)start the grace window on each Esc
 
+    @Slot(bool)
+    def set_modal_overlay_open(self, value: bool) -> None:
+        """QML pushes whether an input-capturing overlay is open (see the
+        `_modal_overlay_open` field). Gates `on_terminal_escape` so a
+        modal-dismissing Escape never clears a still-working agent's sparkle."""
+        self._modal_overlay_open = bool(value)
+
     def _cancel_pending_interrupt_clear(self, slot: int) -> None:
         """Drop a slot's speculative interrupt-clear timer (real event / close)."""
         timer = self._pending_interrupt_clears.pop(slot, None)
@@ -3760,7 +3781,13 @@ class AppController(QObject):
         Mirrors `_on_agent_hook`'s clear path (pop activity → emit → publish the
         now-idle state outward) so the shell dashboard mirrors the clear too.
         """
-        self._pending_interrupt_clears.pop(slot, None)
+        # deleteLater (not just pop): a fired single-shot QTimer is parented to
+        # the controller and would otherwise linger for the app's lifetime —
+        # match `_cancel_pending_interrupt_clear`. Safe from within the timeout
+        # slot (deletion defers to the event loop after this returns).
+        timer = self._pending_interrupt_clears.pop(slot, None)
+        if timer is not None:
+            timer.deleteLater()
         if slot not in self._term_agents:
             return  # closed during the grace window
         if self._term_agent_activity.pop(slot, None) is None:

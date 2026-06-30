@@ -2712,6 +2712,15 @@ Window {
             || pushConfirmDialog.visible;
     }
 
+    // Mirror "an input-capturing overlay is open" to the controller so its
+    // Python EscapeWatcher (agent_interrupt.py) does NOT treat a modal-dismissing
+    // Escape as an agent interrupt — that Escape closes the overlay and never
+    // reaches the agent terminal. Superset of _anyModalVisible() (the chord
+    // ping-pong guard) plus the fuzzy finder, which also swallows Escape. The
+    // binding re-evaluates whenever any of those visibilities change.
+    readonly property bool escapeOverlayOpen: _anyModalVisible() || ideFuzzyFinder.active
+    onEscapeOverlayOpenChanged: controller.set_modal_overlay_open(escapeOverlayOpen)
+
     /// Shared focus dispatch: pull active focus into the visible central
     /// surface. Used by Window.onActiveChanged and modal dismissals.
     function _restoreCentralFocus() {

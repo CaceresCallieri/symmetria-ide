@@ -254,6 +254,21 @@ def test_escape_off_agent_surface_does_not_arm(controller):
     assert controller._term_agent_activity[slot]["state"] == "thinking"
 
 
+def test_escape_suppressed_while_modal_overlay_open(controller):
+    # An open input-capturing overlay (spawn menu, picker, dialog, fuzzy finder)
+    # consumes the Escape to close itself — it never reaches the agent terminal,
+    # so it is not an interrupt and must not arm a clear.
+    slot = _make_thinking_focused_agent(controller)
+    controller.set_modal_overlay_open(True)
+    controller.on_terminal_escape()
+    assert slot not in controller._pending_interrupt_clears
+    assert controller._term_agent_activity[slot]["state"] == "thinking"
+    # Once the overlay closes, a real interrupt Escape arms again.
+    controller.set_modal_overlay_open(False)
+    controller.on_terminal_escape()
+    assert slot in controller._pending_interrupt_clears
+
+
 def test_escape_when_idle_does_not_arm(controller):
     controller.spawn_agent("fresh", True)
     slot = 1
