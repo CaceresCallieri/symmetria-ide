@@ -58,4 +58,5 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
 
-_(empty — protocol contract lives in CLAUDE.md "The agent backend" section + `sidecar/src/protocol.ts`.)_
+- [No hook on Esc-interrupt](reference/agent-sdk/no_hook_on_esc_interrupt.md) — Claude fires NO hook on cancel (2.1.170); sparkle sticks; EscapeWatcher fallback in agent_interrupt.py
+- _(sidecar protocol contract lives in CLAUDE.md "The agent backend" section + `sidecar/src/protocol.ts`.)_

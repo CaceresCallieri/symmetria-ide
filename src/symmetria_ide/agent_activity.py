@@ -215,9 +215,21 @@ class AgentActivityMachine:
         #     instead of the eye-open hold of a normal startup/resume.
         if hook_event == "SessionStart" and event.get("source") == "clear":
             state = "clearing"
-        # (2) Claude fires NO hook on a user interrupt (Esc); the delayed
-        #     Notification(idle_prompt) and a mid-tool PostToolUseFailure with
-        #     is_interrupt are the two partial signals, both mapped to idle.
+        # (2) Claude fires NO hook on a user interrupt (Esc). A PTY harness
+        #     against Claude Code 2.1.170 confirmed this for BOTH cases —
+        #     mid-thinking AND mid-tool: the only events around an interrupt are
+        #     the ones BEFORE it (UserPromptSubmit, and PreToolUse for the tool
+        #     case), then silence. So the two branches below are best-effort
+        #     partial signals, NOT reliable:
+        #       - the delayed Notification(idle_prompt) eventually fires (idle
+        #         timeout, ~tens of seconds, focus-dependent) — too slow to feel
+        #         un-stuck;
+        #       - the PostToolUseFailure(is_interrupt) branch did NOT fire at all
+        #         in 2.1.170 (effectively dead here; kept for older/future
+        #         versions where it may surface — is_interrupt is undocumented).
+        #     The RELIABLE recovery is the IDE-side Esc fallback in
+        #     agent_interrupt.py (EscapeWatcher → AppController.on_terminal_escape),
+        #     which clears the sparkle ~1.5s after the Escape when no hook arrives.
         elif hook_event == "Notification" and event.get("idle_notification"):
             state = "idle"
         elif hook_event == "PostToolUseFailure" and event.get("is_interrupt") is True:

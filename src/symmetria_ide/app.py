@@ -56,6 +56,11 @@ from .account_usage_store import AccountUsageStore
 from .agent_activity import AgentActivityMachine
 from .agent_bridge import AgentBridgeClient, emit_gc_safe
 from .agent_events import AgentEventsServer
+from .agent_interrupt import (
+    INTERRUPT_CLEAR_GRACE_MS as _INTERRUPT_CLEAR_GRACE_MS,
+    EscapeWatcher,
+    should_arm_interrupt_clear,
+)
 from .browser_mcp import BrowserMcpBridge, BrowserMcpServer
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .trace import trace
@@ -640,6 +645,13 @@ class AppController(QObject):
         # fills slots that haven't reported locally yet (legacy path, removed in
         # Phase 3). See `_locally_captured_agents`.
         self._term_agent_activity: dict[int, dict] = {}
+        # Esc-interrupt recovery (agent_interrupt.py). Claude fires NO hook on a
+        # user Esc-interrupt (proven on 2.1.170 — see agent_interrupt module
+        # docstring), so an event-sourced sparkle stays stuck "thinking"/"working"
+        # forever after a cancel. An Escape observed on the focused agent arms a
+        # short-delay clear here (slot -> single-shot QTimer); any real hook event
+        # for that slot cancels it (the event sets the true state instead).
+        self._pending_interrupt_clears: dict[int, QTimer] = {}
         # 0 = no agent focused (empty pool). 1-based slot otherwise.
         self._focused_term_agent: int = 0
         # STT indicator mirrored from snapshot "stt" (0 = no dictation
@@ -2902,6 +2914,7 @@ class AppController(QObject):
             )
             del self._term_agents[slot]
             self._term_agent_activity.pop(slot, None)
+            self._cancel_pending_interrupt_clear(slot)
             self._forget_local_agent(slot)
             self._release_agent_browser_windows(slot)
             self.termAgentsChanged.emit()
@@ -2911,6 +2924,7 @@ class AppController(QObject):
         self._agent_order.remove(slot)
         del self._term_agents[slot]
         self._term_agent_activity.pop(slot, None)
+        self._cancel_pending_interrupt_clear(slot)
         self._forget_local_agent(slot)
         self._release_agent_browser_windows(slot)
         self.termAgentsChanged.emit()
@@ -3609,6 +3623,12 @@ class AppController(QObject):
             return
         if slot not in self._term_agents:
             return  # event for a slot we've already closed
+        # A real hook event supersedes any speculative Esc-interrupt clear armed
+        # for this slot: the agent is genuinely transitioning, and the event
+        # itself sets the correct state below (it may even BE a clear, e.g. Stop).
+        # Without this an Esc pressed while the agent was still working — then a
+        # tool result arrives within the grace window — would wrongly blink idle.
+        self._cancel_pending_interrupt_clear(slot)
         # From now on local capture owns this slot — the bridge snapshot will
         # PRESERVE rather than overwrite its activity (see _on_bridge_snapshot).
         # The claim happens on the FIRST event regardless of whether it yields a
@@ -3685,6 +3705,80 @@ class AppController(QObject):
                 in_plan_mode=outcome.in_plan_mode,
                 session_id=self._term_agents[slot]["session_id"],
             )
+
+    # ------------------------------------------------------------------
+    # Esc-interrupt recovery (agent_interrupt.py) — the non-hook fallback edge
+    # ------------------------------------------------------------------
+
+    @Slot()
+    def on_terminal_escape(self) -> None:
+        """An Escape press was observed (EscapeWatcher) — maybe arm a clear.
+
+        Claude emits no hook on an Esc-interrupt (agent_interrupt module
+        docstring), so this is the only signal that returns a focused agent's
+        sparkle to idle after a cancel. `should_arm_interrupt_clear` is the hard
+        gate: agent surface visible, a focused agent, an interruptible state —
+        which keeps the editor's constant Esc (vim insert-mode exit) and the
+        shell's Esc from ever touching agent state. The clear is DEFERRED behind
+        a grace window that a real subsequent hook cancels
+        (`_cancel_pending_interrupt_clear` in `_on_agent_hook`), so an Esc pressed
+        while the agent is genuinely still working self-corrects.
+
+        Runs entirely on the GUI thread (Qt delivers key events there; the QTimer
+        fires there too) — no cross-thread / GC-suspension concerns (gotcha #10).
+        """
+        slot = self._focused_term_agent
+        activity = self._term_agent_activity.get(slot)
+        if not should_arm_interrupt_clear(
+            central_surface=self._central_surface,
+            focused_slot=slot,
+            activity_state=activity.get("state") if activity else None,
+        ):
+            return
+        timer = self._pending_interrupt_clears.get(slot)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(_INTERRUPT_CLEAR_GRACE_MS)
+            # Default-arg capture binds the slot at connect time (one timer per
+            # slot, so there's no last-slot-wins hazard, but keep it explicit).
+            timer.timeout.connect(lambda s=slot: self._clear_interrupted_agent(s))
+            self._pending_interrupt_clears[slot] = timer
+        timer.start()  # (re)start the grace window on each Esc
+
+    def _cancel_pending_interrupt_clear(self, slot: int) -> None:
+        """Drop a slot's speculative interrupt-clear timer (real event / close)."""
+        timer = self._pending_interrupt_clears.pop(slot, None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+
+    def _clear_interrupted_agent(self, slot: int) -> None:
+        """Grace window elapsed with no superseding hook — treat the Esc as a
+        genuine interrupt and return the slot's sparkle to idle.
+
+        Mirrors `_on_agent_hook`'s clear path (pop activity → emit → publish the
+        now-idle state outward) so the shell dashboard mirrors the clear too.
+        """
+        self._pending_interrupt_clears.pop(slot, None)
+        if slot not in self._term_agents:
+            return  # closed during the grace window
+        if self._term_agent_activity.pop(slot, None) is None:
+            return  # already cleared by a real event in the meantime
+        log.info(
+            "interrupt-clear: slot %d sparkle cleared after Esc (no hook fired)", slot
+        )
+        self.agentActivityChanged.emit()
+        # Publish the now-idle activity outward (same as the hook clear path).
+        # in_plan_mode is best-effort False: the turn ended and a cleared entry
+        # carries no mode; session_id is retained for restore.
+        self._agent_bridge.notify_activity(
+            slot,
+            state="",
+            tool="",
+            in_plan_mode=False,
+            session_id=self._term_agents[slot]["session_id"],
+        )
 
     @Slot(dict)
     def _on_bridge_snapshot(self, payload: dict) -> None:
@@ -4364,6 +4458,18 @@ class AppController(QObject):
         # simply absent). Must be listening before any agent spawns so the very
         # first SessionStart is captured.
         self._agent_events.start()
+        # Observe Escape presses app-wide so we can return a focused agent's
+        # sparkle to idle on a user interrupt (Claude fires no hook for that —
+        # agent_interrupt.py). The filter only notifies; on_terminal_escape gates
+        # and defers. Installed on the QGuiApplication so it sees the key event
+        # the focused QMLTermWidget receives; parented to self for lifetime. The
+        # filter never consumes the key, so the terminal still performs the
+        # interrupt. QGuiApplication.instance() is non-None here (created in run()
+        # before AppController).
+        self._escape_watcher = EscapeWatcher(self.on_terminal_escape, parent=self)
+        app_instance = QGuiApplication.instance()
+        if app_instance is not None:
+            app_instance.installEventFilter(self._escape_watcher)
         # Cross-IDE account-usage peer file: begin watching, then adopt whatever a
         # peer last wrote so a freshly-launched IDE shows usage IMMEDIATELY — before
         # any of its own agents transact (the persistence win of a file channel).
