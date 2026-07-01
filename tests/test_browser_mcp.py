@@ -245,3 +245,78 @@ def test_reap_orphan_configs_handles_per_agent_filenames(tmp_path, monkeypatch):
 
     assert not dead.exists()
     assert live.exists()
+
+
+# ---------------------------------------------------------------------------
+# agent_config_content — opencode inline OPENCODE_CONFIG_CONTENT (SSE + schema).
+# No file is written (inline env var), so these assert the returned JSON string.
+# ---------------------------------------------------------------------------
+
+
+def test_agent_config_content_opencode_schema(monkeypatch):
+    """opencode's inline config uses the `mcp` key with symmetria-browser as a
+    REMOTE server on the /sse URL (NOT streamable-HTTP /mcp) carrying the
+    identity header — returned as a JSON string for OPENCODE_CONFIG_CONTENT."""
+    from symmetria_ide.browser_mcp import _AGENT_HEADER
+
+    monkeypatch.delenv("QTWEBENGINE_REMOTE_DEBUGGING", raising=False)
+    server = _server()
+    server._port = 34567  # pretend bound
+    config = json.loads(server.agent_config_content("1234_2", browser_enabled=True))
+    entry = config["mcp"][SERVER_NAME]
+    assert entry["type"] == "remote"
+    assert entry["url"] == "http://127.0.0.1:34567/sse"  # SSE, not /mcp
+    assert entry["enabled"] is True
+    assert entry["headers"][_AGENT_HEADER] == "1234_2"
+
+
+def test_agent_config_content_injects_chrome_devtools_local(monkeypatch):
+    """With CDP + npx, chrome-devtools is added as a LOCAL (stdio) server whose
+    `command` is the FULL argv array (opencode's shape, vs claude's
+    command+args split)."""
+    from symmetria_ide.browser_mcp import _CHROME_DEVTOOLS_MCP_VERSION
+
+    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
+    monkeypatch.setattr(
+        "symmetria_ide.browser_mcp.shutil.which", lambda _: "/usr/bin/npx"
+    )
+    server = _server()
+    server._port = 34567
+    config = json.loads(server.agent_config_content("1234_2", browser_enabled=True))
+    cdt = config["mcp"]["chrome-devtools"]
+    assert cdt["type"] == "local"
+    assert cdt["command"][0] == "npx"
+    assert f"chrome-devtools-mcp@{_CHROME_DEVTOOLS_MCP_VERSION}" in cdt["command"]
+    assert "http://127.0.0.1:9911" in cdt["command"]
+    assert cdt["enabled"] is True
+    assert SERVER_NAME in config["mcp"]  # window/attention tools still present
+
+
+def test_agent_config_content_omits_chrome_devtools_without_cdp(monkeypatch):
+    """No CDP port → no chrome-devtools entry; the agent still gets our window
+    tools (matches agent_config_path's behaviour)."""
+    monkeypatch.delenv("QTWEBENGINE_REMOTE_DEBUGGING", raising=False)
+    server = _server()
+    server._port = 34567
+    config = json.loads(server.agent_config_content("1234_2", browser_enabled=True))
+    assert "chrome-devtools" not in config["mcp"]
+    assert SERVER_NAME in config["mcp"]
+
+
+def test_agent_config_content_gated_off_returns_empty(monkeypatch):
+    """Same per-project gate as agent_config_path: not opted in → "" (spawn_argv
+    then emits no OPENCODE_CONFIG_CONTENT env var), even with CDP live."""
+    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
+    server = _server()
+    server._port = 34567
+    assert server.agent_config_content("1234_2", browser_enabled=False) == ""
+    assert server.agent_config_content("1234_2") == ""  # default is False
+
+
+def test_agent_config_content_empty_without_port_or_id():
+    """No port (server down) or empty id → "" — the same guards as
+    agent_config_path, so a spawn during the not-yet-ready window gets no env."""
+    server = _server()
+    assert server.agent_config_content("1234_2", browser_enabled=True) == ""  # _port 0
+    server._port = 34567
+    assert server.agent_config_content("", browser_enabled=True) == ""  # no id

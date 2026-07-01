@@ -2680,21 +2680,34 @@ class AppController(QObject):
         # no --mcp-config → the agent gets NO browser MCP and no
         # chrome-devtools-mcp Node process spawns.
         self._refresh_project_browser_enabled()
+        # Stage 2c: inject a PER-AGENT browser MCP config so the agent gets the
+        # browser_* tools AND its requests carry the X-Symmetria-Agent header —
+        # that header is what lets the IDE attribute a browser window to this
+        # agent (Stage 3, the chip glyph). The per-project gate
+        # (_project_browser_enabled) is harness-AGNOSTIC — decided once, here;
+        # only the DELIVERY mechanism differs per harness: claude loads a config
+        # FILE via --mcp-config (mcp_config_flag), opencode reads inline JSON
+        # from OPENCODE_CONFIG_CONTENT (mcp_config_env, its remote MCP being
+        # SSE-only). Each builder returns "" when gated off / server down → a
+        # no-op in spawn_argv (agent gets no browser MCP, no npx process).
+        mcp_config_path = ""
+        mcp_config_content = ""
+        if spec.mcp_config_flag:
+            mcp_config_path = self._browser_mcp_server.agent_config_path(
+                agent_id, browser_enabled=self._project_browser_enabled
+            )
+        elif spec.mcp_config_env:
+            mcp_config_content = self._browser_mcp_server.agent_config_content(
+                agent_id, browser_enabled=self._project_browser_enabled
+            )
         return agent_harness.spawn_argv(
             spec,
             inst["spawn_type"],
             inst["dangerous"],
             agent_id,
             inst["session_id"],
-            # Stage 2c: inject a PER-AGENT browser MCP config so the agent gets
-            # the browser_* tools AND its requests carry the X-Symmetria-Agent
-            # header — that header is what lets the IDE attribute a browser
-            # window to this agent (Stage 3, the chip glyph). Empty when the
-            # project hasn't opted in (the gate), the server isn't running, or
-            # the harness has no --mcp-config flag → a no-op in spawn_argv.
-            self._browser_mcp_server.agent_config_path(
-                agent_id, browser_enabled=self._project_browser_enabled
-            ),
+            mcp_config_path=mcp_config_path,
+            mcp_config_content=mcp_config_content,
             # Agent-ownership inversion: register the IDE reporter hook (claude
             # only) + point it at this IDE's agent socket, so the agent's
             # lifecycle events report DIRECTLY to us (local capture) — see

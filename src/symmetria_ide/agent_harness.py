@@ -40,11 +40,20 @@ class AgentHarness:
     # opens claude's own interactive picker.
     flags: dict[str, list[str]] = field(default_factory=dict)
     resume_requires_id: bool = False
-    # Flag this harness uses to load an extra MCP config file at spawn (Phase
+    # Flag this harness uses to load an extra MCP config FILE at spawn (Phase
     # 4 Stage 2c — injecting the IDE's browser MCP server). claude takes
-    # `--mcp-config <path>`; opencode has no per-launch flag (its MCP lives in
-    # opencode.json), so it stays None until that path is wired.
+    # `--mcp-config <path>`. opencode has no per-launch flag, so it stays None
+    # and injects via `mcp_config_env` instead (below).
     mcp_config_flag: str | None = None
+    # Env var this harness reads INLINE MCP config from at spawn (the opencode
+    # counterpart to `mcp_config_flag` — same claude-flag/opencode-env asymmetry
+    # as dangerous_flag vs dangerous_env). opencode has no `--mcp-config` flag;
+    # its config comes from files + `OPENCODE_CONFIG_CONTENT`, which DEEP-MERGES
+    # inline JSON over the project's opencode.json at highest precedence (so our
+    # browser servers add to, never clobber, the project's own). claude stays
+    # None (it uses the file+flag form). Verified via spike (2026-07-01) — see
+    # .claude/memory/reference/agent-sdk/opencode_remote_mcp_sse_only.md.
+    mcp_config_env: str | None = None
     # Flag this harness uses to load EXTRA settings at spawn (agent-ownership
     # inversion — injecting the IDE-owned activity-reporter hook). claude takes
     # `--settings <file-or-json>` and we pass an inline JSON string (verified:
@@ -84,6 +93,10 @@ HARNESSES: dict[str, AgentHarness] = {
         # goes through the IDE's session picker (AgentSessionPicker.qml).
         flags={"fresh": [], "resume": ["--session"], "continue": ["-c"]},
         resume_requires_id=True,
+        # opencode's browser MCP is injected as inline JSON via this env var
+        # (it has no --mcp-config flag). The IDE builds the content with
+        # browser_mcp.agent_config_content (opencode `mcp`-key schema).
+        mcp_config_env="OPENCODE_CONFIG_CONTENT",
     ),
 }
 
@@ -95,6 +108,7 @@ def spawn_argv(
     agent_id: str,
     session_id: str = "",
     mcp_config_path: str = "",
+    mcp_config_content: str = "",
     settings_json: str = "",
     agent_sock_path: str = "",
 ) -> list[str]:
@@ -109,8 +123,11 @@ def spawn_argv(
 
     `mcp_config_path`, when set AND the harness declares `mcp_config_flag`,
     appends `<flag> <path>` so the agent discovers the IDE's browser MCP
-    server (Stage 2c). Empty path or a harness without the flag (opencode
-    today) is a no-op.
+    server (Stage 2c — claude). `mcp_config_content`, when set AND the harness
+    declares `mcp_config_env`, exports `<env>=<content>` in the env wrapper —
+    the opencode counterpart (inline JSON, no file). A given harness uses one
+    mechanism or the other; the unused arg (and either arg on a harness lacking
+    the corresponding flag/env) is a silent no-op.
 
     `agent_sock_path` (when set) exports `SYMMETRIA_IDE_AGENT_SOCK` so the
     claude reporter knows which IDE socket to report to; `settings_json`
@@ -135,6 +152,11 @@ def spawn_argv(
         argv.append("SYMMETRIA_IDE_STATUSLINE_TAP=1")
     if dangerous:
         argv += [f"{key}={value}" for key, value in harness.dangerous_env]
+    # Inline MCP config env (opencode): rides the env wrapper like dangerous_env.
+    # One argv element — no shell involved (KSession execs argv directly), so the
+    # JSON needs no quoting, same as OPENCODE_PERMISSION above.
+    if mcp_config_content and harness.mcp_config_env:
+        argv.append(f"{harness.mcp_config_env}={mcp_config_content}")
     argv.append(harness.executable)
     if dangerous and harness.dangerous_flag:
         argv.append(harness.dangerous_flag)

@@ -49,6 +49,7 @@ import shutil
 import socket
 import tempfile
 import threading
+from contextlib import asynccontextmanager
 from typing import Callable
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
@@ -232,7 +233,18 @@ class BrowserMcpServer:
 
     @property
     def url(self) -> str:
+        """Streamable-HTTP endpoint (claude's `type: http` config points here)."""
         return f"http://127.0.0.1:{self._port}/mcp" if self._port else ""
+
+    @property
+    def sse_url(self) -> str:
+        """SSE endpoint (opencode's `type: remote` config points here).
+
+        opencode's remote MCP speaks SSE, not streamable-HTTP — so its config
+        must target this URL, not `url`. The server mounts BOTH transports on
+        the one port (see _start). See the reference/agent-sdk memory.
+        """
+        return f"http://127.0.0.1:{self._port}/sse" if self._port else ""
 
     @property
     def config_path(self) -> str:
@@ -357,7 +369,29 @@ class BrowserMcpServer:
             agent_id = _calling_agent_id(server)
             return await bridge.read(lambda: attention_setter(agent_id, message))
 
-        app = server.streamable_http_app()
+        # Serve BOTH transports on the one port from the same FastMCP instance
+        # (same tools): streamable-HTTP at /mcp for claude, SSE at /sse (+
+        # /messages/) for opencode — whose remote MCP speaks SSE, not
+        # streamable-HTTP (verified spike 2026-07-01; see the reference/agent-sdk
+        # memory). Their routes don't collide, so a parent Starlette app hosts
+        # both. The streamable app's lifespan is MANDATORY (it starts the
+        # StreamableHTTP session manager — without it /mcp raises "Task group is
+        # not initialized"); the SSE app's is composed too for safety.
+        from starlette.applications import Starlette  # dep of mcp/fastmcp
+
+        streamable_app = server.streamable_http_app()
+        sse_app = server.sse_app()
+
+        @asynccontextmanager
+        async def _lifespan(_app):
+            async with streamable_app.router.lifespan_context(_app):
+                async with sse_app.router.lifespan_context(_app):
+                    yield
+
+        app = Starlette(
+            routes=[*streamable_app.routes, *sse_app.routes],
+            lifespan=_lifespan,
+        )
         config = uvicorn.Config(
             app, host="127.0.0.1", port=self._port, log_level="warning"
         )
@@ -397,6 +431,44 @@ class BrowserMcpServer:
             json.dump(config, handle)
         self._config_path = path
 
+    def _chrome_devtools_argv(self, agent_id: str) -> list[str] | None:
+        """The `npx chrome-devtools-mcp` invocation for the embedded view's CDP
+        endpoint, or None when CDP is off / npx is missing.
+
+        The ONE place the version pin, the CDP-port read, and the npx-presence
+        gate live — shared by BOTH per-agent config builders (claude's
+        agent_config_path splits it into command+args; opencode's
+        agent_config_content uses the full argv as `command`). CDP is enabled in
+        app.run() via QTWEBENGINE_REMOTE_DEBUGGING (the single source of truth
+        for the port, read back here). chrome-devtools-mcp supersedes our old
+        navigate/eval/perf/snapshot/click/fill tools with Google's suite while
+        driving the SAME contained view; the agent still allocates visible
+        windows via our browser_open (chrome-devtools-mcp can't pool a
+        WebEngineView) then drives them by select_page. See CLAUDE.md "The
+        browser panes".
+        """
+        cdp_port = os.environ.get("QTWEBENGINE_REMOTE_DEBUGGING", "")
+        if not cdp_port:
+            return None  # remote debugging off → agent gets only our window tools
+        if not shutil.which("npx"):
+            # CDP live but node/npx missing: omit the entry so the agent cleanly
+            # gets only our window tools (a broken stdio server would otherwise
+            # just fail at the agent's MCP client). Warn so the missing dep is
+            # visible rather than a silent capability loss.
+            log.warning(
+                "npx not on PATH — agent %s gets no chrome-devtools-mcp browser "
+                "tools (only browser_open/browser_list_windows); install node",
+                agent_id,
+            )
+            return None
+        return [
+            "npx",
+            "-y",
+            f"chrome-devtools-mcp@{_CHROME_DEVTOOLS_MCP_VERSION}",
+            "--browserUrl",
+            f"http://127.0.0.1:{cdp_port}",
+        ]
+
     def agent_config_path(self, agent_id: str, browser_enabled: bool = False) -> str:
         """Write (idempotently) a per-agent MCP config and return its path.
 
@@ -430,36 +502,16 @@ class BrowserMcpServer:
                 },
             }
         }
-        # Add the off-the-shelf Chrome DevTools MCP, pointed at the embedded
-        # QtWebEngine's CDP endpoint (enabled in app.run() via
-        # QTWEBENGINE_REMOTE_DEBUGGING — the single source of truth for the
-        # port, read back here). It supersedes our navigate/eval/perf/snapshot/
-        # click/fill tools with Google's 29-tool suite while driving the SAME
-        # contained view; the agent allocates visible windows via our
-        # browser_open (chrome-devtools-mcp can't pool a WebEngineView) then
-        # drives them by select_page. Omitted when CDP is disabled (then the
-        # agent just gets our two window tools). See CLAUDE.md "The browser panes".
-        cdp_port = os.environ.get("QTWEBENGINE_REMOTE_DEBUGGING", "")
-        if cdp_port and shutil.which("npx"):
+        # Add the off-the-shelf Chrome DevTools MCP (npx stdio) pointed at the
+        # embedded view's CDP endpoint — see _chrome_devtools_argv for the
+        # rationale + the CDP/npx gating. claude's schema splits the invocation
+        # into `command` (executable) + `args` (the rest).
+        argv = self._chrome_devtools_argv(agent_id)
+        if argv:
             config["mcpServers"]["chrome-devtools"] = {
-                "command": "npx",
-                "args": [
-                    "-y",
-                    f"chrome-devtools-mcp@{_CHROME_DEVTOOLS_MCP_VERSION}",
-                    "--browserUrl",
-                    f"http://127.0.0.1:{cdp_port}",
-                ],
+                "command": argv[0],
+                "args": argv[1:],
             }
-        elif cdp_port:
-            # CDP is live but node/npx is missing: omit the entry so the agent
-            # cleanly gets only our two window tools (a broken stdio server
-            # would otherwise just fail at the agent's MCP client). Warn so the
-            # missing dep is visible rather than a silent capability loss.
-            log.warning(
-                "npx not on PATH — agent %s gets no chrome-devtools-mcp browser "
-                "tools (only browser_open/browser_list_windows); install node",
-                agent_id,
-            )
         # agent_id is already "<pid>_<slot>", so the file is
         # <prefix><pid>_<slot>.json — leading-pid-parseable by the reaper.
         path = os.path.join(tempfile.gettempdir(), f"{_CONFIG_PREFIX}{agent_id}.json")
@@ -473,6 +525,49 @@ class BrowserMcpServer:
             return ""
         self._agent_config_paths.add(path)
         return path
+
+    def agent_config_content(self, agent_id: str, browser_enabled: bool = False) -> str:
+        """Inline `OPENCODE_CONFIG_CONTENT` JSON for an opencode agent.
+
+        The opencode counterpart to agent_config_path: opencode has no
+        `--mcp-config` flag, so its browser MCP is injected as inline JSON via
+        the `OPENCODE_CONFIG_CONTENT` env var (spawn_argv, gated on the harness's
+        `mcp_config_env`), which DEEP-MERGES over the project's opencode.json at
+        highest precedence — adding our servers without clobbering the project's.
+
+        Mirrors agent_config_path's two servers in opencode's `mcp`-key schema:
+        `symmetria-browser` as a REMOTE server on the /sse URL (opencode remote
+        MCP speaks SSE, NOT streamable-HTTP — hence sse_url, not url), plus
+        `chrome-devtools` as a LOCAL (stdio) server. The X-Symmetria-Agent
+        header rides EVERY request over SSE (verified spike 2026-07-01), so the
+        chip-globe attribution works for opencode too — see the reference/
+        agent-sdk memory.
+
+        Returns "" under the SAME gate as agent_config_path (project opt-out,
+        server not up, or empty id); spawn_argv then emits no env var. No file is
+        written (inline env var), so — unlike agent_config_path — there is
+        nothing to track or reap.
+        """
+        if not browser_enabled or not self._port or not agent_id:
+            return ""
+        mcp: dict = {
+            SERVER_NAME: {
+                "type": "remote",
+                "url": self.sse_url,
+                "enabled": True,
+                "headers": {_AGENT_HEADER: agent_id},
+            }
+        }
+        argv = self._chrome_devtools_argv(agent_id)
+        if argv:
+            # opencode's local (stdio) shape: `command` is the FULL argv array
+            # (vs claude's command+args split in agent_config_path).
+            mcp["chrome-devtools"] = {
+                "type": "local",
+                "command": argv,
+                "enabled": True,
+            }
+        return json.dumps({"mcp": mcp})
 
     def stop(self) -> None:
         # Called only at app shutdown (aboutToQuit). `_server` may still be None

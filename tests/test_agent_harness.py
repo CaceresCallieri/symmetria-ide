@@ -216,8 +216,9 @@ def test_no_mcp_config_when_path_empty():
 
 
 def test_opencode_ignores_mcp_config_path():
-    # opencode has no --mcp-config flag (mcp_config_flag is None) — the path
-    # is silently dropped until opencode MCP injection is wired.
+    # opencode has no --mcp-config flag (mcp_config_flag is None) — the FILE-PATH
+    # form is claude-only. opencode injects via mcp_config_content instead (its
+    # remote MCP is SSE-only and configured through OPENCODE_CONFIG_CONTENT).
     argv = spawn_argv(
         HARNESSES["opencode"], "fresh", True, "42_1", mcp_config_path="/tmp/cfg.json"
     )
@@ -236,3 +237,49 @@ def test_mcp_config_coexists_with_resume_session_id():
     )
     # opencode drops the mcp flag but still appends the session id last.
     assert argv[-1] == "ses_abc"
+
+
+# ---------------------------------------------------------------------------
+# spawn_argv — opencode inline MCP config (OPENCODE_CONFIG_CONTENT env var)
+# ---------------------------------------------------------------------------
+
+
+def test_opencode_injects_mcp_config_content_env():
+    # opencode's browser MCP rides an env var, NOT --mcp-config: the inline JSON
+    # is exported as OPENCODE_CONFIG_CONTENT in the env wrapper (before the
+    # executable), never as a flag.
+    content = '{"mcp":{"symmetria-browser":{"type":"remote"}}}'
+    argv = spawn_argv(
+        HARNESSES["opencode"], "fresh", False, "42_1", mcp_config_content=content
+    )
+    assert f"OPENCODE_CONFIG_CONTENT={content}" in argv
+    # It's an env pair → before the executable, and NOT a --mcp-config flag.
+    assert argv.index(f"OPENCODE_CONFIG_CONTENT={content}") < argv.index("opencode")
+    assert "--mcp-config" not in argv
+
+
+def test_claude_ignores_mcp_config_content():
+    # claude has no mcp_config_env (it uses the --mcp-config FILE form) → the
+    # inline content is silently dropped.
+    argv = spawn_argv(
+        HARNESSES["claude"], "fresh", False, "42_1", mcp_config_content='{"mcp":{}}'
+    )
+    assert not any(a.startswith("OPENCODE_CONFIG_CONTENT=") for a in argv)
+
+
+def test_no_mcp_config_content_when_empty():
+    argv = spawn_argv(HARNESSES["opencode"], "fresh", False, "42_1")
+    assert not any(a.startswith("OPENCODE_CONFIG_CONTENT=") for a in argv)
+
+
+def test_opencode_mcp_content_coexists_with_dangerous_permission_env():
+    # Two INDEPENDENT env vars: dangerous mode (OPENCODE_PERMISSION) and the
+    # browser MCP (OPENCODE_CONFIG_CONTENT) both ride the env wrapper, both
+    # precede the executable.
+    content = '{"mcp":{}}'
+    argv = spawn_argv(
+        HARNESSES["opencode"], "fresh", True, "42_1", mcp_config_content=content
+    )
+    assert any(a.startswith("OPENCODE_PERMISSION=") for a in argv)
+    exe = argv.index("opencode")
+    assert argv.index(f"OPENCODE_CONFIG_CONTENT={content}") < exe
