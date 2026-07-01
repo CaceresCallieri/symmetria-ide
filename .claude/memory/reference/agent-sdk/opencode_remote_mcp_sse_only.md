@@ -1,7 +1,7 @@
 ---
 name: opencode-remote-mcp-sse-only
 description: "How to inject the IDE's browser MCP into opencode agents — SSE transport, OPENCODE_CONFIG_CONTENT, headers all verified via spike"
-metadata: 
+metadata:
   node_type: memory
   type: reference
   originSessionId: 7327feb9-c282-488b-96ee-453c17a74b72

@@ -320,3 +320,26 @@ def test_agent_config_content_empty_without_port_or_id():
     assert server.agent_config_content("1234_2", browser_enabled=True) == ""  # _port 0
     server._port = 34567
     assert server.agent_config_content("", browser_enabled=True) == ""  # no id
+
+
+# ---------------------------------------------------------------------------
+# _build_combined_asgi_app — dual-transport server build (the novel runtime path).
+# ---------------------------------------------------------------------------
+
+
+def test_build_combined_asgi_app_serves_both_transports():
+    """The combined app exposes claude's /mcp (streamable-HTTP) AND opencode's
+    /sse + /messages/ (SSE) on one Starlette app — a regression guard for the
+    dual-transport build. Also covers the sse_app()-removal risk: a future mcp
+    bump that drops sse_app() (or moves a mount path into a collision) fails
+    HERE in CI rather than at an opencode spawn. No uvicorn boot needed — pure
+    route introspection."""
+    from mcp.server.fastmcp import FastMCP
+
+    from symmetria_ide.browser_mcp import _build_combined_asgi_app
+
+    app = _build_combined_asgi_app(FastMCP("test-probe"))
+    paths = {getattr(route, "path", None) for route in app.routes}
+    assert "/mcp" in paths  # claude streamable-HTTP
+    assert "/sse" in paths  # opencode SSE stream
+    assert any("messages" in (p or "") for p in paths)  # SSE message POST mount

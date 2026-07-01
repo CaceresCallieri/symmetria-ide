@@ -143,6 +143,51 @@ def reap_orphan_configs() -> None:
             pass
 
 
+def _build_combined_asgi_app(server):
+    """Combine the FastMCP server's two transports into ONE Starlette app so a
+    single uvicorn port serves both: streamable-HTTP at /mcp for claude, SSE at
+    /sse (+ /messages/) for opencode — whose remote MCP speaks SSE, not
+    streamable-HTTP (verified spike 2026-07-01; see the reference/agent-sdk
+    memory). Both transports come off the SAME FastMCP instance, so they expose
+    the same tools; the parent app just spreads both sub-apps' routes.
+
+    The streamable app's lifespan is MANDATORY (it starts the StreamableHTTP
+    session manager — without it /mcp raises "Task group is not initialized");
+    the SSE app's is composed too for safety. Passing the parent `_app` into
+    both `lifespan_context(_app)` calls means any `app.state` a sub-app sets
+    lands on the parent that incoming requests actually see via `request.app`.
+
+    Raises RuntimeError if the two sub-apps' route paths collide — a future
+    `mcp` version could move a mount path (e.g. streamable → "/"), which would
+    otherwise silently shadow one transport; fail loud at startup instead.
+    """
+    from starlette.applications import Starlette  # dep of mcp/fastmcp
+
+    streamable_app = server.streamable_http_app()
+    sse_app = server.sse_app()
+
+    streamable_paths = {getattr(r, "path", None) for r in streamable_app.routes}
+    sse_paths = {getattr(r, "path", None) for r in sse_app.routes}
+    collision = (streamable_paths & sse_paths) - {None}
+    if collision:
+        raise RuntimeError(
+            f"browser MCP transport route collision on {sorted(collision)} — a "
+            "dependency change moved a mount path; one transport would shadow "
+            "the other"
+        )
+
+    @asynccontextmanager
+    async def _lifespan(_app):
+        async with streamable_app.router.lifespan_context(_app):
+            async with sse_app.router.lifespan_context(_app):
+                yield
+
+    return Starlette(
+        routes=[*streamable_app.routes, *sse_app.routes],
+        lifespan=_lifespan,
+    )
+
+
 class BrowserMcpBridge(QObject):
     """Marshals an MCP tool call (any thread) ONTO the GUI thread and hands
     back a future the caller awaits.
@@ -369,29 +414,10 @@ class BrowserMcpServer:
             agent_id = _calling_agent_id(server)
             return await bridge.read(lambda: attention_setter(agent_id, message))
 
-        # Serve BOTH transports on the one port from the same FastMCP instance
-        # (same tools): streamable-HTTP at /mcp for claude, SSE at /sse (+
-        # /messages/) for opencode — whose remote MCP speaks SSE, not
-        # streamable-HTTP (verified spike 2026-07-01; see the reference/agent-sdk
-        # memory). Their routes don't collide, so a parent Starlette app hosts
-        # both. The streamable app's lifespan is MANDATORY (it starts the
-        # StreamableHTTP session manager — without it /mcp raises "Task group is
-        # not initialized"); the SSE app's is composed too for safety.
-        from starlette.applications import Starlette  # dep of mcp/fastmcp
-
-        streamable_app = server.streamable_http_app()
-        sse_app = server.sse_app()
-
-        @asynccontextmanager
-        async def _lifespan(_app):
-            async with streamable_app.router.lifespan_context(_app):
-                async with sse_app.router.lifespan_context(_app):
-                    yield
-
-        app = Starlette(
-            routes=[*streamable_app.routes, *sse_app.routes],
-            lifespan=_lifespan,
-        )
+        # Serve BOTH transports on the one port from the same FastMCP instance:
+        # /mcp (streamable-HTTP, claude) + /sse (SSE, opencode). See
+        # _build_combined_asgi_app for the rationale + the route-collision guard.
+        app = _build_combined_asgi_app(server)
         config = uvicorn.Config(
             app, host="127.0.0.1", port=self._port, log_level="warning"
         )
