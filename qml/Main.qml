@@ -2018,9 +2018,9 @@ Window {
                             // user expects those visible, so flip it on here to
                             // match the aux trees. This is INDEPENDENT of
                             // `respectGitignore` below: gitignored entries
-                            // (`.venv/`, build caches) stay hidden regardless,
-                            // so turning this on reveals meaningful dotfiles
-                            // WITHOUT dumping ignored noise.
+                            // (`.venv/`, `node_modules/`) stay hidden
+                            // regardless, so turning this on reveals meaningful
+                            // dotfiles WITHOUT dumping ignored noise.
                             showHidden: true
                             respectGitignore: true
                             // Pre-computed ignored-path set from the IDE's
