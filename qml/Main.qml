@@ -2003,6 +2003,25 @@ Window {
                                     fileTreeView._applyTreeMount(root, expanded);
                                 }
                             }
+                            // Show dot-prefixed files and directories
+                            // (`.claude/`, `.github/`, `.symmetria/`,
+                            // `.gitignore`, …). The FM's FileTreeView defaults
+                            // showHidden to FALSE (hidden-as-opt-in, the
+                            // convention for a general-purpose file manager),
+                            // and this main tree was the one mount site that
+                            // silently inherited that default while both
+                            // auxiliary trees (GitStatusPanel, git-history's
+                            // WorkingFileTreeView) already set it true — so
+                            // dotfiles vanished from the sidebar but showed in
+                            // the changes panels. An IDE project root is
+                            // dotfile-dense (config, CI, agent state) and the
+                            // user expects those visible, so flip it on here to
+                            // match the aux trees. This is INDEPENDENT of
+                            // `respectGitignore` below: gitignored entries
+                            // (`.venv/`, build caches) stay hidden regardless,
+                            // so turning this on reveals meaningful dotfiles
+                            // WITHOUT dumping ignored noise.
+                            showHidden: true
                             respectGitignore: true
                             // Pre-computed ignored-path set from the IDE's
                             // GitController. Lets the FM short-circuit its
