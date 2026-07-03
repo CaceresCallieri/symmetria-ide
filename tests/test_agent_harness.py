@@ -371,6 +371,17 @@ def test_opencode_unvalidated_effort_passes_through():
     assert argv[argv.index("--variant") + 1] == "whatever-provider-uses"
 
 
+def test_model_effort_precede_continue_flag():
+    # The deliberate ordering (model/effort BEFORE the spawn-type flag) must
+    # hold for `continue` (-c) too, not just fresh/resume — a regression that
+    # only reordered the continue path would otherwise slip through.
+    argv = spawn_argv(
+        HARNESSES["claude"], "continue", False, "42_1", model="opus", effort="high"
+    )
+    assert argv.index("--model") < argv.index("-c")
+    assert argv.index("--effort") < argv.index("-c")
+
+
 def test_model_effort_coexist_with_resume_session_id():
     # The session id must stay LAST even with model/effort flags present.
     argv = spawn_argv(

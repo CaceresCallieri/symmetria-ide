@@ -89,16 +89,14 @@ def marker_path(project_root: str) -> Path:
     return Path(project_root) / MARKER_DIR / MARKER_FILE
 
 
-def read_marker(start: str) -> dict:
-    """Return the parsed marker dict for the project owning `start`, or `{}`.
+def _read_marker_at(root: str) -> dict:
+    """Parse the marker under an ALREADY-RESOLVED `root`; `{}` on any failure.
 
-    The single fault-tolerant read every reader shares — a missing file,
-    unreadable file, malformed JSON, or non-dict top level all resolve to an
-    empty dict (each field reader then applies its own default). Keeping the
-    read in one place is what guarantees `browser_agents_enabled` and
-    `harness_model_effort` agree on root resolution and error handling.
+    The read half without the root walk — callers that already hold a resolved
+    root (`set_browser_agents`) use this directly instead of paying for a
+    second `resolve_project_root`. Fault-tolerant: missing / unreadable /
+    malformed JSON / non-dict top level all yield `{}`.
     """
-    root = resolve_project_root(start)
     if not root:
         return {}
     path = marker_path(root)
@@ -111,6 +109,17 @@ def read_marker(start: str) -> dict:
         log.warning("project_browser_marker: read failed for %s: %s", path, e)
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def read_marker(start: str) -> dict:
+    """Return the parsed marker dict for the project owning `start`, or `{}`.
+
+    The single fault-tolerant read every reader shares — resolves the root,
+    then delegates to `_read_marker_at`. Keeping the read in one place is what
+    guarantees `browser_agents_enabled` and `harness_model_effort` agree on
+    root resolution and error handling.
+    """
+    return _read_marker_at(resolve_project_root(start))
 
 
 def browser_agents_enabled(start: str) -> bool:
@@ -163,7 +172,25 @@ def set_browser_agents(start: str, enabled: bool) -> str:
     root = resolve_project_root(start)
     if not root:
         return ""
-    payload = read_marker(root)  # preserve harness_defaults + any unknown fields
+    # Read from the ALREADY-resolved root (no second walk); preserve
+    # harness_defaults + any unknown fields.
+    payload = _read_marker_at(root)
+    if not payload:
+        # A present-but-unparseable marker read as `{}`, so the merge below
+        # can't preserve whatever it held — a browser toggle is about to WIPE a
+        # corrupt file's harness_defaults. That contradicts the invariant this
+        # read-merge-write exists to uphold, so surface the loss instead of
+        # hiding it (a genuinely absent file is the normal case, not a warning).
+        path = marker_path(root)
+        try:
+            if path.exists() and path.stat().st_size > 0:
+                log.warning(
+                    "set_browser_agents: overwriting unparseable marker %s — "
+                    "any harness_defaults it held are lost",
+                    path,
+                )
+        except OSError:
+            pass
     payload["version"] = MARKER_VERSION
     payload["browser_agents"] = bool(enabled)
     if atomic_write_json(marker_path(root), payload):
