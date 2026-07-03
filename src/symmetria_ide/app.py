@@ -82,7 +82,11 @@ from .session_host import SessionHost
 from .session_models import (  # noqa: F401 — side-effect: @QmlElement registration
     SessionModel,
 )
-from .project_browser_marker import browser_agents_enabled, set_browser_agents
+from .project_browser_marker import (
+    browser_agents_enabled,
+    harness_model_effort,
+    set_browser_agents,
+)
 from .tree_state_cache import load_expanded, save_expanded
 from . import session_store
 from .whichkey_models import (  # noqa: F401 — side-effect: @QmlElement registration
@@ -2783,6 +2787,12 @@ class AppController(QObject):
             mcp_config_content = self._browser_mcp_server.agent_config_content(
                 agent_id, browser_enabled=self._project_browser_enabled
             )
+        # Per-project model / effort defaults from the committed
+        # `.symmetria/ide.json` (harness_defaults.<harness>). Read at spawn
+        # (cheap, and honours a hand-edit of the marker since the last root
+        # change — same rationale as the browser re-read above). Empty strings
+        # when unset/malformed → spawn_argv appends no flag → harness default.
+        model, effort = harness_model_effort(self.displayedRoot, inst["harness"])
         return agent_harness.spawn_argv(
             spec,
             inst["spawn_type"],
@@ -2791,6 +2801,8 @@ class AppController(QObject):
             inst["session_id"],
             mcp_config_path=mcp_config_path,
             mcp_config_content=mcp_config_content,
+            model=model,
+            effort=effort,
             # Agent-ownership inversion: register the IDE reporter hook (claude
             # only) + point it at this IDE's agent socket, so the agent's
             # lifecycle events report DIRECTLY to us (local capture) — see

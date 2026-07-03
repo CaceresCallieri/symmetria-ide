@@ -129,3 +129,110 @@ def test_written_marker_is_committable_shape(tmp_path):
     pbm.set_browser_agents(str(repo), True)
     data = json.loads((repo / ".symmetria" / "ide.json").read_text(encoding="utf-8"))
     assert data == {"version": pbm.MARKER_VERSION, "browser_agents": True}
+
+
+# ---------------------------------------------------------------------------
+# harness_model_effort — per-project model/effort launch defaults
+# ---------------------------------------------------------------------------
+
+
+def _write_marker(repo, payload):
+    marker = repo / ".symmetria" / "ide.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_harness_defaults_absent_returns_empty(tmp_path):
+    """No marker / no harness_defaults block → ('', '') for any harness."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert pbm.harness_model_effort(str(repo), "claude") == ("", "")
+    _write_marker(repo, {"version": 1, "browser_agents": True})
+    assert pbm.harness_model_effort(str(repo), "claude") == ("", "")
+
+
+def test_harness_defaults_read_model_and_effort(tmp_path):
+    repo = tmp_path / "repo"
+    _write_marker(
+        repo,
+        {
+            "version": 1,
+            "harness_defaults": {
+                "claude": {"model": "opus", "effort": "high"},
+                "opencode": {"model": "anthropic/x", "effort": "medium"},
+            },
+        },
+    )
+    assert pbm.harness_model_effort(str(repo), "claude") == ("opus", "high")
+    assert pbm.harness_model_effort(str(repo), "opencode") == ("anthropic/x", "medium")
+
+
+def test_harness_defaults_unknown_harness_is_empty(tmp_path):
+    repo = tmp_path / "repo"
+    _write_marker(
+        repo, {"harness_defaults": {"claude": {"model": "opus", "effort": "high"}}}
+    )
+    assert pbm.harness_model_effort(str(repo), "opencode") == ("", "")
+
+
+def test_harness_defaults_partial_entry(tmp_path):
+    """Only one axis committed → the other is ''."""
+    repo = tmp_path / "repo"
+    _write_marker(repo, {"harness_defaults": {"claude": {"model": "sonnet"}}})
+    assert pbm.harness_model_effort(str(repo), "claude") == ("sonnet", "")
+
+
+def test_harness_defaults_wrong_types_are_empty(tmp_path):
+    """Non-string / non-dict shapes are all fault-tolerantly dropped."""
+    repo = tmp_path / "repo"
+    for block in (
+        {"harness_defaults": "not-a-dict"},
+        {"harness_defaults": {"claude": "not-a-dict"}},
+        {"harness_defaults": {"claude": {"model": 5, "effort": ["high"]}}},
+        {"harness_defaults": {"claude": {"model": "", "effort": ""}}},
+    ):
+        _write_marker(repo, block)
+        assert pbm.harness_model_effort(str(repo), "claude") == ("", "")
+
+
+def test_harness_defaults_survive_malformed_marker(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".symmetria").mkdir(parents=True)
+    (repo / ".symmetria" / "ide.json").write_text("not json {", encoding="utf-8")
+    assert pbm.harness_model_effort(str(repo), "claude") == ("", "")
+
+
+# ---------------------------------------------------------------------------
+# set_browser_agents — read-merge-write must preserve harness_defaults
+# ---------------------------------------------------------------------------
+
+
+def test_browser_toggle_preserves_harness_defaults(tmp_path):
+    """The regression guard: toggling browser via the popup must NOT wipe a
+    committed harness_defaults block (a bare overwrite would)."""
+    repo = tmp_path / "repo"
+    _write_marker(
+        repo,
+        {
+            "version": 1,
+            "browser_agents": False,
+            "harness_defaults": {"claude": {"model": "opus", "effort": "high"}},
+        },
+    )
+    pbm.set_browser_agents(str(repo), True)
+    data = json.loads((repo / ".symmetria" / "ide.json").read_text(encoding="utf-8"))
+    assert data["browser_agents"] is True
+    assert data["harness_defaults"] == {"claude": {"model": "opus", "effort": "high"}}
+    # And the model/effort reader still sees them after the toggle.
+    assert pbm.harness_model_effort(str(repo), "claude") == ("opus", "high")
+
+
+def test_browser_toggle_preserves_unknown_future_fields(tmp_path):
+    """Forward-compat: an unknown field a newer IDE wrote survives an older
+    toggle path too (merge, not overwrite)."""
+    repo = tmp_path / "repo"
+    _write_marker(repo, {"version": 1, "some_future_field": {"a": 1}})
+    pbm.set_browser_agents(str(repo), True)
+    data = json.loads((repo / ".symmetria" / "ide.json").read_text(encoding="utf-8"))
+    assert data["some_future_field"] == {"a": 1}
+    assert data["browser_agents"] is True

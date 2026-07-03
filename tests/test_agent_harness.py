@@ -294,3 +294,93 @@ def test_opencode_mcp_content_coexists_with_dangerous_permission_env():
     assert any(a.startswith("OPENCODE_PERMISSION=") for a in argv)
     exe = argv.index("opencode")
     assert argv.index(f"OPENCODE_CONFIG_CONTENT={content}") < exe
+
+
+# ---------------------------------------------------------------------------
+# spawn_argv — per-project model / effort launch defaults
+# ---------------------------------------------------------------------------
+
+
+def test_claude_appends_model_and_effort_flags():
+    argv = spawn_argv(
+        HARNESSES["claude"], "fresh", False, "42_1", model="opus", effort="high"
+    )
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "high"
+    # Both are claude CLI flags, so they sit after the executable.
+    assert argv.index("--model") > argv.index("claude")
+    assert argv.index("--effort") > argv.index("claude")
+
+
+def test_no_model_or_effort_flags_when_empty():
+    argv = spawn_argv(HARNESSES["claude"], "fresh", False, "42_1")
+    assert "--model" not in argv
+    assert "--effort" not in argv
+
+
+def test_claude_model_without_effort():
+    argv = spawn_argv(HARNESSES["claude"], "fresh", False, "42_1", model="sonnet")
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert "--effort" not in argv
+
+
+def test_claude_effort_without_model():
+    argv = spawn_argv(HARNESSES["claude"], "fresh", False, "42_1", effort="xhigh")
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+    assert "--model" not in argv
+
+
+def test_claude_invalid_effort_is_dropped():
+    # A committed typo ("ultra" is not a level) must NOT reach --effort, or the
+    # launch would fail. Model still passes (it isn't validated here).
+    argv = spawn_argv(
+        HARNESSES["claude"], "fresh", False, "42_1", model="opus", effort="ultra"
+    )
+    assert "--effort" not in argv
+    assert "ultra" not in argv
+    assert argv[argv.index("--model") + 1] == "opus"
+
+
+def test_claude_all_valid_effort_levels_pass():
+    for level in ("low", "medium", "high", "xhigh", "max"):
+        argv = spawn_argv(HARNESSES["claude"], "fresh", False, "42_1", effort=level)
+        assert argv[argv.index("--effort") + 1] == level
+
+
+def test_opencode_uses_model_and_variant_flags():
+    # opencode maps model→--model, effort→--variant; valid_efforts is empty so
+    # any provider-specific variant string passes unvalidated.
+    argv = spawn_argv(
+        HARNESSES["opencode"],
+        "fresh",
+        False,
+        "42_1",
+        model="anthropic/claude-opus-4-8",
+        effort="high",
+    )
+    assert argv[argv.index("--model") + 1] == "anthropic/claude-opus-4-8"
+    assert argv[argv.index("--variant") + 1] == "high"
+    assert "--effort" not in argv  # opencode's effort flag is --variant
+
+
+def test_opencode_unvalidated_effort_passes_through():
+    # No valid_efforts set → even an arbitrary string reaches --variant.
+    argv = spawn_argv(
+        HARNESSES["opencode"], "fresh", False, "42_1", effort="whatever-provider-uses"
+    )
+    assert argv[argv.index("--variant") + 1] == "whatever-provider-uses"
+
+
+def test_model_effort_coexist_with_resume_session_id():
+    # The session id must stay LAST even with model/effort flags present.
+    argv = spawn_argv(
+        HARNESSES["claude"],
+        "resume",
+        False,
+        "42_1",
+        session_id="ses_abc",
+        model="opus",
+        effort="high",
+    )
+    assert argv[-1] == "ses_abc"
+    assert "--model" in argv and "--effort" in argv

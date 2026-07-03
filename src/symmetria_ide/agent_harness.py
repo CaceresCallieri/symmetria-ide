@@ -63,6 +63,21 @@ class AgentHarness:
     # opencode has no equivalent per-launch flag, so it stays None (its agents
     # keep reporting to the shell bridge — a known Phase-1 gap).
     settings_flag: str | None = None
+    # Per-project model / reasoning-effort defaults (read from the committed
+    # `.symmetria/ide.json` marker by project_browser_marker.harness_model_effort,
+    # threaded through spawn_argv). Both are plain launch flags that take a value
+    # after them — claude `--model <alias|id> --effort <level>`, opencode
+    # `--model <provider/model> --variant <provider-effort>`. None = the harness
+    # has no such flag, so the corresponding default is a silent no-op.
+    model_flag: str | None = None
+    effort_flag: str | None = None
+    # Legal effort values for this harness. A NON-EMPTY set turns spawn_argv into
+    # a validator: a committed `effort` outside the set is dropped (the agent
+    # launches at the harness default) rather than passed through to crash the
+    # launch — the marker is committable and shared, so a teammate's typo must
+    # not break spawns. An EMPTY set means "don't validate" (opencode's
+    # `--variant` is provider-specific and open-ended, so any string passes).
+    valid_efforts: frozenset[str] = frozenset()
 
 
 # `env -u` pairs prepended to EVERY spawn's env wrapper: when the IDE itself
@@ -90,6 +105,12 @@ HARNESSES: dict[str, AgentHarness] = {
         flags={"fresh": [], "resume": ["-r"], "continue": ["-c"]},
         mcp_config_flag="--mcp-config",
         settings_flag="--settings",
+        # `--model` takes an alias ('fable'/'opus'/'sonnet') OR a full id;
+        # `--effort` takes one of the five levels below (verified via
+        # `claude --help`: "Effort level ... (low, medium, high, xhigh, max)").
+        model_flag="--model",
+        effort_flag="--effort",
+        valid_efforts=frozenset({"low", "medium", "high", "xhigh", "max"}),
     ),
     "opencode": AgentHarness(
         name="opencode",
@@ -113,6 +134,13 @@ HARNESSES: dict[str, AgentHarness] = {
         # (it has no --mcp-config flag). The IDE builds the content with
         # browser_mcp.agent_config_content (opencode `mcp`-key schema).
         mcp_config_env="OPENCODE_CONFIG_CONTENT",
+        # `-m/--model` takes `provider/model`; `--variant` is opencode's
+        # "provider-specific reasoning effort" (verified via `opencode run
+        # --help`). valid_efforts stays EMPTY: the accepted variant values are
+        # provider-defined, not a fixed enum we can validate against, so any
+        # committed string passes through.
+        model_flag="--model",
+        effort_flag="--variant",
     ),
 }
 
@@ -127,6 +155,8 @@ def spawn_argv(
     mcp_config_content: str = "",
     settings_json: str = "",
     agent_sock_path: str = "",
+    model: str = "",
+    effort: str = "",
 ) -> list[str]:
     """argv for a slot's QMLTermSession.
 
@@ -151,6 +181,15 @@ def spawn_argv(
     `<settings_flag> <json>` to REGISTER that reporter as a claude hook
     (agent-ownership inversion). Both empty / a harness without the flag
     (opencode) is a no-op — opencode keeps reporting to the shell bridge.
+
+    `model` / `effort`, when set AND the harness declares the matching flag,
+    append `<model_flag> <model>` / `<effort_flag> <effort>` — the per-project
+    launch defaults from `.symmetria/ide.json`. `effort` is validated against
+    the harness's `valid_efforts` (when non-empty): an out-of-set value is
+    DROPPED (launch at harness default) rather than passed through to crash the
+    spawn — the committable marker must tolerate a teammate's typo. `model` is
+    passed through as-is (aliases and full ids are both valid, and the valid-id
+    set drifts per release, so validating it here would rot).
     """
     argv = ["env", *CHILD_SESSION_UNSET_ARGS, f"SYMMETRIA_AGENT_ID={agent_id}"]
     # Exported unconditionally when provided (harmless for opencode, which has no
@@ -180,6 +219,20 @@ def spawn_argv(
         argv += [harness.mcp_config_flag, mcp_config_path]
     if settings_json and harness.settings_flag:
         argv += [harness.settings_flag, settings_json]
+    # Per-project launch defaults. Order among option flags is irrelevant to
+    # both CLIs; kept before the spawn-type flags so resume's trailing
+    # session_id stays last. effort is validated against the harness's known
+    # set (empty set = accept anything, e.g. opencode's provider-specific
+    # --variant); an out-of-set value is skipped so a bad committed marker
+    # degrades to the default effort instead of failing the launch.
+    if model and harness.model_flag:
+        argv += [harness.model_flag, model]
+    if (
+        effort
+        and harness.effort_flag
+        and (not harness.valid_efforts or effort in harness.valid_efforts)
+    ):
+        argv += [harness.effort_flag, effort]
     argv += harness.flags[spawn_type]
     # Resume-by-id: append the session id after the resume flag when one is
     # supplied. opencode REQUIRES it (bare `--session` errors). claude takes
