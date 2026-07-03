@@ -64,6 +64,12 @@ def _server():
         # attention_setter takes (agent_id, message) — lights the chip globe's
         # attention dot for the calling agent (browser_request_attention).
         attention_setter=lambda agent_id, message="": {"ok": True},
+        # wait_registrar takes (display_num, registrant_id, note) — the
+        # wait_for_agent coordination tool body (agent coordination v1).
+        wait_registrar=lambda agent, registrant_id, note="": {"ok": True},
+        # browser_gate: per-project opt-in read at CALL time for the three
+        # browser tools (the config entry is always injected now).
+        browser_gate=lambda: True,
     )
 
 
@@ -197,11 +203,14 @@ def test_agent_config_path_empty_without_port_or_id(tmp_path, monkeypatch):
     assert server.agent_config_path("", browser_enabled=True) == ""  # no agent id
 
 
-def test_agent_config_path_gated_off_returns_empty(tmp_path, monkeypatch):
-    """The per-project gate: browser_enabled=False (the default) → "" even
-    with a live port, a real agent id, and CDP enabled. This is what keeps a
-    non-web project's agents from spawning the chrome-devtools-mcp Node
-    process — they get no --mcp-config at all."""
+def test_agent_config_path_gated_off_keeps_server_drops_chrome_devtools(
+    tmp_path, monkeypatch
+):
+    """The per-project gate now bites only chrome-devtools: browser_enabled=
+    False (the default) still writes a config carrying OUR server entry (the
+    wait_for_agent coordination tool must Just Work in every project — the
+    browser tools are call-time gated server-side instead), but omits the
+    chrome-devtools entry, so no per-agent Node process spawns."""
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
     monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
     monkeypatch.setattr(
@@ -209,9 +218,15 @@ def test_agent_config_path_gated_off_returns_empty(tmp_path, monkeypatch):
     )
     server = _server()
     server._port = 23456
-    # Explicit False and the default both gate off.
-    assert server.agent_config_path("1234_2", browser_enabled=False) == ""
-    assert server.agent_config_path("1234_2") == ""
+    # Explicit False and the default behave identically.
+    for path in (
+        server.agent_config_path("1234_2", browser_enabled=False),
+        server.agent_config_path("1234_2"),
+    ):
+        with open(path) as handle:
+            config = json.load(handle)
+        assert SERVER_NAME in config["mcpServers"]
+        assert "chrome-devtools" not in config["mcpServers"]
 
 
 def test_stop_unlinks_per_agent_configs(tmp_path, monkeypatch):
@@ -303,14 +318,44 @@ def test_agent_config_content_omits_chrome_devtools_without_cdp(monkeypatch):
     assert SERVER_NAME in config["mcp"]
 
 
-def test_agent_config_content_gated_off_returns_empty(monkeypatch):
-    """Same per-project gate as agent_config_path: not opted in → "" (spawn_argv
-    then emits no OPENCODE_CONFIG_CONTENT env var), even with CDP live."""
+def test_agent_config_content_gated_off_keeps_server_drops_chrome_devtools(
+    monkeypatch,
+):
+    """Same relaxed gate as agent_config_path: not opted in → the opencode
+    inline config still carries OUR server entry (coordination) but omits
+    chrome-devtools, even with CDP live."""
     monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
+    monkeypatch.setattr(
+        "symmetria_ide.browser_mcp.shutil.which", lambda _: "/usr/bin/npx"
+    )
     server = _server()
     server._port = 34567
-    assert server.agent_config_content("1234_2", browser_enabled=False) == ""
-    assert server.agent_config_content("1234_2") == ""  # default is False
+    for content in (
+        server.agent_config_content("1234_2", browser_enabled=False),
+        server.agent_config_content("1234_2"),  # default is False
+    ):
+        config = json.loads(content)
+        assert SERVER_NAME in config["mcp"]
+        assert "chrome-devtools" not in config["mcp"]
+
+
+def test_browser_gated_body_blocks_and_passes():
+    """The call-time browser-tool gate: a False gate returns the disabled
+    error (without invoking the body); True / None passes through."""
+    from symmetria_ide.browser_mcp import _browser_gated_body
+
+    calls = []
+
+    def body():
+        calls.append(1)
+        return {"ok": True}
+
+    blocked = _browser_gated_body(lambda: False, body)
+    assert blocked["ok"] is False
+    assert "disabled" in blocked["error"]
+    assert calls == []  # body never ran
+    assert _browser_gated_body(lambda: True, body) == {"ok": True}
+    assert _browser_gated_body(None, body) == {"ok": True}
 
 
 def test_agent_config_content_empty_without_port_or_id():

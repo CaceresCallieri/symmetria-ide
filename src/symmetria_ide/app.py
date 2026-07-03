@@ -33,6 +33,7 @@ import shutil
 import tempfile
 import threading
 import time
+import uuid
 
 from PySide6.QtCore import (
     Property,
@@ -51,6 +52,7 @@ from PySide6.QtGui import QGuiApplication, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine, QmlElement
 from PySide6.QtWebEngineQuick import QtWebEngineQuick
 
+from . import agent_coordination
 from . import agent_harness
 from .account_usage_store import AccountUsageStore
 from .agent_activity import AgentActivityMachine
@@ -429,6 +431,14 @@ class AppController(QObject):
     # agentBrowserActive stays all-False until a future CDP monitor re-activates
     # the hook. One notify covers all three (count / attention / active).
     agentBrowserChanged = Signal()
+    # Agent coordination (wait_for_agent dependency triggers — see
+    # agent_coordination.py). Notifies the chip coordination-attention dot
+    # list (agentCoordAttention).
+    agentCoordChanged = Signal()
+    # Internal cross-thread marshal for the coordination judge: the one-shot
+    # judge worker thread emits (trigger_id, status, summary); a queued
+    # connection delivers _on_judge_verdict on the GUI thread.
+    _judgeVerdictReady = Signal(str, str, str)
     # Per-project agent-browser opt-in (the `.symmetria/ide.json` marker).
     # Drives the MCP popup's chrome-devtools on/off state (Ctrl+Shift+M → `w`).
     # The cached flag it notifies is the gate that decides whether spawned
@@ -709,6 +719,35 @@ class AppController(QObject):
             self._read_browser_windows,
             self._open_browser_for_mcp,
             self._set_browser_attention_for_mcp,
+            # Agent coordination: wait_for_agent registration (ungated) + the
+            # call-time per-project gate for the three browser tools (the
+            # config-injection gate moved here when the server entry became
+            # always-injected — see browser_mcp.agent_config_path).
+            wait_registrar=self._register_wait_for_mcp,
+            browser_gate=lambda: self._project_browser_enabled,
+        )
+        # ----- Agent coordination (wait_for_agent triggers) ---------------
+        # Pure trigger state machine (agent_coordination.py); this controller
+        # owns only the Qt wiring: settle timers, the judge worker thread,
+        # inject retries, the attention dict, notify-send.
+        self._coordination = agent_coordination.TriggerEngine()
+        # trigger.id -> Trigger while its judge subprocess is in flight (the
+        # verdict signal routes back through this, so a trigger pruned by an
+        # agent close mid-judge simply drops the late verdict).
+        self._coord_inflight: dict[str, agent_coordination.Trigger] = {}
+        # watched slot -> single-shot settle QTimer (idle-edge debounce).
+        self._coord_settle_timers: dict[int, QTimer] = {}
+        # inject request_id -> {slot, text, attempts}: coordination injects
+        # intercepted in agent_inject_done for retry-on-busy (the QML inject
+        # path allows one in-flight submit app-wide — STT may hold it).
+        self._coord_pending_injects: dict[str, dict] = {}
+        # registrant slot -> message. PRESENCE = the coordination attention
+        # dot is lit on that agent's chip; cleared on focus, or agent close.
+        self._agent_coord_attention: dict[int, str] = {}
+        # queued: _judgeVerdictReady originates on the one-shot judge worker
+        # thread; _on_judge_verdict mutates GUI-thread pool state (§4 P2).
+        self._judgeVerdictReady.connect(
+            self._on_judge_verdict, Qt.ConnectionType.QueuedConnection
         )
         # Publish/subscribe client to Symmetria Shell's agent-bridge hub.
         # Publishes this pool's spawns/focus/titles so the shell dashboard
@@ -1812,14 +1851,10 @@ class AppController(QObject):
         if enabled != self._project_browser_enabled:
             self._project_browser_enabled = enabled
             self.projectBrowserEnabledChanged.emit()
-        # Lazily start the browser MCP server ONLY for opted-in projects (the
-        # default is OFF). `start()` is idempotent + backgrounded, so calling it
-        # on every displayedRootChanged is cheap and the ~1s FastMCP/uvicorn
-        # import never touches the cold-start path of the common (non-browser)
-        # project. The Ctrl+Shift+M toggle reaches here via toggle_project_
-        # browser → this method, so flipping the marker ON also starts it.
-        if self._project_browser_enabled:
-            self._browser_mcp_server.start()
+        # The MCP server itself now starts unconditionally in start() (agent
+        # coordination made it universal; still backgrounded + idempotent).
+        # This method keeps only the marker re-read: the cached flag feeds the
+        # browser tools' CALL-time gate and the chrome-devtools config gate.
 
     @Property(bool, notify=projectBrowserEnabledChanged)
     def projectBrowserEnabled(self) -> bool:
@@ -2554,6 +2589,19 @@ class AppController(QObject):
             for slot in range(1, self._MAX_INSTANCES + 1)
         ]
 
+    @Property("QVariantList", notify=agentCoordChanged)
+    def agentCoordAttention(self) -> list:
+        """Per-slot 'coordination needs your eyes on this agent' flag, indexed
+        `slot - 1` → drives the coordination dot on the chip itself (NOT the
+        browser globe — this one renders regardless of browser ownership). Set
+        when a coordination judge returns needs_user (on both involved chips)
+        or a wait is cancelled/undeliverable; cleared when the chip is focused
+        (focus_agent) or the agent closes."""
+        return [
+            slot in self._agent_coord_attention
+            for slot in range(1, self._MAX_INSTANCES + 1)
+        ]
+
     @Property(int, notify=sttStateChanged)
     def sttTargetSlot(self) -> int:
         """1-based slot the STT pipeline is dictating into; 0 = none."""
@@ -2675,10 +2723,10 @@ class AppController(QObject):
         # of the committed `.symmetria/ide.json` since the last root change —
         # the re-read may emit projectBrowserEnabledChanged, refreshing the MCP
         # popup when the on-disk flag changed; that emit is intended, so don't
-        # "optimize away" this call). Then pass the result into
-        # agent_config_path: when the project hasn't opted in it returns "" →
-        # no --mcp-config → the agent gets NO browser MCP and no
-        # chrome-devtools-mcp Node process spawns.
+        # "optimize away" this call). The IDE MCP server entry is ALWAYS
+        # injected (wait_for_agent coordination is universal); browser_enabled
+        # gates only the chrome-devtools entry (the per-agent Node process) —
+        # the browser tools themselves are call-time gated server-side.
         self._refresh_project_browser_enabled()
         # Stage 2c: inject a PER-AGENT browser MCP config so the agent gets the
         # browser_* tools AND its requests carry the X-Symmetria-Agent header —
@@ -2688,8 +2736,8 @@ class AppController(QObject):
         # only the DELIVERY mechanism differs per harness: claude loads a config
         # FILE via --mcp-config (mcp_config_flag), opencode reads inline JSON
         # from OPENCODE_CONFIG_CONTENT (mcp_config_env, its remote MCP being
-        # SSE-only). Each builder returns "" when gated off / server down → a
-        # no-op in spawn_argv (agent gets no browser MCP, no npx process).
+        # SSE-only). Each builder returns "" when the server is down → a
+        # no-op in spawn_argv (agent gets no IDE MCP tools for that spawn).
         mcp_config_path = ""
         mcp_config_content = ""
         if spec.mcp_config_flag:
@@ -2732,6 +2780,10 @@ class AppController(QObject):
         if self._focused_term_agent != slot:
             self._focused_term_agent = slot
             self.focusedAgentChanged.emit()
+        # Clear-on-view for the coordination attention dot: focusing the chip
+        # means the user is looking at this agent — the badge served its purpose.
+        if self._agent_coord_attention.pop(slot, None) is not None:
+            self.agentCoordChanged.emit()
         self._agent_bridge.notify_focus(slot)
         self.set_central_surface("agent")
         self.focusAgentRequested.emit(slot)
@@ -2932,6 +2984,7 @@ class AppController(QObject):
                 "pool desync detected; removing from agents only",
                 slot,
             )
+            self._on_coord_agent_closed(slot)
             del self._term_agents[slot]
             self._term_agent_activity.pop(slot, None)
             self._cancel_pending_interrupt_clear(slot)
@@ -2941,6 +2994,9 @@ class AppController(QObject):
             self._agent_bridge.notify_remove(slot)
             return
         closed_position = self._agent_order.index(slot)
+        # Coordination prune BEFORE the order compaction so a cancellation
+        # message can still name the closing agent's display number.
+        self._on_coord_agent_closed(slot)
         self._agent_order.remove(slot)
         del self._term_agents[slot]
         self._term_agent_activity.pop(slot, None)
@@ -3386,6 +3442,369 @@ class AppController(QObject):
         log.info("browser attention raised by agent slot %d", agent_slot)
         return {"ok": True}
 
+    # ------------------------------------------------------------------
+    # Agent coordination (wait_for_agent dependency triggers)
+    # ------------------------------------------------------------------
+    # Pipeline: registrant B calls the wait_for_agent MCP tool → trigger armed
+    # in the engine → watched agent A's busy→idle edge (hook clear, Esc clear,
+    # or bridge-snapshot diff for opencode) arms a settle timer → judge
+    # subprocess over A's transcript on a worker thread → verdict routes back
+    # on the GUI thread → go-ahead / hold text injected into B's pane.
+    # Pure logic lives in agent_coordination.py; this section is the Qt wiring.
+
+    # Idle-edge debounce: hook flicker (a Stop immediately followed by more
+    # work) within this window cancels the fire.
+    _COORD_SETTLE_MS = 2000
+    # Retry cadence for injects that lose the app-wide single-in-flight QML
+    # inject slot (an STT paste may hold it).
+    _COORD_INJECT_RETRY_MS = 500
+    _COORD_INJECT_MAX_ATTEMPTS = 6
+    _COORD_JUDGE_TIMEOUT_S = 60
+
+    def _register_wait_for_mcp(
+        self, display_num: int, registrant_id: str, note: str = ""
+    ) -> dict:
+        """The `wait_for_agent` MCP tool body. GUI-thread only.
+
+        `display_num` is the CHIP number (the user's "agent 3") — resolved to
+        the frozen internal slot here, at registration, because display
+        positions shift when agents close and internal slots never do.
+        """
+        registrant_slot = self._agent_slot_from_id(registrant_id)
+        if registrant_slot is None or registrant_slot not in self._term_agents:
+            return {"ok": False, "error": "unknown-agent (untagged caller?)"}
+        if not isinstance(display_num, int) or not (
+            1 <= display_num <= len(self._agent_order)
+        ):
+            return {
+                "ok": False,
+                "error": f"no agent #{display_num} — there are "
+                f"{len(self._agent_order)} agents",
+            }
+        watched_slot = self._agent_order[display_num - 1]
+        watched = self._term_agents[watched_slot]
+        result = self._coordination.register(
+            watched_slot,
+            registrant_slot,
+            str(note or ""),
+            watched_has_session=bool(watched["session_id"]),
+            watched_is_busy=watched_slot in self._term_agent_activity,
+            now=time.time(),
+        )
+        if result.error:
+            return {"ok": False, "error": result.error}
+        log.info(
+            "coordination: agent slot %d waits on slot %d (display #%d, %s)",
+            registrant_slot,
+            watched_slot,
+            display_num,
+            result.status,
+        )
+        reply = {"ok": True, "status": result.status, "watched_agent": display_num}
+        if watched["harness"] != "claude":
+            reply["warning"] = (
+                "watched agent is not a claude agent — transcript verification "
+                "is unavailable; you will get a caveated go-ahead on its idle"
+            )
+        if result.status == "evaluating" and result.trigger is not None:
+            # Watched agent is already idle with a session — judge now rather
+            # than waiting for an edge that may never come. Deferred a tick so
+            # the tool call returns before any inject fires back.
+            trigger = result.trigger
+            QTimer.singleShot(0, lambda: self._coord_judge_trigger(trigger))
+        return reply
+
+    def _display_position(self, slot: int) -> int:
+        """1-based chip number for an internal slot (falls back to the slot
+        itself if it already left the display order)."""
+        return self._agent_order.index(slot) + 1 if slot in self._agent_order else slot
+
+    def _on_coord_busy(self, slot: int) -> None:
+        """Busy edge: cancel the slot's pending settle timer (idle flicker)."""
+        timer = self._coord_settle_timers.pop(slot, None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        self._coordination.on_agent_busy(slot)
+
+    def _on_coord_idle(self, slot: int) -> None:
+        """Idle edge: if anyone is watching this slot, arm the settle timer.
+
+        The 2s window absorbs hook flicker (Stop followed immediately by more
+        activity); a busy edge inside it cancels the fire. Mid-conversation
+        stops that survive the window are the JUDGE's problem — it returns
+        in_progress and the trigger silently re-arms.
+        """
+        if not any(
+            t.watched_slot == slot and not t.evaluating
+            for t in self._coordination.triggers
+        ):
+            return
+        timer = self._coord_settle_timers.get(slot)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(self._COORD_SETTLE_MS)
+            # Default-arg capture binds the slot at connect time (one timer
+            # per slot — same pattern as the interrupt-clear timers).
+            timer.timeout.connect(lambda s=slot: self._coord_fire(s))
+            self._coord_settle_timers[slot] = timer
+        timer.start()
+
+    def _coord_fire(self, slot: int) -> None:
+        """Settle window elapsed with the watched slot still idle — judge
+        every armed trigger on it."""
+        timer = self._coord_settle_timers.pop(slot, None)
+        if timer is not None:
+            timer.deleteLater()
+        for trigger in self._coordination.on_agent_idle(slot):
+            self._coord_judge_trigger(trigger)
+
+    def _coord_judge_trigger(self, trigger: agent_coordination.Trigger) -> None:
+        """Evaluate one trigger: caveat-inject for non-claude watched agents
+        (no readable transcript), else run the headless judge off-thread."""
+        inst = self._term_agents.get(trigger.watched_slot)
+        if inst is None:
+            # Watched agent vanished between edge and fire — close_agent's
+            # prune normally handles this; defensive drop.
+            self._coordination.complete(trigger)
+            return
+        display = self._display_position(trigger.watched_slot)
+        if inst["harness"] != "claude":
+            # opencode transcripts have a different (unexplored) format — v1
+            # skips verification with full disclosure rather than killing the
+            # feature for opencode or spamming needs_user.
+            self._coord_inject(
+                trigger.registrant_slot,
+                agent_coordination.opencode_caveat_text(display, trigger.note),
+            )
+            self._coordination.complete(trigger)
+            return
+        session_id = inst["session_id"]
+        cwd = inst["cwd"]
+        if not session_id:
+            self._coord_verdict_needs_user(
+                trigger, "judge failed: watched agent has no session id"
+            )
+            return
+        self._coord_inflight[trigger.id] = trigger
+        threading.Thread(
+            target=self._run_judge,
+            args=(trigger.id, cwd, session_id, trigger.note),
+            daemon=True,
+            name=f"coord-judge-{trigger.watched_slot}",
+        ).start()
+
+    def _run_judge(self, trigger_id: str, cwd: str, session_id: str, note: str) -> None:
+        """Worker-thread body: transcript tail → `claude -p` → verdict emit.
+
+        Any failure mode (missing transcript, timeout, bad exit, unparseable
+        output) becomes a needs_user verdict — never a silent go-ahead, never
+        a silently dropped trigger.
+        """
+        path = agent_coordination.claude_transcript_path(cwd, session_id)
+        tail = agent_coordination.extract_transcript_tail(path)
+        if not tail:
+            verdict = agent_coordination.Verdict(
+                agent_coordination.VERDICT_NEEDS_USER,
+                "judge failed: transcript not found or empty",
+            )
+        else:
+            prompt = agent_coordination.build_judge_prompt(tail, note)
+            try:
+                # Neutral cwd: no project CLAUDE.md / hooks load for the judge.
+                proc = subprocess.run(
+                    agent_coordination.judge_argv(prompt),
+                    capture_output=True,
+                    text=True,
+                    timeout=self._COORD_JUDGE_TIMEOUT_S,
+                    cwd=tempfile.gettempdir(),
+                )
+            except subprocess.TimeoutExpired:
+                verdict = agent_coordination.Verdict(
+                    agent_coordination.VERDICT_NEEDS_USER,
+                    f"judge failed: timed out after {self._COORD_JUDGE_TIMEOUT_S}s",
+                )
+            except OSError as exc:
+                verdict = agent_coordination.Verdict(
+                    agent_coordination.VERDICT_NEEDS_USER,
+                    f"judge failed: could not run claude ({exc})",
+                )
+            else:
+                if proc.returncode != 0:
+                    verdict = agent_coordination.Verdict(
+                        agent_coordination.VERDICT_NEEDS_USER,
+                        f"judge failed: claude exited {proc.returncode} "
+                        f"({proc.stderr.strip()[:120]})",
+                    )
+                else:
+                    verdict = agent_coordination.parse_judge_output(proc.stdout)
+        # Cross-thread emit with GC suspended (gotcha #10); delivered queued
+        # to _on_judge_verdict on the GUI thread.
+        emit_gc_safe(
+            self._judgeVerdictReady, trigger_id, verdict.status, verdict.summary
+        )
+
+    @Slot(str, str, str)
+    def _on_judge_verdict(self, trigger_id: str, status: str, summary: str) -> None:
+        """GUI-thread verdict handler — the trigger's fate is decided here."""
+        trigger = self._coord_inflight.pop(trigger_id, None)
+        if trigger is None:
+            return  # pruned (an involved agent closed) while the judge ran
+        if trigger.registrant_slot not in self._term_agents:
+            self._coordination.complete(trigger)  # nobody left to tell
+            return
+        display = self._display_position(trigger.watched_slot)
+        log.info(
+            "coordination: judge verdict for slot %d (watched by slot %d): %s — %s",
+            trigger.watched_slot,
+            trigger.registrant_slot,
+            status,
+            summary,
+        )
+        if status == agent_coordination.VERDICT_COMPLETE:
+            self._coord_inject(
+                trigger.registrant_slot,
+                agent_coordination.goahead_text(display, summary, trigger.note),
+            )
+            self._coordination.complete(trigger)
+        elif status == agent_coordination.VERDICT_IN_PROGRESS:
+            # The watched agent merely paused mid-task / is chatting with the
+            # user — silently re-arm for its next idle edge (no attention spam).
+            self._coordination.rearm(trigger)
+        else:
+            self._coord_verdict_needs_user(trigger, summary)
+
+    def _coord_verdict_needs_user(
+        self, trigger: agent_coordination.Trigger, summary: str
+    ) -> None:
+        """needs_user path: attention dots on both chips + desktop
+        notification + hold text injected into the registrant."""
+        display = self._display_position(trigger.watched_slot)
+        message = summary or "needs your attention"
+        changed = False
+        for slot in (trigger.watched_slot, trigger.registrant_slot):
+            if slot in self._term_agents:
+                self._agent_coord_attention[slot] = message
+                changed = True
+        if changed:
+            self.agentCoordChanged.emit()
+        self._notify_desktop(
+            f"Agent #{display} needs attention",
+            f"{message} — agent #{self._display_position(trigger.registrant_slot)} "
+            "is holding its dependent task.",
+        )
+        self._coord_inject(
+            trigger.registrant_slot,
+            agent_coordination.hold_text(display, summary, trigger.note),
+        )
+        self._coordination.complete(trigger)
+
+    def _coord_inject(self, slot: int, text: str) -> None:
+        """Inject (auto-submit) coordination text into an agent's pane via the
+        existing QML inject path, with retry-on-busy in agent_inject_done."""
+        # Strip ESC defensively — same bracketed-paste hazard _dispatch_inject
+        # guards against (an embedded \x1b[201~ would end the paste early).
+        text = text.replace("\x1b", "")
+        request_id = f"coord-{uuid.uuid4().hex}"
+        self._coord_pending_injects[request_id] = {
+            "slot": slot,
+            "text": text,
+            "attempts": 1,
+        }
+        log.info("coordination: inject into slot %d (request %s)", slot, request_id)
+        self.agentInjectRequested.emit(slot, text, True, request_id)
+
+    def _coord_inject_result(
+        self, request_id: str, pending: dict, ok: bool, error: str
+    ) -> None:
+        """Resolve one coordination inject attempt (from agent_inject_done)."""
+        if ok:
+            return
+        if error == "busy" and pending["attempts"] < self._COORD_INJECT_MAX_ATTEMPTS:
+            # Another inject (STT) holds the app-wide single-in-flight slot —
+            # retry shortly under the SAME request id.
+            pending["attempts"] += 1
+            self._coord_pending_injects[request_id] = pending
+
+            def _retry() -> None:
+                if request_id in self._coord_pending_injects:
+                    self.agentInjectRequested.emit(
+                        pending["slot"], pending["text"], True, request_id
+                    )
+
+            QTimer.singleShot(self._COORD_INJECT_RETRY_MS, _retry)
+            return
+        # Exhausted / hard failure: never lose the event — light the dot and
+        # tell the user via notification instead.
+        log.warning(
+            "coordination: inject into slot %d failed (%s) after %d attempt(s)",
+            pending["slot"],
+            error,
+            pending["attempts"],
+        )
+        if pending["slot"] in self._term_agents:
+            self._agent_coord_attention[pending["slot"]] = (
+                "coordination message could not be delivered"
+            )
+            self.agentCoordChanged.emit()
+        self._notify_desktop(
+            "Agent coordination message undelivered",
+            f"Could not inject into agent "
+            f"#{self._display_position(pending['slot'])}: {error}",
+        )
+
+    def _on_coord_agent_closed(self, slot: int) -> None:
+        """Prune all coordination state involving a closing agent."""
+        timer = self._coord_settle_timers.pop(slot, None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        if self._agent_coord_attention.pop(slot, None) is not None:
+            self.agentCoordChanged.emit()
+        # Drop in-flight judge routing for triggers involving this slot (the
+        # late verdict then no-ops in _on_judge_verdict).
+        self._coord_inflight = {
+            tid: t
+            for tid, t in self._coord_inflight.items()
+            if slot not in (t.watched_slot, t.registrant_slot)
+        }
+        # Drop pending injects targeting this slot (its pane is going away).
+        self._coord_pending_injects = {
+            rid: p
+            for rid, p in self._coord_pending_injects.items()
+            if p["slot"] != slot
+        }
+        result = self._coordination.on_agent_closed(slot)
+        for trigger in result.orphaned:
+            # The WATCHED agent closed while the registrant lives — tell the
+            # registrant its wait was cancelled (dot + injected note; less
+            # severe than needs_user, so no desktop notification).
+            if trigger.registrant_slot in self._term_agents:
+                self._agent_coord_attention[trigger.registrant_slot] = (
+                    "the agent you were waiting on was closed"
+                )
+                self.agentCoordChanged.emit()
+                self._coord_inject(
+                    trigger.registrant_slot,
+                    agent_coordination.cancelled_text(
+                        self._display_position(slot), trigger.note
+                    ),
+                )
+
+    def _notify_desktop(self, title: str, body: str) -> None:
+        """Best-effort freedesktop notification (routes through Symmetria
+        Shell's notification center — the org.freedesktop.Notifications
+        daemon on this system)."""
+        try:
+            subprocess.Popen(
+                ["notify-send", "-a", "Symmetria IDE", title, body],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            log.warning("notify-send unavailable — desktop notification dropped")
+
     @Slot()
     def request_opencode_sessions(self) -> None:
         """Fetch this project's OpenCode session list for the resume picker.
@@ -3706,6 +4125,13 @@ class AppController(QObject):
         # else: observer/recap/unmapped event — only session_id may have changed.
         if activity_changed:
             self.agentActivityChanged.emit()
+            # Coordination edge taps (claude agents — the local-capture path):
+            # a clear that actually popped is the busy→idle edge, a state that
+            # actually set is the idle→busy edge (agent_coordination pipeline).
+            if outcome.clear:
+                self._on_coord_idle(slot)
+            else:
+                self._on_coord_busy(slot)
         # Phase 2 (inversion): publish the locally-captured activity outward so
         # the shell dashboard sources it from the IDE (the authoritative owner)
         # rather than computing its own from the global hook. Publish on any
@@ -3809,6 +4235,9 @@ class AppController(QObject):
             "interrupt-clear: slot %d sparkle cleared after Esc (no hook fired)", slot
         )
         self.agentActivityChanged.emit()
+        # Coordination: an Esc-interrupt is a busy→idle edge too (the judge
+        # will typically read the cut-short transcript as in_progress/needs_user).
+        self._on_coord_idle(slot)
         # Publish the now-idle activity outward (same as the hook clear path).
         # in_plan_mode is best-effort False: the turn ended and a cleared entry
         # carries no mode; session_id is retained for restore.
@@ -3873,8 +4302,18 @@ class AppController(QObject):
                 or self._term_agents[slot]["harness"],
             }
         if new_activity != self._term_agent_activity:
+            old_activity = self._term_agent_activity
             self._term_agent_activity = new_activity
             self.agentActivityChanged.emit()
+            # Coordination edge taps for BRIDGE-driven slots (opencode — its
+            # activity has no local reporter yet). Locally-captured slots get
+            # their edges in _on_agent_hook / _clear_interrupted_agent.
+            for slot in old_activity.keys() - new_activity.keys():
+                if slot not in self._locally_captured_agents:
+                    self._on_coord_idle(slot)
+            for slot in new_activity.keys() - old_activity.keys():
+                if slot not in self._locally_captured_agents:
+                    self._on_coord_busy(slot)
         # (agent-ownership inversion, Phase 4) STT recording state no longer
         # rides the bridge snapshot — the former `_mirror_stt_state(payload["stt"])`
         # call + method were removed. The chip dot is driven directly by
@@ -3970,7 +4409,15 @@ class AppController(QObject):
         Future for this request_id, which unblocks the agent-events handler
         thread waiting to write the result back to the dictation client. A
         request_id with no pending inject (already timed out / resolved) is a
-        benign no-op (resolve_inject returns False)."""
+        benign no-op (resolve_inject returns False).
+
+        Coordination injects (request ids minted by _coord_inject) are
+        intercepted FIRST — they have no agent-events Future to resolve, and
+        their busy-retry loop lives in _coord_inject_result."""
+        pending = self._coord_pending_injects.pop(request_id, None)
+        if pending is not None:
+            self._coord_inject_result(request_id, pending, ok, error)
+            return
         self._agent_events.resolve_inject(request_id, ok, submitted, error)
 
     @Slot(str)
@@ -4515,13 +4962,15 @@ class AppController(QObject):
         # any of its own agents transact (the persistence win of a file channel).
         self._account_usage_store.start()
         self._on_shared_usage_changed()
-        # NB: the browser MCP server is NO LONGER started unconditionally here.
-        # Its FastMCP+uvicorn import is ~1s and used to block this startup path
-        # (even though the browser-agent capability is per-project, default OFF).
-        # It now starts lazily + backgrounded, gated on the project opt-in, via
-        # `_refresh_project_browser_enabled` — triggered by the synthetic
-        # `displayedRootChanged.emit()` a few lines below (and on every project
-        # change / the Ctrl+Shift+M toggle). See that method + browser_mcp.start.
+        # Start the IDE MCP server (browser window tools + wait_for_agent
+        # coordination) unconditionally BUT backgrounded: start() only spawns a
+        # daemon starter thread, so the ~1s FastMCP+uvicorn import never touches
+        # this GUI-thread startup path (the startup-perf fix that mattered).
+        # It used to be gated on the per-project browser opt-in; agent
+        # coordination made the server universal — the browser tools are now
+        # gated at CALL time instead, and chrome-devtools injection keeps the
+        # per-project config gate. See browser_mcp.py + CLAUDE.md Stage 5.
+        self._browser_mcp_server.start()
         # Seed the GitController with the launch cwd by firing
         # `displayedRootChanged` once at startup. Without this, the very
         # first nvim cwd capsule arrives with a value equal to `_cwd`

@@ -202,6 +202,54 @@ Rectangle {
                         borderColor: Theme.color.border.hairline
                     }
 
+                    // Coordination attention dot — lit when a wait_for_agent
+                    // trigger involving this agent needs the user (judge said
+                    // needs_user, a wait was cancelled, or a message couldn't
+                    // be delivered). Rides the CHIP's top-right corner, not the
+                    // browser globe (its sibling attentionDot below requires
+                    // browser ownership; coordination must show regardless).
+                    // Blue (mode.command) so it reads "info/coordination",
+                    // distinct from the globe badge's amber accent. Cleared by
+                    // focusing the chip (focus_agent) — the plain-click
+                    // MouseArea below already does that, so tapping the dot
+                    // acknowledges it. agentCoordAttention is a PySide
+                    // QVariantList — index then coerce, per
+                    // qml_qvariantlist_array_check (no Array.isArray).
+                    Rectangle {
+                        id: coordAttentionDot
+                        visible: !!(controller.agentCoordAttention[chip.slot - 1])
+                        width: Math.round(chip.height * 0.28)
+                        height: width
+                        radius: width / 2
+                        color: Theme.color.mode.command
+                        border.width: 1
+                        border.color: Theme.color.bg.chrome
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.rightMargin: -Math.round(width * 0.2)
+                        anchors.topMargin: -Math.round(width * 0.2)
+                        z: 2  // above chipContent (z:1) and the focus MouseArea
+
+                        // Same gentle pulse discipline as the globe badge —
+                        // alwaysRunToEnd so it never freezes mid-fade,
+                        // Theme.anim durations (no hand-rolled ms).
+                        SequentialAnimation {
+                            running: coordAttentionDot.visible
+                            loops: Animation.Infinite
+                            alwaysRunToEnd: true
+                            NumberAnimation {
+                                target: coordAttentionDot; property: "opacity"
+                                to: 0.45; duration: Theme.anim.duration
+                                easing.type: Easing.InOutQuad
+                            }
+                            NumberAnimation {
+                                target: coordAttentionDot; property: "opacity"
+                                to: 1.0; duration: Theme.anim.duration
+                                easing.type: Easing.InOutQuad
+                            }
+                        }
+                    }
+
                     Row {
                         id: chipContent
                         anchors.centerIn: parent

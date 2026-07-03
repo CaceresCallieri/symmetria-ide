@@ -176,28 +176,41 @@ def test_toggle_project_browser_flips_and_persists(controller, tmp_path):
     assert pbm.browser_agents_enabled(str(tmp_path)) is False
 
 
-def test_spawn_argv_gates_browser_mcp(controller, tmp_path, monkeypatch):
-    """agent_spawn_argv injects --mcp-config ONLY when the project opted in.
+def test_spawn_argv_gates_chrome_devtools_not_server(controller, tmp_path, monkeypatch):
+    """agent_spawn_argv always injects --mcp-config (coordination's
+    wait_for_agent must work in every project) — the per-project gate now
+    controls only whether the written config carries the chrome-devtools
+    entry (the per-agent Node process). Config writes are routed to tmp via
+    gettempdir so the test leaves no temp-dir litter."""
+    import json
 
-    With a fake server port + a spawned slot, the per-agent config (hence the
-    --mcp-config flag claude loads it through) appears only after the project
-    is enabled — the harness-agnostic gate in action. Config writes are routed
-    to tmp via gettempdir so the test leaves no temp-dir litter."""
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    # Deterministic chrome-devtools availability (CDP port + npx present).
+    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
+    monkeypatch.setattr(
+        "symmetria_ide.browser_mcp.shutil.which", lambda _: "/usr/bin/npx"
+    )
     (tmp_path / ".git").mkdir()  # anchor the marker at tmp_path, never the repo
     controller.anchor_to_path(str(tmp_path))
     # Pretend the browser MCP server bound a port so agent_config_path can
-    # write a config when the gate allows it.
+    # write a config.
     controller._browser_mcp_server._port = 54321
     controller.spawn_agent("fresh", True, "claude")
     slot = controller.agentOrder[0]
 
-    # OFF (default): the gate returns "" → no --mcp-config flag.
-    assert "--mcp-config" not in controller.agent_spawn_argv(slot)
+    def _written_config(argv):
+        assert "--mcp-config" in argv
+        with open(argv[argv.index("--mcp-config") + 1]) as handle:
+            return json.load(handle)
 
-    # ON: enable; the spawn-time re-read picks it up → --mcp-config present.
+    # OFF (default): server entry present, chrome-devtools omitted.
+    config = _written_config(controller.agent_spawn_argv(slot))
+    assert "chrome-devtools" not in config["mcpServers"]
+
+    # ON: the spawn-time re-read picks it up → chrome-devtools injected.
     controller.toggle_project_browser()
-    assert "--mcp-config" in controller.agent_spawn_argv(slot)
+    config = _written_config(controller.agent_spawn_argv(slot))
+    assert "chrome-devtools" in config["mcpServers"]
 
 
 # ---------------------------------------------------------------------------

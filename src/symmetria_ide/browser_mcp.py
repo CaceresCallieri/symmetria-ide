@@ -143,6 +143,27 @@ def reap_orphan_configs() -> None:
             pass
 
 
+def _browser_gated_body(
+    gate: Callable[[], bool] | None, fn: Callable[[], dict]
+) -> dict:
+    """Run a browser tool body behind the per-project call-time gate.
+
+    Since the server config became always-injected (agent coordination rides
+    it), the `.symmetria/ide.json` browser opt-in is enforced HERE for the
+    three browser tools instead of at config-injection time (chrome-devtools
+    injection keeps the config-level gate — that's the costly Node process).
+    A None gate (tests / permissive embedder) means ungated. Runs inside the
+    GUI-thread closure the bridge marshals, where controller state lives.
+    """
+    if gate is not None and not gate():
+        return {
+            "ok": False,
+            "error": "browser tools disabled for this project — enable via "
+            "Ctrl+Shift+M (writes .symmetria/ide.json browser_agents)",
+        }
+    return fn()
+
+
 def _build_combined_asgi_app(server):
     """Combine the FastMCP server's two transports into ONE Starlette app so a
     single uvicorn port serves both: streamable-HTTP at /mcp for claude, SSE at
@@ -248,6 +269,8 @@ class BrowserMcpServer:
         windows_reader: Callable[[], dict],
         window_opener: Callable[[str, str], dict],
         attention_setter: Callable[[str, str], dict],
+        wait_registrar: Callable[[int, str, str], dict] | None = None,
+        browser_gate: Callable[[], bool] | None = None,
     ) -> None:
         self._bridge = bridge
         self._windows_reader = windows_reader
@@ -259,6 +282,16 @@ class BrowserMcpServer:
         # agent's browser globe (browser_request_attention). Same agent-id seam
         # as the opener — the IDE maps it onto the chip slot.
         self._attention_setter = attention_setter
+        # (display_num, registrant_agent_id, note) -> dict: the wait_for_agent
+        # tool body (agent coordination v1 — see agent_coordination.py). Rides
+        # this server because it's a generic FastMCP host, not browser-specific;
+        # coordination is UNGATED (unlike the browser tools below).
+        self._wait_registrar = wait_registrar
+        # () -> bool: the per-project browser opt-in, read AT CALL TIME on the
+        # GUI thread. Since coordination made the server config always-injected,
+        # the `.symmetria/ide.json` gate moved from config-injection to here for
+        # the three browser tools (chrome-devtools injection stays config-level).
+        self._browser_gate = browser_gate
         self._server = None  # uvicorn.Server
         self._thread: threading.Thread | None = None  # uvicorn serve thread
         # Starter thread that runs _start() (the ~1s FastMCP+uvicorn import +
@@ -369,9 +402,18 @@ class BrowserMcpServer:
         windows_reader = self._windows_reader
         window_opener = self._window_opener
         attention_setter = self._attention_setter
+        wait_registrar = self._wait_registrar
+        browser_gate = self._browser_gate
         server = FastMCP(
             SERVER_NAME, host="127.0.0.1", port=self._port, log_level="WARNING"
         )
+
+        # Call-time per-project gate for the BROWSER tools only (wait_for_agent
+        # is ungated). The gate callable reads controller state, so it must run
+        # inside the GUI-thread closure the bridge marshals — wrap the tool's
+        # real body rather than checking on the uvicorn thread.
+        def _browser_gated(fn):
+            return lambda: _browser_gated_body(browser_gate, fn)
 
         @server.tool()
         async def browser_open(url: str = "about:blank") -> dict:
@@ -388,7 +430,9 @@ class BrowserMcpServer:
             url settles after the page loads — read browser_list_windows for the
             current url/title if it differs from what you passed."""
             agent_id = _calling_agent_id(server)
-            return await bridge.read(lambda: window_opener(url, agent_id))
+            return await bridge.read(
+                _browser_gated(lambda: window_opener(url, agent_id))
+            )
 
         @server.tool()
         async def browser_list_windows() -> dict:
@@ -396,7 +440,7 @@ class BrowserMcpServer:
             focused. This is the correlation table for the chrome-devtools-mcp
             tools: match a window's url here to a chrome-devtools-mcp page
             (list_pages) and select_page it before driving."""
-            return await bridge.read(windows_reader)
+            return await bridge.read(_browser_gated(windows_reader))
 
         @server.tool()
         async def browser_request_attention(message: str = "") -> dict:
@@ -412,7 +456,32 @@ class BrowserMcpServer:
             way). Returns {ok, ...}; {ok: false} with an error if you own no
             window or the caller is untagged."""
             agent_id = _calling_agent_id(server)
-            return await bridge.read(lambda: attention_setter(agent_id, message))
+            return await bridge.read(
+                _browser_gated(lambda: attention_setter(agent_id, message))
+            )
+
+        if wait_registrar is not None:
+
+            @server.tool()
+            async def wait_for_agent(agent: int, note: str = "") -> dict:
+                """Register a dependency on another agent in this IDE: when
+                that agent finishes its current task, the IDE will verify its
+                transcript and then send YOU a go-ahead message to continue.
+
+                `agent` is the other agent's DISPLAY number — the number shown
+                on its chip in the IDE top bar (what the user calls "agent 3").
+                `note` is an optional one-line description of what you are
+                waiting for (e.g. "the API refactor is merged"); it is shown to
+                the verification judge and echoed back in the go-ahead.
+
+                After this returns ok, END YOUR TURN and do nothing — do NOT
+                poll or busy-wait. The IDE injects a new prompt into you when
+                the other agent is done (or if its result needs the user's
+                attention, in which case you'll be told to hold). Returns
+                {ok, status: "armed"|"evaluating", ...}; {ok: false, error}
+                if the target doesn't exist or is yourself."""
+                agent_id = _calling_agent_id(server)
+                return await bridge.read(lambda: wait_registrar(agent, agent_id, note))
 
         # Serve BOTH transports on the one port from the same FastMCP instance:
         # /mcp (streamable-HTTP, claude) + /sse (SSE, opencode). See
@@ -504,20 +573,23 @@ class BrowserMcpServer:
         agent-bubble browser indicator). `agent_spawn_argv` passes the returned
         path via `--mcp-config`.
 
-        `browser_enabled` is the PER-PROJECT gate (default False). When the
-        project hasn't opted into the agent browser capability (no
-        `.symmetria/ide.json` marker — see project_browser_marker), this
-        returns "" and the agent gets NO browser MCP at all: neither our
-        window tools NOR chrome-devtools, so no per-agent `npx
-        chrome-devtools-mcp` Node process spawns (the RAM the gate saves). The
-        decision is harness-agnostic — it's made here, before
-        `spawn_argv` applies the harness-specific `--mcp-config` flag.
+        Since agent coordination (wait_for_agent) rides this server, the
+        `symmetria-browser` entry is ALWAYS injected (server up + agent_id
+        nonempty) — coordination must Just Work in every project.
+        `browser_enabled` (the PER-PROJECT `.symmetria/ide.json` marker — see
+        project_browser_marker) now gates only the COSTLY part: the
+        `chrome-devtools` entry, i.e. the per-agent `npx chrome-devtools-mcp`
+        Node process (the RAM the gate saves). The three browser tools on our
+        own server are additionally gated at CALL time via the `browser_gate`
+        ctor callable, so a non-opted-in project's agent sees them but gets a
+        clear disabled-error. The decision is harness-agnostic — made here,
+        before `spawn_argv` applies the harness-specific `--mcp-config` flag.
 
-        Returns "" when not enabled, the server isn't running, or `agent_id`
-        is empty — all mean "no per-agent config", which `spawn_argv` treats
-        as no `--mcp-config` flag (the agent simply gets no browser tools).
+        Returns "" when the server isn't running or `agent_id` is empty —
+        both mean "no per-agent config", which `spawn_argv` treats as no
+        `--mcp-config` flag (the agent then gets no IDE MCP tools at all).
         """
-        if not browser_enabled or not self._port or not agent_id:
+        if not self._port or not agent_id:
             return ""
         config = {
             "mcpServers": {
@@ -531,8 +603,9 @@ class BrowserMcpServer:
         # Add the off-the-shelf Chrome DevTools MCP (npx stdio) pointed at the
         # embedded view's CDP endpoint — see _chrome_devtools_argv for the
         # rationale + the CDP/npx gating. claude's schema splits the invocation
-        # into `command` (executable) + `args` (the rest).
-        argv = self._chrome_devtools_argv(agent_id)
+        # into `command` (executable) + `args` (the rest). Per-project gated:
+        # this is the entry that spawns a Node process per agent.
+        argv = self._chrome_devtools_argv(agent_id) if browser_enabled else None
         if argv:
             config["mcpServers"]["chrome-devtools"] = {
                 "command": argv[0],
@@ -569,12 +642,13 @@ class BrowserMcpServer:
         chip-globe attribution works for opencode too — see the reference/
         agent-sdk memory.
 
-        Returns "" under the SAME gate as agent_config_path (project opt-out,
-        server not up, or empty id); spawn_argv then emits no env var. No file is
-        written (inline env var), so — unlike agent_config_path — there is
-        nothing to track or reap.
+        Returns "" under the SAME conditions as agent_config_path (server not
+        up, or empty id — `browser_enabled` gates only the chrome-devtools
+        entry, mirroring the claude builder); spawn_argv then emits no env
+        var. No file is written (inline env var), so — unlike
+        agent_config_path — there is nothing to track or reap.
         """
-        if not browser_enabled or not self._port or not agent_id:
+        if not self._port or not agent_id:
             return ""
         mcp: dict = {
             SERVER_NAME: {
@@ -584,7 +658,7 @@ class BrowserMcpServer:
                 "headers": {_AGENT_HEADER: agent_id},
             }
         }
-        argv = self._chrome_devtools_argv(agent_id)
+        argv = self._chrome_devtools_argv(agent_id) if browser_enabled else None
         if argv:
             # opencode's local (stdio) shape: `command` is the FULL argv array
             # (vs claude's command+args split in agent_config_path).
