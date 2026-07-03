@@ -70,8 +70,8 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
     CmdlineState,
     CompletionModel,
 )
-from .git_controller import GitController, GitStatusListModel
 from .git_branch_controller import GitBranchController, GitBranchListModel
+from .git_controller import GitController, GitStatusListModel
 from .git_log_controller import GitLogController, GitLogListModel
 from .git_ops_controller import GitOpsController
 from .minimap_model import MinimapModel

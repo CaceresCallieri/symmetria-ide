@@ -53,15 +53,15 @@ FocusScope {
         view.forceActiveFocus();
     }
 
-    // Same row metrics + gg idiom as CommitListView (shared rhythm).
+    // Same row pitch as CommitListView (shared rhythm); the host's
+    // content-hugging height cap multiplies this by the visible row count.
     readonly property int rowHeight: 34
-    readonly property int _halfPage: Math.max(1, Math.floor(view.height / (2 * root.rowHeight)))
-    property bool _gPending: false
 
-    Timer {
-        id: gReset
-        interval: 400
-        onTriggered: root._gPending = false
+    // Shared vim motions (j/k, gg/G, Ctrl+D/U) — see VimListNav.qml.
+    VimListNav {
+        id: nav
+        view: view
+        rowHeight: root.rowHeight
     }
 
     ListView {
@@ -94,45 +94,13 @@ FocusScope {
                 event.accepted = true;
                 return;
             }
-            if (event.key !== Qt.Key_G || (event.modifiers & Qt.ShiftModifier)) {
-                root._gPending = false;
-                gReset.stop();
+            // Shared vim motions first (also runs the gg-cancel bookkeeping
+            // for every other key — see VimListNav.handleKey's contract).
+            if (nav.handleKey(event)) {
+                event.accepted = true;
+                return;
             }
             switch (event.key) {
-            case Qt.Key_J:
-                view.incrementCurrentIndex();
-                event.accepted = true;
-                break;
-            case Qt.Key_K:
-                view.decrementCurrentIndex();
-                event.accepted = true;
-                break;
-            case Qt.Key_G:
-                if (event.modifiers & Qt.ShiftModifier) {
-                    view.currentIndex = view.count - 1;
-                } else if (root._gPending) {
-                    root._gPending = false;
-                    gReset.stop();
-                    view.currentIndex = 0;
-                } else {
-                    root._gPending = true;
-                    gReset.restart();
-                }
-                event.accepted = true;
-                break;
-            case Qt.Key_D:
-                if (event.modifiers & Qt.ControlModifier) {
-                    view.currentIndex = Math.min(view.count - 1,
-                                                 view.currentIndex + root._halfPage);
-                    event.accepted = true;
-                }
-                break;
-            case Qt.Key_U:
-                if (event.modifiers & Qt.ControlModifier) {
-                    view.currentIndex = Math.max(0, view.currentIndex - root._halfPage);
-                    event.accepted = true;
-                }
-                break;
             case Qt.Key_Return:
             case Qt.Key_Enter:
             case Qt.Key_L:

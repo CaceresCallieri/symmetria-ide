@@ -387,7 +387,7 @@ def test_run_log_ref_appends_ref_and_double_dash(monkeypatch) -> None:
         return _P()
 
     ctrl = _make_stopped_controller()
-    monkeypatch.setattr("symmetria_ide.git_log_controller.subprocess.run", fake_run)
+    monkeypatch.setattr("symmetria_ide.git_subprocess.subprocess.run", fake_run)
     ctrl._run_log("/tmp", skip=0, ref="feature-x")
     assert captured["argv"][-2:] == ["feature-x", "--"]
 
@@ -408,7 +408,7 @@ def test_run_log_empty_ref_keeps_argv_unchanged(monkeypatch) -> None:
         return _P()
 
     ctrl = _make_stopped_controller()
-    monkeypatch.setattr("symmetria_ide.git_log_controller.subprocess.run", fake_run)
+    monkeypatch.setattr("symmetria_ide.git_subprocess.subprocess.run", fake_run)
     ctrl._run_log("/tmp", skip=7, ref="")
     assert captured["argv"] == [
         "git",

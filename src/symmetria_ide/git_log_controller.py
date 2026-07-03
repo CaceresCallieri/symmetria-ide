@@ -54,11 +54,13 @@ from PySide6.QtCore import (
     Slot,
 )
 
+from .git_subprocess import resolve_repo_root, run_git
+
 log = logging.getLogger(__name__)
 
 # Subprocess timeouts (seconds). `git show` gets the longest budget — an agent
 # commit touching many files produces a large patch that takes a beat to emit.
-_RESOLVE_TIMEOUT_SEC = 5.0
+# (Repo-root resolution uses git_subprocess.resolve_repo_root's own default.)
 _LOG_TIMEOUT_SEC = 10.0
 _SHOW_TIMEOUT_SEC = 20.0
 # A single file's `git diff HEAD -- <path>` is bounded to that file, so it's
@@ -515,7 +517,7 @@ class GitLogController(QObject):
         # load_more/set_repo_root callers, which never set the flag.
         with self._lock:
             self._reload_pending = False
-        resolved = self._resolve_repo_root(asked_root)
+        resolved = resolve_repo_root(asked_root)
         rows = self._run_log(resolved, skip=skip, ref=asked_ref) if resolved else []
         has_more = len(rows) == _PAGE_SIZE
 
@@ -589,23 +591,10 @@ class GitLogController(QObject):
             gc.enable()
 
     # -- Subprocess shells (worker thread only) ----------------------------
-
-    def _resolve_repo_root(self, asked: str) -> str:
-        """Run ``git rev-parse --show-toplevel``. Empty string = not a repo."""
-        try:
-            proc = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=asked,
-                capture_output=True,
-                timeout=_RESOLVE_TIMEOUT_SEC,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.debug("git rev-parse failed for %s: %s", asked, exc)
-            return ""
-        if proc.returncode != 0:
-            return ""
-        return proc.stdout.decode("utf-8", errors="replace").strip()
+    # Repo-root resolution + plain run-and-return-stdout commands come from
+    # git_subprocess.py (shared with the branch controller). `_run_show` and
+    # `_run_working_diff` stay local: their exit-code semantics (accepting 1
+    # from `--no-index`) and text post-processing don't fit that contract.
 
     def _run_log(self, cwd: str, *, skip: int, ref: str = "") -> list[CommitRow]:
         """Run ``git log -z`` for one page and parse it. ``[]`` on failure.
@@ -614,35 +603,19 @@ class GitLogController(QObject):
         after it disambiguates a branch name from a path. Empty ref keeps the
         argv byte-identical to the pre-filter command (HEAD implicit).
         """
-        try:
-            proc = subprocess.run(
-                [
-                    "git",
-                    "log",
-                    "-z",
-                    "--no-color",
-                    f"--max-count={_PAGE_SIZE}",
-                    f"--skip={skip}",
-                    f"--pretty=format:{_LOG_FORMAT}",
-                    *([ref, "--"] if ref else []),
-                ],
-                cwd=cwd,
-                capture_output=True,
-                timeout=_LOG_TIMEOUT_SEC,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.warning("git log failed for %s: %s", cwd, exc)
-            return []
-        if proc.returncode != 0:
-            log.warning(
-                "git log exited %d for %s: %s",
-                proc.returncode,
+        return parse_git_log(
+            run_git(
                 cwd,
-                proc.stderr.decode("utf-8", errors="replace").strip(),
+                "log",
+                "-z",
+                "--no-color",
+                f"--max-count={_PAGE_SIZE}",
+                f"--skip={skip}",
+                f"--pretty=format:{_LOG_FORMAT}",
+                *([ref, "--"] if ref else []),
+                timeout=_LOG_TIMEOUT_SEC,
             )
-            return []
-        return parse_git_log(proc.stdout)
+        )
 
     def _run_show(self, cwd: str, commit_hash: str) -> str:
         """Run ``git show <hash>`` and return the patch text only.

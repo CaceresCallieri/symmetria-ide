@@ -18,6 +18,7 @@ from PySide6.QtCore import QObject, Signal
 from symmetria_ide.git_branch_controller import (
     _BRANCH_FIELD_COUNT,
     BranchRow,
+    GitBranchController,
     GitBranchListModel,
     WorktreeRow,
     annotate_worktrees,
@@ -441,3 +442,102 @@ def test_model_gone_upstream_still_has_upstream() -> None:
     model._refresh()
     assert _role(model, 0, b"hasUpstream") is True
     assert _role(model, 0, b"upstreamGone") is True
+
+
+# ---------------------------------------------------------------------------
+# GitBranchController facade — worker stopped, synchronous state transitions
+# ---------------------------------------------------------------------------
+
+
+def _make_stopped_controller() -> GitBranchController:
+    """A real controller with its worker stopped immediately — `set_repo_root`
+    / `reload` state transitions are synchronous on the caller side, so
+    everything below asserts without an event loop or a live worker."""
+    ctrl = GitBranchController()
+    ctrl.stop()
+    return ctrl
+
+
+def test_set_repo_root_clears_and_enqueues() -> None:
+    ctrl = _make_stopped_controller()
+    with ctrl._lock:
+        ctrl._branches = [_mk_branch("stale")]
+        ctrl._reload_pending = True
+
+    ctrl.set_repo_root("/p/new")
+
+    assert ctrl.branches() == []
+    assert ctrl._reload_pending is False
+    assert ctrl._queue.get_nowait() == ("branches", "/p/new")
+
+
+def test_set_repo_root_idempotent_on_equal_value() -> None:
+    ctrl = _make_stopped_controller()
+    ctrl.set_repo_root("/p/repo")
+    ctrl._queue.get_nowait()
+    ctrl.set_repo_root("/p/repo")
+    assert ctrl._queue.empty()
+
+
+def test_reload_is_coalesced() -> None:
+    ctrl = _make_stopped_controller()
+    ctrl.set_repo_root("/p/repo")
+    ctrl._queue.get_nowait()
+
+    ctrl.reload()
+    ctrl.reload()  # second call gated by _reload_pending
+
+    assert ctrl._queue.get_nowait() == ("branches", "/p/repo")
+    assert ctrl._queue.empty()
+
+
+def test_reload_without_repo_is_noop() -> None:
+    ctrl = _make_stopped_controller()
+    ctrl.reload()
+    assert ctrl._queue.empty()
+
+
+def test_do_branches_race_guard_drops_stale_root(monkeypatch) -> None:
+    # A scan for the OLD root finishing after a project switch must not land.
+    ctrl = _make_stopped_controller()
+    ctrl.set_repo_root("/p/new")
+    ctrl._queue.get_nowait()
+
+    monkeypatch.setattr(
+        "symmetria_ide.git_branch_controller.resolve_repo_root",
+        lambda asked: "/p/old",
+    )
+    monkeypatch.setattr(
+        "symmetria_ide.git_branch_controller.run_git",
+        lambda *a, **k: _join_lines(_branch(name="stale-branch")),
+    )
+
+    ctrl._do_branches(asked_root="/p/old")
+
+    assert ctrl.branches() == []
+    assert ctrl.repoRoot == ""
+
+
+def test_do_branches_applies_for_current_root(monkeypatch) -> None:
+    ctrl = _make_stopped_controller()
+    ctrl.set_repo_root("/p/repo")
+    ctrl._queue.get_nowait()
+
+    monkeypatch.setattr(
+        "symmetria_ide.git_branch_controller.resolve_repo_root",
+        lambda asked: "/p/repo",
+    )
+
+    def fake_run_git(cwd, *args, timeout):
+        if args[0] == "for-each-ref":
+            return _join_lines(_branch(head="*", name="dev"))
+        return b""  # empty worktree list
+
+    monkeypatch.setattr("symmetria_ide.git_branch_controller.run_git", fake_run_git)
+
+    ctrl._do_branches(asked_root="/p/repo")
+
+    assert [b.name for b in ctrl.branches()] == ["dev"]
+    assert ctrl.repoRoot == "/p/repo"
+    # The coalescing flag was cleared at the top of the scan.
+    assert ctrl._reload_pending is False

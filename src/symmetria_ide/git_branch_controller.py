@@ -39,11 +39,10 @@ import gc
 import logging
 import queue
 import re
-import subprocess
 import threading
 import time
 from dataclasses import dataclass, replace
-from pathlib import PurePosixPath
+from pathlib import PurePath
 
 from PySide6.QtCore import (
     Property,
@@ -55,11 +54,12 @@ from PySide6.QtCore import (
     Slot,
 )
 
+from .git_subprocess import resolve_repo_root, run_git
+
 log = logging.getLogger(__name__)
 
-# Subprocess timeouts (seconds). Both commands are metadata-only and cheap
+# Subprocess timeout (seconds). Both commands are metadata-only and cheap
 # regardless of repo size (no per-branch work), so a short budget suffices.
-_RESOLVE_TIMEOUT_SEC = 5.0
 _BRANCH_TIMEOUT_SEC = 5.0
 
 # NUL between fields (via %00 in the format), newline between records —
@@ -132,12 +132,16 @@ class WorktreeRow:
     omits the ``branch`` line in both cases — the mid-rebase recovery via
     ``rebase-merge/head-name`` that lazygit does is deferred; the row then
     simply annotates no branch).
+
+    ``is_detached`` is not read by production code yet — it is the seam the
+    deferred mid-rebase/detached worktree treatment will build on (rendering
+    a detached worktree distinctly, recovering its rebasing branch). Kept
+    deliberately; do not strip it in a dead-code sweep.
     """
 
     path: str
     head_sha: str
     branch: str
-    is_bare: bool = False
     is_detached: bool = False
 
 
@@ -212,7 +216,6 @@ def parse_worktree_list_porcelain(blob: bytes) -> list[WorktreeRow]:
                     path=path,
                     head_sha=head_sha,
                     branch=branch,
-                    is_bare=False,
                     is_detached=is_detached,
                 )
             )
@@ -438,19 +441,26 @@ class GitBranchController(QObject):
         # this scan must be free to queue a fresh one.
         with self._lock:
             self._reload_pending = False
-        resolved = self._resolve_repo_root(asked_root)
+        resolved = resolve_repo_root(asked_root)
         if resolved:
             branches = parse_for_each_ref_branches(
-                self._run_git(
+                run_git(
                     resolved,
                     "for-each-ref",
                     "--sort=-committerdate",
                     f"--format={_BRANCH_FORMAT}",
                     "refs/heads",
+                    timeout=_BRANCH_TIMEOUT_SEC,
                 )
             )
             worktrees = parse_worktree_list_porcelain(
-                self._run_git(resolved, "worktree", "list", "--porcelain")
+                run_git(
+                    resolved,
+                    "worktree",
+                    "list",
+                    "--porcelain",
+                    timeout=_BRANCH_TIMEOUT_SEC,
+                )
             )
             rows = annotate_worktrees(branches, worktrees, resolved)
         else:
@@ -473,48 +483,8 @@ class GitBranchController(QObject):
         finally:
             gc.enable()
 
-    # -- Subprocess shells (worker thread only) ----------------------------
-
-    def _resolve_repo_root(self, asked: str) -> str:
-        """Run ``git rev-parse --show-toplevel``. Empty string = not a repo."""
-        try:
-            proc = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=asked,
-                capture_output=True,
-                timeout=_RESOLVE_TIMEOUT_SEC,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.debug("git rev-parse failed for %s: %s", asked, exc)
-            return ""
-        if proc.returncode != 0:
-            return ""
-        return proc.stdout.decode("utf-8", errors="replace").strip()
-
-    def _run_git(self, cwd: str, *args: str) -> bytes:
-        """Run one git command, return raw stdout. ``b""`` on any failure."""
-        try:
-            proc = subprocess.run(
-                ["git", *args],
-                cwd=cwd,
-                capture_output=True,
-                timeout=_BRANCH_TIMEOUT_SEC,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.warning("git %s failed for %s: %s", args[0], cwd, exc)
-            return b""
-        if proc.returncode != 0:
-            log.warning(
-                "git %s exited %d for %s: %s",
-                args[0],
-                proc.returncode,
-                cwd,
-                proc.stderr.decode("utf-8", errors="replace").strip(),
-            )
-            return b""
-        return proc.stdout
+    # Subprocess shells live in git_subprocess.py (shared with the log
+    # controller — see that module's docstring for the sharing rationale).
 
 
 # ---------------------------------------------------------------------------
@@ -607,7 +577,7 @@ class GitBranchListModel(QAbstractListModel):
                 return ""
             return format_recency(row.committer_unix, int(time.time()))
         if role == self.WorktreeNameRole:
-            return PurePosixPath(row.worktree_path).name if row.worktree_path else ""
+            return PurePath(row.worktree_path).name if row.worktree_path else ""
         if role == self.CheckedOutElsewhereRole:
             return bool(row.worktree_path) and row.worktree_path != self._resolved_root
         if role == self.DetachedRole:
