@@ -470,6 +470,8 @@ class BrowserMcpServer:
 
                 `agent` is the other agent's DISPLAY number — the number shown
                 on its chip in the IDE top bar (what the user calls "agent 3").
+                It is strictly 1-based: unlike the browser tools' `window`
+                arg, there is NO 0 = "focused" shorthand here.
                 `note` is an optional one-line description of what you are
                 waiting for (e.g. "the API refactor is merged"); it is shown to
                 the verification judge and echoed back in the go-ahead.

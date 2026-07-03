@@ -115,7 +115,7 @@ def test_register_opencode_watched_carries_warning(two_agents):
     _mark_busy(c, 1)
     reply = c._register_wait_for_mcp(1, _agent_id(2), "")
     assert reply["ok"] is True
-    assert "opencode" not in reply.get("warning", "") or reply["warning"]
+    assert reply.get("warning")
     assert "verification" in reply["warning"]
 
 
@@ -244,6 +244,32 @@ def test_verdict_for_pruned_trigger_is_dropped(two_agents):
     c = two_agents
     injects = _capture_injects(c)
     c._on_judge_verdict("no-such-trigger", coord.VERDICT_COMPLETE, "late")
+    assert injects == []
+
+
+def test_verdict_for_trigger_absent_from_engine_is_dropped(two_agents):
+    """The defensive engine-membership guard: a trigger still routed in
+    _coord_inflight but no longer held by the engine (a prune path that
+    forgot to reconcile) must never act."""
+    c = two_agents
+    stray = coord.Trigger(watched_slot=1, registrant_slot=2, note="", registered_at=0.0)
+    c._coord_inflight[stray.id] = stray  # in-flight, but NOT in the engine
+    injects = _capture_injects(c)
+    c._on_judge_verdict(stray.id, coord.VERDICT_COMPLETE, "stray")
+    assert injects == []
+
+
+def test_judge_trigger_skips_superseded_trigger(two_agents):
+    """_coord_judge_trigger's own supersession guard: a trigger dropped from
+    the engine before the deferred immediate-eval fires must not re-seat
+    itself in _coord_inflight or spawn a judge."""
+    c = two_agents
+    stale = coord.Trigger(
+        watched_slot=1, registrant_slot=2, note="old", registered_at=0.0
+    )
+    injects = _capture_injects(c)
+    c._coord_judge_trigger(stale)  # not in the engine → must no-op
+    assert stale.id not in c._coord_inflight
     assert injects == []
 
 

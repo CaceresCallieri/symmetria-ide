@@ -3577,6 +3577,13 @@ class AppController(QObject):
             # prune normally handles this; defensive drop.
             self._coordination.complete(trigger)
             return
+        if all(t.id != trigger.id for t in self._coordination.triggers):
+            # No longer the live registration — the deferred singleShot(0)
+            # immediate-eval path can fire after a re-registration already
+            # replaced this trigger. Judging it anyway would re-seat the stale
+            # id in _coord_inflight and burn a duplicate claude -p subprocess
+            # whose verdict _on_judge_verdict would only then discard.
+            return
         display = self._display_position(trigger.watched_slot)
         if inst["harness"] != "claude":
             # opencode transcripts have a different (unexplored) format — v1
@@ -3811,13 +3818,18 @@ class AppController(QObject):
         Shell's notification center — the org.freedesktop.Notifications
         daemon on this system)."""
         try:
-            subprocess.Popen(
+            proc = subprocess.Popen(
                 ["notify-send", "-a", "Symmetria IDE", title, body],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
         except OSError:
             log.warning("notify-send unavailable — desktop notification dropped")
+            return
+        # Reap off-thread so notify-send never leaves a zombie for the IDE's
+        # lifetime (fire-and-forget Popen is otherwise reaped only whenever
+        # the subprocess module happens to run its lazy _cleanup sweep).
+        threading.Thread(target=proc.wait, daemon=True, name="notify-reap").start()
 
     @Slot()
     def request_opencode_sessions(self) -> None:
