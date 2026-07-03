@@ -10,9 +10,12 @@
 //                  diff (vs HEAD) streams in live. This is the DEFAULT view on
 //                  entry — "what haven't I committed yet" is the most
 //                  immediately actionable question.
-//   - "history"  — the committed log. CommitListView (left) drives
-//                  CommitDetailView (right): j/k walk commits, each commit's
-//                  diff streams in. The long view of "how did we get here".
+//   - "history"  — the committed log. The master column stacks BranchListView
+//                  (top band, ≤6 rows then scrolls; entered with `b`, filters
+//                  the log by branch) above CommitListView; together they
+//                  drive CommitDetailView (right): j/k walk commits, each
+//                  commit's diff streams in. The long view of "how did we
+//                  get here".
 //
 // Both answer the same need from opposite ends — shrinking the cognitive gap
 // agent-authored changes open up (you didn't type them, so comprehension has
@@ -47,6 +50,9 @@ FocusScope {
     // Injected by the host.
     property var logController: null
     property var logModel: null
+    // Branches panel (history sub-view's leftmost column).
+    property var branchController: null
+    property var branchModel: null
     property var statusModel: null
     // Mutating/network git ops (pull/push) — the surface's first write actions.
     // Injected like the read controllers so the subtree stays extraction-ready.
@@ -124,6 +130,13 @@ FocusScope {
     function setMode(next: string): void {
         if (next !== root.mode)
             root.mode = next;
+        // Freshness poke on entering the history side: the branches panel has
+        // no watcher of its own, and a commit made to ANOTHER branch from a
+        // different worktree escapes the `.git` watcher set (only the current
+        // branch's ref is watched). Entering the panel is the natural "is
+        // this fresh?" moment; reload() is coalesced, so this is cheap.
+        if (next === "history" && root.branchController)
+            root.branchController.reload();
         focusContent();
     }
 
@@ -205,6 +218,9 @@ FocusScope {
                         text: seg.modelData.label
                               + (seg.modelData.mode === "changes" && root.hasPendingChanges
                                  ? " · " + root.statusModel.count : "")
+                              + (seg.modelData.mode === "history" && root.logController
+                                 && root.logController.currentRef.length > 0
+                                 ? " · " + root.logController.currentRef : "")
                         color: seg.isCurrent ? Theme.color.text.strong : Theme.color.text.dim
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.xs
@@ -289,34 +305,95 @@ FocusScope {
             visible: root.mode === "history"
             spacing: Theme.spacing.sm
 
-            // Master: commit list.
-            Rectangle {
+            // Master column — branches panel stacked ABOVE the commit list
+            // (the lazygit left-column rhythm), sharing the master width so
+            // the detail pane keeps its room. The branches frame hugs its
+            // content up to a cap of 6 rows, then scrolls internally — a
+            // long branch list must not squeeze the log out of the column.
+            ColumnLayout {
+                // fillWidth must be EXPLICITLY false: a layout nested inside
+                // another layout defaults Layout.fillWidth to TRUE (unlike a
+                // plain Item/Rectangle), so without this the master column
+                // grabs the row's spare width and crushes the detail pane to
+                // zero. Regression observed live when the plain Rectangle
+                // master became this ColumnLayout (2026-07-03).
+                Layout.fillWidth: false
                 Layout.preferredWidth: Math.round(root.width * 0.42)
                 Layout.minimumWidth: 320
                 Layout.fillHeight: true
-                color: Theme.color.bg.chrome
-                radius: Theme.radius.md
-                border.width: 1
-                border.color: Theme.color.border.hairline
+                spacing: Theme.spacing.sm
 
-                CommitListView {
-                    id: commitList
-                    anchors.fill: parent
-                    model: root.logModel
-                    controller: root.logController
-                    focus: root.mode === "history"
+                // Branches panel — entered with `b` from the commit list;
+                // Enter on a row filters the log to that branch (Enter on
+                // the checked-out branch clears back to HEAD).
+                Rectangle {
+                    Layout.fillWidth: true
+                    // Content-hugging height: N rows (row pitch is the
+                    // list's rowHeight) + the ListView's top/bottom content
+                    // insets, capped at 6 rows before internal scrolling.
+                    // Floor of 1 row keeps the "no branches" empty state a
+                    // visible slim band rather than a collapsed sliver.
+                    Layout.preferredHeight: Math.max(1, Math.min(
+                            root.branchModel ? root.branchModel.count : 0, 6))
+                        * branchList.rowHeight + Theme.spacing.xs * 2
+                    color: Theme.color.bg.chrome
+                    radius: Theme.radius.md
+                    border.width: 1
+                    border.color: Theme.color.border.hairline
 
-                    // Selection moved → load that commit's diff.
-                    onCurrentCommitChanged: {
-                        if (root.logController && commitList.currentCommit)
-                            root.logController.request_diff(commitList.currentCommit.hash);
+                    BranchListView {
+                        id: branchList
+                        anchors.fill: parent
+                        model: root.branchModel
+                        activeFilter: root.logController ? root.logController.currentRef : ""
+
+                        // Enter on the checked-out branch means "show me where I
+                        // am" — identical to the unfiltered HEAD view, so it
+                        // clears the filter instead of pinning a redundant one.
+                        onBranchSelected: function (name, isHead) {
+                            if (root.logController)
+                                root.logController.set_ref(isHead ? "" : name);
+                            commitList.focusList();
+                        }
+                        onClearFilterRequested: {
+                            if (root.logController)
+                                root.logController.set_ref("");
+                        }
+                        onFocusCommitListRequested: commitList.focusList()
+                        onToggleRequested: root.toggleMode()
                     }
-                    onToggleRequested: root.toggleMode()
-                    // p → pull directly (no confirm); P → bubble push intent up
-                    // to Main for the confirm dialog; Esc → bubble toast dismiss.
-                    onPullRequested: if (root.opsController) root.opsController.pull()
-                    onPushRequested: root.pushRequested()
-                    onDismissStatusRequested: root.dismissStatusRequested()
+                }
+
+                // Master: commit list — takes whatever height the branches
+                // band leaves.
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    color: Theme.color.bg.chrome
+                    radius: Theme.radius.md
+                    border.width: 1
+                    border.color: Theme.color.border.hairline
+
+                    CommitListView {
+                        id: commitList
+                        anchors.fill: parent
+                        model: root.logModel
+                        controller: root.logController
+                        focus: root.mode === "history"
+
+                        // Selection moved → load that commit's diff.
+                        onCurrentCommitChanged: {
+                            if (root.logController && commitList.currentCommit)
+                                root.logController.request_diff(commitList.currentCommit.hash);
+                        }
+                        onToggleRequested: root.toggleMode()
+                        onFocusBranchesRequested: branchList.focusList()
+                        // p → pull directly (no confirm); P → bubble push intent up
+                        // to Main for the confirm dialog; Esc → bubble toast dismiss.
+                        onPullRequested: if (root.opsController) root.opsController.pull()
+                        onPushRequested: root.pushRequested()
+                        onDismissStatusRequested: root.dismissStatusRequested()
+                    }
                 }
             }
 

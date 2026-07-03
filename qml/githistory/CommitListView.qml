@@ -39,6 +39,9 @@ FocusScope {
     // git sync from the history view, the surface's first mutating actions.
     signal pullRequested()
     signal pushRequested()
+    // b — hand focus to the branches panel (the history sub-view's leftmost
+    // column). Pure intent; the host owns the focus handoff.
+    signal focusBranchesRequested()
     // Esc dismisses a stuck git-ops status toast (the persistent error case).
     // Bubbled to the host → Main.qml hides the toast.
     signal dismissStatusRequested()
@@ -173,6 +176,12 @@ FocusScope {
             case Qt.Key_U:
                 if (event.modifiers & Qt.ControlModifier) {
                     view.currentIndex = Math.max(0, view.currentIndex - root._halfPage);
+                    event.accepted = true;
+                }
+                break;
+            case Qt.Key_B:
+                if (!(event.modifiers & (Qt.ControlModifier | Qt.ShiftModifier))) {
+                    root.focusBranchesRequested();
                     event.accepted = true;
                 }
                 break;

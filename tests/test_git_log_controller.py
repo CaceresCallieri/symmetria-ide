@@ -17,6 +17,7 @@ from PySide6.QtCore import QObject, Signal
 from symmetria_ide.git_log_controller import (
     _LOG_FIELD_COUNT,
     CommitRow,
+    GitLogController,
     GitLogListModel,
     parse_git_log,
 )
@@ -356,3 +357,112 @@ def test_refresh_shorter_list_is_a_reset() -> None:
     assert model.rowCount() == 2
     assert spy["resets"] == 1
     assert spy["inserted"] == []
+
+
+# ---------------------------------------------------------------------------
+# Ref filtering (`set_ref` / `_run_log` ref argument)
+# ---------------------------------------------------------------------------
+
+
+def _make_stopped_controller() -> "GitLogController":
+    """A real controller with its worker stopped immediately — `set_ref` /
+    `set_repo_root` state transitions are synchronous on the caller side, so
+    everything below asserts without an event loop or a live worker."""
+    ctrl = GitLogController()
+    ctrl.stop()
+    return ctrl
+
+
+def test_run_log_ref_appends_ref_and_double_dash(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+
+        class _P:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return _P()
+
+    ctrl = _make_stopped_controller()
+    monkeypatch.setattr("symmetria_ide.git_log_controller.subprocess.run", fake_run)
+    ctrl._run_log("/tmp", skip=0, ref="feature-x")
+    assert captured["argv"][-2:] == ["feature-x", "--"]
+
+
+def test_run_log_empty_ref_keeps_argv_unchanged(monkeypatch) -> None:
+    # Regression pin: the unfiltered command must stay byte-identical to the
+    # pre-filter behavior (HEAD implicit, no trailing args).
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+
+        class _P:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return _P()
+
+    ctrl = _make_stopped_controller()
+    monkeypatch.setattr("symmetria_ide.git_log_controller.subprocess.run", fake_run)
+    ctrl._run_log("/tmp", skip=7, ref="")
+    assert captured["argv"] == [
+        "git",
+        "log",
+        "-z",
+        "--no-color",
+        "--max-count=100",
+        "--skip=7",
+        captured["argv"][6],  # the --pretty format arg (content pinned below)
+    ]
+    assert captured["argv"][6].startswith("--pretty=format:")
+
+
+def test_set_ref_clears_commits_and_commit_diff() -> None:
+    ctrl = _make_stopped_controller()
+    ctrl._repo_root = "/p/repo"
+    with ctrl._lock:
+        ctrl._commits = [_row("a")]
+        ctrl._has_more = True
+        ctrl._current_diff_hash = "a" * 40
+        ctrl._current_diff_text = "patch"
+        ctrl._current_file_diff_path = "f.py"
+        ctrl._current_file_diff_text = "file patch"
+
+    ctrl.set_ref("feature-x")
+
+    assert ctrl.currentRef == "feature-x"
+    assert ctrl.commits() == []
+    assert ctrl.hasMore is False
+    assert ctrl.currentDiffHash == ""
+    assert ctrl.currentDiffText == ""
+    # File-diff fields are working-tree-scoped — a ref switch keeps them.
+    assert ctrl.currentFileDiffPath == "f.py"
+    assert ctrl.currentFileDiffText == "file patch"
+    # The enqueued page-0 request carries the new ref.
+    assert ctrl._queue.get_nowait() == ("log", "/p/repo", 0, "feature-x")
+
+
+def test_set_ref_idempotent_on_equal_value() -> None:
+    ctrl = _make_stopped_controller()
+    ctrl._repo_root = "/p/repo"
+    ctrl.set_ref("dev")
+    ctrl._queue.get_nowait()  # drain the first request
+    ctrl.set_ref("dev")
+    assert ctrl._queue.empty()
+
+
+def test_set_repo_root_resets_ref_to_head() -> None:
+    ctrl = _make_stopped_controller()
+    ctrl._repo_root = "/p/old"
+    ctrl.set_ref("feature-x")
+    ctrl._queue.get_nowait()
+
+    ctrl.set_repo_root("/p/new")
+
+    assert ctrl.currentRef == ""
+    assert ctrl._queue.get_nowait() == ("log", "/p/new", 0, "")

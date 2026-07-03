@@ -1212,6 +1212,10 @@ Window {
                     focus: visible
                     logController: gitLogController
                     logModel: gitLogModel
+                    // Branches panel (history sub-view's leftmost column) —
+                    // local branches + worktree annotation, log filter on Enter.
+                    branchController: gitBranchController
+                    branchModel: gitBranchModel
                     // Pull/push (p / P in the history list) — the surface's
                     // first mutating actions. pull() dispatches directly; push
                     // bubbles up (below) to a confirm dialog.

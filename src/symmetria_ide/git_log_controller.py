@@ -179,10 +179,12 @@ def parse_git_log(blob: bytes) -> list[CommitRow]:
 
 # ---------------------------------------------------------------------------
 # Worker request shapes. A small typed tuple is enough — the queue carries
-# ("log", asked_root, skip), ("diff", resolved_root, commit_hash), and
-# ("file_diff", resolved_root, rel_path, untracked). The repo root travels WITH
-# the request so the worker never reads mutable GUI state mid-scan, and the
-# apply step can compare it against the live root (race guard).
+# ("log", asked_root, skip, asked_ref), ("diff", resolved_root, commit_hash),
+# and ("file_diff", resolved_root, rel_path, untracked). The repo root AND the
+# ref filter travel WITH the request so the worker never reads mutable GUI
+# state mid-scan, and the apply step can compare both against the live values
+# (race guard) — a fast branch hop must not let branch-A's page land in
+# branch-B's list.
 # ---------------------------------------------------------------------------
 _REQ_LOG = "log"
 _REQ_DIFF = "diff"
@@ -208,6 +210,7 @@ class GitLogController(QObject):
     """
 
     repoRootChanged = Signal()
+    refChanged = Signal()
     logChanged = Signal()
     hasMoreChanged = Signal()
     commitDiffChanged = Signal()
@@ -226,6 +229,12 @@ class GitLogController(QObject):
         # worker resolves; `repoRoot` exposes the resolved value to QML.
         self._repo_root: str = ""
         self._resolved_root: str = ""
+
+        # Ref the log is filtered to (a local branch name from the branches
+        # panel). Empty = HEAD — the exact pre-filter behavior. Guarded by
+        # `_lock`; travels with each _REQ_LOG so the apply-side race guard can
+        # drop pages fetched for a previously-selected ref.
+        self._ref: str = ""
 
         self._commits: list[CommitRow] = []
         self._has_more: bool = False
@@ -271,6 +280,12 @@ class GitLogController(QObject):
         """The RESOLVED repo root (``git rev-parse --show-toplevel``)."""
         with self._lock:
             return self._resolved_root
+
+    @Property(str, notify=refChanged)
+    def currentRef(self) -> str:
+        """The ref the log is filtered to (empty = HEAD, unfiltered)."""
+        with self._lock:
+            return self._ref
 
     @Property(bool, notify=hasMoreChanged)
     def hasMore(self) -> bool:
@@ -330,6 +345,10 @@ class GitLogController(QObject):
         with self._lock:
             self._repo_root = value
             self._resolved_root = ""
+            # A project switch must land on HEAD — a branch name filtered in
+            # the previous repo has no meaning in the new one.
+            ref_was_set = bool(self._ref)
+            self._ref = ""
             self._commits = []
             self._has_more = False
             self._current_diff_hash = ""
@@ -341,12 +360,14 @@ class GitLogController(QObject):
             # a later reload for the NEW one.
             self._reload_pending = False
         self.repoRootChanged.emit()
+        if ref_was_set:
+            self.refChanged.emit()
         self.logChanged.emit()
         self.commitDiffChanged.emit()
         self.fileDiffChanged.emit()
         self.hasMoreChanged.emit()
         if value:
-            self._queue.put((_REQ_LOG, value, 0))
+            self._queue.put((_REQ_LOG, value, 0, ""))
 
     @Slot()
     def reload(self) -> None:
@@ -364,7 +385,8 @@ class GitLogController(QObject):
                 return
             self._reload_pending = True
             root = self._repo_root
-        self._queue.put((_REQ_LOG, root, 0))
+            ref = self._ref
+        self._queue.put((_REQ_LOG, root, 0, ref))
 
     @Slot()
     def load_more(self) -> None:
@@ -378,8 +400,39 @@ class GitLogController(QObject):
             if not self._has_more:
                 return
             skip = len(self._commits)
+            ref = self._ref
         if self._repo_root:
-            self._queue.put((_REQ_LOG, self._repo_root, skip))
+            self._queue.put((_REQ_LOG, self._repo_root, skip, ref))
+
+    @Slot(str)
+    def set_ref(self, value: str) -> None:
+        """Filter the log to one ref (a local branch name). Empty = HEAD.
+
+        Idempotent on equal values. Clears the commit list synchronously (so
+        the UI never shows branch-A commits labeled as branch-B) plus the
+        commit-diff fields — the selected commit may not exist on the new
+        ref. The FILE-diff fields stay: they are working-tree-scoped and
+        independent of which ref the history list shows. Enqueues a fresh
+        page-0 load carrying the new ref.
+        """
+        if value == self._ref:
+            return
+        with self._lock:
+            self._ref = value
+            self._commits = []
+            self._has_more = False
+            self._current_diff_hash = ""
+            self._current_diff_text = ""
+            # A ref switch enqueues its own page-0 load below; a reload
+            # pending for the OLD ref must not gate a later reload.
+            self._reload_pending = False
+            root = self._repo_root
+        self.refChanged.emit()
+        self.logChanged.emit()
+        self.commitDiffChanged.emit()
+        self.hasMoreChanged.emit()
+        if root:
+            self._queue.put((_REQ_LOG, root, 0, value))
 
     @Slot(str)
     def request_diff(self, commit_hash: str) -> None:
@@ -436,7 +489,11 @@ class GitLogController(QObject):
             try:
                 kind = request[0]
                 if kind == _REQ_LOG:
-                    self._do_log(asked_root=request[1], skip=request[2])
+                    self._do_log(
+                        asked_root=request[1],
+                        skip=request[2],
+                        asked_ref=request[3],
+                    )
                 elif kind == _REQ_DIFF:
                     self._do_diff(resolved_root=request[1], commit_hash=request[2])
                 elif kind == _REQ_FILE_DIFF:
@@ -450,7 +507,7 @@ class GitLogController(QObject):
                 # leave every future request stuck in the queue forever.
                 log.exception("git-log worker request failed: %r", request)
 
-    def _do_log(self, *, asked_root: str, skip: int) -> None:
+    def _do_log(self, *, asked_root: str, skip: int, asked_ref: str) -> None:
         """Resolve the repo, fetch one page, apply it under the race guard."""
         # Clear the coalescing flag BEFORE fetching: any reload request that
         # arrives during this fetch must be free to queue a fresh one (clearing
@@ -459,14 +516,15 @@ class GitLogController(QObject):
         with self._lock:
             self._reload_pending = False
         resolved = self._resolve_repo_root(asked_root)
-        rows = self._run_log(resolved, skip=skip) if resolved else []
+        rows = self._run_log(resolved, skip=skip, ref=asked_ref) if resolved else []
         has_more = len(rows) == _PAGE_SIZE
 
         with self._lock:
-            # Race guard: a project switch may have landed while this scan ran.
-            # Dropping the stale result keeps another repo's commits out of the
-            # model. (`set_repo_root` already cleared + re-enqueued the new one.)
-            if asked_root != self._repo_root:
+            # Race guard: a project switch OR a ref switch may have landed
+            # while this scan ran. Dropping the stale result keeps another
+            # repo's — or another branch's — commits out of the model.
+            # (`set_repo_root`/`set_ref` already cleared + re-enqueued.)
+            if asked_root != self._repo_root or asked_ref != self._ref:
                 return
             old_resolved = self._resolved_root
             self._resolved_root = resolved
@@ -549,8 +607,13 @@ class GitLogController(QObject):
             return ""
         return proc.stdout.decode("utf-8", errors="replace").strip()
 
-    def _run_log(self, cwd: str, *, skip: int) -> list[CommitRow]:
-        """Run ``git log -z`` for one page and parse it. ``[]`` on failure."""
+    def _run_log(self, cwd: str, *, skip: int, ref: str = "") -> list[CommitRow]:
+        """Run ``git log -z`` for one page and parse it. ``[]`` on failure.
+
+        A non-empty ``ref`` filters the log to that ref's history; the ``--``
+        after it disambiguates a branch name from a path. Empty ref keeps the
+        argv byte-identical to the pre-filter command (HEAD implicit).
+        """
         try:
             proc = subprocess.run(
                 [
@@ -561,6 +624,7 @@ class GitLogController(QObject):
                     f"--max-count={_PAGE_SIZE}",
                     f"--skip={skip}",
                     f"--pretty=format:{_LOG_FORMAT}",
+                    *([ref, "--"] if ref else []),
                 ],
                 cwd=cwd,
                 capture_output=True,

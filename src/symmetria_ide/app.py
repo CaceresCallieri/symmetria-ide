@@ -71,6 +71,7 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
     CompletionModel,
 )
 from .git_controller import GitController, GitStatusListModel
+from .git_branch_controller import GitBranchController, GitBranchListModel
 from .git_log_controller import GitLogController, GitLogListModel
 from .git_ops_controller import GitOpsController
 from .minimap_model import MinimapModel
@@ -981,6 +982,15 @@ class AppController(QObject):
         # surface (the history viewer) — see qml/githistory/.
         self._git_log_controller = GitLogController(self)
         self._git_log_model = GitLogListModel(self._git_log_controller, self)
+        # ----- Git BRANCHES provider (the history tab's branches panel) -----
+        # Third read-only provider: local branches + worktree association
+        # (`for-each-ref` + `worktree list --porcelain`). Its OWN worker (not
+        # the log controller's queue) so a wedged multi-second `git show`
+        # never delays a branch refresh. Same anchored root via
+        # `_sync_git_repo_root`; freshness rides the same wires as the log
+        # (workingTreeChanged + the git-op poke below).
+        self._git_branch_controller = GitBranchController(self)
+        self._git_branch_model = GitBranchListModel(self._git_branch_controller, self)
         # ----- Git OPERATIONS provider (the surface's first MUTATIONS) ------
         # The mutating/network counterpart to the two read-only controllers
         # above: `git pull` / `git push`, driven by p / P in the history view.
@@ -1038,6 +1048,12 @@ class AppController(QObject):
         # (QTimer.timeout) and `reload()` only reads `_repo_root` + enqueues,
         # so no QueuedConnection is needed (matches the `checktime` wire above).
         self._git_controller.workingTreeChanged.connect(self._git_log_controller.reload)
+        # Branch-list freshness rides the same beat and the same rationale as
+        # the log reload above (commits move committerdate/ahead-behind; a
+        # branch switch moves HEAD). Same-thread, coalesced, cheap.
+        self._git_controller.workingTreeChanged.connect(
+            self._git_branch_controller.reload
+        )
         # Drive `repoRoot` from `displayedRoot` (NOT raw `cwd`). This is
         # the ONE place where the anchor concept leaks below the pure
         # view-transformation line into actual behavior: when anchored,
@@ -1996,6 +2012,20 @@ class AppController(QObject):
         return self._git_log_model
 
     @Property(QObject, constant=True)
+    def gitBranchController(self) -> QObject:
+        """The read-only `GitBranchController` exposed to QML.
+
+        Backs the branches panel inside the history tab. Identity-stable
+        like the sibling git controllers.
+        """
+        return self._git_branch_controller
+
+    @Property(QObject, constant=True)
+    def gitBranchModel(self) -> QObject:
+        """Flat list model of local branches for the branches panel."""
+        return self._git_branch_model
+
+    @Property(QObject, constant=True)
     def gitOpsController(self) -> QObject:
         """The `GitOpsController` (pull/push) exposed to QML.
 
@@ -2093,6 +2123,8 @@ class AppController(QObject):
         # The history viewer tracks the SAME anchored root — one anchor, both
         # the status badges and the log. Also idempotent on equal values.
         self._git_log_controller.set_repo_root(self.displayedRoot)
+        # The branches panel tracks the same anchored root too.
+        self._git_branch_controller.set_repo_root(self.displayedRoot)
         # Pull/push target the same anchored root — one anchor, every git
         # surface. Idempotent on equal values.
         self._git_ops_controller.set_repo_root(self.displayedRoot)
@@ -2117,6 +2149,9 @@ class AppController(QObject):
         """
         self._git_controller.poke()
         self._git_log_controller.reload()
+        # A pull/push moves ahead/behind counts (and a pull can move HEAD),
+        # so the branches panel refreshes on the same poke.
+        self._git_branch_controller.reload()
 
     @Slot()
     def _sync_nvim_cwd(self) -> None:
@@ -5441,6 +5476,8 @@ class AppController(QObject):
         self._git_controller.stop()
         # Same join-before-teardown rationale for the history worker.
         self._git_log_controller.stop()
+        # And the branches worker (same fast-join, cheap-scan profile).
+        self._git_branch_controller.stop()
         # And the ops worker. Its join budget is the op timeout (it may be
         # mid-push), so stop it here alongside the other git workers — before
         # nvim's shutdown handshake takes the event loop.
@@ -5627,6 +5664,8 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # subtree stays extraction-ready for a future Symmetria.Git.UI module).
     ctx.setContextProperty("gitLogController", controller.gitLogController)
     ctx.setContextProperty("gitLogModel", controller.gitLogModel)
+    ctx.setContextProperty("gitBranchController", controller.gitBranchController)
+    ctx.setContextProperty("gitBranchModel", controller.gitBranchModel)
     ctx.setContextProperty("gitOpsController", controller.gitOpsController)
     # NB: previously this block also exposed `sessionHost` and
     # `sessionModel` as context properties pointing at the focused
