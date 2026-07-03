@@ -16,6 +16,7 @@ import time
 
 import pytest
 
+from symmetria_ide.agent_harness import CHILD_SESSION_UNSET_ARGS
 from symmetria_ide.app import AppController
 
 
@@ -102,6 +103,7 @@ def test_spawn_fresh_dangerous_default_argv(controller):
     # tracks the real socket path / settings string.
     assert argv == [
         "env",
+        *CHILD_SESSION_UNSET_ARGS,
         f"SYMMETRIA_AGENT_ID={os.getpid()}_1",
         f"SYMMETRIA_IDE_AGENT_SOCK={controller._agent_events.socket_path}",
         "SYMMETRIA_IDE_STATUSLINE_TAP=1",
@@ -153,6 +155,7 @@ def test_spawn_opencode_fresh_dangerous_argv(controller):
     # (no settings_flag) — its agents keep reporting to the shell bridge.
     assert controller.agent_spawn_argv(1) == [
         "env",
+        *CHILD_SESSION_UNSET_ARGS,
         f"SYMMETRIA_AGENT_ID={os.getpid()}_1",
         f"SYMMETRIA_IDE_AGENT_SOCK={controller._agent_events.socket_path}",
         "SYMMETRIA_IDE_STATUSLINE_TAP=1",
@@ -791,7 +794,10 @@ def test_close_first_agent_promotes_survivor_to_position_one(controller):
     assert controller.agentOrder == [2]
     # ...while its frozen identity (SYMMETRIA_AGENT_ID env of the live
     # process) keeps the internal slot number.
-    assert controller.agent_spawn_argv(2)[1].endswith("_2")
+    agent_id_pair = next(
+        a for a in controller.agent_spawn_argv(2) if a.startswith("SYMMETRIA_AGENT_ID=")
+    )
+    assert agent_id_pair.endswith("_2")
 
 
 def test_spawn_after_compaction_appends_as_next_position(controller):

@@ -65,6 +65,22 @@ class AgentHarness:
     settings_flag: str | None = None
 
 
+# `env -u` pairs prepended to EVERY spawn's env wrapper: when the IDE itself
+# was launched from inside a Claude Code session (the standard dev loop — an
+# agent in the stable IDE starts the dev IDE), spawned agents would inherit
+# CLAUDE_CODE_CHILD_SESSION=1 + CLAUDE_CODE_SESSION_ID, and claude then
+# SILENTLY SKIPS persisting the session transcript to
+# ~/.claude/projects/<proj>/<session>.jsonl (verified live 2026-07-03). That
+# breaks the coordination judge ("transcript not found") AND the shell hook's
+# last-message digests. IDE-spawned agents are always top-level user sessions,
+# never children — unset unconditionally (env -u on an absent var is a no-op).
+CHILD_SESSION_UNSET_ARGS: tuple[str, ...] = (
+    "-u",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "-u",
+    "CLAUDE_CODE_SESSION_ID",
+)
+
 HARNESSES: dict[str, AgentHarness] = {
     "claude": AgentHarness(
         name="claude",
@@ -136,7 +152,7 @@ def spawn_argv(
     (agent-ownership inversion). Both empty / a harness without the flag
     (opencode) is a no-op — opencode keeps reporting to the shell bridge.
     """
-    argv = ["env", f"SYMMETRIA_AGENT_ID={agent_id}"]
+    argv = ["env", *CHILD_SESSION_UNSET_ARGS, f"SYMMETRIA_AGENT_ID={agent_id}"]
     # Exported unconditionally when provided (harmless for opencode, which has no
     # reporter reading it); the settings registration below is what actually
     # wires claude's hook to this socket.
