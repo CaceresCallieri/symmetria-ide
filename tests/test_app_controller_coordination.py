@@ -212,6 +212,32 @@ def test_verdict_in_progress_silently_rearms(two_agents):
     assert not trigger.evaluating  # armed for the next idle edge
 
 
+def test_reregister_while_judge_inflight_drops_stale_verdict(two_agents):
+    """Re-registering the same (watched, registrant) pair while the old
+    trigger's judge is mid-flight must SUPERSEDE it: the stale verdict may
+    not inject the old note (or inject at all) — only the fresh trigger's
+    verdict acts."""
+    c = two_agents
+    _mark_busy(c, 1)
+    c._register_wait_for_mcp(1, _agent_id(2), "old note")
+    c._term_agent_activity.pop(1)
+    old_trigger = _inflight_trigger(c)  # old judge now "running"
+    _mark_busy(c, 1)
+    c._register_wait_for_mcp(1, _agent_id(2), "new note")  # supersede mid-judge
+    assert old_trigger.id not in c._coord_inflight
+    injects = _capture_injects(c)
+    # The old judge finally resolves — must be a no-op.
+    c._on_judge_verdict(old_trigger.id, coord.VERDICT_COMPLETE, "stale")
+    assert injects == []
+    # The fresh trigger is intact and fires normally.
+    c._term_agent_activity.pop(1)
+    (fresh,) = c._coordination.on_agent_idle(1)
+    c._coord_inflight[fresh.id] = fresh
+    c._on_judge_verdict(fresh.id, coord.VERDICT_COMPLETE, "done")
+    assert len(injects) == 1
+    assert "new note" in injects[0]["text"]
+
+
 def test_verdict_for_pruned_trigger_is_dropped(two_agents):
     """A late verdict whose trigger was pruned (agent closed mid-judge)
     no-ops — _coord_inflight routing is the guard."""

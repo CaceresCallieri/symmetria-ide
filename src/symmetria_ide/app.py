@@ -3493,6 +3493,14 @@ class AppController(QObject):
         )
         if result.error:
             return {"ok": False, "error": result.error}
+        if result.replaced is not None:
+            # This registration superseded the pair's previous trigger, whose
+            # judge may be mid-flight RIGHT NOW (subprocess up to 60s). Drop
+            # its in-flight routing so the stale verdict falls into the same
+            # late-verdict no-op as an agent close — otherwise it would still
+            # inject text built from the superseded note, out of order with
+            # the fresh registration's own verdict.
+            self._coord_inflight.pop(result.replaced.id, None)
         log.info(
             "coordination: agent slot %d waits on slot %d (display #%d, %s)",
             registrant_slot,
@@ -3650,7 +3658,13 @@ class AppController(QObject):
         """GUI-thread verdict handler — the trigger's fate is decided here."""
         trigger = self._coord_inflight.pop(trigger_id, None)
         if trigger is None:
-            return  # pruned (an involved agent closed) while the judge ran
+            return  # pruned (agent closed / registration superseded) mid-judge
+        if all(t.id != trigger.id for t in self._coordination.triggers):
+            # Defensive belt over the pruning above: an in-flight trigger is
+            # always still in the engine list (complete() only runs post-
+            # verdict), so absence means it was dropped by a path that forgot
+            # to reconcile _coord_inflight — never act on a stale trigger.
+            return
         if trigger.registrant_slot not in self._term_agents:
             self._coordination.complete(trigger)  # nobody left to tell
             return

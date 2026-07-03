@@ -63,6 +63,11 @@ class RegisterResult:
     status: str = ""
     trigger: Trigger | None = None
     error: str = ""
+    # The prior trigger for the same (watched, registrant) pair that this
+    # registration replaced, if any. The caller MUST reconcile any in-flight
+    # judge routing keyed on the old trigger's id (drop it), or a stale
+    # verdict would still act with the superseded note.
+    replaced: Trigger | None = None
 
 
 @dataclass(frozen=True)
@@ -107,14 +112,20 @@ class TriggerEngine:
         if watched_slot == registrant_slot:
             return RegisterResult(error="cannot wait on yourself")
         # Re-registering the same (watched, registrant) pair replaces the
-        # note rather than stacking duplicate triggers.
-        self._triggers = [
-            t
-            for t in self._triggers
-            if not (
-                t.watched_slot == watched_slot and t.registrant_slot == registrant_slot
-            )
-        ]
+        # note rather than stacking duplicate triggers. The replaced trigger
+        # is surfaced in the result so the caller can drop any in-flight
+        # judge routing keyed on its id (it may be mid-judge right now).
+        replaced = next(
+            (
+                t
+                for t in self._triggers
+                if t.watched_slot == watched_slot
+                and t.registrant_slot == registrant_slot
+            ),
+            None,
+        )
+        if replaced is not None:
+            self._triggers = [t for t in self._triggers if t.id != replaced.id]
         trigger = Trigger(
             watched_slot=watched_slot,
             registrant_slot=registrant_slot,
@@ -127,8 +138,10 @@ class TriggerEngine:
         # Never ran (no session): arm for the next busy→idle edge.
         if not watched_is_busy and watched_has_session:
             trigger.evaluating = True
-            return RegisterResult(status="evaluating", trigger=trigger)
-        return RegisterResult(status="armed", trigger=trigger)
+            return RegisterResult(
+                status="evaluating", trigger=trigger, replaced=replaced
+            )
+        return RegisterResult(status="armed", trigger=trigger, replaced=replaced)
 
     def on_agent_busy(self, slot: int) -> None:
         """The watched agent started working again — nothing to drop; armed

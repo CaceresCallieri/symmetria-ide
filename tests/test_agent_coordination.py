@@ -71,6 +71,20 @@ def test_reregister_same_pair_replaces_note():
     assert engine.triggers[0].note == "second"
 
 
+def test_reregister_surfaces_replaced_trigger():
+    """The caller must reconcile in-flight judge routing keyed on the old
+    trigger's id — register() surfaces the replaced trigger for that."""
+    engine = coord.TriggerEngine()
+    first = _register(engine, note="first")
+    assert first.replaced is None
+    second = _register(engine, note="second")
+    assert second.replaced is not None
+    assert second.replaced.id == first.trigger.id
+    # Different pairs never report a replacement.
+    other = _register(engine, watched=4, registrant=2)
+    assert other.replaced is None
+
+
 def test_on_agent_idle_returns_and_marks_candidates():
     engine = coord.TriggerEngine()
     _register(engine, watched=1, registrant=2)
