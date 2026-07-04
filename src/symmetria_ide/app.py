@@ -4200,7 +4200,7 @@ class AppController(QObject):
         """The bridge's per-instance shape (bridge.lua:185-203 parity)."""
         inst = self._term_agents[slot]
         cwd = inst["cwd"]
-        return {
+        payload = {
             "buf": slot,
             "cwd": cwd,
             "project": os.path.basename(cwd.rstrip("/")) or cwd,
@@ -4217,6 +4217,15 @@ class AppController(QObject):
             # bridge's inject verb, not nvim RPC.
             "inject_via": "bridge",
         }
+        # Advertise the addressable tmux session name ONLY when the tmux
+        # substrate is enabled. An external control plane (vigiliad → the phone)
+        # attaches ttyd and routes send-keys by this exact name, so it must
+        # match a session that actually exists. With the flag off the agent runs
+        # in the IDE's own pane with no standalone tmux session — publishing the
+        # (still-computed) name would make the phone try to open a phantom one.
+        if _agent_tmux_enabled():
+            payload["tmux_session"] = inst["tmux_session"]
+        return payload
 
     def _forget_local_agent(self, slot: int) -> None:
         """Drop a closed slot's local-capture state (called from close_agent).

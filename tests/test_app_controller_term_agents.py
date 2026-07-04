@@ -12,6 +12,7 @@ from __future__ import annotations
 import concurrent.futures
 import io
 import os
+import re
 import time
 
 import pytest
@@ -390,6 +391,26 @@ def test_spawn_publishes_bridge_instance_payload(controller, bridge):
     assert inst["dangerous"] is True
     assert inst["color_idx"] == 1
     assert inst["project"] == os.path.basename(controller.displayedRoot)
+    # Flag off by default: no addressable tmux session is advertised. A non-tmux
+    # agent has no standalone session, so the phone must not be told to open one.
+    assert "tmux_session" not in inst
+
+
+def test_spawn_payload_advertises_tmux_session_when_enabled(
+    controller, bridge, monkeypatch
+):
+    # With the tmux substrate on, the payload carries the addressable session
+    # name so an external control plane (vigiliad → the phone) can attach ttyd
+    # and route send-keys to this exact agent. It is the SAME collision-free id
+    # used for the spawn wrap and close kill.
+    monkeypatch.setenv("SYMMETRIA_IDE_AGENT_TMUX", "1")
+    controller.spawn_agent("fresh", True)
+    inst = bridge.spawns[0]
+    # <slug>-<6hex>-<slot>; the slug may itself contain hyphens (e.g.
+    # "symmetria-ide"), so the leading class allows them — the 6-hex + slot
+    # tail anchors the split.
+    assert re.fullmatch(r"[a-z0-9-]+-[0-9a-f]{6}-\d+", inst["tmux_session"])
+    assert inst["tmux_session"].endswith("-1")  # slot 1
 
 
 # ---------------------------------------------------------------------------
