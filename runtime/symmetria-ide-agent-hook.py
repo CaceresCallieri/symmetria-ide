@@ -26,6 +26,14 @@ marker). Missing either env var → silent no-op (the agent simply isn't IDE-own
 Fire-and-forget and fast: a short socket timeout keeps a hook from ever stalling
 a Claude turn, and the exit code is ALWAYS 0 — a reporter failure must never
 break the agent.
+
+Claude-Code 2.1.x daemon caveat: `SYMMETRIA_IDE_AGENT_SOCK` (and
+`SYMMETRIA_AGENT_ID`) are FROZEN to the daemon spare-pool creator, so trusting
+the env socket misroutes an agent's events to a different project's IDE. We
+therefore RE-RESOLVE the target socket from the cross-IDE registry
+(`symmetria_ide.agent_registry`) using the reliable signals — the stdin
+`session_id` and this process's real `os.getcwd()` — and only fall back to the
+frozen env socket when the registry has no answer. See agent_registry.py.
 """
 
 import json
@@ -37,6 +45,27 @@ import time
 # Short enough that a hung/absent IDE socket never stalls a Claude turn (the hook
 # is registered async, but a blocking connect would still hold the hook process).
 _SOCKET_TIMEOUT_SECONDS = 1.0
+
+
+def _resolve_target_socket(session_id: str, cwd: str, env_sock: str) -> str:
+    """Owning IDE's socket via the registry; `env_sock` when it can't answer.
+
+    Imports the package's pure `agent_registry` (Qt-free) by adding the repo's
+    `src/` to sys.path — the hook lives at `<repo>/runtime/…`, so `../src` is the
+    package root for whichever tree (dev or stable) injected this reporter. Any
+    failure (import, bad registry) degrades to the frozen env socket — the
+    pre-daemon behaviour — because a reporter must never break a turn.
+    """
+    try:
+        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from symmetria_ide.agent_registry import resolve_socket
+
+        routed = resolve_socket(session_id, cwd)
+        return routed or env_sock
+    except Exception:
+        return env_sock
 
 
 def main() -> None:
@@ -52,6 +81,12 @@ def main() -> None:
     if not isinstance(event, dict):
         return  # a non-object payload has no hook fields — mirror the server-side guard
 
+    session_id = event.get("session_id", "")
+    # This hook process runs in the SESSION's real cwd, so os.getcwd() is a
+    # reliable project signal even when SYMMETRIA_AGENT_ID is frozen by the
+    # daemon. The IDE uses it to claim an agent's first event to the right slot.
+    cwd = os.getcwd()
+
     # Curated passthrough — exactly the fields agent_activity.AgentActivityMachine
     # reads. We forward raw values (no mapping) so all interpretation stays in the
     # IDE. `event_ts_ns` uses CLOCK_REALTIME (time.time_ns) because monotonic
@@ -61,7 +96,9 @@ def main() -> None:
         "type": "hook",
         "agent_id": agent_id,
         "hook_event_name": event.get("hook_event_name", ""),
-        "session_id": event.get("session_id", ""),
+        "session_id": session_id,
+        # cwd lets the IDE derive the true slot when the frozen agent_id lies.
+        "cwd": cwd,
         "tool_name": event.get("tool_name", ""),
         "permission_mode": event.get("permission_mode", ""),
         "source": event.get("source", ""),
@@ -75,9 +112,12 @@ def main() -> None:
         "event_ts_ns": time.time_ns(),
     }
 
+    # Route to the OWNING IDE's socket (registry), not the frozen env socket.
+    target = _resolve_target_socket(session_id, cwd, sock_path)
+
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(_SOCKET_TIMEOUT_SECONDS)
-        sock.connect(sock_path)
+        sock.connect(target)
         sock.sendall((json.dumps(payload) + "\n").encode())
 
 

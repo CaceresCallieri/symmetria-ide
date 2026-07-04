@@ -54,6 +54,7 @@ from PySide6.QtWebEngineQuick import QtWebEngineQuick
 
 from . import agent_coordination
 from . import agent_harness
+from . import agent_registry
 from .account_usage_store import AccountUsageStore
 from .agent_activity import AgentActivityMachine
 from .agent_bridge import AgentBridgeClient, emit_gc_safe
@@ -85,6 +86,7 @@ from .session_models import (  # noqa: F401 — side-effect: @QmlElement registr
 from .project_browser_marker import (
     browser_agents_enabled,
     harness_model_effort,
+    resolve_project_root,
     set_browser_agents,
 )
 from .tree_state_cache import load_expanded, save_expanded
@@ -2738,6 +2740,9 @@ class AppController(QObject):
         self._agent_order.append(slot)
         self.termAgentsChanged.emit()
         self._agent_bridge.notify_spawn(self._term_instance_payload(slot))
+        # Publish the new slot to the cross-IDE registry (a resume carries its
+        # session id already; a fresh agent's binds on its first hook event).
+        self._sync_agent_registry()
         log.info(
             "spawn_agent: slot %d (%s %s%s) in %s",
             slot,
@@ -4102,6 +4107,31 @@ class AppController(QObject):
         """
         self._activity_machine.forget(f"{os.getpid()}_{slot}")
         self._locally_captured_agents.discard(slot)
+        # Both close paths reach here AFTER the slot is removed from
+        # _term_agents, so re-publishing drops its session from the registry —
+        # a peer IDE won't route a dead session's late events to us.
+        self._sync_agent_registry()
+
+    def _sync_agent_registry(self) -> None:
+        """Re-publish this IDE's cross-IDE routing entry (agent_registry).
+
+        Called whenever the pool's slots/sessions or the displayed project root
+        change. The entry lets a peer IDE's reporter hook route THIS IDE's
+        agents' events back here even when Claude's daemon froze their env socket
+        to another instance (see agent_registry.py). Best-effort: a failed write
+        just falls the reporter back to the frozen env socket (old behaviour).
+        """
+        sessions = {
+            inst["session_id"]: slot
+            for slot, inst in self._term_agents.items()
+            if inst.get("session_id")
+        }
+        agent_registry.write_entry(
+            os.getpid(),
+            self._agent_events.socket_path,
+            resolve_project_root(self.displayedRoot),
+            sessions,
+        )
 
     @staticmethod
     def _coerce_int(value, default: int = 0) -> int:
@@ -4244,20 +4274,39 @@ class AppController(QObject):
 
         The IDE's own agents report lifecycle events to `_agent_events`; this is
         the AUTHORITATIVE driver of their sparkles + resumable session id (vs the
-        legacy `_on_bridge_snapshot` round-trip). Resolve the slot from the agent
-        id's `<ide_pid>_<slot>`, run the activity machine, update the slot's
-        activity + session_id, and emit only on a real change.
+        legacy `_on_bridge_snapshot` round-trip). Resolve the true slot from the
+        event's session id + cwd (NOT the daemon-frozen agent id — see
+        agent_registry), run the activity machine, update the slot's activity +
+        session_id, and emit only on a real change.
         """
-        agent_id = str(payload.get("agent_id", ""))
-        prefix = f"{os.getpid()}_"
-        if not agent_id.startswith(prefix):
-            return  # not one of our agents (defensive — only ours report here)
-        try:
-            slot = int(agent_id[len(prefix) :])
-        except ValueError:
-            return
-        if slot not in self._term_agents:
-            return  # event for a slot we've already closed
+        # Slot resolution no longer trusts the env agent_id — Claude Code 2.1.x's
+        # daemon spare-pool FREEZES SYMMETRIA_AGENT_ID to the pool creator, so a
+        # different project's agent can arrive stamped with our (or a sibling's)
+        # id. Derive the true slot from the reliable signals — the session id and
+        # the reporting process's real cwd — via agent_registry (pure,
+        # unit-tested). See agent_registry.py + CLAUDE.md "The terminal-agent
+        # runtime" (daemon caveat).
+        slot, _bind_session = agent_registry.resolve_slot_for_event(
+            self._term_agents,
+            os.getpid(),
+            str(payload.get("session_id", "") or ""),
+            str(payload.get("cwd", "") or ""),
+            str(payload.get("agent_id", "")),
+        )
+        if slot is None:
+            return  # belongs to no live local slot (foreign / already closed)
+        # Binding the session id → slot (including a first-event project-root
+        # claim) is DEFERRED to the session-id backfill below — the single place
+        # that stores it, publishes the change, and re-syncs the registry — so a
+        # claim and an ordinary session capture share one path. The resolver's
+        # `_bind_session` (equal to that same session id) is therefore advisory;
+        # `slot` is all we need here.
+        # Normalize the (possibly poisoned) env id to the TRUE `<ide_pid>_<slot>`
+        # so everything keyed on agent_id downstream — the activity machine's
+        # subagent-depth counter, notify_activity, _forget_local_agent — is
+        # correct and can't collide with a frozen-id sibling in another project.
+        payload = {**payload, "agent_id": f"{os.getpid()}_{slot}"}
+        agent_id = payload["agent_id"]
         # A real hook event supersedes any speculative Esc-interrupt clear armed
         # for this slot: the agent is genuinely transitioning, and the event
         # itself sets the correct state below (it may even BE a clear, e.g. Stop).
@@ -4301,6 +4350,9 @@ class AppController(QObject):
         )
         if session_changed:
             self._term_agents[slot]["session_id"] = outcome.session_id
+            # Advertise the freshly-learned session→slot so peer reporters route
+            # this session's later events precisely (idempotent atomic write).
+            self._sync_agent_registry()
         activity_changed = False
         if outcome.clear:
             # idle/offline → drop the activity entry (chip falls back to dormant).
@@ -5145,6 +5197,14 @@ class AppController(QObject):
         # simply absent). Must be listening before any agent spawns so the very
         # first SessionStart is captured.
         self._agent_events.start()
+        # Publish this IDE's cross-IDE routing entry (and reap dead peers' first)
+        # so a sibling IDE's reporter hook can route OUR agents' events back to
+        # us even after Claude's daemon froze their env socket to another
+        # instance. Must follow _agent_events.start() (needs the bound socket
+        # path) and precede any spawn. See agent_registry.py.
+        agent_registry.reap_dead()
+        self._sync_agent_registry()
+        self.displayedRootChanged.connect(self._sync_agent_registry)
         # Observe Escape presses app-wide so we can return a focused agent's
         # sparkle to idle on a user interrupt (Claude fires no hook for that —
         # agent_interrupt.py). The filter only notifies; on_terminal_escape gates
@@ -5598,6 +5658,9 @@ class AppController(QObject):
         # on engine teardown, so any in-flight reporter just fails its fast
         # connect — nothing to coordinate here.
         self._agent_events.stop()
+        # Drop our cross-IDE routing entry so peers stop routing to a dead
+        # socket (reap_dead would clean it eventually, but a clean exit is tidy).
+        agent_registry.remove_entry(os.getpid())
         self._account_usage_store.stop()
         # Signal the browser MCP server to exit and drop its config file
         # (daemon thread; reaped with the process either way).
