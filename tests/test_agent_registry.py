@@ -138,6 +138,33 @@ def test_slot_legacy_env_match_binds_session(tmp_path):
     assert bind == "sess-new"
 
 
+def test_slot_legacy_env_match_rejected_for_foreign_cwd(tmp_path):
+    """The tier-2 project guard: a daemon-FROZEN foreign event stamped with our
+    pid prefix but reporting a DIFFERENT project's cwd must NOT steal our slot —
+    it falls through (no unbound slot in the foreign root) to None."""
+    root = _mkrepo(tmp_path, "proj")
+    foreign = _mkrepo(tmp_path, "foreign")
+    agents = _agents(slot2=("", root, 1.0))
+    slot, bind = agent_registry.resolve_slot_for_event(
+        agents, my_pid=700, session_id="sess-frozen", cwd=foreign, agent_id_env="700_2"
+    )
+    assert slot is None
+    assert bind == ""
+
+
+def test_slot_legacy_env_match_accepted_when_cwd_absent(tmp_path):
+    """The guard preserves pre-daemon behaviour: with no cwd to verify against,
+    a matching env id is still trusted (can't be a routed foreign event, which
+    always carries os.getcwd())."""
+    root = _mkrepo(tmp_path, "proj")
+    agents = _agents(slot2=("", root, 1.0))
+    slot, bind = agent_registry.resolve_slot_for_event(
+        agents, my_pid=700, session_id="sess-new", cwd="", agent_id_env="700_2"
+    )
+    assert slot == 2
+    assert bind == "sess-new"
+
+
 def test_slot_project_root_claim_newest_unbound(tmp_path):
     root = _mkrepo(tmp_path, "proj")
     # Two unbound slots in the same project; the NEWEST spawn (higher mono) wins.

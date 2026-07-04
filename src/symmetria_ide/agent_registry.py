@@ -76,9 +76,12 @@ def write_entry(
 
     `sessions` maps each bound `session_id` → its pool slot. `project_root` is
     the resolved repo root the IDE currently displays — the bootstrap key for
-    an agent's FIRST event (before its session id is known to anyone). Failure
-    is swallowed by `atomic_write_json` (returns False, logged) — a missing
-    entry just falls the reporter back to the frozen env socket (old behaviour).
+    an agent's FIRST event (before its session id is known to anyone).
+    Filesystem failures are swallowed by `atomic_write_json` (returns False,
+    logged) — a missing entry just falls the reporter back to the frozen env
+    socket (old behaviour). A serialization error (a caller bug — `sessions`
+    values are int slots, keys str ids) would propagate, so the GUI-thread
+    caller (`_sync_agent_registry`) guards this call.
     """
     atomic_write_json(
         _entry_path(pid),
@@ -159,6 +162,11 @@ def resolve_socket(session_id: str, cwd: str) -> str:
     if cwd:
         root = resolve_project_root(cwd)
         for e in entries:
+            # On a project-root tie (two live IDEs on the same repo — possible
+            # since one-IDE-per-project is a convention, not enforced) the first
+            # entry in glob order wins. Non-deterministic, but acceptable under
+            # that topology; the session-map branch above is the precise path
+            # once a session is bound.
             if e.get("project_root") == root and _pid_alive(e.get("pid", -1)):
                 return str(e["socket"])
     return ""
@@ -185,11 +193,15 @@ def resolve_slot_for_event(
     Order:
       1. **exact session match** — a slot already bound to `session_id`;
       2. **legacy env id** — `agent_id_env == "<my_pid>_<slot>"` (the un-poisoned
-         path: an in-process agent whose env was never frozen). Binds the
-         session id if the slot lacks one;
-      3. **project-root claim** — an unknown session that the reporter routed to
-         us by project root. Bind it to the newest unbound slot in the same
-         project (the bootstrap; exact for every later event).
+         path: an in-process agent whose env was never frozen), GATED on the
+         event cwd resolving to the same project as that slot (else a
+         daemon-frozen foreign id would re-poison — see the guard comment).
+         Binds the session id if the slot lacks one;
+      3. **project-root claim** — an unknown session the reporter routed to us by
+         project root; bound to the newest unbound slot in the same project.
+         Best-effort only: with two same-project slots unbound at once the claim
+         is a guess (arrival order ≠ spawn order), but it self-corrects to exact
+         once bound (later events match by session id in tier 1).
     """
     if session_id:
         for slot, inst in term_agents.items():
@@ -202,9 +214,25 @@ def resolve_slot_for_event(
             slot = int(agent_id_env[len(prefix) :])
         except ValueError:
             slot = None
+        # Project guard (load-bearing): the env id is the daemon-FROZEN signal
+        # this whole module exists to stop trusting, so accepting it blindly
+        # would RE-POISON. A foreign agent whose home IDE isn't registered falls
+        # back (in the hook) to our frozen socket and arrives stamped
+        # "<our_pid>_N"; without the guard, tier 2 would bind its session to our
+        # slot N and resurrect the sparkle desync. Only accept the env slot when
+        # the event's cwd agrees with that slot's project (a genuine in-process
+        # agent's first-event cwd equals its spawn cwd), or when cwd is absent
+        # (can't verify → preserve the pre-daemon behaviour). A frozen foreign
+        # agent's cwd resolves to a different root → falls through to tier 3.
         if slot is not None and slot in term_agents:
-            needs_bind = bool(session_id and not term_agents[slot].get("session_id"))
-            return slot, (session_id if needs_bind else "")
+            same_project = not cwd or resolve_project_root(cwd) == resolve_project_root(
+                term_agents[slot].get("cwd", "")
+            )
+            if same_project:
+                needs_bind = bool(
+                    session_id and not term_agents[slot].get("session_id")
+                )
+                return slot, (session_id if needs_bind else "")
 
     if session_id and cwd:
         root = resolve_project_root(cwd)
@@ -215,8 +243,13 @@ def resolve_slot_for_event(
             and resolve_project_root(inst.get("cwd", "")) == root
         ]
         if candidates:
-            # Newest spawn wins — the slot the user most recently opened in this
-            # project is the one whose first session is arriving now.
+            # Best-effort bootstrap: pick the newest-spawned unbound slot in this
+            # project. This is a GUESS when two same-project agents are unbound at
+            # once — hook arrival order isn't guaranteed to match spawn order, so
+            # a faster-warming older agent could claim the newer slot (sparkles
+            # swapped). Acceptable under the one-agent-at-a-time interactive spawn
+            # topology; harmless once bound (every LATER event matches by exact
+            # session id in tier 1). No per-event slot signal exists to do better.
             slot = max(candidates, key=lambda s: term_agents[s].get("spawn_mono", 0))
             return slot, session_id
 

@@ -59,7 +59,10 @@ def _resolve_target_socket(session_id: str, cwd: str, env_sock: str) -> str:
     try:
         src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
         if src not in sys.path:
-            sys.path.insert(0, src)
+            # append (not insert(0)): the `symmetria_ide` package name is unique,
+            # so appending resolves it without risking shadowing a stdlib/top-level
+            # module for the rest of this short-lived hook process.
+            sys.path.append(src)
         from symmetria_ide.agent_registry import resolve_socket
 
         routed = resolve_socket(session_id, cwd)
@@ -71,8 +74,11 @@ def _resolve_target_socket(session_id: str, cwd: str, env_sock: str) -> str:
 def main() -> None:
     agent_id = os.environ.get("SYMMETRIA_AGENT_ID", "")
     sock_path = os.environ.get("SYMMETRIA_IDE_AGENT_SOCK", "")
-    if not agent_id or not sock_path:
-        return  # not an IDE-owned agent, or no socket to report to
+    if not agent_id:
+        return  # not an IDE-owned agent — nothing to report
+    # NB: we do NOT require sock_path here. The frozen env socket is unreliable
+    # under the daemon; the registry is authoritative and can route this event
+    # even when SYMMETRIA_IDE_AGENT_SOCK is empty/unset (empty target no-ops below).
 
     raw = sys.stdin.read().strip()
     if not raw:
@@ -114,6 +120,8 @@ def main() -> None:
 
     # Route to the OWNING IDE's socket (registry), not the frozen env socket.
     target = _resolve_target_socket(session_id, cwd, sock_path)
+    if not target:
+        return  # no registry route AND no env socket — nowhere to report
 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(_SOCKET_TIMEOUT_SECONDS)

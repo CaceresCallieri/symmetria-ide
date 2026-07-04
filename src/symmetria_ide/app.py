@@ -4121,17 +4121,25 @@ class AppController(QObject):
         to another instance (see agent_registry.py). Best-effort: a failed write
         just falls the reporter back to the frozen env socket (old behaviour).
         """
-        sessions = {
-            inst["session_id"]: slot
-            for slot, inst in self._term_agents.items()
-            if inst.get("session_id")
-        }
-        agent_registry.write_entry(
-            os.getpid(),
-            self._agent_events.socket_path,
-            resolve_project_root(self.displayedRoot),
-            sessions,
-        )
+        # Best-effort per the docstring — and this runs on a Qt slot (wired to
+        # displayedRootChanged), so a stray raise (e.g. from resolve_project_root
+        # or a non-serializable session value) must not escape into the event
+        # loop. atomic_write_json already swallows filesystem errors; this guards
+        # everything else.
+        try:
+            sessions = {
+                inst["session_id"]: slot
+                for slot, inst in self._term_agents.items()
+                if inst.get("session_id")
+            }
+            agent_registry.write_entry(
+                os.getpid(),
+                self._agent_events.socket_path,
+                resolve_project_root(self.displayedRoot),
+                sessions,
+            )
+        except Exception:
+            log.warning("agent registry sync failed", exc_info=True)
 
     @staticmethod
     def _coerce_int(value, default: int = 0) -> int:

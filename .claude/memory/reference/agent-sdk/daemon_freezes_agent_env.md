@@ -14,7 +14,7 @@ idle, while a genuinely-working agent in another project shows idle. Cross-IDE
 activity desync that appeared after a Claude Code update (was on 2.1.197).
 
 **Root cause.** Claude Code 2.1.x runs a **per-user daemon + pre-warmed spare
-pool** (one pool dir `/tmp/cc-daemon-1000/<id>/`). The `claude` process the IDE
+pool** (one pool dir `/tmp/cc-daemon-<uid>/<id>/` — `cc-daemon-1000` here). The `claude` process the IDE
 spawns is only a thin **launcher**; it spawns a `claude daemon run` child, which
 hosts the real interactive session as a **grandchild in a background PTY**
 (`--bg-pty-host … --session-id … --effort …`). The daemon pre-warms **spare**
@@ -35,9 +35,10 @@ A's sparkle lights for B's work (`agent_activity.py` keyed slot purely on the en
 stdin `session_id` is the real per-session id (distinct per project even when
 `agent_id` collides), and the hook process runs in the session's **real cwd**
 (`os.getcwd()`). Only the env is poisoned. `--session-id <uuid>` injection was
-considered but is riskier — `CHILD_SESSION_UNSET_ARGS` deliberately unsets
-`CLAUDE_CODE_SESSION_ID` to force top-level transcript persistence, and injecting
-touches the same machinery — so it was NOT done.
+considered but is riskier — the spawn path already scrubs CC-internal session env
+vars (`CHILD_SESSION_UNSET_ARGS` in `agent_harness.py` unsets
+`CLAUDE_CODE_SESSION_ID`) to force top-level transcript persistence, and injecting
+a session id touches that same session-identity machinery — so it was NOT done.
 
 **Fix shipped (dev, 2026-07-04) — `see src/symmetria_ide/agent_registry.py`:**
 - On-disk cross-IDE registry `$XDG_RUNTIME_DIR/symmetria-ide/registry/<pid>.json`
