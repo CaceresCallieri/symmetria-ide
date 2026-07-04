@@ -35,10 +35,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -68,18 +68,25 @@ jobs:
           pip install "ruff>=0.6" "pyright>=1.1.400" "pip-audit>=2.7"
 
       - name: stylua — format check
-        uses: JohnnyMorganz/stylua-action@v4
+        uses: JohnnyMorganz/stylua-action@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           version: latest
           args: --check runtime/
 
+      # selene has no maintained GitHub Action — the only one
+      # (NTBBloodbath/selene-action) is pinned to a deprecated Node runtime
+      # and unmaintained. Install the pinned prebuilt binary directly instead:
+      # a plain run-step with no Node action, same selene version as before.
       - name: selene — Lua lint
-        uses: NTBBloodbath/selene-action@v1.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          version: 0.27.1
-          args: --config selene.toml runtime/
+        env:
+          SELENE_VERSION: "0.27.1"
+        run: |
+          curl -fsSL -o /tmp/selene.zip \
+            "https://github.com/Kampfkarren/selene/releases/download/${SELENE_VERSION}/selene-${SELENE_VERSION}-linux.zip"
+          unzip -o /tmp/selene.zip -d /tmp/selene-bin
+          chmod +x /tmp/selene-bin/selene
+          /tmp/selene-bin/selene --config selene.toml runtime/
 
       - name: Ruff — lint
         run: ruff check src/ tests/
