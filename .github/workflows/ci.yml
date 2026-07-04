@@ -58,8 +58,10 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          # Runtime deps + dev extras from pyproject.toml.
-          pip install -e ".[dev]"
+          # Runtime deps + dev extras from pyproject.toml. The `browser` extra
+          # pulls `mcp` (+ starlette/uvicorn) so the browser-MCP tests run
+          # instead of erroring on a missing optional dep.
+          pip install -e ".[dev,browser]"
           # Tooling matches what the maintainer runs locally via paru/pip.
           # Lower bounds only — a CI tool bump surfaces drift the same
           # day it happens.

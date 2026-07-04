@@ -25,6 +25,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Optional runtime deps for the agent/browser MCP server (browser_mcp.py).
+# Kept OUT of core `dependencies` — the feature degrades gracefully when
+# absent (browser_mcp.py guards its mcp/uvicorn imports). CI installs this
+# extra so the dual-transport regression guard in test_browser_mcp.py runs
+# instead of erroring on a missing `mcp`. `mcp` pulls starlette + uvicorn +
+# sse-starlette transitively.
+browser = ["mcp>=1.28"]
 
 [project.scripts]
 symmetria-ide = "symmetria_ide.__main__:main"
