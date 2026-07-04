@@ -107,9 +107,13 @@ jobs:
         run: pip-audit
 
       # Offscreen Qt platform plugin keeps tests headless — no xvfb,
-      # no Wayland. 125 tests cover pure-Python Grid, key translator,
-      # animation springs, and model classes (see docs/dev-workflow.md).
+      # no Wayland (see docs/dev-workflow.md).
+      # `python -m pytest` (NOT bare `pytest`): the module form puts the repo
+      # root on sys.path, which several test modules need for their
+      # `from tests.conftest import ...` helper imports. Bare `pytest` omits
+      # it and fails collection with `ModuleNotFoundError: No module named
+      # 'tests'`. This matches the documented command in CLAUDE.md.
       - name: pytest — offscreen unit tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: pytest tests/ -v
+        run: python -m pytest tests/ -v
