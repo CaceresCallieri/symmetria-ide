@@ -14,6 +14,8 @@ from symmetria_ide.agent_harness import (
     HARNESSES,
     parse_opencode_sessions,
     spawn_argv,
+    tmux_session_name,
+    tmux_wrap,
 )
 
 
@@ -395,3 +397,105 @@ def test_model_effort_coexist_with_resume_session_id():
     )
     assert argv[-1] == "ses_abc"
     assert "--model" in argv and "--effort" in argv
+
+
+# ---------------------------------------------------------------------------
+# executable override (tmux mode uses an absolute path)
+# ---------------------------------------------------------------------------
+
+
+def test_executable_override_replaces_bare_name():
+    argv = spawn_argv(
+        HARNESSES["claude"], "fresh", False, "42_1", executable="/usr/bin/claude"
+    )
+    assert "/usr/bin/claude" in argv
+    assert "claude" not in argv  # the bare name is gone
+    # It replaces the program element (ends the env prefix), so every following
+    # arg is still the program's, not env's.
+    assert argv[argv.index("/usr/bin/claude") - 1].startswith("SYMMETRIA_AGENT_ID=")
+
+
+def test_executable_empty_keeps_bare_name():
+    # The default ("") preserves the legacy bare-name behavior byte-for-byte.
+    assert spawn_argv(HARNESSES["claude"], "fresh", False, "42_1") == spawn_argv(
+        HARNESSES["claude"], "fresh", False, "42_1", executable=""
+    )
+    assert "claude" in spawn_argv(HARNESSES["claude"], "fresh", False, "42_1")
+
+
+# ---------------------------------------------------------------------------
+# tmux_session_name
+# ---------------------------------------------------------------------------
+
+
+def test_tmux_session_name_slug_and_slot():
+    assert tmux_session_name("/home/jc/projects/vigilia", 1) == "vigilia-1"
+
+
+def test_tmux_session_name_slugifies_forbidden_chars():
+    # tmux forbids '.' and ':' in session names; the slug must reduce them.
+    name = tmux_session_name("/home/jc/my.cool:proj", 3)
+    assert name == "my-cool-proj-3"
+    assert "." not in name and ":" not in name
+
+
+def test_tmux_session_name_trailing_slash_and_case():
+    assert tmux_session_name("/home/jc/Projects/Symmetria-IDE/", 2) == "symmetria-ide-2"
+
+
+def test_tmux_session_name_empty_falls_back_to_agent():
+    assert tmux_session_name("", 4) == "agent-4"
+    assert tmux_session_name("/", 4) == "agent-4"
+
+
+# ---------------------------------------------------------------------------
+# tmux_wrap
+# ---------------------------------------------------------------------------
+
+
+def test_tmux_wrap_attaches_or_creates_with_inner_last():
+    inner = ["env", "SYMMETRIA_AGENT_ID=42_1", "claude"]
+    argv = tmux_wrap(inner, "/run/user/1000/agent.sock", "vigilia-1")
+    assert argv == [
+        "tmux",
+        "-S",
+        "/run/user/1000/agent.sock",
+        "new-session",
+        "-A",  # attach-if-exists → a restarted IDE re-adopts, no double-spawn
+        "-s",
+        "vigilia-1",
+        *inner,  # inner appended verbatim, LAST
+    ]
+
+
+def test_tmux_wrap_conf_adds_server_flag_before_command():
+    argv = tmux_wrap(["env", "claude"], "/s.sock", "vigilia-1", conf_path="/c.conf")
+    # -f is a SERVER flag: it must sit with -S, before `new-session`.
+    assert argv[:5] == ["tmux", "-S", "/s.sock", "-f", "/c.conf"]
+    assert argv[5] == "new-session"
+
+
+def test_tmux_wrap_start_directory_adds_c_flag():
+    argv = tmux_wrap(
+        ["env", "claude"], "/s.sock", "vigilia-1", start_directory="/home/jc/projects/x"
+    )
+    assert argv[argv.index("-c") + 1] == "/home/jc/projects/x"
+    # -c is a new-session flag: after `new-session`, before the inner argv.
+    assert argv.index("new-session") < argv.index("-c") < argv.index("env")
+
+
+def test_tmux_wrap_preserves_inline_settings_json():
+    # The load-bearing property: an inline --settings JSON (spaces/braces/quotes)
+    # rides through as ONE element and stays intact — tmux execs the inner argv
+    # directly (no shell re-split). Pin it against a wrap that shells the command.
+    inner = spawn_argv(
+        HARNESSES["claude"],
+        "fresh",
+        True,
+        "42_1",
+        settings_json='{"hooks": {"Stop": [{"type": "command"}]}}',
+    )
+    argv = tmux_wrap(inner, "/s.sock", "vigilia-1")
+    assert '{"hooks": {"Stop": [{"type": "command"}]}}' in argv
+    # And the whole inner block is a contiguous suffix (nothing interleaved).
+    assert argv[-len(inner) :] == inner

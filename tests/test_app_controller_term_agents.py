@@ -177,6 +177,63 @@ def test_spawn_opencode_resume_without_session_id_is_a_no_op(controller):
     assert controller.agentOrder == []
 
 
+# ---------------------------------------------------------------------------
+# tmux substrate (SYMMETRIA_IDE_AGENT_TMUX=1) — opt-in wrap + close-kill
+# ---------------------------------------------------------------------------
+
+
+def test_agent_spawn_argv_no_tmux_wrap_by_default(controller):
+    # Default (flag unset): the argv is the bare env-wrapper, no tmux — the
+    # substrate must be strictly opt-in so it can't surprise the daily driver.
+    controller.spawn_agent("fresh", True)
+    argv = controller.agent_spawn_argv(1)
+    assert argv[0] == "env"
+    assert "tmux" not in argv
+
+
+def test_agent_spawn_argv_wraps_in_tmux_when_enabled(controller, monkeypatch, tmp_path):
+    sock = str(tmp_path / "t.sock")
+    monkeypatch.setenv("SYMMETRIA_IDE_AGENT_TMUX", "1")
+    monkeypatch.setenv("SYMMETRIA_IDE_TMUX_SOCKET", sock)
+    controller.spawn_agent("fresh", True)
+    argv = controller.agent_spawn_argv(1)
+    assert argv[0] == "tmux"
+    assert argv[1:3] == ["-S", sock]
+    assert "-f" in argv  # the agent-tmux.conf server flag
+    assert "new-session" in argv
+    assert "-A" in argv  # attach-if-exists
+    assert "-c" in argv  # start-directory → correct cwd attribution
+    s = argv.index("-s")
+    assert argv[s + 1].endswith("-1")  # <project-slug>-<slot> session name
+    # The inner env-wrapper rides after the session name, contiguous and intact.
+    assert "env" in argv[s + 2 :]
+    assert any(a == "claude" or a.endswith("/claude") for a in argv)
+
+
+def test_close_agent_kills_tmux_session_when_enabled(controller, monkeypatch):
+    monkeypatch.setenv("SYMMETRIA_IDE_AGENT_TMUX", "1")
+    killed: list[str] = []
+    monkeypatch.setattr(
+        controller,
+        "_kill_agent_tmux_session",
+        lambda inst: killed.append(inst.get("tmux_session")),
+    )
+    controller.spawn_agent("fresh", True)
+    controller.close_agent(1)
+    assert killed and killed[0].endswith("-1")
+
+
+def test_close_agent_skips_tmux_kill_when_disabled(controller, monkeypatch):
+    # Default (flag unset): no kill-session attempted — legacy close is untouched.
+    called: list = []
+    monkeypatch.setattr(
+        controller, "_kill_agent_tmux_session", lambda inst: called.append(inst)
+    )
+    controller.spawn_agent("fresh", True)
+    controller.close_agent(1)
+    assert called == []
+
+
 def test_spawn_unknown_harness_is_a_no_op(controller):
     controller.spawn_agent("fresh", True, "copilot")
     assert controller.agentOrder == []

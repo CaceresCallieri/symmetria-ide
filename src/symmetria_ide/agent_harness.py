@@ -13,6 +13,8 @@ for the resume picker's session list.
 from __future__ import annotations
 
 import json
+import os
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -157,6 +159,7 @@ def spawn_argv(
     agent_sock_path: str = "",
     model: str = "",
     effort: str = "",
+    executable: str = "",
 ) -> list[str]:
     """argv for a slot's QMLTermSession.
 
@@ -190,6 +193,10 @@ def spawn_argv(
     spawn — the committable marker must tolerate a teammate's typo. `model` is
     passed through as-is (aliases and full ids are both valid, and the valid-id
     set drifts per release, so validating it here would rot).
+
+    `executable`, when set, replaces the bare `harness.executable` with an
+    absolute path (see `tmux_wrap` — the tmux server's PATH may differ from the
+    IDE's). Empty keeps the bare name.
     """
     argv = ["env", *CHILD_SESSION_UNSET_ARGS, f"SYMMETRIA_AGENT_ID={agent_id}"]
     # Exported unconditionally when provided (harmless for opencode, which has no
@@ -212,7 +219,11 @@ def spawn_argv(
     # JSON needs no quoting, same as OPENCODE_PERMISSION above.
     if mcp_config_content and harness.mcp_config_env:
         argv.append(f"{harness.mcp_config_env}={mcp_config_content}")
-    argv.append(harness.executable)
+    # `executable` overrides the bare harness name with an ABSOLUTE path when the
+    # caller has resolved one (tmux mode — so finding the CLI does not depend on
+    # the tmux server's inherited PATH). Empty = use the bare name (legacy PTY,
+    # where the child inherits the IDE's own PATH).
+    argv.append(executable or harness.executable)
     if dangerous and harness.dangerous_flag:
         argv.append(harness.dangerous_flag)
     if mcp_config_path and harness.mcp_config_flag:
@@ -245,6 +256,62 @@ def spawn_argv(
     if spawn_type == "resume" and session_id:
         argv.append(session_id)
     return argv
+
+
+def tmux_session_name(project_root: str, slot: int) -> str:
+    """Stable tmux session name for a slot: ``<project-slug>-<slot>``.
+
+    This name is what external clients (Vigilia's ttyd → the phone) LIST, so it
+    must be human-meaningful AND stable across IDE restarts — no pid — so that a
+    restarted IDE (or ``new-session -A``) re-adopts the surviving session instead
+    of double-spawning. The slug is the project basename reduced to ``[a-z0-9-]``
+    (tmux forbids ``.``/``:`` in session names); a rootless/empty path falls back
+    to ``agent``.
+    """
+    base = os.path.basename(os.path.normpath(project_root or ""))
+    slug = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-") or "agent"
+    return f"{slug}-{slot}"
+
+
+def tmux_wrap(
+    inner_argv: list[str],
+    socket: str,
+    session_name: str,
+    conf_path: str = "",
+    start_directory: str = "",
+) -> list[str]:
+    """Wrap an agent launch argv so it runs inside a tmux session on ``socket``.
+
+    ``new-session -A`` = attach-if-exists, else create-and-run ``inner_argv`` — so
+    a restarted IDE re-attaches the surviving agent rather than double-spawning;
+    the inner ``env … <cli>`` command runs only on first creation. ``inner_argv``
+    is appended LAST and verbatim: tmux stops option parsing at the first
+    non-option (``env``) and execs the remainder directly (no shell), so the
+    inline ``--settings <json>`` survives byte-for-byte (verified 2026-07-04,
+    tmux 3.7). ``-f <conf>`` is a SERVER flag (before the command) and applies
+    only when this invocation starts the server — harmless on a running one.
+
+    ``start_directory`` (``-c``) is LOAD-BEARING when set: without it, the session
+    command starts in the tmux *server's* cwd, not the project root. The agent's
+    activity reporter keys on ``session_id`` + the agent's real ``os.getcwd()``
+    (agent_registry), so a wrong cwd would misroute the agent's state — pass the
+    project root here so it matches the pre-tmux direct-PTY behavior.
+    """
+    server_flags = ["-S", socket]
+    if conf_path:
+        server_flags += ["-f", conf_path]
+    new_session_flags = ["-A"]
+    if start_directory:
+        new_session_flags += ["-c", start_directory]
+    return [
+        "tmux",
+        *server_flags,
+        "new-session",
+        *new_session_flags,
+        "-s",
+        session_name,
+        *inner_argv,
+    ]
 
 
 def parse_opencode_sessions(stdout: str) -> list[dict] | None:

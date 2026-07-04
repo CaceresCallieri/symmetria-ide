@@ -103,6 +103,28 @@ QML_IMPORT_MAJOR_VERSION = 1
 log = logging.getLogger(__name__)
 
 
+# --- tmux substrate for agent sessions (Vigilia convergence, step 4) ----------
+# When enabled, agent CLIs spawn INSIDE a tmux session on a shared socket instead
+# of a bare PTY, so external clients (Vigilia's ttyd → the phone) can attach the
+# SAME session the IDE drives. OFF by default: opt in per-instance with
+# SYMMETRIA_IDE_AGENT_TMUX=1 — that flag is the dev→stable promotion gate, and a
+# `=0` (or unset) instantly restores the direct-PTY path. The socket is shared
+# with Vigilia's stack (~/.vigilia/tmux.sock by default) and overridable so the
+# same logic points at a VPS socket later. Config (status bar off, window-size
+# latest, sessions survive detach) lives in runtime/agent-tmux.conf.
+_AGENT_TMUX_CONF = _RUNTIME_DIR / "agent-tmux.conf"
+
+
+def _agent_tmux_enabled() -> bool:
+    return os.environ.get("SYMMETRIA_IDE_AGENT_TMUX") == "1"
+
+
+def _agent_tmux_socket() -> str:
+    return os.environ.get("SYMMETRIA_IDE_TMUX_SOCKET") or os.path.expanduser(
+        "~/.vigilia/tmux.sock"
+    )
+
+
 def _qt_message_handler(mode, ctx, msg: str) -> None:
     """Route Qt/QML log output into Python's logging so console.log + qWarning
     actually surface during development.
@@ -2730,6 +2752,11 @@ class AppController(QObject):
             # payload + sort): monotonic is immune to clock adjustments and has
             # the sub-second resolution the ~250ms OOM-death window needs.
             "spawn_mono": time.monotonic(),
+            # Stable tmux session name (<project>-<slot>) used when the tmux
+            # substrate is enabled — for the wrap at spawn and the kill at close.
+            # Computed here (not at spawn-argv time) so it is fixed for the
+            # agent's whole lifetime regardless of later root changes.
+            "tmux_session": agent_harness.tmux_session_name(cwd, slot),
         }
         # Display ordering: new agents always APPEND — the newest agent
         # is the highest chip number, and closing compacts (agentOrder).
@@ -2815,7 +2842,8 @@ class AppController(QObject):
         # change — same rationale as the browser re-read above). Empty strings
         # when unset/malformed → spawn_argv appends no flag → harness default.
         model, effort = harness_model_effort(self.displayedRoot, inst["harness"])
-        return agent_harness.spawn_argv(
+        tmux_enabled = _agent_tmux_enabled()
+        inner = agent_harness.spawn_argv(
             spec,
             inst["spawn_type"],
             inst["dangerous"],
@@ -2832,6 +2860,41 @@ class AppController(QObject):
             # agent_sock_path exports SYMMETRIA_IDE_AGENT_SOCK in the env wrapper.
             settings_json=self._agent_reporter_settings,
             agent_sock_path=self._agent_events.socket_path,
+            # Absolute exec path only in tmux mode — the tmux server's inherited
+            # PATH may differ from the IDE's (it can be started by ttyd, not the
+            # IDE). The legacy PTY child inherits the IDE env, so bare is fine.
+            executable=(shutil.which(spec.executable) or spec.executable)
+            if tmux_enabled
+            else "",
+        )
+        if not tmux_enabled:
+            return inner
+        # Wrap the launch to run inside a tmux session external clients can attach
+        # (Vigilia's ttyd → the phone). tmux creates the socket but not its parent
+        # dir; ensure it, and on failure fall back to a direct PTY rather than fail
+        # the spawn — the agent still launches, just not shared.
+        socket = _agent_tmux_socket()
+        try:
+            os.makedirs(os.path.dirname(socket), exist_ok=True)
+        except OSError as exc:
+            log.error(
+                "agent_spawn_argv: tmux socket dir for %s unusable (%s) — direct PTY",
+                socket,
+                exc,
+            )
+            return inner
+        session_name = inst.get("tmux_session") or agent_harness.tmux_session_name(
+            inst["cwd"], slot
+        )
+        return agent_harness.tmux_wrap(
+            inner,
+            socket,
+            session_name,
+            conf_path=str(_AGENT_TMUX_CONF),
+            # Start the session in the project root so the agent's os.getcwd()
+            # matches the registry's session_id+cwd attribution (else the sparkle
+            # state misroutes). Mirrors the pre-tmux initialWorkingDirectory.
+            start_directory=inst["cwd"],
         )
 
     @Slot(int)
@@ -3044,6 +3107,13 @@ class AppController(QObject):
         if slot not in self._term_agents:
             log.warning("close_agent: slot %d not in pool — no-op", slot)
             return
+        # tmux substrate: a clean close KILLS the agent's session, preserving the
+        # pre-tmux "close = gone" semantics for this first increment (letting a
+        # close DETACH so the agent survives is a deliberate later step). Runs
+        # before the record is dropped below. Best-effort — the session may
+        # already be gone (agent exited on its own → arrives via on_agent_finished).
+        if _agent_tmux_enabled():
+            self._kill_agent_tmux_session(self._term_agents[slot])
         if slot not in self._agent_order:
             # Defensive: _term_agents and _agent_order should always be in sync.
             # A desync here (double-close race or logic bug) would raise ValueError
@@ -3084,6 +3154,27 @@ class AppController(QObject):
                     self.set_central_surface("terminal")
             else:
                 self.focus_agent(self._agent_order[max(0, closed_position - 1)])
+
+    def _kill_agent_tmux_session(self, inst: dict) -> None:
+        """Best-effort `tmux kill-session` for a closing agent (tmux substrate).
+
+        Synchronous but fast (<50ms) and user-initiated, so running it on the GUI
+        thread is fine. A missing session (already dead) is not an error — tmux
+        just reports "can't find session" and we ignore it.
+        """
+        name = inst.get("tmux_session")
+        if not name:
+            return
+        try:
+            subprocess.run(
+                ["tmux", "-S", _agent_tmux_socket(), "kill-session", "-t", name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning("close_agent: tmux kill-session %s failed: %s", name, exc)
 
     @Slot()
     def close_focused_agent(self) -> None:
