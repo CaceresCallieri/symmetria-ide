@@ -428,24 +428,47 @@ def test_executable_empty_keeps_bare_name():
 # ---------------------------------------------------------------------------
 
 
-def test_tmux_session_name_slug_and_slot():
-    assert tmux_session_name("/home/jc/projects/vigilia", 1) == "vigilia-1"
+def test_tmux_session_name_slug_hash_and_slot():
+    # <slug>-<hash6>-<slot>: readable slug prefix, 6-hex path hash, slot suffix.
+    name = tmux_session_name("/home/jc/projects/vigilia", 1)
+    assert name.startswith("vigilia-") and name.endswith("-1")
+    parts = name.split("-")
+    assert parts[0] == "vigilia"
+    assert len(parts[-2]) == 6 and all(c in "0123456789abcdef" for c in parts[-2])
+    assert parts[-1] == "1"
 
 
 def test_tmux_session_name_slugifies_forbidden_chars():
     # tmux forbids '.' and ':' in session names; the slug must reduce them.
     name = tmux_session_name("/home/jc/my.cool:proj", 3)
-    assert name == "my-cool-proj-3"
+    assert name.startswith("my-cool-proj-") and name.endswith("-3")
     assert "." not in name and ":" not in name
 
 
 def test_tmux_session_name_trailing_slash_and_case():
-    assert tmux_session_name("/home/jc/Projects/Symmetria-IDE/", 2) == "symmetria-ide-2"
+    name = tmux_session_name("/home/jc/Projects/Symmetria-IDE/", 2)
+    assert name.startswith("symmetria-ide-") and name.endswith("-2")
 
 
 def test_tmux_session_name_empty_falls_back_to_agent():
-    assert tmux_session_name("", 4) == "agent-4"
-    assert tmux_session_name("/", 4) == "agent-4"
+    assert tmux_session_name("", 4).startswith("agent-")
+    assert tmux_session_name("", 4).endswith("-4")
+
+
+def test_tmux_session_name_disambiguates_same_basename():
+    # The whole point: two distinct roots sharing a basename must NOT collide on
+    # the shared socket (else new-session -A attaches the wrong project's session).
+    a = tmux_session_name("/home/jc/clients/acme/app", 1)
+    b = tmux_session_name("/home/jc/clients/globex/app", 1)
+    assert a != b
+    assert a.startswith("app-") and b.startswith("app-")
+
+
+def test_tmux_session_name_is_deterministic():
+    # Same path → same name (no pid), so a restarted IDE re-adopts via -A.
+    assert tmux_session_name("/home/jc/projects/vigilia", 2) == tmux_session_name(
+        "/home/jc/projects/vigilia", 2
+    )
 
 
 # ---------------------------------------------------------------------------

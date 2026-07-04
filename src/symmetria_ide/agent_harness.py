@@ -12,6 +12,7 @@ for the resume picker's session list.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -259,27 +260,29 @@ def spawn_argv(
 
 
 def tmux_session_name(project_root: str, slot: int) -> str:
-    """Stable tmux session name for a slot: ``<project-slug>-<slot>``.
+    """Collision-free tmux session name for a slot: ``<slug>-<pathhash>-<slot>``.
 
-    This name is what external clients (Vigilia's ttyd → the phone) LIST, so it
-    must be human-meaningful AND stable across IDE restarts — no pid — so that a
-    restarted IDE (or ``new-session -A``) re-adopts the surviving session instead
-    of double-spawning. The slug is the project basename reduced to ``[a-z0-9-]``
-    (tmux forbids ``.``/``:`` in session names); a rootless/empty path falls back
-    to ``agent``.
+    Under the project→agents model (the phone/IDE group sessions by project), the
+    tmux session name is an INTERNAL id, NOT the user-facing label — the UI shows
+    the project name (from the pane's cwd) and the agent's own name, both from
+    metadata. So this name only has to be UNIQUE and STABLE, not pretty:
 
-    KNOWN LIMITATION: only the project BASENAME is used (for readability on the
-    phone), so two distinct roots that share a basename (``~/a/app`` and
-    ``~/b/app``) collide to the same name on the shared socket — ``new-session -A``
-    would then attach the wrong project's session. Accepted for now: real projects
-    have unique basenames, and the mismatch is VISIBLE in the pane (wrong cwd/
-    content), not silent. Disambiguation with a deterministic path hash is deferred
-    to the shared-socket formalization (Phase 3 in
-    vigilia/docs/tmux-agent-integration-plan.md).
+    - ``slug`` is the project basename reduced to ``[a-z0-9-]`` (kept purely for
+      human debuggability; tmux also forbids ``.``/``:`` in session names).
+    - a short hash of the FULL normalized path disambiguates distinct roots that
+      share a basename (``~/a/app`` vs ``~/b/app``) — they must never collide on
+      the shared socket, where ``new-session -A`` would otherwise ATTACH the wrong
+      project's live session instead of creating a new one.
+    - it is deterministic (same path → same name, no pid), so a restarted IDE (or
+      ``new-session -A``) still re-adopts the surviving session.
+
+    A rootless/empty path slugs to ``agent`` (still hash-disambiguated).
     """
-    base = os.path.basename(os.path.normpath(project_root or ""))
+    normalized = os.path.normpath(project_root or "")
+    base = os.path.basename(normalized)
     slug = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-") or "agent"
-    return f"{slug}-{slot}"
+    digest = hashlib.sha1(normalized.encode()).hexdigest()[:6]
+    return f"{slug}-{digest}-{slot}"
 
 
 def tmux_wrap(
