@@ -269,19 +269,23 @@ def tmux_session_name(project_root: str, slot: int) -> str:
 
     - ``slug`` is the project basename reduced to ``[a-z0-9-]`` (kept purely for
       human debuggability; tmux also forbids ``.``/``:`` in session names).
-    - a short hash of the FULL normalized path disambiguates distinct roots that
+    - a short hash of the FULL ABSOLUTE path disambiguates distinct roots that
       share a basename (``~/a/app`` vs ``~/b/app``) — they must never collide on
       the shared socket, where ``new-session -A`` would otherwise ATTACH the wrong
-      project's live session instead of creating a new one.
+      project's live session instead of creating a new one. The path is coerced to
+      absolute so the hash is stable regardless of the caller's cwd.
     - it is deterministic (same path → same name, no pid), so a restarted IDE (or
       ``new-session -A``) still re-adopts the surviving session.
 
-    A rootless/empty path slugs to ``agent`` (still hash-disambiguated).
+    6 hex chars (~16M values) is generous for interactive single-user use; revisit
+    the width only if the number of concurrently tracked project roots ever nears
+    the thousands (birthday-bound collision territory). A rootless/empty path slugs
+    to ``agent``.
     """
     normalized = os.path.normpath(project_root or "")
     base = os.path.basename(normalized)
     slug = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-") or "agent"
-    digest = hashlib.sha1(normalized.encode()).hexdigest()[:6]
+    digest = hashlib.sha1(os.path.abspath(normalized).encode()).hexdigest()[:6]
     return f"{slug}-{digest}-{slot}"
 
 

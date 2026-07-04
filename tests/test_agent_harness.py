@@ -8,6 +8,7 @@ QMLTermSession launch depends on.
 from __future__ import annotations
 
 import json
+import re
 
 from symmetria_ide.agent_harness import (
     CHILD_SESSION_UNSET_ARGS,
@@ -436,6 +437,9 @@ def test_tmux_session_name_slug_hash_and_slot():
     assert parts[0] == "vigilia"
     assert len(parts[-2]) == 6 and all(c in "0123456789abcdef" for c in parts[-2])
     assert parts[-1] == "1"
+    # Pin the WHOLE format contract in one place — in particular that no tmux-
+    # forbidden char ('.'/':') can ever appear in the composed name.
+    assert re.fullmatch(r"[a-z0-9]+-[0-9a-f]{6}-\d+", name)
 
 
 def test_tmux_session_name_slugifies_forbidden_chars():
