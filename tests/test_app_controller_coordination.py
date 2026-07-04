@@ -308,6 +308,26 @@ def test_coord_inject_ok_clears_pending(two_agents):
     assert c._coord_pending_injects == {}
 
 
+def test_coord_close_during_retry_cancels_via_inplace_prune(two_agents):
+    """A busy result re-registers the inject and arms a QTimer whose closure
+    captured the registry OBJECT. The close-time prune MUST mutate that object
+    in place — a rebind would orphan the closure on the old dict and let the
+    retry fire a stray inject into the freed (possibly-reused) slot. Asserts the
+    id is gone from the captured object AND identity is preserved, so a
+    regression back to rebind-pruning fails here."""
+    c = two_agents
+    injects = _capture_injects(c)
+    c._coord_inject(2, "go ahead")
+    rid = injects[0]["rid"]
+    captured = c._coord_pending_injects  # the object the retry closure holds
+    c.agent_inject_done(rid, False, False, "busy")  # -> re-registered, retry armed
+    assert captured is c._coord_pending_injects  # not rebound by the retry
+    assert rid in captured
+    c._on_coord_agent_closed(2)  # agent closes mid-retry-window
+    assert rid not in captured  # closure will find it gone -> no stray emit
+    assert captured is c._coord_pending_injects  # pruned in place, not rebound
+
+
 def test_coord_inject_strips_escape_bytes(two_agents):
     injects = _capture_injects(two_agents)
     two_agents._coord_inject(2, "evil \x1b[201~ payload")

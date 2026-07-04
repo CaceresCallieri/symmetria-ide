@@ -158,3 +158,23 @@ def test_slash_pending_pruned_on_agent_close(one_agent):
     (rid,) = c._slash_pending_injects
     c._on_coord_agent_closed(1)  # slot 1's pane is going away
     assert rid not in c._slash_pending_injects
+
+
+def test_slash_close_during_retry_cancels_via_inplace_prune(one_agent):
+    """Close-during-retry cancellation: a busy result re-registers the inject
+    and schedules a QTimer whose closure captured the registry OBJECT. The
+    close-time prune MUST mutate that same object in place — a rebind would
+    orphan the closure on the old dict and let the retry fire a stray inject
+    into the freed (possibly-reused) slot. Asserts both the id is gone AND the
+    object identity is preserved, so a regression back to rebind-pruning fails
+    here."""
+    c = one_agent
+    c.open_model_picker()
+    (rid,) = c._slash_pending_injects
+    captured = c._slash_pending_injects  # the object the retry closure holds
+    c.agent_inject_done(rid, False, False, "busy")  # -> re-registered, retry armed
+    assert captured is c._slash_pending_injects  # not rebound by the retry
+    assert rid in captured
+    c._on_coord_agent_closed(1)  # agent closes mid-retry-window
+    assert rid not in captured  # closure will find it gone -> no stray emit
+    assert captured is c._slash_pending_injects  # pruned in place, not rebound

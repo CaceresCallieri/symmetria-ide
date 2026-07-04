@@ -15,7 +15,7 @@ by QML polling.
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import ClassVar, TypedDict
 
 import argparse
 import errno
@@ -281,6 +281,18 @@ class CapsuleModel(QAbstractListModel):
 # 1440p monitor (~1280px). Raise it if the sidebar should persist only on
 # wider layouts.
 SIDEBAR_MIN_WINDOW_WIDTH: float = 1000.0
+
+
+class _PendingInject(TypedDict):
+    """One in-flight auto-submit inject awaiting its QML `agent_inject_done`.
+
+    Shared shape of the coordination (`coord-`) and slash (`slash-`) pending
+    registries: `slot` is the target agent, `text` the bracketed-paste body,
+    `attempts` the busy-retry count consumed by `_retry_inject_on_busy`."""
+
+    slot: int
+    text: str
+    attempts: int
 
 
 class AppController(QObject):
@@ -745,12 +757,12 @@ class AppController(QObject):
         # inject request_id -> {slot, text, attempts}: coordination injects
         # intercepted in agent_inject_done for retry-on-busy (the QML inject
         # path allows one in-flight submit app-wide — STT may hold it).
-        self._coord_pending_injects: dict[str, dict] = {}
+        self._coord_pending_injects: dict[str, _PendingInject] = {}
         # inject request_id -> {slot, text, attempts}: user-triggered slash
         # commands (Alt+M -> `/model`) share the same one-in-flight QML inject
         # path + busy-retry, but resolve on their OWN namespace so completion
         # never routes to the coordination attention-dot tail or the STT Future.
-        self._slash_pending_injects: dict[str, dict] = {}
+        self._slash_pending_injects: dict[str, _PendingInject] = {}
         # registrant slot -> message. PRESENCE = the coordination attention
         # dot is lit on that agent's chip; cleared on focus, or agent close.
         self._agent_coord_attention: dict[int, str] = {}
@@ -3773,26 +3785,42 @@ class AppController(QObject):
         )
         self._coordination.complete(trigger)
 
+    def _emit_pending_inject(
+        self,
+        registry: dict[str, _PendingInject],
+        prefix: str,
+        what: str,
+        slot: int,
+        text: str,
+    ) -> None:
+        """Strip ESC, mint a `<prefix>-` request id, register the pending
+        inject, log it, and emit it (auto-submit). The shared spine of
+        `_coord_inject` and `_inject_slash_command` — only the id prefix, the
+        target `registry`, and the log `what` label differ.
+
+        ESC is stripped defensively: the text is typed into a live TUI via a
+        bracketed paste, and an embedded \x1b[201~ would end the paste early and
+        leak the remainder as keystrokes. Logging before the emit preserves the
+        original ordering (the emit can resolve synchronously via
+        agent_inject_done)."""
+        text = text.replace("\x1b", "")
+        request_id = f"{prefix}-{uuid.uuid4().hex}"
+        registry[request_id] = {"slot": slot, "text": text, "attempts": 1}
+        log.info("%s inject into slot %d (request %s)", what, slot, request_id)
+        self.agentInjectRequested.emit(slot, text, True, request_id)
+
     def _coord_inject(self, slot: int, text: str) -> None:
         """Inject (auto-submit) coordination text into an agent's pane via the
         existing QML inject path, with retry-on-busy in agent_inject_done."""
-        # Strip ESC defensively — same bracketed-paste hazard _dispatch_inject
-        # guards against (an embedded \x1b[201~ would end the paste early).
-        text = text.replace("\x1b", "")
-        request_id = f"coord-{uuid.uuid4().hex}"
-        self._coord_pending_injects[request_id] = {
-            "slot": slot,
-            "text": text,
-            "attempts": 1,
-        }
-        log.info("coordination: inject into slot %d (request %s)", slot, request_id)
-        self.agentInjectRequested.emit(slot, text, True, request_id)
+        self._emit_pending_inject(
+            self._coord_pending_injects, "coord", "coordination", slot, text
+        )
 
     def _retry_inject_on_busy(
         self,
         request_id: str,
-        pending: dict,
-        registry: dict[str, dict],
+        pending: _PendingInject,
+        registry: dict[str, _PendingInject],
         ok: bool,
         error: str,
     ) -> bool:
@@ -3901,15 +3929,9 @@ class AppController(QObject):
         """Inject a slash command (auto-submit) into an agent's pane, reusing
         the QML bracketed-paste inject path with a `slash-` request id so
         agent_inject_done routes completion to _slash_inject_result."""
-        command = command.replace("\x1b", "")
-        request_id = f"slash-{uuid.uuid4().hex}"
-        self._slash_pending_injects[request_id] = {
-            "slot": slot,
-            "text": command,
-            "attempts": 1,
-        }
-        log.info("slash inject %r into slot %d (request %s)", command, slot, request_id)
-        self.agentInjectRequested.emit(slot, command, True, request_id)
+        self._emit_pending_inject(
+            self._slash_pending_injects, "slash", "slash", slot, command
+        )
 
     def _on_coord_agent_closed(self, slot: int) -> None:
         """Prune all coordination state involving a closing agent."""
@@ -3927,16 +3949,23 @@ class AppController(QObject):
             if slot not in (t.watched_slot, t.registrant_slot)
         }
         # Drop pending injects targeting this slot (its pane is going away).
-        self._coord_pending_injects = {
-            rid: p
-            for rid, p in self._coord_pending_injects.items()
-            if p["slot"] != slot
-        }
-        self._slash_pending_injects = {
-            rid: p
-            for rid, p in self._slash_pending_injects.items()
-            if p["slot"] != slot
-        }
+        # Mutate the dicts IN PLACE, never rebind: `_retry_inject_on_busy`
+        # schedules a QTimer whose closure captures the registry OBJECT by
+        # reference. A rebind here (`self._x = {…comprehension…}`) would leave
+        # that closure pointing at the OLD dict — which still holds the request
+        # — so a retry firing after the agent closed would emit one stray inject
+        # into the freed (possibly-reused) slot. In-place deletion keeps the one
+        # object the prune and the closure share consistent, cancelling the
+        # retry. (Regression: an earlier rebind form silently broke this once
+        # the retry loop was extracted to capture `registry` locally.)
+        for rid in [
+            rid for rid, p in self._coord_pending_injects.items() if p["slot"] == slot
+        ]:
+            del self._coord_pending_injects[rid]
+        for rid in [
+            rid for rid, p in self._slash_pending_injects.items() if p["slot"] == slot
+        ]:
+            del self._slash_pending_injects[rid]
         result = self._coordination.on_agent_closed(slot)
         for trigger in result.orphaned:
             # The WATCHED agent closed while the registrant lives — tell the
