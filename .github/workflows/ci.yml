@@ -99,8 +99,12 @@ jobs:
       # Dependency CVE scan. Scans the already-installed environment;
       # once a lockfile lands (#23), swap this to scan the lockfile for
       # precise CVE matching rather than range-based approximation.
+      # NOTE: bare `pip-audit` (no `--disable-pip`). pip-audit >=2.8 rejects
+      # `--disable-pip` unless `-r <requirements>` is also given; since this
+      # audits the installed environment (no `-r`), the flag is invalid and
+      # was failing CI. Bare invocation audits the same environment.
       - name: pip-audit — dependency CVE scan
-        run: pip-audit --disable-pip
+        run: pip-audit
 
       # Offscreen Qt platform plugin keeps tests headless — no xvfb,
       # no Wayland. 125 tests cover pure-Python Grid, key translator,
