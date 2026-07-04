@@ -305,6 +305,22 @@ Window {
         }
     }
 
+    // Model picker (Alt+M): inject `/model` into the focused agent's pane so
+    // Claude Code's OWN native model picker opens — we drive the CLI's picker
+    // rather than reimplement one in QML (compose, don't reimplement). Alt+M,
+    // NOT Ctrl+M: in a terminal Ctrl+M IS carriage-return (Enter), so it can
+    // never be a distinct chord. The controller no-ops when no agent is
+    // focused or the focused agent isn't a claude harness.
+    Shortcut {
+        sequences: ["Alt+M"]
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (root._anyModalVisible())
+                return;
+            controller.open_model_picker();
+        }
+    }
+
     // Reload-in-place (Ctrl+Shift+R): save the session, quit, re-exec the
     // (possibly updated) binary, and auto-restore — pick up a new build
     // without losing the workspace. Routes through the teardown funnel, so

@@ -746,6 +746,11 @@ class AppController(QObject):
         # intercepted in agent_inject_done for retry-on-busy (the QML inject
         # path allows one in-flight submit app-wide — STT may hold it).
         self._coord_pending_injects: dict[str, dict] = {}
+        # inject request_id -> {slot, text, attempts}: user-triggered slash
+        # commands (Alt+M -> `/model`) share the same one-in-flight QML inject
+        # path + busy-retry, but resolve on their OWN namespace so completion
+        # never routes to the coordination attention-dot tail or the STT Future.
+        self._slash_pending_injects: dict[str, dict] = {}
         # registrant slot -> message. PRESENCE = the coordination attention
         # dot is lit on that agent's chip; cleared on focus, or agent close.
         self._agent_coord_attention: dict[int, str] = {}
@@ -3783,25 +3788,48 @@ class AppController(QObject):
         log.info("coordination: inject into slot %d (request %s)", slot, request_id)
         self.agentInjectRequested.emit(slot, text, True, request_id)
 
-    def _coord_inject_result(
-        self, request_id: str, pending: dict, ok: bool, error: str
-    ) -> None:
-        """Resolve one coordination inject attempt (from agent_inject_done)."""
+    def _retry_inject_on_busy(
+        self,
+        request_id: str,
+        pending: dict,
+        registry: dict[str, dict],
+        ok: bool,
+        error: str,
+    ) -> bool:
+        """Shared busy-retry for auto-submit injects (coordination + slash).
+
+        The QML inject path allows one in-flight submit app-wide; a concurrent
+        request answers "busy". Both inject kinds respond identically: retry the
+        SAME request id shortly, up to `_COORD_INJECT_MAX_ATTEMPTS`. Returns
+        True when the result is fully handled (success, or a retry scheduled);
+        False tells the caller to run its own kind-specific exhausted-failure
+        tail. `registry` is the pending dict the request lives in, so the retry
+        re-registers in the correct namespace (coord vs slash)."""
         if ok:
-            return
+            return True
         if error == "busy" and pending["attempts"] < self._COORD_INJECT_MAX_ATTEMPTS:
-            # Another inject (STT) holds the app-wide single-in-flight slot —
-            # retry shortly under the SAME request id.
+            # Another inject (STT / the other kind) holds the app-wide
+            # single-in-flight slot — retry shortly under the SAME request id.
             pending["attempts"] += 1
-            self._coord_pending_injects[request_id] = pending
+            registry[request_id] = pending
 
             def _retry() -> None:
-                if request_id in self._coord_pending_injects:
+                if request_id in registry:
                     self.agentInjectRequested.emit(
                         pending["slot"], pending["text"], True, request_id
                     )
 
             QTimer.singleShot(self._COORD_INJECT_RETRY_MS, _retry)
+            return True
+        return False
+
+    def _coord_inject_result(
+        self, request_id: str, pending: dict, ok: bool, error: str
+    ) -> None:
+        """Resolve one coordination inject attempt (from agent_inject_done)."""
+        if self._retry_inject_on_busy(
+            request_id, pending, self._coord_pending_injects, ok, error
+        ):
             return
         # Exhausted / hard failure: never lose the event — light the dot and
         # tell the user via notification instead.
@@ -3822,6 +3850,67 @@ class AppController(QObject):
             f"#{self._display_position(pending['slot'])}: {error}",
         )
 
+    def _slash_inject_result(
+        self, request_id: str, pending: dict, ok: bool, error: str
+    ) -> None:
+        """Resolve one user-triggered slash-command inject (from
+        agent_inject_done). Same busy-retry as coordination, but a plain log on
+        exhaustion: a dropped `/model` picker is a benign miss the user can
+        retrigger with Alt+M, not a lost cross-agent handoff — so no attention
+        dot and no desktop notification."""
+        if self._retry_inject_on_busy(
+            request_id, pending, self._slash_pending_injects, ok, error
+        ):
+            return
+        log.warning(
+            "slash inject into slot %d failed (%s) after %d attempt(s)",
+            pending["slot"],
+            error,
+            pending["attempts"],
+        )
+
+    @Slot()
+    def open_model_picker(self) -> None:
+        """Alt+M: open Claude Code's OWN native `/model` picker in the focused
+        agent's pane by injecting `/model` (auto-submit).
+
+        We drive Claude Code's built-in picker rather than reimplementing a
+        model/effort selector in QML — "compose, don't reimplement"
+        (non-negotiable #4): zero picker state to keep in sync with the CLI, and
+        it extends to `/effort` later with no new UI. `Ctrl+M` cannot serve as
+        the chord — in a terminal it IS carriage-return (Enter) — so Alt+M is
+        used.
+
+        Claude-only: opencode has no `/model` slash command (its model switch is
+        a different UX), so this is a no-op there rather than injecting a stray
+        line into the pane."""
+        slot = self._focused_term_agent
+        if slot not in self._term_agents:
+            log.info("open_model_picker: no focused agent — no-op")
+            return
+        if self._term_agents[slot].get("harness") != "claude":
+            log.info("open_model_picker: slot %d is not a claude harness — no-op", slot)
+            return
+        # Bring the agent surface forward so the picker is visible + drivable —
+        # the inject itself is surface-independent, but an unseen picker is
+        # useless. focus_agent is the same surface-switch Ctrl+1..5 uses.
+        self.focus_agent(slot)
+        self._inject_slash_command(slot, "/model")
+
+    def _inject_slash_command(self, slot: int, command: str) -> None:
+        """Inject a slash command (auto-submit) into an agent's pane, reusing
+        the QML bracketed-paste inject path with a `slash-` request id so
+        agent_inject_done routes completion to _slash_inject_result."""
+        command = command.replace("\x1b", "")
+        request_id = f"slash-{uuid.uuid4().hex}"
+        self._slash_pending_injects[request_id] = {
+            "slot": slot,
+            "text": command,
+            "attempts": 1,
+        }
+        log.info("slash inject %r into slot %d (request %s)", command, slot, request_id)
+        self.agentInjectRequested.emit(slot, command, True, request_id)
+
     def _on_coord_agent_closed(self, slot: int) -> None:
         """Prune all coordination state involving a closing agent."""
         timer = self._coord_settle_timers.pop(slot, None)
@@ -3841,6 +3930,11 @@ class AppController(QObject):
         self._coord_pending_injects = {
             rid: p
             for rid, p in self._coord_pending_injects.items()
+            if p["slot"] != slot
+        }
+        self._slash_pending_injects = {
+            rid: p
+            for rid, p in self._slash_pending_injects.items()
             if p["slot"] != slot
         }
         result = self._coordination.on_agent_closed(slot)
@@ -4490,6 +4584,10 @@ class AppController(QObject):
         pending = self._coord_pending_injects.pop(request_id, None)
         if pending is not None:
             self._coord_inject_result(request_id, pending, ok, error)
+            return
+        slash = self._slash_pending_injects.pop(request_id, None)
+        if slash is not None:
+            self._slash_inject_result(request_id, slash, ok, error)
             return
         self._agent_events.resolve_inject(request_id, ok, submitted, error)
 
