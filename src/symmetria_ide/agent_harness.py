@@ -267,6 +267,15 @@ def tmux_session_name(project_root: str, slot: int) -> str:
     of double-spawning. The slug is the project basename reduced to ``[a-z0-9-]``
     (tmux forbids ``.``/``:`` in session names); a rootless/empty path falls back
     to ``agent``.
+
+    KNOWN LIMITATION: only the project BASENAME is used (for readability on the
+    phone), so two distinct roots that share a basename (``~/a/app`` and
+    ``~/b/app``) collide to the same name on the shared socket — ``new-session -A``
+    would then attach the wrong project's session. Accepted for now: real projects
+    have unique basenames, and the mismatch is VISIBLE in the pane (wrong cwd/
+    content), not silent. Disambiguation with a deterministic path hash is deferred
+    to the shared-socket formalization (Phase 3 in
+    vigilia/docs/tmux-agent-integration-plan.md).
     """
     base = os.path.basename(os.path.normpath(project_root or ""))
     slug = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-") or "agent"

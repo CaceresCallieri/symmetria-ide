@@ -210,28 +210,61 @@ def test_agent_spawn_argv_wraps_in_tmux_when_enabled(controller, monkeypatch, tm
     assert any(a == "claude" or a.endswith("/claude") for a in argv)
 
 
-def test_close_agent_kills_tmux_session_when_enabled(controller, monkeypatch):
+def test_close_agent_kills_tmux_session_when_wrapped(controller, monkeypatch, tmp_path):
+    sock = str(tmp_path / "t.sock")
     monkeypatch.setenv("SYMMETRIA_IDE_AGENT_TMUX", "1")
-    killed: list[str] = []
+    monkeypatch.setenv("SYMMETRIA_IDE_TMUX_SOCKET", sock)
+    calls: list = []
     monkeypatch.setattr(
-        controller,
-        "_kill_agent_tmux_session",
-        lambda inst: killed.append(inst.get("tmux_session")),
+        "symmetria_ide.app.subprocess.run", lambda *a, **k: calls.append(a[0])
     )
     controller.spawn_agent("fresh", True)
+    controller.agent_spawn_argv(1)  # records inst["tmux_socket"] — the wrap succeeded
     controller.close_agent(1)
-    assert killed and killed[0].endswith("-1")
+    assert calls, "expected a tmux kill-session on close"
+    argv = calls[0]
+    assert "kill-session" in argv
+    assert "-S" in argv and sock in argv  # the socket recorded at spawn, not a re-read
+    assert argv[-1].endswith("-1")  # the <project-slug>-<slot> session name
 
 
-def test_close_agent_skips_tmux_kill_when_disabled(controller, monkeypatch):
-    # Default (flag unset): no kill-session attempted — legacy close is untouched.
-    called: list = []
+def test_close_agent_skips_tmux_kill_when_not_wrapped(controller, monkeypatch):
+    # Flag unset: agent_spawn_argv never records a socket, so the kill helper
+    # self-gates to a no-op — the legacy direct-PTY close path is untouched.
+    calls: list = []
     monkeypatch.setattr(
-        controller, "_kill_agent_tmux_session", lambda inst: called.append(inst)
+        "symmetria_ide.app.subprocess.run", lambda *a, **k: calls.append(a[0])
     )
     controller.spawn_agent("fresh", True)
+    controller.agent_spawn_argv(1)
     controller.close_agent(1)
-    assert called == []
+    assert calls == []
+
+
+def test_agent_spawn_argv_falls_back_to_direct_pty_when_socket_dir_unusable(
+    controller, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SYMMETRIA_IDE_AGENT_TMUX", "1")
+    monkeypatch.setenv("SYMMETRIA_IDE_TMUX_SOCKET", str(tmp_path / "sub" / "t.sock"))
+
+    def boom(*_a, **_k):
+        raise OSError("no dir")
+
+    monkeypatch.setattr("symmetria_ide.app.os.makedirs", boom)
+    controller.spawn_agent("fresh", True)
+    argv = controller.agent_spawn_argv(1)
+    assert argv[0] == "env"  # direct-PTY fallback, not wrapped in tmux
+    assert "tmux" not in argv
+    # No socket recorded → a later close won't attempt a spurious kill-session.
+    assert "tmux_socket" not in controller._term_agents[1]
+
+
+def test_shipped_agent_tmux_conf_exists():
+    # Packaging / _RUNTIME_DIR relocation guard: the conf must resolve on disk, or
+    # every tmux spawn silently loses the shared config (status bar reappears).
+    from symmetria_ide.app import _AGENT_TMUX_CONF
+
+    assert _AGENT_TMUX_CONF.exists(), f"shipped tmux conf missing at {_AGENT_TMUX_CONF}"
 
 
 def test_spawn_unknown_harness_is_a_no_op(controller):

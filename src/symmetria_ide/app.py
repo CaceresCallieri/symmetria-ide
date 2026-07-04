@@ -2843,6 +2843,22 @@ class AppController(QObject):
         # when unset/malformed → spawn_argv appends no flag → harness default.
         model, effort = harness_model_effort(self.displayedRoot, inst["harness"])
         tmux_enabled = _agent_tmux_enabled()
+        # Absolute exec path only in tmux mode — the tmux server's inherited PATH
+        # may differ from the IDE's (it can be started by ttyd, not the IDE). The
+        # legacy PTY child inherits the IDE env, so the bare name is fine.
+        executable = ""
+        if tmux_enabled:
+            resolved = shutil.which(spec.executable)
+            if resolved is None:
+                # Fall back to the bare name, but make the misconfig VISIBLE — a
+                # bare name that the tmux server's PATH also can't find would
+                # otherwise fail opaquely at exec time inside tmux.
+                log.warning(
+                    "agent_spawn_argv: %s not on the IDE's PATH — relying on the "
+                    "tmux server's PATH to resolve it at exec time",
+                    spec.executable,
+                )
+            executable = resolved or spec.executable
         inner = agent_harness.spawn_argv(
             spec,
             inst["spawn_type"],
@@ -2860,37 +2876,46 @@ class AppController(QObject):
             # agent_sock_path exports SYMMETRIA_IDE_AGENT_SOCK in the env wrapper.
             settings_json=self._agent_reporter_settings,
             agent_sock_path=self._agent_events.socket_path,
-            # Absolute exec path only in tmux mode — the tmux server's inherited
-            # PATH may differ from the IDE's (it can be started by ttyd, not the
-            # IDE). The legacy PTY child inherits the IDE env, so bare is fine.
-            executable=(shutil.which(spec.executable) or spec.executable)
-            if tmux_enabled
-            else "",
+            executable=executable,
         )
         if not tmux_enabled:
             return inner
         # Wrap the launch to run inside a tmux session external clients can attach
         # (Vigilia's ttyd → the phone). tmux creates the socket but not its parent
-        # dir; ensure it, and on failure fall back to a direct PTY rather than fail
-        # the spawn — the agent still launches, just not shared.
+        # dir; ensure it (skip a bare filename, whose dirname is "" — makedirs("")
+        # raises), and on failure fall back to a direct PTY rather than fail the
+        # spawn — the agent still launches, just not shared.
         socket = _agent_tmux_socket()
-        try:
-            os.makedirs(os.path.dirname(socket), exist_ok=True)
-        except OSError as exc:
-            log.error(
-                "agent_spawn_argv: tmux socket dir for %s unusable (%s) — direct PTY",
-                socket,
-                exc,
+        socket_dir = os.path.dirname(socket)
+        if socket_dir:
+            try:
+                os.makedirs(socket_dir, exist_ok=True)
+            except OSError as exc:
+                log.error(
+                    "agent_spawn_argv: tmux socket dir %s unusable (%s) — direct PTY",
+                    socket_dir,
+                    exc,
+                )
+                return inner
+        # The conf is a ship-invariant, but degrade gracefully if it is missing
+        # (packaging / relocated _RUNTIME_DIR): tmux still starts, just without the
+        # shared config (status bar visible) rather than failing the spawn hard.
+        conf = str(_AGENT_TMUX_CONF) if _AGENT_TMUX_CONF.exists() else ""
+        if not conf:
+            log.warning(
+                "agent_spawn_argv: %s missing — tmux session starts without the "
+                "shared config (status bar visible)",
+                _AGENT_TMUX_CONF,
             )
-            return inner
-        session_name = inst.get("tmux_session") or agent_harness.tmux_session_name(
-            inst["cwd"], slot
-        )
+        # Record the socket actually used so the close-time kill targets the right
+        # server. Reached only when the wrap succeeds, so its presence on the slot
+        # record also tells close_agent the agent really went into tmux.
+        inst["tmux_socket"] = socket
         return agent_harness.tmux_wrap(
             inner,
             socket,
-            session_name,
-            conf_path=str(_AGENT_TMUX_CONF),
+            inst["tmux_session"],
+            conf_path=conf,
             # Start the session in the project root so the agent's os.getcwd()
             # matches the registry's session_id+cwd attribution (else the sparkle
             # state misroutes). Mirrors the pre-tmux initialWorkingDirectory.
@@ -3109,11 +3134,10 @@ class AppController(QObject):
             return
         # tmux substrate: a clean close KILLS the agent's session, preserving the
         # pre-tmux "close = gone" semantics for this first increment (letting a
-        # close DETACH so the agent survives is a deliberate later step). Runs
-        # before the record is dropped below. Best-effort — the session may
-        # already be gone (agent exited on its own → arrives via on_agent_finished).
-        if _agent_tmux_enabled():
-            self._kill_agent_tmux_session(self._term_agents[slot])
+        # close DETACH so the agent survives is a deliberate later step). The
+        # helper self-gates on the socket recorded at spawn — a no-op when the
+        # agent never went into tmux. Runs before the record is dropped below.
+        self._kill_agent_tmux_session(self._term_agents[slot])
         if slot not in self._agent_order:
             # Defensive: _term_agents and _agent_order should always be in sync.
             # A desync here (double-close race or logic bug) would raise ValueError
@@ -3158,16 +3182,22 @@ class AppController(QObject):
     def _kill_agent_tmux_session(self, inst: dict) -> None:
         """Best-effort `tmux kill-session` for a closing agent (tmux substrate).
 
-        Synchronous but fast (<50ms) and user-initiated, so running it on the GUI
-        thread is fine. A missing session (already dead) is not an error — tmux
-        just reports "can't find session" and we ignore it.
+        Gated on the socket recorded at spawn (`tmux_socket`): absent means the
+        agent never went into tmux (flag off, or the wrap fell back to a direct
+        PTY), so there is nothing to kill. Uses that recorded socket — not a fresh
+        env read — so a mid-session SYMMETRIA_IDE_TMUX_SOCKET change can't leak the
+        real session. Synchronous and user-initiated; a local kill is ~ms, and the
+        2s timeout is a safety bound on a pathological tmux, not the expected cost.
+        A missing session (already dead) is not an error — tmux reports "can't find
+        session" and we ignore it.
         """
+        socket = inst.get("tmux_socket")
         name = inst.get("tmux_session")
-        if not name:
+        if not socket or not name:
             return
         try:
             subprocess.run(
-                ["tmux", "-S", _agent_tmux_socket(), "kill-session", "-t", name],
+                ["tmux", "-S", socket, "kill-session", "-t", name],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=2,
