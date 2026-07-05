@@ -2911,6 +2911,14 @@ class AppController(QObject):
         # server. Reached only when the wrap succeeds, so its presence on the slot
         # record also tells close_agent the agent really went into tmux.
         inst["tmux_socket"] = socket
+        # The wrap succeeded, so the tmux session is real now: re-publish the
+        # bridge payload so it carries the addressable tmux_session. The
+        # spawn-time payload (notify_spawn in spawn_agent) omitted it because the
+        # wrap outcome wasn't known yet; the fallback branches above return early
+        # and never reach here, so a degraded direct-PTY agent is never
+        # advertised. Re-sending `added` for the same buf overwrites the hub's
+        # stored instance (idempotent) — the snapshot converges to the true state.
+        self._agent_bridge.notify_spawn(self._term_instance_payload(slot))
         return agent_harness.tmux_wrap(
             inner,
             socket,
@@ -4197,7 +4205,12 @@ class AppController(QObject):
         return None
 
     def _term_instance_payload(self, slot: int) -> dict:
-        """The bridge's per-instance shape (bridge.lua:185-203 parity)."""
+        """The bridge's per-instance shape (bridge.lua:185-203 parity).
+
+        Plus a vigiliad-only ``tmux_session`` extension (no bridge.lua
+        counterpart) included only once the tmux wrap has actually succeeded —
+        see the gate below.
+        """
         inst = self._term_agents[slot]
         cwd = inst["cwd"]
         payload = {
@@ -4217,13 +4230,16 @@ class AppController(QObject):
             # bridge's inject verb, not nvim RPC.
             "inject_via": "bridge",
         }
-        # Advertise the addressable tmux session name ONLY when the tmux
-        # substrate is enabled. An external control plane (vigiliad → the phone)
-        # attaches ttyd and routes send-keys by this exact name, so it must
-        # match a session that actually exists. With the flag off the agent runs
-        # in the IDE's own pane with no standalone tmux session — publishing the
-        # (still-computed) name would make the phone try to open a phantom one.
-        if _agent_tmux_enabled():
+        # Advertise the addressable tmux session name ONLY once the wrap has
+        # actually succeeded — gated on the per-instance `tmux_socket` (set in
+        # agent_spawn_argv only when the wrap ran), NOT the global intent flag.
+        # This mirrors _kill_agent_tmux_session's gate. The global flag is known
+        # at spawn time, BEFORE the wrap resolves, so gating on it would advertise
+        # a session name even when the wrap later falls back to a direct PTY
+        # (socket dir unusable) — a phantom the phone would fail to attach to.
+        # agent_spawn_argv re-publishes this payload once `tmux_socket` is set,
+        # so the name surfaces exactly when its session becomes real.
+        if inst.get("tmux_socket"):
             payload["tmux_session"] = inst["tmux_session"]
         return payload
 

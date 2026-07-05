@@ -396,21 +396,44 @@ def test_spawn_publishes_bridge_instance_payload(controller, bridge):
     assert "tmux_session" not in inst
 
 
-def test_spawn_payload_advertises_tmux_session_when_enabled(
-    controller, bridge, monkeypatch
+def test_spawn_payload_advertises_tmux_session_after_wrap(
+    controller, bridge, monkeypatch, tmp_path
 ):
-    # With the tmux substrate on, the payload carries the addressable session
-    # name so an external control plane (vigiliad → the phone) can attach ttyd
-    # and route send-keys to this exact agent. It is the SAME collision-free id
-    # used for the spawn wrap and close kill.
+    # The addressable tmux name is advertised only once the wrap SUCCEEDS:
+    # the spawn-time payload omits it (the wrap outcome isn't known yet), and
+    # agent_spawn_argv re-publishes after setting tmux_socket. An external
+    # control plane (vigiliad → the phone) uses it to attach ttyd / send-keys.
     monkeypatch.setenv("SYMMETRIA_IDE_AGENT_TMUX", "1")
+    monkeypatch.setenv("SYMMETRIA_IDE_TMUX_SOCKET", str(tmp_path / "t.sock"))
     controller.spawn_agent("fresh", True)
-    inst = bridge.spawns[0]
+    assert "tmux_session" not in bridge.spawns[0]  # pre-wrap: not advertised yet
+    controller.agent_spawn_argv(1)  # runs the wrap → sets tmux_socket → re-notifies
+    inst = bridge.spawns[-1]  # the re-published payload
     # <slug>-<6hex>-<slot>; the slug may itself contain hyphens (e.g.
     # "symmetria-ide"), so the leading class allows them — the 6-hex + slot
     # tail anchors the split.
     assert re.fullmatch(r"[a-z0-9-]+-[0-9a-f]{6}-\d+", inst["tmux_session"])
     assert inst["tmux_session"].endswith("-1")  # slot 1
+    # The advertised value is EXACTLY the one used for the wrap and close-kill —
+    # guards against a future refactor recomputing it divergently.
+    assert inst["tmux_session"] == controller._term_agents[1]["tmux_session"]
+
+
+def test_spawn_payload_omits_tmux_session_when_wrap_falls_back(
+    controller, bridge, monkeypatch, tmp_path
+):
+    # If the wrap falls back to a direct PTY (socket dir unusable), the agent is
+    # NOT in tmux — no published payload may advertise a phantom session name.
+    monkeypatch.setenv("SYMMETRIA_IDE_AGENT_TMUX", "1")
+    monkeypatch.setenv("SYMMETRIA_IDE_TMUX_SOCKET", str(tmp_path / "sub" / "t.sock"))
+
+    def boom(*_a, **_k):
+        raise OSError("socket dir unusable")
+
+    monkeypatch.setattr("symmetria_ide.app.os.makedirs", boom)
+    controller.spawn_agent("fresh", True)
+    controller.agent_spawn_argv(1)  # wrap attempt → fallback to direct PTY
+    assert all("tmux_session" not in payload for payload in bridge.spawns)
 
 
 # ---------------------------------------------------------------------------
