@@ -266,3 +266,138 @@ def test_reconcile_leaves_busy_session_untouched(monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     asyncio.run(hub.reconcile_claude_sessions())
     assert json.loads(hub.snapshot_line())["agents"][0]["activity_state"] == "working"
+
+
+class _FakeWriter:
+    """Minimal StreamWriter stand-in that records emitted snapshot lines."""
+
+    def __init__(self):
+        self.lines: list[bytes] = []
+
+    def write(self, data: bytes) -> None:
+        self.lines.append(data)
+
+    def is_closing(self) -> bool:
+        return False
+
+
+def test_event_burst_coalesces_to_leading_plus_trailing_emit():
+    async def scenario() -> int:
+        hub = HeadlessAgentHub()
+        writer = _FakeWriter()
+        hub.add_subscriber(writer)  # writes 1 initial snapshot
+        for event_name in ("SessionStart", "UserPromptSubmit", "PreToolUse"):
+            hub.handle_hook_event(_event(event_name, tool_name="Bash"))
+        await asyncio.sleep(0.2)  # let the trailing coalesce edge fire
+        return len(writer.lines)
+
+    # 1 initial + leading edge + one trailing edge for the burst = 3 total.
+    assert asyncio.run(scenario()) == 3
+
+
+def test_reconcile_min_interval_throttles_cli_invocations(monkeypatch):
+    hub = HeadlessAgentHub()
+    hub.handle_hook_event(_event("UserPromptSubmit", session_id="sess-1"))
+    hub._agents["vigilia-abc12-1"]["last_event_mono"] -= 60
+    calls = []
+
+    async def fake_exec(*argv, **kwargs):
+        calls.append(argv)
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"[]", b""
+
+        return FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    async def scenario():
+        await hub.reconcile_claude_sessions()
+        await hub.reconcile_claude_sessions()  # within min interval → no-op
+
+    asyncio.run(scenario())
+    assert len(calls) == 1
+
+
+def test_reconcile_missing_cli_warns_once_and_leaves_state(monkeypatch):
+    hub = HeadlessAgentHub()
+    hub.handle_hook_event(_event("PreToolUse", tool_name="Bash", session_id="s1"))
+    hub._agents["vigilia-abc12-1"]["last_event_mono"] -= 60
+
+    async def fake_exec(*argv, **kwargs):
+        raise FileNotFoundError("claude")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(hub.reconcile_claude_sessions())
+    assert hub._claude_cli_warned is True
+    assert json.loads(hub.snapshot_line())["agents"][0]["activity_state"] == "working"
+
+
+def test_reconcile_revalidates_after_cli_await(monkeypatch):
+    """A hook arriving DURING the CLI await must veto the stale idle verdict."""
+    hub = HeadlessAgentHub()
+    hub.handle_hook_event(_event("UserPromptSubmit", session_id="sess-1"))
+    hub._agents["vigilia-abc12-1"]["last_event_mono"] -= 60
+
+    async def fake_exec(*argv, **kwargs):
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                # The agent resumes work while the CLI is running: the fresh
+                # event refreshes last_event_mono, so the idle verdict below
+                # is stale and must not clear the new activity.
+                hub.handle_hook_event(
+                    _event("PreToolUse", tool_name="Bash", session_id="sess-1")
+                )
+                return (
+                    json.dumps([{"sessionId": "sess-1", "status": "idle"}]).encode(),
+                    b"",
+                )
+
+        return FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(hub.reconcile_claude_sessions())
+    assert json.loads(hub.snapshot_line())["agents"][0]["activity_state"] == "working"
+
+
+def test_prune_leaves_table_on_tmux_failure(monkeypatch):
+    """A failing tmux (bad socket, permissions) must NOT mass-forget agents."""
+    hub = HeadlessAgentHub(tmux_socket="/tmp/wrong.sock")
+    hub.handle_hook_event(_event("SessionStart", agent_id="alive-1"))
+
+    async def fake_exec(*argv, **kwargs):
+        class FakeProc:
+            returncode = 1
+
+            async def communicate(self):
+                return b"", b"error connecting to /tmp/wrong.sock (No such file)"
+
+        return FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(hub.prune_dead_tmux_sessions())
+    assert len(json.loads(hub.snapshot_line())["agents"]) == 1
+
+
+def test_prune_clears_all_when_tmux_server_is_gone(monkeypatch):
+    """tmux's explicit no-server error means zero live sessions → clear all."""
+    hub = HeadlessAgentHub(tmux_socket="/tmp/gone.sock")
+    hub.handle_hook_event(_event("SessionStart", agent_id="dead-1"))
+
+    async def fake_exec(*argv, **kwargs):
+        class FakeProc:
+            returncode = 1
+
+            async def communicate(self):
+                return b"", b"no server running on /tmp/gone.sock"
+
+        return FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(hub.prune_dead_tmux_sessions())
+    assert json.loads(hub.snapshot_line())["agents"] == []

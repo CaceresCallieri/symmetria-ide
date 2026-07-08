@@ -125,8 +125,8 @@ class HeadlessAgentHub:
 
         # SessionEnd removes the agent entirely — it is gone, not idle.
         if hook_event == "SessionEnd":
-            self._forget(agent_id)
-            self._schedule_emit()
+            if self._forget(agent_id):
+                self._schedule_emit()
             return
 
         row = self._agents.get(agent_id)
@@ -170,12 +170,14 @@ class HeadlessAgentHub:
             )
         self._schedule_emit()
 
-    def _forget(self, agent_id: str) -> None:
-        """Drop every trace of an agent (SessionEnd / tmux prune)."""
-        if self._agents.pop(agent_id, None) is not None:
+    def _forget(self, agent_id: str) -> bool:
+        """Drop every trace of an agent; True when a row was actually removed."""
+        removed = self._agents.pop(agent_id, None) is not None
+        if removed:
             log.info("agent forgotten | %s", agent_id)
         self._activities.pop(agent_id, None)
         self._machine.forget(agent_id)
+        return removed
 
     # ── snapshot / subscribers ──────────────────────────────────────────
 
@@ -323,14 +325,25 @@ class HeadlessAgentHub:
                 except Exception:  # noqa: BLE001 — reaping is best-effort
                     pass
 
+        # Last-wins on a duplicate sessionId is fine: ids are unique in
+        # `claude agents --json` (one row per live session).
         status_by_session = {
             s.get("sessionId", ""): s.get("status", "")
             for s in sessions
             if isinstance(s, dict)
         }
         changed = False
+        now_after_cli = time.monotonic()
         for aid, sid in candidates.items():
             if status_by_session.get(sid) != "idle":
+                continue
+            # Re-validate after the await: the CLI can take up to 10s, and a
+            # hook arriving meanwhile may have resumed this agent — clearing
+            # from the stale snapshot would blank a genuinely working agent.
+            row = self._agents.get(aid)
+            if row is None or aid not in self._activities:
+                continue
+            if now_after_cli - row["last_event_mono"] < CLAUDE_RECONCILE_AFTER_SECONDS:
                 continue
             stale = self._activities.get(aid, {}).get("state", "?")
             log.info(
@@ -354,8 +367,11 @@ class HeadlessAgentHub:
 
         A killed session fires no SessionEnd, so without this a dead agent
         would linger in the table forever. Only runs when a tmux socket was
-        configured; a non-running tmux server means NO sessions exist, so the
-        whole table is cleared in that case.
+        configured. A non-running tmux server means NO sessions exist, so the
+        whole table is cleared in that case — but ONLY on tmux's explicit
+        "no server running" error; any other failure (bad socket path,
+        permissions) leaves the table untouched rather than mass-forgetting
+        live agents on operator error.
         """
         if not self._tmux_socket or not self._agents:
             return
@@ -369,13 +385,16 @@ class HeadlessAgentHub:
                 "-F",
                 "#{session_name}",
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=5)
         except FileNotFoundError:
             return  # no tmux binary — nothing to prune against
         except asyncio.TimeoutError:
             log.warning("prune | tmux list-sessions timed out")
+            return
+        except OSError as exc:
+            log.warning("prune | tmux list-sessions failed to spawn: %s", exc)
             return
         finally:
             if proc is not None and proc.returncode is None:
@@ -384,8 +403,18 @@ class HeadlessAgentHub:
                     await proc.wait()
                 except Exception:  # noqa: BLE001
                     pass
-        # Exit != 0 with empty output = no server running = no live sessions.
-        live = {line.strip() for line in out.decode().splitlines() if line.strip()}
+        if proc.returncode != 0 and b"no server running" not in err:
+            log.warning(
+                "prune | tmux list-sessions failed (rc=%s): %s",
+                proc.returncode,
+                err.decode("utf-8", errors="replace").strip(),
+            )
+            return
+        live = {
+            line.strip()
+            for line in out.decode("utf-8", errors="replace").splitlines()
+            if line.strip()
+        }
         dead = [aid for aid in self._agents if aid not in live]
         if not dead:
             return
@@ -461,8 +490,13 @@ async def _serve(socket_path: str, tmux_socket: str) -> None:
     # A stale socket file from a previous run blocks bind; the service manager
     # (systemd) guarantees single-instance, so unlinking is safe here.
     path.unlink(missing_ok=True)
+    # limit= lifts the StreamReader's default 64 KiB readline cap — without it
+    # the _MAX_LINE_BYTES skip guard in _handle_client is unreachable (readline
+    # raises at 64 KiB and drops the whole connection instead).
     server = await asyncio.start_unix_server(
-        lambda r, w: _handle_client(hub, r, w), path=str(path)
+        lambda r, w: _handle_client(hub, r, w),
+        path=str(path),
+        limit=_MAX_LINE_BYTES,
     )
     log.info(
         "agent hub listening on %s (tmux prune: %s)", socket_path, tmux_socket or "off"
