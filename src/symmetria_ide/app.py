@@ -73,6 +73,7 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
 )
 from .git_branch_controller import GitBranchController, GitBranchListModel
 from .git_controller import GitController, GitStatusListModel
+from .gh_pr_controller import GhPrController, GhPrListModel, GhPrTimelineModel
 from .git_log_controller import GitLogController, GitLogListModel
 from .git_ops_controller import GitOpsController
 from .minimap_model import MinimapModel
@@ -1054,6 +1055,20 @@ class AppController(QObject):
         # operationFinished is emitted on the ops worker, so connect QUEUED
         # (project-standards §4 P2) — the slot pokes GUI-thread-owned objects.
         self._git_ops_controller.operationFinished.connect(
+            self._on_git_op_finished, Qt.ConnectionType.QueuedConnection
+        )
+        # The GitHub PR lane (gh CLI): list/detail reads + `gh pr checkout`,
+        # driven by the history view's third tab. Its own worker like the ops
+        # controller; lazy fetch (ensure_loaded on tab entry, `r` to refresh —
+        # never polled). Shares the anchored root via `_sync_git_repo_root`.
+        self._gh_pr_controller = GhPrController(self)
+        self._gh_pr_list_model = GhPrListModel(self._gh_pr_controller, self)
+        self._gh_pr_timeline_model = GhPrTimelineModel(self._gh_pr_controller, self)
+        # A PR checkout moves HEAD + the working tree exactly like a pull, so
+        # it rides the SAME post-op refresh as pull/push (the controller
+        # re-emits GitOpsController's signal contract for this reason).
+        # queued: gh-pr worker → AppController GUI (§4 P2)
+        self._gh_pr_controller.operationFinished.connect(
             self._on_git_op_finished, Qt.ConnectionType.QueuedConnection
         )
         # Real-time external-reload: when the working tree settles after a
@@ -2080,6 +2095,25 @@ class AppController(QObject):
         """
         return self._git_ops_controller
 
+    @Property(QObject, constant=True)
+    def ghPrController(self) -> QObject:
+        """The `GhPrController` (GitHub PRs via gh) exposed to QML.
+
+        Backs the history view's "pull requests" tab. Identity-stable like
+        the sibling git controllers.
+        """
+        return self._gh_pr_controller
+
+    @Property(QObject, constant=True)
+    def ghPrListModel(self) -> QObject:
+        """Flat list model of pull requests for the PR tab's list pane."""
+        return self._gh_pr_list_model
+
+    @Property(QObject, constant=True)
+    def ghPrTimelineModel(self) -> QObject:
+        """Flattened conversation timeline of the loaded PR detail."""
+        return self._gh_pr_timeline_model
+
     @Property(list, notify=expandedPathsCacheChanged)
     def expandedPathsCache(self) -> list[str]:
         """Saved expanded-paths list for the current displayed root.
@@ -2173,6 +2207,10 @@ class AppController(QObject):
         # Pull/push target the same anchored root — one anchor, every git
         # surface. Idempotent on equal values.
         self._git_ops_controller.set_repo_root(self.displayedRoot)
+        # The PR tab tracks the same anchored root. Idempotent; clears its
+        # list/detail synchronously but fetches nothing until the tab is
+        # entered (lazy by design — PR data is network-priced).
+        self._gh_pr_controller.set_repo_root(self.displayedRoot)
 
     @Slot(str, bool, str)
     def _on_git_op_finished(self, op: str, ok: bool, message: str) -> None:  # noqa: ARG002
@@ -5838,6 +5876,9 @@ class AppController(QObject):
         # mid-push), so stop it here alongside the other git workers — before
         # nvim's shutdown handshake takes the event loop.
         self._git_ops_controller.stop()
+        # And the gh PR worker (may be mid network fetch/checkout; short join,
+        # daemon reaped on exit — same profile as the ops worker).
+        self._gh_pr_controller.stop()
         # Ask nvim to quit GRACEFULLY over the RPC socket (`_backend.stop()`
         # sends `qa!` + closes the client) so it writes shada/swap cleanly.
         # The terminal widgets (editor nvim + shell) are owned by their
@@ -6023,6 +6064,12 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     ctx.setContextProperty("gitBranchController", controller.gitBranchController)
     ctx.setContextProperty("gitBranchModel", controller.gitBranchModel)
     ctx.setContextProperty("gitOpsController", controller.gitOpsController)
+    # GitHub PR provider — backs the history view's "pull requests" tab.
+    # Injected into the githistory subtree as `prController`/`prModel`/
+    # `prTimelineModel` (extraction-ready, same rationale as above).
+    ctx.setContextProperty("ghPrController", controller.ghPrController)
+    ctx.setContextProperty("ghPrListModel", controller.ghPrListModel)
+    ctx.setContextProperty("ghPrTimelineModel", controller.ghPrTimelineModel)
     # NB: previously this block also exposed `sessionHost` and
     # `sessionModel` as context properties pointing at the focused
     # slot. Those have been removed for two reasons:

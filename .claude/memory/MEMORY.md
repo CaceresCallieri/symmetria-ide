@@ -10,6 +10,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Clay chrome surfaces](feedback/clay_chrome_surfaces.md) — new chrome uses PillSurface/PillCard + Theme.depth, gate depth via `elevated`; no flat Rectangles
 - [MCP enablement is per-project](feedback/mcp_enablement_per_project.md) — costly agent MCP gates per PROJECT (default off, IDE-owned), never per agent
 - [Prefer peer over shell coordination](feedback/prefer_peer_over_shell_coordination.md) — cross-IDE state via shared file/socket, NOT the shell bridge; survives shell swap/outage
+- [Shift+S = back in drill-ins](feedback/shift_s_back_navigation.md) — canonical go-back key for in-place detail views; bind at the root so it works mid-load
 
 ## Project — meta — `project/meta/` (identity, governance, key decisions)
 

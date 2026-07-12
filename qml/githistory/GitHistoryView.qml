@@ -1,6 +1,6 @@
 // Git viewer — root of the "git" central surface.
 //
-// Two keyboard-first master/detail comprehension sub-views, toggled with Tab
+// Three keyboard-first master/detail comprehension sub-views, cycled with Tab
 // (and the clay tab header at the top-left):
 //
 //   - "changes"  — the UNCOMMITTED working tree. WorkingFileTreeView (left)
@@ -16,6 +16,13 @@
 //                  drive CommitDetailView (right): j/k walk commits, each
 //                  commit's diff streams in. The long view of "how did we
 //                  get here".
+//   - "prs"      — GitHub pull requests (via the gh CLI). PrListView (left)
+//                  lists open PRs (o toggles closed/merged, r refreshes —
+//                  manual freshness only, never polled); Enter loads a PR's
+//                  header + flattened conversation into PrDetailView (right).
+//                  Enter-driven, NOT selection-driven: each detail load is
+//                  two network gh calls, so j/k stays free. c checks out the
+//                  PR's branch (confirm dialog at Main scope, like push).
 //
 // Both answer the same need from opposite ends — shrinking the cognitive gap
 // agent-authored changes open up (you didn't type them, so comprehension has
@@ -57,6 +64,10 @@ FocusScope {
     // Mutating/network git ops (pull/push) — the surface's first write actions.
     // Injected like the read controllers so the subtree stays extraction-ready.
     property var opsController: null
+    // GitHub PR lane (gh CLI) — backs the "prs" sub-view.
+    property var prController: null
+    property var prModel: null
+    property var prTimelineModel: null
 
     // FM file-tree inputs for the "changes" master pane — forwarded to
     // WorkingFileTreeView's embedded FmUi.FileTreeView. Same three the Active
@@ -78,6 +89,10 @@ FocusScope {
     // (Esc on the history list) bubbles to Main to hide the git-ops toast.
     signal pushRequested()
     signal dismissStatusRequested()
+    // PR checkout needs the same Main-level confirm treatment as push (it
+    // moves HEAD + the working tree), so the intent bubbles up with the
+    // number + branch for the dialog message.
+    signal prCheckoutRequested(int number, string branch)
 
     // Which sub-view is active. Initial value "changes" (working tree first)
     // per the surface's "what's uncommitted" framing; Tab toggles between the
@@ -94,6 +109,14 @@ FocusScope {
     readonly property bool hasPendingChanges: root.statusModel != null
                                               && root.statusModel.count > 0
 
+    // PR-detail navigation state, per surface visit. `prDetailNumber` is the
+    // PR the user opened with Enter (0 = none; drives PrDetailView's
+    // requestedNumber + ready guard); `prDetailFocused` tracks which PR pane
+    // owns the keys. Both reset in enterSurface() so re-entering the surface
+    // always lands on the list.
+    property int prDetailNumber: 0
+    property bool prDetailFocused: false
+
     // Move focus into the active sub-view's list (host calls this when the
     // surface becomes visible so j/k navigation is live immediately). On the
     // changes side we ALSO request the selected file's diff — this is what
@@ -104,6 +127,11 @@ FocusScope {
         if (root.mode === "changes") {
             workingList.focusList();
             _requestCurrentDiff();
+        } else if (root.mode === "prs") {
+            if (root.prDetailFocused)
+                prDetail.focusList();
+            else
+                prList.focusList();
         } else {
             commitList.focusList();
         }
@@ -137,11 +165,21 @@ FocusScope {
         // this fresh?" moment; reload() is coalesced, so this is cheap.
         if (next === "history" && root.branchController)
             root.branchController.reload();
+        // Lazy first fetch on entering the PR tab: ensure_loaded() hits the
+        // network once per (repo, filter) and no-ops after — manual `r` is
+        // the only refetch (no polling, ever, by user decision).
+        if (next === "prs" && root.prController)
+            root.prController.ensure_loaded();
         focusContent();
     }
 
+    // The cycle order for Tab. Adding a future sub-view (issues) = one entry
+    // here + a tab-header entry + a visible-gated RowLayout below.
+    readonly property var _modeCycle: ["changes", "history", "prs"]
+
     function toggleMode(): void {
-        setMode(root.mode === "changes" ? "history" : "changes");
+        const i = root._modeCycle.indexOf(root.mode);
+        setMode(root._modeCycle[(i + 1) % root._modeCycle.length]);
     }
 
     // Called by the host every time the surface becomes visible. Picks the most
@@ -155,6 +193,10 @@ FocusScope {
     // the Ctrl+H focus-restore path, which calls focusContent() directly so it
     // re-homes focus WITHOUT re-picking the mode the user may have toggled to.
     function enterSurface(): void {
+        // Re-entering always lands the PR tab on its list, not a stale
+        // detail from the previous visit.
+        root.prDetailNumber = 0;
+        root.prDetailFocused = false;
         setMode(root.hasPendingChanges ? "changes" : "history");
     }
 
@@ -194,6 +236,7 @@ FocusScope {
                 model: [
                     { mode: "changes", label: "changes" },
                     { mode: "history", label: "history" },
+                    { mode: "prs", label: "PRs" },
                 ]
 
                 delegate: Item {
@@ -221,6 +264,9 @@ FocusScope {
                               + (seg.modelData.mode === "history" && root.logController
                                  && root.logController.currentRef.length > 0
                                  ? " · " + root.logController.currentRef : "")
+                              + (seg.modelData.mode === "prs" && root.prModel
+                                 && root.prModel.count > 0
+                                 ? " · " + root.prModel.count : "")
                         color: seg.isCurrent ? Theme.color.text.strong : Theme.color.text.dim
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.xs
@@ -407,6 +453,72 @@ FocusScope {
                 commit: commitList.currentCommit
                 diffText: root.logController ? root.logController.currentDiffText : ""
                 diffHash: root.logController ? root.logController.currentDiffHash : ""
+            }
+        }
+
+        // --- "prs": GitHub pull requests ---------------------------------
+        // NOT a side-by-side master/detail like the other two modes: the PR
+        // list and the PR conversation are FULL-SURFACE alternates (a
+        // drill-in, user decision 2026-07-12). Enter swaps the list for the
+        // detail; h/Esc swaps back. Rationale: a half-width detail pane sat
+        // mostly empty next to a short list, and the conversation deserves
+        // the whole width (bodies render untruncated — see PrDetailView).
+        Item {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            visible: root.mode === "prs"
+
+            // The list, full width. Hidden (not unloaded) while the detail
+            // is open so its selection survives the round-trip.
+            Rectangle {
+                anchors.fill: parent
+                visible: !root.prDetailFocused
+                color: Theme.color.bg.chrome
+                radius: Theme.radius.md
+                border.width: 1
+                border.color: Theme.color.border.hairline
+
+                PrListView {
+                    id: prList
+                    anchors.fill: parent
+                    model: root.prModel
+                    controller: root.prController
+                    focus: root.mode === "prs" && !root.prDetailFocused
+
+                    onToggleRequested: root.toggleMode()
+                    // Enter → load the detail (network) and swap to it.
+                    onOpenDetailRequested: function (number) {
+                        if (root.prController)
+                            root.prController.request_detail(number);
+                        root.prDetailNumber = number;
+                        root.prDetailFocused = true;
+                        prDetail.focusList();
+                    }
+                    onCheckoutRequested: (number, branch) =>
+                        root.prCheckoutRequested(number, branch)
+                    onDismissStatusRequested: root.dismissStatusRequested()
+                }
+            }
+
+            // The conversation, full width, shown in the list's place.
+            PrDetailView {
+                id: prDetail
+                anchors.fill: parent
+                visible: root.prDetailFocused
+                radius: Theme.radius.md
+                border.width: 1
+                border.color: Theme.color.border.hairline
+                controller: root.prController
+                timelineModel: root.prTimelineModel
+                requestedNumber: root.prDetailNumber
+
+                onBackRequested: {
+                    root.prDetailFocused = false;
+                    prList.focusList();
+                }
+                onToggleRequested: root.toggleMode()
+                onCheckoutRequested: (number, branch) =>
+                    root.prCheckoutRequested(number, branch)
             }
         }
     }

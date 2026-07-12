@@ -1259,11 +1259,23 @@ Window {
                         controller.open_in_nvim(absolutePath);
                         controller.set_central_surface("editor");
                     }
+                    // GitHub PR tab ("prs" sub-view) — the gh-backed lane.
+                    prController: ghPrController
+                    prModel: ghPrListModel
+                    prTimelineModel: ghPrTimelineModel
                     // Push intent → the confirm gate (branch/ahead context +
                     // the modal live at Main scope). Esc on the list → clear a
                     // stuck git-ops error toast.
                     onPushRequested: pushConfirmDialog.open()
                     onDismissStatusRequested: gitOpsToast.hide()
+                    // PR checkout intent → the confirm gate (checkout moves
+                    // HEAD + the working tree — same deliberate-Enter class
+                    // as push).
+                    onPrCheckoutRequested: function (number, branch) {
+                        prCheckoutDialog.prNumber = number;
+                        prCheckoutDialog.prBranch = branch;
+                        prCheckoutDialog.open();
+                    }
                 }
 
                 // REGRESSION NOTE: a 2026-05-23 experiment wrapped AgentPane
@@ -2546,6 +2558,24 @@ Window {
                                      message, "error");
             }
         }
+
+        // PR checkout feedback — GhPrController re-emits GitOpsController's
+        // exact signal contract (op === "checkout"), so it rides the same
+        // toast: running spinner, green auto-hide, red persistent on failure
+        // (dirty-tree conflicts land here with git's stderr tail).
+        Connections {
+            target: ghPrController
+            function onOperationStarted(op) {
+                gitOpsToast.show("Checking out PR…", "", "running");
+            }
+            // Delivered queued (worker-thread emit), like the ops wire above.
+            function onOperationFinished(op, ok, message) {
+                if (ok)
+                    gitOpsToast.show("Checked out", message, "success");
+                else
+                    gitOpsToast.show("Checkout failed", message, "error");
+            }
+        }
     }
 
     // Window-close confirmation (Hyprland Super+Q / WM close). Closing the
@@ -2589,6 +2619,26 @@ Window {
         // Host-first: dispatch the push, THEN re-home focus onto the git list.
         onConfirmed: {
             gitOpsController.push();
+            root._restoreCentralFocus();
+        }
+        onCancelled: root._restoreCentralFocus()
+    }
+
+    // PR-checkout confirmation (c in the PR tab). Checkout moves HEAD + the
+    // working tree — strictly more invasive locally than push — so it gets
+    // the same deliberate-Enter gate. A dirty working tree makes gh/git fail
+    // the checkout; that error surfaces in the git-ops toast (persistent red).
+    ConfirmDialog {
+        id: prCheckoutDialog
+        property int prNumber: 0
+        property string prBranch: ""
+        title: "Checkout pull request?"
+        confirmText: "Checkout"
+        message: "Checkout PR #" + prNumber + " — branch '" + prBranch + "'.\n"
+                 + "This switches your working tree; conflicting uncommitted "
+                 + "changes will block it."
+        onConfirmed: {
+            ghPrController.checkout(prCheckoutDialog.prNumber);
             root._restoreCentralFocus();
         }
         onCancelled: root._restoreCentralFocus()
