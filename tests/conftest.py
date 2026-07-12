@@ -42,6 +42,21 @@ def _isolate_xdg_state(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("xdg_state")))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_xdg_runtime(monkeypatch, tmp_path_factory):
+    """Redirect ``XDG_RUNTIME_DIR`` to a throwaway dir for every test.
+
+    ``agent_registry`` publishes per-IDE routing entries under
+    ``$XDG_RUNTIME_DIR/symmetria-ide/registry/`` and the reporter hook
+    re-resolves its target socket from them (the CC 2.1.x daemon caveat fix).
+    Without this isolation, a LIVE IDE instance whose registry entry claims
+    this repo's path hijacks the reporter tests' events — the reporter routes
+    to the real IDE's socket instead of the test's tmp socket and the test
+    times out pumping events. Same override semantics as ``_isolate_xdg_state``:
+    tests that need a specific path re-setenv locally (last writer wins)."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("xdg_runtime")))
+
+
 def construction_source(cls) -> str:
     """Return ``__init__`` source concatenated with every ``_init_*`` helper.
 
