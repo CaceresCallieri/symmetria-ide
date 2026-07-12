@@ -114,15 +114,16 @@ FocusScope {
                 break;
             case Qt.Key_R:
                 // Manual refresh — THE freshness mechanism (no polling, ever).
-                if (root.controller) {
+                // Ctrl-guarded like `c` so Ctrl+R stays a no-op here.
+                if (root.controller && !(event.modifiers & Qt.ControlModifier)) {
                     root.controller.refresh();
                     event.accepted = true;
                 }
                 break;
             case Qt.Key_O:
                 // Toggle open ↔ closed (closed includes merged; the row's
-                // state chip distinguishes).
-                if (root.controller) {
+                // state chip distinguishes). Ctrl-guarded like `c`.
+                if (root.controller && !(event.modifiers & Qt.ControlModifier)) {
                     root.controller.toggle_state_filter();
                     event.accepted = true;
                 }

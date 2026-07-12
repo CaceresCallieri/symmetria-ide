@@ -31,6 +31,13 @@ import "../design"
 Rectangle {
     id: root
 
+    // Focus model: this ROOT owns keyboard focus, always programmatically
+    // (the host's focusList() calls) — there is deliberately no declarative
+    // `focus:` binding and no focusable child. The inner timeline must never
+    // take focus (it's invisible during loading/error states and would go
+    // deaf — see the focusList note below); keep it that way when adding
+    // children.
+
     // GhPrController — the detail* properties + checkout target.
     property var controller: null
     // GhPrTimelineModel — the flattened conversation rows.

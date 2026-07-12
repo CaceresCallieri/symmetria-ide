@@ -83,9 +83,13 @@ _LIST_FIELDS = (
 )
 _DETAIL_FIELDS = (
     "number,title,body,state,author,headRefName,baseRefName,isDraft,"
-    "createdAt,mergedAt,reviewDecision,url,additions,deletions,changedFiles,"
+    "createdAt,url,additions,deletions,changedFiles,"
     "comments,reviews"
 )
+# `url` is stored (detailUrl) but has no QML consumer yet — kept as the seam
+# for a future "open in browser" action. mergedAt/reviewDecision were trimmed
+# from the detail fetch: nothing consumed them (the list fetch carries
+# reviewDecision for its glyph).
 
 # Op kind carried in operationStarted/operationFinished (read by QML/toast).
 _OP_CHECKOUT = "checkout"
@@ -248,6 +252,12 @@ def parse_pr_list(text: str, now: datetime) -> list[PrRow]:
         return []
     rows: list[PrRow] = []
     for item in raw:
+        # A non-dict array element would raise AttributeError on .get(),
+        # which the except tuple below deliberately doesn't cover (it guards
+        # field-shape faults, not type faults) — skip it up front.
+        if not isinstance(item, dict):
+            log.warning("non-object gh pr list item skipped: %r", item)
+            continue
         try:
             updated = str(item.get("updatedAt") or "")
             rows.append(
@@ -291,7 +301,14 @@ def flatten_timeline(
     source order (comments, then reviews, then inline).
     """
     entries: list[TimelineEntry] = []
+    # Same malformed-record posture as parse_pr_list: a non-dict element in
+    # any of the three sources must skip, not abort the whole flatten (an
+    # AttributeError here would propagate out of _do_detail and strand the
+    # pane on its loading state).
     for c in detail.get("comments") or []:
+        if not isinstance(c, dict):
+            log.warning("non-object PR comment skipped: %r", c)
+            continue
         ts = str(c.get("createdAt") or "")
         entries.append(
             TimelineEntry(
@@ -305,6 +322,9 @@ def flatten_timeline(
             )
         )
     for r in detail.get("reviews") or []:
+        if not isinstance(r, dict):
+            log.warning("non-object PR review skipped: %r", r)
+            continue
         state = str(r.get("state") or "")
         body = str(r.get("body") or "")
         if state == "COMMENTED" and not body.strip():
@@ -322,6 +342,9 @@ def flatten_timeline(
             )
         )
     for ic in inline:
+        if not isinstance(ic, dict):
+            log.warning("non-object inline PR comment skipped: %r", ic)
+            continue
         ts = str(ic.get("created_at") or "")
         line = ic.get("line") or ic.get("original_line") or "?"
         entries.append(
@@ -631,7 +654,8 @@ class GhPrController(QObject):
             self._loaded_key = None
         self.stateFilterChanged.emit()
         self.prListChanged.emit()
-        self.listMetaChanged.emit()
+        # No listMetaChanged emit here: refresh() below sets _list_loading
+        # and emits it — a second emit would just double-bind the meta state.
         self.refresh()
 
     @Slot(int)
@@ -724,6 +748,21 @@ class GhPrController(QObject):
                             False,
                             "Internal error running gh — see the IDE log.",
                         )
+                    finally:
+                        gc.enable()
+                elif request[0] == _REQ_LIST:
+                    # refresh() latched _list_loading on the GUI thread and
+                    # only _do_list's apply clears it — an exception before
+                    # that point would otherwise strand the pane on
+                    # "loading pull requests…" forever.
+                    with self._lock:
+                        self._list_loading = False
+                        self._list_error = (
+                            "Internal error running gh — see the IDE log."
+                        )
+                    gc.disable()
+                    try:
+                        self.listMetaChanged.emit()
                     finally:
                         gc.enable()
 

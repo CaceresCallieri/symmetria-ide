@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt
@@ -643,5 +644,35 @@ def test_busy_cleared_after_worker_exception(monkeypatch) -> None:
         assert (op, ok) == ("checkout", False)
         with controller._lock:
             assert controller._busy is False
+    finally:
+        controller.stop()
+
+
+def test_list_loading_cleared_after_worker_exception(monkeypatch) -> None:
+    # The list twin of the checkout recovery test: refresh() latches
+    # _list_loading on the GUI thread and only _do_list's apply clears it.
+    # If _do_list raises inside the worker, the except branch MUST reset the
+    # flag (and surface an error) — otherwise the pane shows
+    # "loading pull requests…" forever.
+    controller = GhPrController()
+
+    def _boom(**_kwargs) -> None:
+        raise RuntimeError("boom")
+
+    try:
+        monkeypatch.setattr(controller, "_do_list", _boom)
+        controller.set_repo_root("/repo")
+        controller.refresh()
+        # Poll the flag rather than waiting on listMetaChanged: refresh()
+        # emits it synchronously BEFORE the worker's recovery emit, and an
+        # Event-based wait would race the two (clear/set interleaving).
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with controller._lock:
+                if not controller._list_loading:
+                    break
+            time.sleep(0.01)
+        assert controller.listLoading is False, "loading flag never recovered"
+        assert controller.listError != ""
     finally:
         controller.stop()
