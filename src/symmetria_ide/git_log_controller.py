@@ -40,7 +40,6 @@ from __future__ import annotations
 import gc
 import logging
 import queue
-import subprocess
 import threading
 from dataclasses import dataclass
 
@@ -54,7 +53,7 @@ from PySide6.QtCore import (
     Slot,
 )
 
-from .git_subprocess import resolve_repo_root, run_git
+from .git_subprocess import LOCAL_GIT, GitExecutor
 
 log = logging.getLogger(__name__)
 
@@ -230,6 +229,9 @@ class GitLogController(QObject):
         # returned — they differ when the anchor is a subdir/worktree. The
         # worker resolves; `repoRoot` exposes the resolved value to QML.
         self._repo_root: str = ""
+        # Git execution seam (VPS location): LOCAL_GIT or a remote executor
+        # injected via set_executor. Frozen dataclass, swapped atomically.
+        self._executor: GitExecutor = LOCAL_GIT
         self._resolved_root: str = ""
 
         # Ref the log is filtered to (a local branch name from the branches
@@ -325,6 +327,28 @@ class GitLogController(QObject):
             return list(self._commits)
 
     # -- QML-facing slots --------------------------------------------------
+
+    def set_executor(self, executor) -> None:
+        """Swap the git execution seam (VPS location toggle).
+
+        `executor` is a git_subprocess.GitExecutor — LOCAL_GIT or a remote
+        one. Frozen object, swapped atomically; the worker reads it per
+        request, so an in-flight fetch finishes on whichever executor it
+        started with (convergence, not isolation — same contract as
+        GitController.set_remote). Reloads page 0 so the surface reflects
+        the new location's history immediately.
+        """
+        if executor is self._executor:
+            return
+        self._executor = executor
+        # Force a non-coalesced reload: the pending flag may be set from a
+        # reload against the OLD executor.
+        with self._lock:
+            self._reload_pending = False
+            root = self._repo_root
+            ref = self._ref
+        if root:
+            self._queue.put((_REQ_LOG, root, 0, ref))
 
     def set_repo_root(self, value: str) -> None:
         """Switch the repo whose history is shown. Idempotent on equal values.
@@ -517,7 +541,7 @@ class GitLogController(QObject):
         # load_more/set_repo_root callers, which never set the flag.
         with self._lock:
             self._reload_pending = False
-        resolved = resolve_repo_root(asked_root)
+        resolved = self._executor.resolve_repo_root(asked_root)
         rows = self._run_log(resolved, skip=skip, ref=asked_ref) if resolved else []
         has_more = len(rows) == _PAGE_SIZE
 
@@ -604,7 +628,7 @@ class GitLogController(QObject):
         argv byte-identical to the pre-filter command (HEAD implicit).
         """
         return parse_git_log(
-            run_git(
+            self._executor.run_git(
                 cwd,
                 "log",
                 "-z",
@@ -625,23 +649,13 @@ class GitLogController(QObject):
         strip git's default decorated header without an empty-format edge case.
         Truncated at ``_DIFF_CHAR_CAP`` with a visible notice.
         """
-        try:
-            proc = subprocess.run(
-                [
-                    "git",
-                    "show",
-                    "--no-color",
-                    "--format=%x00",
-                    "--patch",
-                    commit_hash,
-                ],
-                cwd=cwd,
-                capture_output=True,
-                timeout=_SHOW_TIMEOUT_SEC,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.warning("git show failed for %s @ %s: %s", commit_hash, cwd, exc)
+        proc = self._executor.execute(
+            cwd,
+            ["show", "--no-color", "--format=%x00", "--patch", commit_hash],
+            timeout=_SHOW_TIMEOUT_SEC,
+        )
+        if proc is None:
+            log.warning("git show failed for %s @ %s", commit_hash, cwd)
             return ""
         if proc.returncode != 0:
             log.warning(
@@ -679,27 +693,12 @@ class GitLogController(QObject):
         ``_DIFF_CHAR_CAP`` with a visible notice, matching ``_run_show``.
         """
         if untracked:
-            cmd = [
-                "git",
-                "diff",
-                "--no-color",
-                "--no-index",
-                "--",
-                "/dev/null",
-                rel_path,
-            ]
+            args = ["diff", "--no-color", "--no-index", "--", "/dev/null", rel_path]
         else:
-            cmd = ["git", "diff", "--no-color", "HEAD", "--", rel_path]
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=cwd,
-                capture_output=True,
-                timeout=_FILE_DIFF_TIMEOUT_SEC,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.warning("git diff failed for %s @ %s: %s", rel_path, cwd, exc)
+            args = ["diff", "--no-color", "HEAD", "--", rel_path]
+        proc = self._executor.execute(cwd, args, timeout=_FILE_DIFF_TIMEOUT_SEC)
+        if proc is None:
+            log.warning("git diff failed for %s @ %s", rel_path, cwd)
             return ""
         # Accepted exit codes differ by form: `git diff HEAD` (tracked path,
         # no `--exit-code`) always returns 0, even when there are changes; the

@@ -575,17 +575,21 @@ def test_pairing_establishes_and_teardown_stops_hub_link(hub_controller):
 
 
 class _GitSpy:
-    """Records GitController.set_remote / set_local calls."""
+    """Records the git controllers' location-seam swaps."""
 
     def __init__(self, ctrl: AppController) -> None:
         self.remote_calls: list[tuple] = []
         self.local_calls = 0
+        self.executors: dict[str, list] = {"log": [], "branch": [], "ops": []}
         ctrl._git_controller.set_remote = lambda runner, remote_root, mount: (
             self.remote_calls.append((runner, remote_root, mount))
         )
         ctrl._git_controller.set_local = lambda: setattr(
             self, "local_calls", self.local_calls + 1
         )
+        ctrl._git_log_controller.set_executor = self.executors["log"].append
+        ctrl._git_branch_controller.set_executor = self.executors["branch"].append
+        ctrl._git_ops_controller.set_executor = self.executors["ops"].append
 
 
 def test_toggle_to_vps_swaps_git_and_tree(controller):
@@ -600,6 +604,12 @@ def test_toggle_to_vps_swaps_git_and_tree(controller):
     assert git_spy.remote_calls[0][2] == mount.mountpoint
     assert mounts and mounts[-1] == mount.mountpoint
     assert ctrl.vpsProjectLabel == "vigilia-vps:fake"
+    # Phase 4: the whole git surface follows — one shared remote executor.
+    for name in ("log", "branch", "ops"):
+        (executor,) = git_spy.executors[name]
+        assert executor.is_remote
+        assert executor.remote_root == REMOTE_ROOT
+        assert executor.local_mount == mount.mountpoint
 
 
 def test_toggle_back_restores_local_chrome(controller):
@@ -610,6 +620,8 @@ def test_toggle_back_restores_local_chrome(controller):
     ctrl.treeMountRequested.connect(lambda root, expanded: mounts.append(root))
     ctrl.set_location("local")
     assert git_spy.local_calls == 1
+    for name in ("log", "branch", "ops"):
+        assert not git_spy.executors[name][-1].is_remote
     assert mounts and mounts[-1] == ctrl.displayedRoot
     # The mount is KEPT for the session (cheap re-toggle); only pairing
     # loss / shutdown drop it.

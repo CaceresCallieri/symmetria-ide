@@ -54,7 +54,7 @@ from PySide6.QtCore import (
     Slot,
 )
 
-from .git_subprocess import resolve_repo_root, run_git
+from .git_subprocess import LOCAL_GIT, GitExecutor
 
 log = logging.getLogger(__name__)
 
@@ -340,6 +340,8 @@ class GitBranchController(QObject):
         # — they differ when the anchor is a subdir. The resolved root is also
         # the "current worktree" key for the checked-out-elsewhere derivation.
         self._repo_root: str = ""
+        # Git execution seam (VPS location) — see git_log_controller.
+        self._executor: GitExecutor = LOCAL_GIT
         self._resolved_root: str = ""
 
         self._branches: list[BranchRow] = []
@@ -377,6 +379,24 @@ class GitBranchController(QObject):
             return list(self._branches)
 
     # -- QML-facing slots --------------------------------------------------
+
+    def set_executor(self, executor) -> None:
+        """Swap the git execution seam (VPS location toggle) + fresh scan.
+
+        Same contract as GitLogController.set_executor: frozen
+        git_subprocess.GitExecutor swapped atomically; the worker reads it
+        per request, so an in-flight scan converges rather than mixes.
+        """
+        if executor is self._executor:
+            return
+        self._executor = executor
+        with self._lock:
+            # Force a non-coalesced rescan (a pending reload may belong to
+            # the OLD executor's location).
+            self._reload_pending = False
+            root = self._repo_root
+        if root:
+            self._queue.put((_REQ_BRANCHES, root))
 
     def set_repo_root(self, value: str) -> None:
         """Switch the repo whose branches are listed. Idempotent on equals.
@@ -441,10 +461,10 @@ class GitBranchController(QObject):
         # this scan must be free to queue a fresh one.
         with self._lock:
             self._reload_pending = False
-        resolved = resolve_repo_root(asked_root)
+        resolved = self._executor.resolve_repo_root(asked_root)
         if resolved:
             branches = parse_for_each_ref_branches(
-                run_git(
+                self._executor.run_git(
                     resolved,
                     "for-each-ref",
                     "--sort=-committerdate",
@@ -454,7 +474,7 @@ class GitBranchController(QObject):
                 )
             )
             worktrees = parse_worktree_list_porcelain(
-                run_git(
+                self._executor.run_git(
                     resolved,
                     "worktree",
                     "list",

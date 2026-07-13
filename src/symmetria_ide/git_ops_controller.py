@@ -55,11 +55,12 @@ from __future__ import annotations
 
 import gc
 import logging
-import subprocess
 import threading
 from queue import Queue
 
 from PySide6.QtCore import QObject, Signal, Slot
+
+from .git_subprocess import LOCAL_GIT, GitExecutor
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +104,10 @@ class GitOpsController(QObject):
         # The path we're asked to operate on (the project anchor). The worker
         # resolves it to the real repo root via `git rev-parse` per op.
         self._repo_root: str = ""
+        # Git execution seam (VPS location): LOCAL_GIT or a remote executor
+        # injected via set_executor — pull/push then run ON the paired
+        # server (its repo, its remotes, its credentials).
+        self._executor: GitExecutor = LOCAL_GIT
         # Single-flight gate: True between request-accept and worker-complete.
         self._busy: bool = False
 
@@ -129,6 +134,14 @@ class GitOpsController(QObject):
     # GUI-thread-marshaled notify, not a raw worker-thread emit.
 
     # -- Wiring (Python side) ---------------------------------------------
+
+    def set_executor(self, executor) -> None:
+        """Swap the git execution seam (VPS location toggle).
+
+        No rescan to trigger — ops are one-shot request/response; the next
+        pull/push simply runs through the new executor.
+        """
+        self._executor = executor
 
     def set_repo_root(self, value: str) -> None:
         """Point ops at a new repo root. Idempotent on equal values.
@@ -296,19 +309,11 @@ class GitOpsController(QObject):
         binary, timeout, OS error) so callers branch on ``rc != 0`` uniformly
         and the reason surfaces in the error toast.
         """
-        try:
-            proc = subprocess.run(
-                ["git", *args],
-                cwd=cwd,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return (-1, "", f"git {args[0]} timed out after {int(timeout)}s.")
-        except (FileNotFoundError, OSError) as exc:
-            log.debug("git %s failed in %s: %s", args[0], cwd, exc)
-            return (-1, "", f"Could not run git: {exc}")
+        proc = self._executor.execute(cwd, list(args), timeout=timeout)
+        if proc is None:
+            # Exec/transport failure (missing binary, timeout, dead ssh) —
+            # the executor already logged the specifics.
+            return (-1, "", f"Could not run git {args[0]} (see log).")
         return (
             proc.returncode,
             proc.stdout.decode("utf-8", errors="replace"),

@@ -90,6 +90,7 @@ from .project_browser_marker import (
     resolve_project_root,
     set_browser_agents,
 )
+from . import git_subprocess
 from . import remote_location
 from .mount_manager import SshfsMount
 from .remote_location import RemoteContext
@@ -2182,6 +2183,12 @@ class AppController(QObject):
                 mount.mount()
         else:
             self._git_controller.set_local()
+            # Log/branch/ops back onto local subprocesses (the PR tab never
+            # switched: gh talks to GitHub and both checkouts share the
+            # origin, so it is location-agnostic by construction).
+            self._git_log_controller.set_executor(git_subprocess.LOCAL_GIT)
+            self._git_branch_controller.set_executor(git_subprocess.LOCAL_GIT)
+            self._git_ops_controller.set_executor(git_subprocess.LOCAL_GIT)
             self._mount_tree_for(self.displayedRoot)
 
     def _ensure_repo_mount(self) -> SshfsMount | None:
@@ -2241,6 +2248,18 @@ class AppController(QObject):
         self._git_controller.set_remote(
             _remote_git_runner, remote_root, mount.mountpoint
         )
+        # Full git surface goes remote too (user decision: day one): history,
+        # branches, and pull/push all execute on the paired server. One
+        # frozen executor shared by the three — their workers read it per
+        # request, so an in-flight local scan converges on the next one.
+        remote_executor = git_subprocess.GitExecutor(
+            remote_runner=_remote_git_runner,
+            remote_root=remote_root,
+            local_mount=mount.mountpoint,
+        )
+        self._git_log_controller.set_executor(remote_executor)
+        self._git_branch_controller.set_executor(remote_executor)
+        self._git_ops_controller.set_executor(remote_executor)
         self._mount_tree_for(mount.mountpoint)
 
     def _refresh_project_browser_enabled(self) -> None:

@@ -497,18 +497,28 @@ def test_reload_without_repo_is_noop() -> None:
     assert ctrl._queue.empty()
 
 
-def test_do_branches_race_guard_drops_stale_root(monkeypatch) -> None:
+class _FakeExecutor:
+    """Executor stand-in (the seam the scan reads — see set_executor)."""
+
+    def __init__(self, resolved: str, run_git_fn) -> None:
+        self._resolved = resolved
+        self._run_git_fn = run_git_fn
+
+    def resolve_repo_root(self, asked: str) -> str:
+        return self._resolved
+
+    def run_git(self, cwd: str, *args, timeout) -> bytes:
+        return self._run_git_fn(cwd, *args, timeout=timeout)
+
+
+def test_do_branches_race_guard_drops_stale_root() -> None:
     # A scan for the OLD root finishing after a project switch must not land.
     ctrl = _make_stopped_controller()
     ctrl.set_repo_root("/p/new")
     ctrl._queue.get_nowait()
 
-    monkeypatch.setattr(
-        "symmetria_ide.git_branch_controller.resolve_repo_root",
-        lambda asked: "/p/old",
-    )
-    monkeypatch.setattr(
-        "symmetria_ide.git_branch_controller.run_git",
+    ctrl._executor = _FakeExecutor(
+        "/p/old",
         lambda *a, **k: _join_lines(_branch(name="stale-branch")),
     )
 
@@ -518,22 +528,17 @@ def test_do_branches_race_guard_drops_stale_root(monkeypatch) -> None:
     assert ctrl.repoRoot == ""
 
 
-def test_do_branches_applies_for_current_root(monkeypatch) -> None:
+def test_do_branches_applies_for_current_root() -> None:
     ctrl = _make_stopped_controller()
     ctrl.set_repo_root("/p/repo")
     ctrl._queue.get_nowait()
-
-    monkeypatch.setattr(
-        "symmetria_ide.git_branch_controller.resolve_repo_root",
-        lambda asked: "/p/repo",
-    )
 
     def fake_run_git(cwd, *args, timeout):
         if args[0] == "for-each-ref":
             return _join_lines(_branch(head="*", name="dev"))
         return b""  # empty worktree list
 
-    monkeypatch.setattr("symmetria_ide.git_branch_controller.run_git", fake_run_git)
+    ctrl._executor = _FakeExecutor("/p/repo", fake_run_git)
 
     ctrl._do_branches(asked_root="/p/repo")
 
