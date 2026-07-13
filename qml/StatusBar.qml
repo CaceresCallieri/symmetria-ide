@@ -222,6 +222,33 @@ Rectangle {
                     renderType: Text.NativeRendering
                 }
 
+                // Location badge — visible only in the VPS context so the
+                // active location is legible from EVERY surface (the top
+                // bar's toggle can be scrolled out of mind; this can't).
+                // Shows the paired server's registry name, falling back to
+                // a generic "vps" if the name is somehow empty.
+                Rectangle {
+                    visible: controller.location === "vps"
+                    color: Theme.color.bg.selected
+                    border.color: Theme.color.border.hairline
+                    border.width: 1
+                    radius: height / 2
+                    implicitHeight: vpsBadgeLabel.implicitHeight + Theme.spacing.xs
+                    implicitWidth: vpsBadgeLabel.implicitWidth + Theme.spacing.md
+                    Layout.alignment: Qt.AlignLeft | Qt.AlignVCenter
+                    Text {
+                        id: vpsBadgeLabel
+                        anchors.centerIn: parent
+                        text: "⇅ " + (controller.vpsServerName !== "" ? controller.vpsServerName : "vps")
+                        color: Theme.color.accent.primary
+                        font.family: Theme.font.family
+                        font.pixelSize: Theme.font.size.xs
+                        font.weight: Theme.font.weight.bold
+                        font.letterSpacing: 0.6
+                        renderType: Text.NativeRendering
+                    }
+                }
+
                 // Branch — prefixed with a git-like glyph, followed by the
                 // ahead/behind commit counts vs. the branch's upstream.
                 Row {

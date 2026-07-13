@@ -104,6 +104,19 @@ Window {
         }
     }
 
+    // Location toggle (Local ↔ VPS) — U-for-upstream. Flips the project's
+    // whole context between the local checkout and its paired remote-server
+    // repo (the agent/chrome/terminal seams arrive across the VPS-toggle
+    // phases; today it drives the top-bar toggle + status-bar badge). Valid
+    // on unpaired projects too: set_location refuses with a locationAlert
+    // toast — the only feedback path there, since the top-bar control is
+    // hidden while unpaired.
+    Shortcut {
+        sequences: ["Ctrl+Shift+U"]
+        context: Qt.ApplicationShortcut
+        onActivated: controller.toggle_location()
+    }
+
     // Phase 2.5 central-surface toggle chord. Same application-scope
     // pattern as the anchor chord above — fires regardless of which pane has
     // focus, including from inside nvim's insert mode. The anchor block
@@ -2518,6 +2531,12 @@ Window {
             // Qt.QueuedConnection needed (project-standards §4 P2 covers only
             // cross-thread emits).
             function onAgentSpawnFailed(title, detail) {
+                spawnFailedToast.show(title, detail);
+            }
+            // Location-toggle feedback (refused switch / forced local
+            // fallback). Shares this toast — the two signals never coexist
+            // in practice and both are transient one-line alerts.
+            function onLocationAlert(title, detail) {
                 spawnFailedToast.show(title, detail);
             }
         }

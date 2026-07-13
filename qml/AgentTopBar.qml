@@ -49,9 +49,73 @@ Rectangle {
         anchors.bottom: root.bottom
     }
 
-    // Surface switcher — terminal / editor / agents, pinned to the bar's
-    // left edge (moved here from StatusBar's center per the 2026-06-11
-    // layout decision). Anchored as a SIBLING of the centering RowLayout,
+    // Location toggle — Local ↔ VPS context for THIS project. Renders only
+    // when the pairing probe found the repo on a registered remote server
+    // (controller.vpsAvailable), or defensively while location is already
+    // "vps" so the way back never disappears. Leftmost — location scopes
+    // everything to its right (surfaces, agents), so it reads first.
+    // Collapses to zero width when hidden so the surface switcher slides
+    // back to the bar edge. Same clay-segment anatomy as the switcher
+    // below; Ctrl+Shift+U is the chord twin.
+    Row {
+        id: locationToggle
+        anchors.left: root.left
+        anchors.leftMargin: Theme.spacing.md
+        anchors.verticalCenter: root.verticalCenter
+        spacing: Theme.spacing.sm
+        z: 1
+        visible: controller.vpsAvailable || controller.location === "vps"
+        width: visible ? implicitWidth : 0
+
+        Repeater {
+            model: [
+                { location: "local", label: "local" },
+                { location: "vps", label: "vps" },
+            ]
+
+            delegate: Item {
+                id: locationSegment
+
+                required property var modelData
+                readonly property bool isCurrent: controller.location === locationSegment.modelData.location
+
+                height: Theme.size.modeBadgeHeight
+                implicitWidth: locationSegmentLabel.implicitWidth + Theme.spacing.md * 2
+
+                PillSurface {
+                    anchors.fill: parent
+                    radius: height / 2
+                    elevated: locationSegment.isCurrent
+                    color: locationSegment.isCurrent ? Theme.color.bg.selected : "transparent"
+                    borderColor: locationSegment.isCurrent ? Theme.color.border.hairline : "transparent"
+                }
+
+                Text {
+                    id: locationSegmentLabel
+                    anchors.centerIn: parent
+                    text: locationSegment.modelData.label
+                    color: locationSegment.isCurrent ? Theme.color.text.strong : Theme.color.text.dim
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                    font.weight: locationSegment.isCurrent ? Theme.font.weight.bold : Theme.font.weight.medium
+                    font.letterSpacing: 0.6
+                    renderType: Text.NativeRendering
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: controller.set_location(locationSegment.modelData.location)
+                }
+            }
+        }
+    }
+
+    // Surface switcher — terminal / editor / agents, pinned after the
+    // location toggle at the bar's left edge (moved here from StatusBar's
+    // center per the 2026-06-11 layout decision; the toggle collapses to
+    // zero width when unpaired so this sits at the original position).
+    // Anchored as a SIBLING of the centering RowLayout,
     // not a member: the chip strip must stay centered on the WHOLE bar,
     // and a layout member would shift that center by the switcher's
     // width. No overlap at sane widths — chips would need to span half
@@ -61,8 +125,8 @@ Rectangle {
     // focus) remain primary.
     Row {
         id: surfaceSwitcher
-        anchors.left: root.left
-        anchors.leftMargin: Theme.spacing.md
+        anchors.left: locationToggle.right
+        anchors.leftMargin: locationToggle.visible ? Theme.spacing.lg : 0
         anchors.verticalCenter: root.verticalCenter
         spacing: Theme.spacing.sm
         z: 1

@@ -43,6 +43,18 @@ def _isolate_xdg_state(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_xdg_config(monkeypatch, tmp_path_factory):
+    """Redirect ``XDG_CONFIG_HOME`` to a throwaway dir for every test.
+
+    ``server_registry.load_servers`` reads
+    ``$XDG_CONFIG_HOME/symmetria-ide/servers.json`` and every
+    ``AppController()`` construction probes VPS pairing through it — with the
+    developer's real registry in scope the suite would fire live ssh probes
+    on each construction. Same override semantics as the fixtures below."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg_config")))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_xdg_runtime(monkeypatch, tmp_path_factory):
     """Redirect ``XDG_RUNTIME_DIR`` to a throwaway dir for every test.
 

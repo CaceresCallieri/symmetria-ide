@@ -90,6 +90,8 @@ from .project_browser_marker import (
     resolve_project_root,
     set_browser_agents,
 )
+from .remote_location import RemoteContext
+from . import ssh_runner
 from .tree_state_cache import load_expanded, save_expanded
 from . import session_store
 from .whichkey_models import (  # noqa: F401 — side-effect: @QmlElement registration
@@ -505,6 +507,15 @@ class AppController(QObject):
     # Internal cross-thread marshal for the above: the session-list
     # worker emits this; a queued connection re-emits on the GUI thread.
     _opencode_sessions_fetched = Signal(dict)
+    # Location toggle (Local ↔ VPS). `locationChanged` notifies the QML-facing
+    # `location` property; `vpsAvailabilityChanged` notifies `vpsAvailable` +
+    # `vpsServerName` (pairing-probe result — the toggle control only renders
+    # when paired). `locationAlert` carries (title, detail) for the user-facing
+    # toast on refused toggles / forced local fallbacks — sibling of
+    # agentSpawnFailed.
+    locationChanged = Signal()
+    vpsAvailabilityChanged = Signal()
+    locationAlert = Signal(str, str)
 
     # Cycle order for Shift+Tab in the agent pane. Tuple is the source of
     # truth for both validation (gate `_set_permission_mode` against this)
@@ -971,6 +982,21 @@ class AppController(QObject):
         # NOT a nvim `<leader>` binding (it has to fire from any pane).
         self._anchored: bool = False
         self._anchored_root: str = ""
+        # Location state (Local ↔ VPS). Orthogonal to the anchor: `_location`
+        # never mutates `displayedRoot` — each remote-aware surface reads its
+        # own seam (agent-pool location filter, git runner, tree mount,
+        # terminal pane; wired across Phases 2–5 of the VPS-toggle plan).
+        # `_remote_context` owns pairing — by repo identity: the displayed
+        # root's basename existing as a git repo under a registered server's
+        # repos_dir (server_registry / remote_location). "vps" is only
+        # reachable while paired, and a project switch force-resets to
+        # "local" before re-probing (a pairing never survives a root change).
+        self._location: str = "local"
+        self._remote_context = RemoteContext(self)
+        # same-thread: pairingChanged fires on the GUI thread (RemoteContext
+        # marshals its probe-worker result through an internal queued
+        # connection before emitting).
+        self._remote_context.pairingChanged.connect(self._on_vps_pairing_changed)
         # Per-project agent-browser opt-in, read from the `.symmetria/ide.json`
         # marker for `displayedRoot` (default OFF). Refreshed on every
         # displayedRootChanged (so it tracks the right project) and re-read at
@@ -1172,6 +1198,12 @@ class AppController(QObject):
         # just keep `:pwd` honest. See docs/vision.md "Modes of inhabiting
         # the IDE" for the dual-mode framing this lands inside.
         self.displayedRootChanged.connect(self._sync_nvim_cwd)
+
+        # Project switch: force the location back to local, then re-probe the
+        # new root's VPS pairing. Seeded at startup by the synthetic emit in
+        # start() (same pattern as _refresh_project_browser_enabled above).
+        # GUI-thread; the probe itself runs on a one-shot daemon thread.
+        self.displayedRootChanged.connect(self._reprobe_vps_pairing)
 
     def _create_instance(self, slot: int) -> None:
         """Allocate one pool entry: host + model + per-instance scalar state.
@@ -1912,6 +1944,90 @@ class AppController(QObject):
         if self.displayedRoot != prior_displayed:
             self.displayedRootChanged.emit()
         log.info("anchor: released")
+
+    # ----- Location toggle (Local ↔ VPS) ---------------------------------
+
+    @Property(str, notify=locationChanged)
+    def location(self) -> str:
+        """Active per-project location context: ``"local"`` or ``"vps"``.
+
+        Read by every location-aware QML seam (toggle control, status-bar
+        badge; the agent/chrome/terminal seams arrive in later phases).
+        """
+        return self._location
+
+    @Property(bool, notify=vpsAvailabilityChanged)
+    def vpsAvailable(self) -> bool:
+        """Whether the displayed project is paired with a remote server."""
+        return self._remote_context.paired
+
+    @Property(str, notify=vpsAvailabilityChanged)
+    def vpsServerName(self) -> str:
+        """Paired server's registry name ("" when unpaired) — chrome labels."""
+        server = self._remote_context.server
+        return server.name if server is not None else ""
+
+    @Slot(str)
+    def set_location(self, location: str) -> None:
+        """Switch the project's location context (validated funnel).
+
+        Mirrors `set_central_surface`'s contract: unknown values are
+        rejected loudly, equal values return without emitting. "vps" is
+        additionally guarded on the pairing probe — a refusal surfaces
+        through `locationAlert` (the chord can be pressed on unpaired
+        projects; the QML control is hidden there, so the toast is the
+        only honest feedback path).
+        """
+        if location not in ("local", "vps"):
+            log.warning("set_location: invalid location %r", location)
+            return
+        if location == self._location:
+            return
+        if location == "vps" and not self._remote_context.paired:
+            detail = (
+                "Still probing the server — try again in a moment."
+                if self._remote_context.probing
+                else "No paired repo on a registered server"
+                " (~/.config/symmetria-ide/servers.json)."
+            )
+            self.locationAlert.emit("VPS not available", detail)
+            return
+        self._location = location
+        log.info("location: switched to %s", location)
+        self.locationChanged.emit()
+
+    @Slot()
+    def toggle_location(self) -> None:
+        """Chord-facing wrapper (Ctrl+Shift+U): flip local ↔ vps."""
+        self.set_location("vps" if self._location == "local" else "local")
+
+    def _reprobe_vps_pairing(self) -> None:
+        """Root changed: drop to local silently, re-probe the new root.
+
+        Silent (no locationAlert) because a project switch is a deliberate
+        act — the location reset is expected, not an error. Connected to
+        `displayedRootChanged`; also covers the startup seed via start()'s
+        synthetic emit.
+        """
+        if self._location != "local":
+            self._location = "local"
+            self.locationChanged.emit()
+        self._remote_context.probe(self.displayedRoot)
+
+    def _on_vps_pairing_changed(self) -> None:
+        """Pairing edge from RemoteContext → QML availability + safety net.
+
+        The safety net covers pairing being LOST while the user sits in the
+        vps context (registry edited, probe of a new root cleared it) — the
+        context must never point at a server we no longer trust as paired.
+        """
+        self.vpsAvailabilityChanged.emit()
+        if self._location == "vps" and not self._remote_context.paired:
+            self._location = "local"
+            self.locationChanged.emit()
+            self.locationAlert.emit(
+                "VPS unavailable", "Pairing lost — switched back to local."
+            )
 
     def _refresh_project_browser_enabled(self) -> None:
         """Re-read the `.symmetria/ide.json` marker for the current project
@@ -5864,6 +5980,11 @@ class AppController(QObject):
         # (it shouldn't, but defensive iteration costs nothing).
         for host in list(self._session_hosts.values()):
             host.stop()
+        # Close the paired server's ssh ControlMaster (best-effort; the
+        # probes/remote calls opened it). ControlPersist=60 self-reaps after
+        # a crash, so this is only the polite clean-exit path.
+        if self._remote_context.server is not None:
+            ssh_runner.close_control_master(self._remote_context.server)
         # Stop the git worker before nvim — its scan is fast (≤1s join) and
         # we want it joined before the event loop tears down so its
         # cross-thread emit can't fire into a half-destroyed receiver.
