@@ -2236,10 +2236,11 @@ class AppController(QObject):
         """argv for the VPS terminal pane (read once at Loader load).
 
         `ssh -t` into a login shell in the paired repo — the vps location's
-        counterpart of the local shell pane. `"$SHELL"` expands inside the
-        remote `sh -c`, so the user gets THEIR server shell (bash on the
-        Vigilia box), not whatever sh resolves to. Empty list when unpaired
-        (the QML Loader treats it as "don't spawn").
+        counterpart of the local shell pane. `"${SHELL:-/bin/sh}"` expands
+        inside the remote `sh -c`, so the user gets THEIR server shell (bash
+        on the Vigilia box), not whatever sh resolves to — with /bin/sh as
+        the fallback so an unset SHELL doesn't kill the pane at spawn. Empty
+        list when unpaired (the QML Loader treats it as "don't spawn").
         """
         server = self._remote_context.server
         remote_root = self._remote_context.remote_root
@@ -2247,7 +2248,11 @@ class AppController(QObject):
             return []
         return ssh_runner.remote_command_argv(
             server,
-            ["sh", "-c", f'cd {shlex.quote(remote_root)} && exec "$SHELL" -l'],
+            [
+                "sh",
+                "-c",
+                f'cd {shlex.quote(remote_root)} && exec "${{SHELL:-/bin/sh}}" -l',
+            ],
             tty=True,
         )
 

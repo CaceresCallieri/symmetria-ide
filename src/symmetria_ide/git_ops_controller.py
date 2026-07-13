@@ -141,6 +141,8 @@ class GitOpsController(QObject):
         No rescan to trigger — ops are one-shot request/response; the next
         pull/push simply runs through the new executor.
         """
+        if executor is self._executor:
+            return
         self._executor = executor
 
     def set_repo_root(self, value: str) -> None:
@@ -308,6 +310,13 @@ class GitOpsController(QObject):
         Returns ``(-1, "", <reason>)`` when git can't be run at all (missing
         binary, timeout, OS error) so callers branch on ``rc != 0`` uniformly
         and the reason surfaces in the error toast.
+
+        Deliberate simplification: the executor collapses timeout / missing
+        binary / dead transport into one ``None``, so the toast no longer
+        distinguishes "timed out after Ns" from other exec failures (the
+        pre-executor code did). The specifics are in the log; don't re-add
+        per-cause toasts without threading a reason enum through
+        ``GitExecutor.execute``.
         """
         proc = self._executor.execute(cwd, list(args), timeout=timeout)
         if proc is None:

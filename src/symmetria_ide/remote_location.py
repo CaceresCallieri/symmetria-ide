@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import posixpath
+import shlex
 import threading
 import time
 from collections.abc import Callable
@@ -46,10 +47,17 @@ def remote_repo_path(server: RemoteServer, project_root: str) -> str:
 
 
 def _default_probe(server: RemoteServer, project_root: str) -> bool:
-    """True when the paired repo exists on ``server`` (worker-thread only)."""
+    """True when the paired repo exists on ``server`` (worker-thread only).
+
+    ``sh -c 'test …'`` rather than a bare ``test`` argv: the locale wrapper
+    (``env LANG=… <cmd>``) resolves its command from PATH, so a bare
+    ``test`` would depend on the external coreutils binary — the shell
+    builtin has no such dependency on minimal userlands.
+    """
+    repo_git_dir = f"{remote_repo_path(server, project_root)}/.git"
     result = run_remote(
         server,
-        ["test", "-d", f"{remote_repo_path(server, project_root)}/.git"],
+        ["sh", "-c", f"test -d {shlex.quote(repo_git_dir)}"],
         timeout=_PROBE_TIMEOUT,
     )
     return result is not None and result.returncode == 0

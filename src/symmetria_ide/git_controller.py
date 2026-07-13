@@ -988,16 +988,7 @@ class GitController(QObject):
         # a repo yet.
         self._cancel_repo_sentinel_backstop()
         self._worktree_watcher.set_root("")
-        with self._lock:
-            self._status_map = {}
-            self._stats = GitStats()
-            self._resolved_root = ""
-            self._ignored_set = {}
-            self._branch_sync = GitBranchSync()
-            self._branch_name = ""
-        self.statusChanged.emit()
-        self.statsChanged.emit()
-        self.branchSyncChanged.emit()
+        self._reset_git_state()
         self._wake_worker()
 
     def set_remote(
@@ -1018,6 +1009,14 @@ class GitController(QObject):
 
         Watchers stand down (inotify is blind across SSHFS/network) and the
         poll timer takes over. GUI-thread only, like set_repo_root.
+
+        NB: this runner/remote_root/local_mount seam deliberately PARALLELS
+        ``git_subprocess.GitExecutor`` (which the log/branch/ops controllers
+        share) rather than consuming it — the scan pipeline's resolve
+        short-circuit, watcher stand-down, and poll lifecycle are entangled
+        with this class's locking. Unifying on GitExecutor is a known
+        follow-up; until then, a change to remote git execution semantics
+        must land in BOTH places.
         """
         self._clear_watcher()
         self._cancel_repo_sentinel_backstop()
@@ -1026,15 +1025,7 @@ class GitController(QObject):
             self._remote_runner = runner
             self._remote_root = remote_root
             self._remote_mount = local_mount
-            self._status_map = {}
-            self._stats = GitStats()
-            self._resolved_root = ""
-            self._ignored_set = {}
-            self._branch_sync = GitBranchSync()
-            self._branch_name = ""
-        self.statusChanged.emit()
-        self.statsChanged.emit()
-        self.branchSyncChanged.emit()
+        self._reset_git_state()
         self._remote_poll.start()
         self._wake_worker()
 
@@ -1048,6 +1039,17 @@ class GitController(QObject):
         self._remote_poll.stop()
         if not was_remote:
             return
+        self._reset_git_state()
+        self._wake_worker()
+
+    def _reset_git_state(self) -> None:
+        """Clear all published scan state + notify (GUI thread).
+
+        Shared by set_repo_root / set_remote / set_local — every root or
+        location switch must empty the SAME field set synchronously so no
+        consumer sees the previous context's data before the worker's fresh
+        scan lands (see set_repo_root's ignored-set rationale).
+        """
         with self._lock:
             self._status_map = {}
             self._stats = GitStats()
@@ -1058,7 +1060,6 @@ class GitController(QObject):
         self.statusChanged.emit()
         self.statsChanged.emit()
         self.branchSyncChanged.emit()
-        self._wake_worker()
 
     def _remote_spec(
         self,
@@ -1099,7 +1100,7 @@ class GitController(QObject):
                 check=False,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.debug("git %s failed for %s: %s", args[:1], cwd, exc)
+            log.debug("git %s failed for %s: %s", args[0] if args else "?", cwd, exc)
             return None
 
     @Slot(str, result="QVariantMap")

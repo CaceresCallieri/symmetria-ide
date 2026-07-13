@@ -136,12 +136,17 @@ def test_stale_worker_result_discarded_after_unmount(monkeypatch, tmp_path, qt_a
 
 def test_unmount_falls_back_to_lazy(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    monkeypatch.setattr(mount_manager, "_is_mounted", lambda mp: True)
+    # Stateful fake: mounted until a fusermount call succeeds (unmount()
+    # re-checks /proc/mounts after its attempts before trusting the state).
+    still_mounted = {"value": True}
+    monkeypatch.setattr(mount_manager, "_is_mounted", lambda mp: still_mounted["value"])
     calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
         # First (plain) unmount fails EBUSY; the lazy retry succeeds.
+        if len(calls) > 1:
+            still_mounted["value"] = False
         return subprocess.CompletedProcess(argv, 1 if len(calls) == 1 else 0, "", "")
 
     monkeypatch.setattr(mount_manager.subprocess, "run", fake_run)
@@ -153,6 +158,20 @@ def test_unmount_falls_back_to_lazy(monkeypatch, tmp_path):
     ]
     assert "-z" in calls[1]
     assert mount.state == "unmounted"
+
+
+def test_unmount_reports_failed_when_mount_survives(monkeypatch, tmp_path):
+    """If both fusermount attempts fail, the state must not lie 'unmounted'."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(mount_manager, "_is_mounted", lambda mp: True)
+    monkeypatch.setattr(
+        mount_manager.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", "busy"),
+    )
+    mount = SshfsMount(SERVER, REMOTE)
+    mount.unmount()
+    assert mount.state == "failed"
 
 
 def test_healthy_false_when_not_in_proc_mounts(monkeypatch, tmp_path):

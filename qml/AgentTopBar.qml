@@ -57,7 +57,11 @@ Rectangle {
     // the surface switcher and muddled the two controls' reading order;
     // right-aligned it mirrors StatusBar's trailing ⇅ server badge, so
     // both location cues live on the right rail). Same clay-segment
-    // anatomy as the switcher; Ctrl+Shift+U is the chord twin.
+    // anatomy as the switcher; Ctrl+Shift+U is the chord twin. Same
+    // accepted-overlap caveat as the switcher's comment below, mirrored
+    // to this edge: the centered chip strip could reach the toggle only
+    // with many long-titled chips on a narrow window — verify visually
+    // if that combination ever ships.
     Row {
         id: locationToggle
         anchors.right: root.right

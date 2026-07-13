@@ -74,7 +74,7 @@ class GitExecutor:
                 check=False,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.debug("git %s failed for %s: %s", args[:1], cwd, exc)
+            log.debug("git %s failed for %s: %s", args[0] if args else "?", cwd, exc)
             return None
 
     def resolve_repo_root(

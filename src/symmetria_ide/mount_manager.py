@@ -28,7 +28,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 
 from .agent_bridge import emit_gc_safe
 from .server_registry import RemoteServer
@@ -74,13 +74,29 @@ def sshfs_argv(server: RemoteServer, remote_path: str, mountpoint: str) -> list[
     ]
 
 
+def _unescape_mounts_field(field: str) -> str:
+    """Reverse /proc/mounts' octal escaping (space→``\\040``, tab→``\\011``…).
+
+    The kernel escapes whitespace and backslashes in mount paths so the file
+    stays field-splittable; comparing a raw path against the escaped field
+    would never match a mountpoint containing a space (e.g. a registry
+    server name or repo basename with one).
+    """
+    return (
+        field.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+    )
+
+
 def _is_mounted(mountpoint: str) -> bool:
     """True when the mountpoint appears in /proc/mounts (fuse.sshfs)."""
     try:
         with open("/proc/mounts", encoding="utf-8") as handle:
             for line in handle:
                 parts = line.split()
-                if len(parts) >= 3 and parts[1] == mountpoint:
+                if len(parts) >= 3 and _unescape_mounts_field(parts[1]) == mountpoint:
                     return True
     except OSError:
         log.exception("mount_manager: cannot read /proc/mounts")
@@ -113,8 +129,6 @@ class SshfsMount(QObject):
         self._mountpoint = mountpoint_for(server, remote_path)
         self._state = "unmounted"
         self._generation = 0
-        from PySide6.QtCore import Qt
-
         # queued: the mount worker emits; state mutates on the GUI thread
         # (§4 P2).
         self._mountFinished.connect(
@@ -194,6 +208,13 @@ class SshfsMount(QObject):
         The stat runs on a scratch thread with a deadline because a WEDGED
         FUSE mount blocks the calling thread in the kernel — the whole point
         of this check is to never let that thread be the GUI one.
+
+        Known bound: a wedged stat leaves its scratch thread blocked in the
+        kernel until the mount clears (it cannot be cancelled), so each
+        healthy() call against a wedged mount leaks one thread. Acceptable
+        because callers probe on user-driven events (location toggles, mount
+        reuse), not in a loop — revisit with a single long-lived probe
+        thread if a polling caller ever appears.
         """
         if not _is_mounted(self._mountpoint):
             return False
@@ -211,7 +232,12 @@ class SshfsMount(QObject):
         return answered.wait(timeout=_HEALTH_TIMEOUT)
 
     def unmount(self) -> None:
-        """Best-effort unmount: fusermount3 -u, then lazy -z on EBUSY."""
+        """Best-effort unmount: fusermount3 -u, then lazy -z on EBUSY.
+
+        State is set from what /proc/mounts says AFTER the attempts, not
+        assumed — reporting "unmounted" while the mount is still live would
+        let a later mount() reuse-check skip a needed remount.
+        """
         self._generation += 1  # invalidates any in-flight mount worker
         if not _is_mounted(self._mountpoint):
             self._set_state("unmounted")
@@ -228,7 +254,14 @@ class SshfsMount(QObject):
                     break
             except (subprocess.SubprocessError, OSError) as exc:
                 log.warning("mount_manager: fusermount3 failed: %s", exc)
-        self._set_state("unmounted")
+        if _is_mounted(self._mountpoint):
+            log.error(
+                "mount_manager: %s still mounted after unmount attempts",
+                self._mountpoint,
+            )
+            self._set_state("failed")
+        else:
+            self._set_state("unmounted")
 
     def _set_state(self, state: str) -> None:
         if state != self._state:
