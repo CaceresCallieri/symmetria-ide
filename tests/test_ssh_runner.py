@@ -27,6 +27,10 @@ from symmetria_ide.ssh_runner import (
 
 SERVER = RemoteServer(name="vps", host="203.0.113.7")
 
+# Every remote command is wrapped in a UTF-8 locale (the sshd command
+# environment has none; a POSIX-locale tmux client renders non-ASCII as "_").
+LOCALE_WRAP = ["env", ssh_runner.REMOTE_LOCALE_ENV]
+
 
 def _opt_pairs(argv: list[str]) -> list[str]:
     """Collect the values of every `-o` option in an ssh argv."""
@@ -90,8 +94,13 @@ def test_remote_command_is_quoted_as_one_trailing_token(tmp_path, monkeypatch):
     argv = remote_command_argv(SERVER, ["git", "-C", "/opt/dev/repos/x", "status"])
     assert argv[-2] == "--"
     # The remote shell must split the flattened string back into exactly
-    # the tokens given.
-    assert shlex.split(argv[-1]) == ["git", "-C", "/opt/dev/repos/x", "status"]
+    # the tokens given (behind the locale wrapper).
+    assert shlex.split(argv[-1]) == LOCALE_WRAP + [
+        "git",
+        "-C",
+        "/opt/dev/repos/x",
+        "status",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -102,7 +111,19 @@ def test_remote_command_is_quoted_as_one_trailing_token(tmp_path, monkeypatch):
 def test_remote_quoting_survives_hostile_tokens(tmp_path, monkeypatch, token):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     argv = remote_command_argv(SERVER, ["echo", token])
-    assert shlex.split(argv[-1]) == ["echo", token]
+    assert shlex.split(argv[-1]) == LOCALE_WRAP + ["echo", token]
+
+
+def test_remote_command_carries_utf8_locale():
+    """The locale wrapper prefixes EVERY remote command, tty or not.
+
+    Without it the tmux client attaches in the sshd command environment's
+    POSIX locale and renders every non-ASCII glyph as an underscore.
+    """
+    for tty in (False, True):
+        argv = remote_command_argv(SERVER, ["tmux", "attach"], tty=tty)
+        assert shlex.split(argv[-1])[:2] == LOCALE_WRAP
+    assert "UTF-8" in ssh_runner.REMOTE_LOCALE_ENV
 
 
 def test_tty_inserts_dash_t_and_drops_batchmode(tmp_path, monkeypatch):

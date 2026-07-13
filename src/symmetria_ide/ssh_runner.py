@@ -37,6 +37,21 @@ log = logging.getLogger(__name__)
 
 _RUN_TIMEOUT_DEFAULT = 15.0
 
+# sshd runs command-style invocations (`ssh host <cmd>`) WITHOUT a login
+# profile, so the remote environment has no locale (LANG empty, LC_CTYPE
+# "POSIX" — verified live on vigilia-vps). A POSIX-locale tmux client then
+# downgrades every non-ASCII cell to "_" on output: Claude's banner, spinners,
+# bullets, and typographic quotes all render as underscores in the attached
+# agent pane, while the phone (whose ttyd sets its own env) shows them fine.
+# Injecting a UTF-8 locale into every remote command fixes the tmux client,
+# the remote login shell, and any future remote tool in one place. C.UTF-8 is
+# glibc-builtin (present on any modern server; a server lacking it just falls
+# back to C — no worse than today). LANG, not LC_ALL: LANG is the weakest
+# setting, so an explicit locale from the user's own remote profile still
+# wins in the login shell. Escalate to LC_ALL only if a server is ever seen
+# setting an explicit non-UTF-8 LC_CTYPE in the command environment.
+REMOTE_LOCALE_ENV = "LANG=C.UTF-8"
+
 
 def runtime_dir() -> Path:
     """Per-user runtime dir for control sockets / forwarded sockets."""
@@ -98,11 +113,16 @@ def remote_command_argv(
     panes: agent tmux attach, remote shell) and drops BatchMode so an
     interactive auth prompt, should one ever appear, lands in the pane
     instead of insta-failing it.
+
+    Every command is wrapped in ``env LANG=C.UTF-8`` (see REMOTE_LOCALE_ENV)
+    because the sshd command environment carries no locale and a POSIX-locale
+    tmux client renders all non-ASCII as underscores.
     """
     base = ssh_base_argv(server, batch=not tty)
     if tty:
         base.insert(1, "-t")
-    return base + ["--", " ".join(shlex.quote(token) for token in remote_argv)]
+    wrapped = ["env", REMOTE_LOCALE_ENV, *remote_argv]
+    return base + ["--", " ".join(shlex.quote(token) for token in wrapped)]
 
 
 def run_remote(

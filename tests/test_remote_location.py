@@ -12,6 +12,7 @@ from __future__ import annotations
 import shlex
 import time
 
+from symmetria_ide import ssh_runner
 from symmetria_ide.remote_location import (
     TMUX_LIST_FORMAT,
     parse_tmux_sessions,
@@ -37,9 +38,16 @@ def _record(spawn_type: str = "fresh", dangerous: bool = True, **extra) -> dict:
 
 
 def _remote_tokens(argv: list[str]) -> list[str]:
-    """The token list the remote shell reconstructs from the ssh command."""
+    """The token list the remote shell reconstructs from the ssh command.
+
+    Strips (and asserts) the ``env LANG=C.UTF-8`` locale wrapper that
+    ``remote_command_argv`` prefixes onto every remote command, so the
+    argv-shape tests below stay about the tmux/claude command itself.
+    """
     assert argv[-2] == "--"
-    return shlex.split(argv[-1])
+    tokens = shlex.split(argv[-1])
+    assert tokens[:2] == ["env", ssh_runner.REMOTE_LOCALE_ENV]
+    return tokens[2:]
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +185,12 @@ def test_attach_has_no_inner_command():
 
 
 def test_no_env_wrapper_or_local_machinery():
-    """The local spawn machinery must NOT leak into the remote argv."""
+    """The local spawn machinery must NOT leak into the remote argv.
+
+    (_remote_tokens has already stripped the deliberate locale wrapper;
+    the "env" being guarded against here is the local SYMMETRIA_AGENT_ID
+    one — Vigilia manages the server agent env, not us.)
+    """
     tokens = _remote_tokens(remote_agent_argv(SERVER, _record()))
     assert "env" not in tokens
     assert not any(token.startswith("SYMMETRIA_") for token in tokens)
