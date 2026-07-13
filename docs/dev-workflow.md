@@ -98,6 +98,15 @@ bridge client, or the chord family:
 Scripted spawn for headless smoke runs (composes with the screenshot
 harness): `SYMMETRIA_IDE_SPAWN_AGENT=fresh` spawns one agent at launch;
 an optional `:<agent-harness>` suffix selects the CLI (`fresh:opencode`).
+Adding `SYMMETRIA_IDE_SPAWN_AGENT_LOCATION=vps` defers the spawn to the
+VPS pairing edge and spawns it REMOTELY — the one-command E2E for the
+whole location toggle (pair → toggle → sshfs mount → remote git scan →
+ssh+tmux agent). Needs `~/.config/symmetria-ide/servers.json` and the
+repo present under the server's repos_dir; with a long `SETTLE_MS`
+(~10s) the screenshot shows the vps tab, the remote tree/branch, and
+the agent pane attached to `<repo>-vps-1`. Clean up the smoke session
+afterwards: `ssh dev@<host> tmux -S /home/dev/.vigilia/tmux.sock
+kill-session -t <repo>-vps-1` (identity-pinned ssh, as always).
 Bridge-side state is inspectable via `pkill -USR1 -f agent-bridge.py` →
 `~/.local/state/symmetria/agent-bridge-diagnostic.json` (look for your
 IDE pid under `clients`).
