@@ -91,6 +91,7 @@ from .project_browser_marker import (
     set_browser_agents,
 )
 from . import remote_location
+from .mount_manager import SshfsMount
 from .remote_location import RemoteContext
 from . import ssh_runner
 from .tree_state_cache import load_expanded, save_expanded
@@ -1046,6 +1047,17 @@ class AppController(QObject):
         # marshals its probe-worker result through an internal queued
         # connection before emitting).
         self._remote_context.pairingChanged.connect(self._on_vps_pairing_changed)
+        # The paired repo's SSHFS mount (VPS location file tree). Created on
+        # first toggle→vps, kept for the session (lazy unmount at shutdown /
+        # pairing loss). One mount per pairing; recreated when the pairing
+        # identity below changes (server name + remote root — compared on
+        # the INPUTS, not the derived mountpoint, so a test fake with its
+        # own mountpoint scheme can't confuse the reuse check).
+        self._repo_mount: SshfsMount | None = None
+        self._repo_mount_key: tuple[str, str] = ("", "")
+        # Chrome swap on every location flip: git runner + tree mount +
+        # (Phase 5) terminal pane. Same-thread; locationChanged fires on GUI.
+        self.locationChanged.connect(self._sync_location_context)
         # Per-project agent-browser opt-in, read from the `.symmetria/ide.json`
         # marker for `displayedRoot` (default OFF). Refreshed on every
         # displayedRootChanged (so it tracks the right project) and re-read at
@@ -2124,11 +2136,112 @@ class AppController(QObject):
                 self.spawn_agent(spawn_type, True, harness)
         else:
             self._teardown_hub_link()
+            self._drop_repo_mount()
             if self._location == "vps":
                 self._switch_location("local")
                 self.locationAlert.emit(
                     "VPS unavailable", "Pairing lost — switched back to local."
                 )
+
+    # ----- Location chrome swap (git data + file tree) ---------------------
+
+    @Property(str, notify=vpsAvailabilityChanged)
+    def vpsProjectLabel(self) -> str:
+        """Status-bar project label for the vps context: `<server>:<repo>`."""
+        server = self._remote_context.server
+        if server is None:
+            return ""
+        repo = os.path.basename(self._remote_context.remote_root.rstrip("/"))
+        return f"{server.name}:{repo}"
+
+    def _sync_location_context(self) -> None:
+        """Swap the chrome data sources on every location flip.
+
+        → vps: ensure the SSHFS mount (async; the chrome activates from the
+        mount's `stateChanged` once it lands), point GitController at the
+        remote runner when already mounted.
+        → local: GitController back to local subprocesses, tree back to the
+        displayed root. The mount stays (cheap, reused on the next toggle);
+        it is dropped on pairing loss / shutdown.
+        """
+        if self._location == "vps":
+            server = self._remote_context.server
+            if server is None:
+                return  # the pairing safety net is about to force local
+            mount = self._ensure_repo_mount()
+            if mount is None:
+                return
+            if mount.mounted and mount.healthy():
+                self._activate_remote_chrome()
+            else:
+                if mount.mounted:
+                    # Stale FUSE mount (server rebooted, network flapped):
+                    # one automatic remount cycle before giving up.
+                    log.warning("location: stale sshfs mount — remounting")
+                    mount.unmount()
+                mount.mount()
+        else:
+            self._git_controller.set_local()
+            self._mount_tree_for(self.displayedRoot)
+
+    def _ensure_repo_mount(self) -> SshfsMount | None:
+        """The pairing's SshfsMount, (re)created when the pairing changed."""
+        server = self._remote_context.server
+        remote_root = self._remote_context.remote_root
+        if server is None or not remote_root:
+            return None
+        wanted_key = (server.name, remote_root)
+        if self._repo_mount is not None and self._repo_mount_key != wanted_key:
+            self._drop_repo_mount()
+        if self._repo_mount is None:
+            self._repo_mount = SshfsMount(server, remote_root, self)
+            self._repo_mount_key = wanted_key
+            # same-thread: stateChanged is emitted from the mount's queued
+            # GUI slot, never from its worker.
+            self._repo_mount.stateChanged.connect(self._on_repo_mount_state)
+        return self._repo_mount
+
+    def _drop_repo_mount(self) -> None:
+        """Unmount + forget the pairing's mount (pairing loss / shutdown)."""
+        if self._repo_mount is None:
+            return
+        mount, self._repo_mount = self._repo_mount, None
+        self._repo_mount_key = ("", "")
+        mount.unmount()
+
+    def _on_repo_mount_state(self) -> None:
+        """Mount worker landed: activate the vps chrome, or fall back."""
+        mount = self._repo_mount
+        if mount is None or self._location != "vps":
+            return
+        if mount.mounted:
+            self._activate_remote_chrome()
+        elif mount.state == "failed":
+            self.locationAlert.emit(
+                "VPS files unavailable",
+                "Could not mount the remote repo (sshfs) — back to local.",
+            )
+            self._switch_location("local")
+
+    def _activate_remote_chrome(self) -> None:
+        """Point git + tree at the remote (mount is up, location is vps)."""
+        server = self._remote_context.server
+        remote_root = self._remote_context.remote_root
+        mount = self._repo_mount
+        if server is None or mount is None or not mount.mounted:
+            return
+
+        def _remote_git_runner(git_argv: list, timeout: float):
+            # Worker-thread only (GitController's scan worker). Bytes out —
+            # the porcelain parsers split on NUL bytes.
+            return ssh_runner.run_remote(
+                server, list(git_argv), timeout=timeout, text=False
+            )
+
+        self._git_controller.set_remote(
+            _remote_git_runner, remote_root, mount.mountpoint
+        )
+        self._mount_tree_for(mount.mountpoint)
 
     def _refresh_project_browser_enabled(self) -> None:
         """Re-read the `.symmetria/ide.json` marker for the current project
@@ -2364,7 +2477,16 @@ class AppController(QObject):
         finishes. The disk file's atomic-write contract guarantees we
         never observe a partial-write here.
         """
-        root = self.displayedRoot
+        self._mount_tree_for(self.displayedRoot)
+
+    def _mount_tree_for(self, root: str) -> None:
+        """Load `root`'s expansion cache and request the QML tree mount.
+
+        Shared by the displayedRoot sync above and the location toggle
+        (which mounts the SSHFS mountpoint instead of the local root —
+        `tree_state_cache` keys by path hash, so the mount gets its own
+        persisted expansion state for free).
+        """
         # Stash the root the cache was loaded for. `saveExpandedPaths`
         # writes back to this — keeps save paths correct even if the
         # user is rapidly switching projects.
@@ -6594,11 +6716,15 @@ class AppController(QObject):
         # (it shouldn't, but defensive iteration costs nothing).
         for host in list(self._session_hosts.values()):
             host.stop()
-        # Tear down the VPS hub link (forward child + subscriber thread) and
-        # close the paired server's ssh ControlMaster (best-effort; the
-        # probes/remote calls opened it). ControlPersist=60 self-reaps after
-        # a crash, so the master close is only the polite clean-exit path.
+        # Tear down the VPS pieces: hub link (forward child + subscriber
+        # thread), the repo's SSHFS mount, then the paired server's ssh
+        # ControlMaster (best-effort; the probes/remote calls opened it).
+        # ControlPersist=60 self-reaps after a crash, so the master close is
+        # only the polite clean-exit path. Mount before master: fusermount
+        # doesn't need ssh, but sshfs owns its own connection anyway (see
+        # mount_manager's docstring).
         self._teardown_hub_link()
+        self._drop_repo_mount()
         if self._remote_context.server is not None:
             ssh_runner.close_control_master(self._remote_context.server)
         # Stop the git worker before nvim — its scan is fast (≤1s join) and

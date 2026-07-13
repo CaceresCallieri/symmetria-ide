@@ -211,10 +211,18 @@ Rectangle {
                     }
                 }
 
-                // Project name.
+                // Project name. In the VPS location the nvim capsule still
+                // describes the LOCAL project (nvim never leaves this
+                // machine), so the label switches to the paired
+                // `<server>:<repo>` identity instead.
                 Text {
-                    visible: statusState.project !== ""
-                    text: statusState.project
+                    id: projectText
+                    readonly property string projectLabel:
+                        controller.location === "vps"
+                            ? controller.vpsProjectLabel
+                            : statusState.project
+                    visible: projectText.projectLabel !== ""
+                    text: projectText.projectLabel
                     color: Theme.color.text.dim
                     font.family: Theme.font.family
                     font.pixelSize: Theme.font.size.sm
@@ -251,8 +259,18 @@ Rectangle {
 
                 // Branch — prefixed with a git-like glyph, followed by the
                 // ahead/behind commit counts vs. the branch's upstream.
+                // Branch NAME source is location-dependent: locally it's the
+                // nvim capsule; in the VPS location it's GitController's
+                // porcelain `# branch.head` (the remote repo's branch —
+                // nvim knows nothing about it). Ahead/behind already read
+                // gitController, which tracks the active location's repo.
                 Row {
-                    visible: statusState.branch !== ""
+                    id: branchRow
+                    readonly property string branchLabel:
+                        controller.location === "vps"
+                            ? gitController.branchName
+                            : statusState.branch
+                    visible: branchRow.branchLabel !== ""
                     spacing: Theme.spacing.xs
                     Layout.alignment: Qt.AlignLeft | Qt.AlignVCenter
                     Text {
@@ -263,7 +281,7 @@ Rectangle {
                         renderType: Text.NativeRendering
                     }
                     Text {
-                        text: statusState.branch
+                        text: branchRow.branchLabel
                         color: Theme.color.text.normal
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.sm

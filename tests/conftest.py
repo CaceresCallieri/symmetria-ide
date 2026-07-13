@@ -145,6 +145,55 @@ class FakeRemoteContext(QObject):
         self._probing = probing
 
 
+class FakeSshfsMount(QObject):
+    """Stand-in for mount_manager.SshfsMount — no FUSE, no subprocess.
+
+    mount() lands synchronously in the state set at construction
+    (default "mounted") and emits stateChanged, so the controller's
+    chrome-activation path runs deterministically in-test. Fixtures that
+    exercise set_location("vps") MUST patch `symmetria_ide.app.SshfsMount`
+    to this class (the real one spawns an sshfs subprocess).
+    """
+
+    stateChanged = Signal()
+    instances: list = []
+
+    def __init__(self, server, remote_path, parent=None) -> None:
+        super().__init__(parent)
+        self.server = server
+        self.remote_path = remote_path
+        self.mount_calls = 0
+        self.unmount_calls = 0
+        self.result_state = "mounted"
+        self._state = "unmounted"
+        FakeSshfsMount.instances.append(self)
+
+    @property
+    def mountpoint(self) -> str:
+        return f"/mnt/fake/{self.server.name}/{self.remote_path.rsplit('/', 1)[-1]}"
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @property
+    def mounted(self) -> bool:
+        return self._state == "mounted"
+
+    def healthy(self) -> bool:
+        return self.mounted
+
+    def mount(self) -> None:
+        self.mount_calls += 1
+        self._state = self.result_state
+        self.stateChanged.emit()
+
+    def unmount(self) -> None:
+        self.unmount_calls += 1
+        self._state = "unmounted"
+        self.stateChanged.emit()
+
+
 class FakeSessionHost:
     """Stand-in for SessionHost — no threads, no subprocess, no network.
 

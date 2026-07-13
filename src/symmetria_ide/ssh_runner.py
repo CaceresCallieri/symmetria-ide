@@ -110,6 +110,7 @@ def run_remote(
     remote_argv: list[str],
     *,
     timeout: float = _RUN_TIMEOUT_DEFAULT,
+    text: bool = True,
 ) -> subprocess.CompletedProcess | None:
     """Run ``remote_argv`` on the server; ``None`` on transport failure.
 
@@ -118,13 +119,16 @@ def run_remote(
     ``None`` / ``returncode`` rather than catching. A non-zero returncode is
     returned as-is — remote-command failure and transport failure are
     different conditions and callers may care which.
+
+    ``text=False`` yields BYTES stdout/stderr — required by the git parsers
+    (porcelain ``-z`` framing splits on ``b"\\x00"``).
     """
     argv = remote_command_argv(server, remote_argv)
     try:
         return subprocess.run(
             argv,
             capture_output=True,
-            text=True,
+            text=text,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:

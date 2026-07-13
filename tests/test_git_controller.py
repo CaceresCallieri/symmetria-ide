@@ -101,7 +101,7 @@ def test_only_branch_headers_returns_empty_map() -> None:
 
 
 # ---------------------------------------------------------------------------
-# parse_branch_header — ahead/behind + upstream from the `--branch` headers.
+# parse_branch_header — ahead/behind + upstream + head from `--branch` headers.
 # ---------------------------------------------------------------------------
 
 
@@ -112,7 +112,7 @@ def test_branch_header_ahead_and_behind() -> None:
         b"# branch.upstream origin/main",
         b"# branch.ab +4 -2",
     )
-    sync, upstream = parse_branch_header(blob)
+    sync, upstream, _head = parse_branch_header(blob)
     assert sync == GitBranchSync(ahead=4, behind=2)
     assert upstream == "origin/main"
 
@@ -124,27 +124,27 @@ def test_branch_header_ahead_only() -> None:
         b"# branch.upstream origin/vigilia",
         b"# branch.ab +4 -0",
     )
-    sync, _ = parse_branch_header(blob)
+    sync, _, _ = parse_branch_header(blob)
     assert sync.ahead == 4
     assert sync.behind == 0
 
 
 def test_branch_header_behind_only() -> None:
     blob = _join(b"# branch.upstream origin/main", b"# branch.ab +0 -3")
-    sync, _ = parse_branch_header(blob)
+    sync, _, _ = parse_branch_header(blob)
     assert sync == GitBranchSync(ahead=0, behind=3)
 
 
 def test_branch_header_no_upstream_defaults_to_zero() -> None:
     # A local-only branch: git omits both branch.upstream AND branch.ab.
     blob = _join(b"# branch.oid abc123", b"# branch.head local-only")
-    sync, upstream = parse_branch_header(blob)
+    sync, upstream, _head = parse_branch_header(blob)
     assert sync == GitBranchSync()
     assert upstream == ""
 
 
 def test_branch_header_empty_blob_defaults() -> None:
-    sync, upstream = parse_branch_header(b"")
+    sync, upstream, _head = parse_branch_header(b"")
     assert sync == GitBranchSync()
     assert upstream == ""
 
@@ -158,7 +158,7 @@ def test_branch_header_stops_at_first_file_record() -> None:
         _ordinary(".M", "src/foo.py"),
         _ordinary("M.", "src/bar.py"),
     )
-    sync, upstream = parse_branch_header(blob)
+    sync, upstream, _head = parse_branch_header(blob)
     assert sync == GitBranchSync(ahead=1, behind=0)
     assert upstream == "origin/main"
 
@@ -166,7 +166,7 @@ def test_branch_header_stops_at_first_file_record() -> None:
 def test_branch_header_upstream_with_slashes() -> None:
     # Remote-tracking names can contain slashes in the branch component.
     blob = _join(b"# branch.upstream origin/feature/new-thing", b"# branch.ab +2 -0")
-    _, upstream = parse_branch_header(blob)
+    _, upstream, _head = parse_branch_header(blob)
     assert upstream == "origin/feature/new-thing"
 
 
@@ -175,12 +175,12 @@ def test_branch_header_malformed_ab_defaults_to_zero() -> None:
     # malformed shapes, each hitting a different guard in parse_branch_header:
     #   (a) too few tokens — fails the `len(parts) >= 4` check before parsing.
     blob = _join(b"# branch.upstream origin/main", b"# branch.ab garbage")
-    sync, _ = parse_branch_header(blob)
+    sync, _, _ = parse_branch_header(blob)
     assert sync == GitBranchSync()
     #   (b) four tokens but non-numeric counts — reaches int() and trips the
     #       `except ValueError` fallback. This is the path (a) cannot exercise.
     blob = _join(b"# branch.upstream origin/main", b"# branch.ab +x -y")
-    sync, _ = parse_branch_header(blob)
+    sync, _, _ = parse_branch_header(blob)
     assert sync == GitBranchSync()
 
 
@@ -1981,5 +1981,145 @@ def test_status_recovers_after_git_init_without_any_capsule(tmp_path) -> None:
         controller._refresh_watcher_for_root(*refresh_payloads[-1])
         assert str(tmp_path) not in controller._watcher.directories()
         assert not controller._sentinel_backstop.isActive()
+    finally:
+        controller.stop()
+
+
+# ---------------------------------------------------------------------------
+# branch.head parsing (the VPS status bar's branch-name source).
+# ---------------------------------------------------------------------------
+
+
+def test_branch_header_carries_head_name() -> None:
+    blob = _join(
+        b"# branch.oid abc123",
+        b"# branch.head dev",
+        b"# branch.upstream origin/dev",
+        b"# branch.ab +1 -0",
+    )
+    _sync, _upstream, head = parse_branch_header(blob)
+    assert head == "dev"
+
+
+def test_branch_header_detached_head_normalizes_to_empty() -> None:
+    blob = _join(b"# branch.oid abc123", b"# branch.head (detached)")
+    _sync, _upstream, head = parse_branch_header(blob)
+    assert head == ""
+
+
+def test_branch_header_missing_head_is_empty() -> None:
+    _sync, _upstream, head = parse_branch_header(b"")
+    assert head == ""
+
+
+# ---------------------------------------------------------------------------
+# Remote mode (VPS location): injected runner + mountpoint path translation.
+# ---------------------------------------------------------------------------
+
+
+def _remote_status_blob() -> bytes:
+    return _join(
+        b"# branch.oid abc123",
+        b"# branch.head feature/vps",
+        b"# branch.upstream origin/feature/vps",
+        b"# branch.ab +2 -1",
+        _ordinary(".M", "src/foo.py"),
+    )
+
+
+class _FakeRemoteRunner:
+    """Dispatches canned bytes per git subcommand; records every argv."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def __call__(self, git_argv: list, timeout: float):
+        import subprocess as _subprocess
+
+        self.calls.append(list(git_argv))
+        if "status" in git_argv:
+            stdout: bytes = _remote_status_blob()
+        elif "ls-files" in git_argv:
+            stdout = b"node_modules/\x00"
+        else:  # numstat passes
+            stdout = b""
+        return _subprocess.CompletedProcess(git_argv, 0, stdout, b"")
+
+
+def test_remote_scan_translates_paths_onto_the_mount() -> None:
+    controller = GitController()
+    try:
+        runner = _FakeRemoteRunner()
+        controller.set_repo_root("/home/jc/projects/demo")
+        controller.set_remote(runner, "/opt/dev/repos/demo", "/mnt/sym/demo")
+        controller._do_scan()  # drive the worker body directly (test thread)
+        # Every runner call targets the REMOTE root...
+        assert all(c[:2] == ["git", "-C"] for c in runner.calls)
+        assert all(c[2] == "/opt/dev/repos/demo" for c in runner.calls)
+        # ...while every published path is a LOCAL mount path.
+        status = controller.statusForPath("/mnt/sym/demo/src/foo.py")
+        assert status and status["state"] == STATE_UNSTAGED
+        assert controller.ignoredPathSet == {"/mnt/sym/demo/node_modules": True}
+        assert controller.aheadCount == 2
+        assert controller.behindCount == 1
+        assert controller.branchName == "feature/vps"
+    finally:
+        controller.stop()
+
+
+def test_remote_scan_skips_rev_parse_and_watchers() -> None:
+    controller = GitController()
+    try:
+        runner = _FakeRemoteRunner()
+        watcher_refreshes: list = []
+        controller._watcherRefreshRequested.connect(
+            lambda *args: watcher_refreshes.append(args)
+        )
+        controller.set_repo_root("/home/jc/projects/demo")
+        controller.set_remote(runner, "/opt/dev/repos/demo", "/mnt/sym/demo")
+        controller._do_scan()
+        # No rev-parse round-trip (the mountpoint IS the resolved root)...
+        assert not any("rev-parse" in c for c in runner.calls)
+        # ...and no watcher rebuild request (poll timer owns the cadence).
+        assert watcher_refreshes == []
+        assert controller._remote_poll.isActive()
+    finally:
+        controller.stop()
+
+
+def test_set_local_restores_local_execution() -> None:
+    controller = GitController()
+    try:
+        runner = _FakeRemoteRunner()
+        controller.set_repo_root("/home/jc/projects/demo")
+        controller.set_remote(runner, "/opt/dev/repos/demo", "/mnt/sym/demo")
+        controller._do_scan()
+        assert controller.branchName == "feature/vps"
+        controller.set_local()
+        assert not controller._remote_poll.isActive()
+        assert controller.branchName == ""  # remote state cleared
+        assert controller.statusForPath("/mnt/sym/demo/src/foo.py") == {}
+        assert controller._remote_spec() is None
+    finally:
+        controller.stop()
+
+
+def test_remote_transport_failure_preserves_previous_map() -> None:
+    controller = GitController()
+    try:
+        runner = _FakeRemoteRunner()
+        controller.set_repo_root("/home/jc/projects/demo")
+        controller.set_remote(runner, "/opt/dev/repos/demo", "/mnt/sym/demo")
+        controller._do_scan()
+        assert controller.statusForPath("/mnt/sym/demo/src/foo.py")
+        # ssh drops: the runner degrades to None → the scan must preserve
+        # the previous map rather than blink the panel empty.
+        controller.set_remote(
+            lambda argv, timeout: None, "/opt/dev/repos/demo", "/mnt/sym/demo"
+        )
+        # set_remote cleared state (project-switch semantics); rescan once
+        # to simulate a scan cycle under a dead transport.
+        controller._do_scan()
+        assert controller.statusForPath("/mnt/sym/demo/src/foo.py") == {}
     finally:
         controller.stop()

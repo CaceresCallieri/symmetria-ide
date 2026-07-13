@@ -25,7 +25,7 @@ import time
 import pytest
 from PySide6.QtCore import Qt
 
-from conftest import FakeRemoteContext
+from conftest import FakeRemoteContext, FakeSshfsMount
 from symmetria_ide.app import AppController
 from symmetria_ide.remote_location import RemoteContext, remote_repo_path
 from symmetria_ide.server_registry import RemoteServer
@@ -43,6 +43,11 @@ def controller(monkeypatch):
     monkeypatch.setattr(
         "symmetria_ide.app.ssh_runner.close_control_master", lambda server: None
     )
+    # set_location("vps") runs the chrome swap — never a real sshfs (nor a
+    # real ssh from the git worker's remote runner) in-test.
+    FakeSshfsMount.instances = []
+    monkeypatch.setattr("symmetria_ide.app.SshfsMount", FakeSshfsMount)
+    monkeypatch.setattr("symmetria_ide.ssh_runner.run_remote", lambda *a, **k: None)
     ctrl = AppController()
     fake = FakeRemoteContext()
     # Swap AFTER construction: the real context's pairingChanged connect

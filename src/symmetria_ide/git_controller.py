@@ -37,6 +37,7 @@ import logging
 import os
 import subprocess
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -289,12 +290,15 @@ def parse_porcelain_v2(blob: bytes) -> dict[str, GitStatus]:
     return result
 
 
-def parse_branch_header(blob: bytes) -> tuple[GitBranchSync, str]:
-    """Extract ``(ahead/behind sync, upstream ref)`` from porcelain v2 headers.
+def parse_branch_header(blob: bytes) -> tuple[GitBranchSync, str, str]:
+    """Extract ``(ahead/behind sync, upstream ref, branch name)`` from
+    porcelain v2 headers.
 
     Reads the leading ``# branch.*`` header block of
     ``git status --porcelain=v2 -z --branch`` output:
 
+      ``# branch.head dev``               → branch name = ``"dev"``
+        (``"(detached)"`` — git's literal — is normalized to ``""``)
       ``# branch.upstream origin/main``   → upstream = ``"origin/main"``
       ``# branch.ab +4 -1``               → ``GitBranchSync(ahead=4, behind=1)``
 
@@ -316,15 +320,20 @@ def parse_branch_header(blob: bytes) -> tuple[GitBranchSync, str]:
     """
     sync = GitBranchSync()
     upstream = ""
+    head = ""
     if not blob:
-        return (sync, upstream)
+        return (sync, upstream, head)
     for chunk in blob.split(b"\x00"):
         if not chunk:
             continue
         if not chunk.startswith(b"#"):
             break  # headers lead the output; first file record ends the block
         rec = chunk.decode("utf-8", errors="replace")
-        if rec.startswith("# branch.upstream "):
+        if rec.startswith("# branch.head "):
+            head = rec[len("# branch.head ") :].strip()
+            if head == "(detached)":
+                head = ""
+        elif rec.startswith("# branch.upstream "):
             upstream = rec[len("# branch.upstream ") :].strip()
         elif rec.startswith("# branch.ab "):
             # rec == "# branch.ab +<ahead> -<behind>" → 4 whitespace tokens.
@@ -338,7 +347,7 @@ def parse_branch_header(blob: bytes) -> tuple[GitBranchSync, str]:
                 # max(0, ...) guards against a malformed sign producing a
                 # nonsensical negative count.
                 sync = GitBranchSync(ahead=max(0, ahead), behind=max(0, behind))
-    return (sync, upstream)
+    return (sync, upstream, head)
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +580,11 @@ def _compute_stats(
 # within milliseconds). Coalescing to one scan per burst is what the FM brief
 # explicitly recommends.
 _DEBOUNCE_MS = 200
+# Remote-mode (VPS location) rescan cadence. inotify crosses neither SSHFS
+# nor the network, so a poll timer replaces both watchers there. 5s balances
+# freshness against one ssh-multiplexed git status per tick; editor saves and
+# git ops still poke immediately through the same debounce funnel.
+_REMOTE_POLL_MS = 5000
 # Timeouts protect against pathological repos (e.g., a corrupted index, a
 # `core.fsmonitor` daemon that hangs). The status scan can take seconds on
 # very large monorepos; the rev-parse should be near-instant.
@@ -680,6 +694,23 @@ class GitController(QObject):
         # watch, so it rides the `_watcherRefreshRequested` signal as a
         # snapshot rather than living in shared state (see that signal's note).
         self._branch_sync: GitBranchSync = GitBranchSync()
+        # Branch NAME from the same porcelain `# branch.head` header. The
+        # status bar normally gets the name from the nvim capsule; the VPS
+        # location has no nvim on the remote repo, so it binds this instead
+        # ("" on detached/unborn HEAD). Rides branchSyncChanged.
+        self._branch_name: str = ""
+        # Remote-execution seam (VPS location). When set, every git
+        # subprocess this controller runs is delegated to the runner (which
+        # executes `git -C <remote_root> …` on the paired server over ssh)
+        # and `_resolved_root` is pinned to `local_mount` (the repo's SSHFS
+        # mountpoint) so every published absolute path stays a LOCAL path —
+        # tree badges, Active Changes rows, and click-to-open all work
+        # unchanged. Guarded by `_lock` (worker reads it per scan).
+        self._remote_runner: (
+            Callable[[list[str], float], subprocess.CompletedProcess | None] | None
+        ) = None
+        self._remote_root: str = ""
+        self._remote_mount: str = ""
         # Absolute-path membership map of every gitignored file + directory
         # in the working tree. Computed via a single
         # ``git ls-files --others --ignored --exclude-standard --directory``
@@ -750,6 +781,14 @@ class GitController(QObject):
         self._sentinel_backstop.setSingleShot(True)
         self._sentinel_backstop.timeout.connect(self._on_sentinel_backstop)
         self._sentinel_backstop_delay_ms = 0
+
+        # Remote-mode refresh poll (VPS location): started by set_remote,
+        # stopped by set_local. Fires into the debounce funnel so poll
+        # ticks, manual pokes, and git-op refreshes all coalesce the same
+        # way they do locally.
+        self._remote_poll = QTimer(self)
+        self._remote_poll.setInterval(_REMOTE_POLL_MS)
+        self._remote_poll.timeout.connect(self._debounce.start)
 
         # Worker→GUI marshaling for watcher rebuild. Explicit QueuedConnection
         # is the project-standards §4 P2 pattern — worker emits, GUI slot runs.
@@ -824,6 +863,17 @@ class GitController(QObject):
         """
         with self._lock:
             return self._branch_sync.behind
+
+    @Property(str, notify=branchSyncChanged)
+    def branchName(self) -> str:
+        """Current branch name from the porcelain `# branch.head` header.
+
+        "" on detached/unborn HEAD or outside a repo. The status bar binds
+        this in the VPS location (there is no nvim capsule for the remote
+        repo); locally the capsule stays the branch-name source of truth.
+        """
+        with self._lock:
+            return self._branch_name
 
     @Property("QVariant", notify=statusChanged)
     def ignoredPathSet(self) -> dict | None:
@@ -944,10 +994,113 @@ class GitController(QObject):
             self._resolved_root = ""
             self._ignored_set = {}
             self._branch_sync = GitBranchSync()
+            self._branch_name = ""
         self.statusChanged.emit()
         self.statsChanged.emit()
         self.branchSyncChanged.emit()
         self._wake_worker()
+
+    def set_remote(
+        self,
+        runner: Callable[[list[str], float], subprocess.CompletedProcess | None],
+        remote_root: str,
+        local_mount: str,
+    ) -> None:
+        """Point the controller at a REMOTE repo (VPS location).
+
+        ``runner(git_argv, timeout)`` executes a full git argv on the paired
+        server (ssh, worker-thread only) and returns a CompletedProcess with
+        BYTES stdout, or None on transport failure. ``remote_root`` is the
+        repo's path on the server (`git -C` target); ``local_mount`` is its
+        SSHFS mountpoint here — it becomes `_resolved_root`, so the path
+        translation is one assignment: porcelain's repo-relative paths join
+        onto the mount and every consumer keeps working on local paths.
+
+        Watchers stand down (inotify is blind across SSHFS/network) and the
+        poll timer takes over. GUI-thread only, like set_repo_root.
+        """
+        self._clear_watcher()
+        self._cancel_repo_sentinel_backstop()
+        self._worktree_watcher.set_root("")
+        with self._lock:
+            self._remote_runner = runner
+            self._remote_root = remote_root
+            self._remote_mount = local_mount
+            self._status_map = {}
+            self._stats = GitStats()
+            self._resolved_root = ""
+            self._ignored_set = {}
+            self._branch_sync = GitBranchSync()
+            self._branch_name = ""
+        self.statusChanged.emit()
+        self.statsChanged.emit()
+        self.branchSyncChanged.emit()
+        self._remote_poll.start()
+        self._wake_worker()
+
+    def set_local(self) -> None:
+        """Back to local execution (leave the VPS location). Idempotent."""
+        with self._lock:
+            was_remote = self._remote_runner is not None
+            self._remote_runner = None
+            self._remote_root = ""
+            self._remote_mount = ""
+        self._remote_poll.stop()
+        if not was_remote:
+            return
+        with self._lock:
+            self._status_map = {}
+            self._stats = GitStats()
+            self._resolved_root = ""
+            self._ignored_set = {}
+            self._branch_sync = GitBranchSync()
+            self._branch_name = ""
+        self.statusChanged.emit()
+        self.statsChanged.emit()
+        self.branchSyncChanged.emit()
+        self._wake_worker()
+
+    def _remote_spec(
+        self,
+    ) -> (
+        tuple[
+            Callable[[list[str], float], subprocess.CompletedProcess | None], str, str
+        ]
+        | None
+    ):
+        """(runner, remote_root, local_mount) snapshot, or None when local."""
+        with self._lock:
+            if self._remote_runner is None:
+                return None
+            return (self._remote_runner, self._remote_root, self._remote_mount)
+
+    def _run_git(
+        self, args: list[str], cwd: str, timeout: float
+    ) -> subprocess.CompletedProcess | None:
+        """The single git-subprocess choke point (worker thread).
+
+        Local mode: today's ``subprocess.run(["git", *args], cwd=…)``.
+        Remote mode: delegate the full argv to the injected runner, which
+        executes ``git -C <remote_root> …`` on the paired server (cwd is
+        irrelevant there). Returns None instead of raising on ANY failure —
+        the call sites' error handling collapses to a None check with their
+        site-specific log message.
+        """
+        remote = self._remote_spec()
+        if remote is not None:
+            runner, remote_root, _mount = remote
+            return runner(["git", "-C", remote_root, *args], timeout)
+        try:
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            log.debug("git %s failed for %s: %s", args[:1], cwd, exc)
+            return None
 
     @Slot(str, result="QVariantMap")
     def statusForPath(self, absolute_path: str) -> dict:
@@ -1050,6 +1203,7 @@ class GitController(QObject):
         # controller's. Called on the GUI thread (shutdown).
         self._debounce.stop()
         self._sentinel_backstop.stop()
+        self._remote_poll.stop()
 
     # -- Worker thread -----------------------------------------------------
 
@@ -1087,10 +1241,19 @@ class GitController(QObject):
         with self._lock:
             repo_root = self._repo_root
         if not repo_root:
-            self._publish({}, "", GitStats(), {}, GitBranchSync())
+            self._publish({}, "", GitStats(), {}, GitBranchSync(), "")
             return
 
-        resolved = self._resolve_repo_root(repo_root)
+        remote = self._remote_spec()
+        if remote is not None:
+            # Remote mode: the mountpoint IS the resolved root (the pairing
+            # probe already proved `<remote_root>/.git` exists — no
+            # rev-parse round-trip), which is the whole path-translation
+            # trick: porcelain rel-paths join onto the mount and every
+            # published absolute path stays local.
+            _runner, _remote_root, resolved = remote
+        else:
+            resolved = self._resolve_repo_root(repo_root)
         if not resolved:
             # Not a git repo — clear map, emit (panel hides), and tear the
             # watchers down (empty root clears both the .git trigger files
@@ -1098,11 +1261,11 @@ class GitController(QObject):
             # STOPS being one mid-session (`.git` deleted) — without the
             # emit, the working-tree observer would keep firing into a
             # permanently-empty scan loop.
-            self._publish({}, "", GitStats(), {}, GitBranchSync())
+            self._publish({}, "", GitStats(), {}, GitBranchSync(), "")
             self._watcherRefreshRequested.emit("", "")
             return
 
-        new_map, branch_sync, upstream = self._run_status(resolved)
+        new_map, branch_sync, upstream, branch_name = self._run_status(resolved)
         if new_map is None:
             # Scan failed; preserve previous map rather than blink to empty
             # on a transient error (timeout, fsmonitor hiccup). The branch
@@ -1128,8 +1291,17 @@ class GitController(QObject):
         # Best-effort: on subprocess failure we publish an empty set
         # (the FM falls back to its per-dir check-ignore path).
         new_ignored = self._run_ignored_set(resolved)
-        self._publish(new_map, resolved, new_stats, new_ignored, branch_sync)
+        self._publish(
+            new_map, resolved, new_stats, new_ignored, branch_sync, branch_name
+        )
 
+        if remote is not None:
+            # Remote mode: NO watcher rebuild — inotify sees neither the
+            # SSHFS mount nor the server's .git (set_remote already cleared
+            # both watcher sets; the poll timer owns the refresh cadence).
+            # Emitting ("", "") here instead would arm the not-a-repo
+            # SENTINEL on the local project root — pointless churn.
+            return
         # Hand the watcher rebuild back to the GUI thread — QFileSystemWatcher
         # is not thread-safe and lives on `self`'s thread. `upstream` rides
         # along so `_install_watcher` arms the remote-ref watch off the same
@@ -1141,52 +1313,34 @@ class GitController(QObject):
 
         Empty string means "not a git repo" — callers branch on truthiness.
         """
-        try:
-            proc = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=asked,
-                capture_output=True,
-                timeout=_RESOLVE_TIMEOUT_SEC,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.debug("git rev-parse failed for %s: %s", asked, exc)
-            return ""
-        if proc.returncode != 0:
+        proc = self._run_git(
+            ["rev-parse", "--show-toplevel"], asked, _RESOLVE_TIMEOUT_SEC
+        )
+        if proc is None or proc.returncode != 0:
             return ""
         return proc.stdout.decode("utf-8", errors="replace").strip()
 
     def _run_status(
         self, cwd: str
-    ) -> tuple[dict[str, GitStatus] | None, GitBranchSync, str]:
+    ) -> tuple[dict[str, GitStatus] | None, GitBranchSync, str, str]:
         """Run ``git status --porcelain=v2 -z --branch`` and parse the output.
 
-        Returns ``(file_map, branch_sync, upstream_ref)``. ``file_map`` is
-        ``None`` on subprocess failure (the caller preserves the previous map)
-        and an empty dict on a clean tree. ``branch_sync`` + ``upstream_ref``
+        Returns ``(file_map, branch_sync, upstream_ref, branch_name)``.
+        ``file_map`` is ``None`` on subprocess failure (the caller preserves
+        the previous map) and an empty dict on a clean tree. The other three
         come from the same single ``git status`` invocation's ``--branch``
-        headers — no extra subprocess — and fall back to ``(GitBranchSync(),
-        "")`` on failure so the ahead/behind indicator clears rather than
-        freezes on the last good value.
+        headers — no extra subprocess — and fall back to empty defaults on
+        failure so the ahead/behind indicator clears rather than freezes on
+        the last good value.
         """
-        try:
-            proc = subprocess.run(
-                [
-                    "git",
-                    "status",
-                    "--porcelain=v2",
-                    "-z",
-                    "--branch",
-                    "--untracked-files=all",
-                ],
-                cwd=cwd,
-                capture_output=True,
-                timeout=_SCAN_TIMEOUT_SEC,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.warning("git status failed for %s: %s", cwd, exc)
-            return (None, GitBranchSync(), "")
+        proc = self._run_git(
+            ["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"],
+            cwd,
+            _SCAN_TIMEOUT_SEC,
+        )
+        if proc is None:
+            log.warning("git status failed for %s", cwd)
+            return (None, GitBranchSync(), "", "")
         if proc.returncode != 0:
             log.warning(
                 "git status exited %d for %s: %s",
@@ -1194,9 +1348,9 @@ class GitController(QObject):
                 cwd,
                 proc.stderr.decode("utf-8", errors="replace").strip(),
             )
-            return (None, GitBranchSync(), "")
-        branch_sync, upstream = parse_branch_header(proc.stdout)
-        return (parse_porcelain_v2(proc.stdout), branch_sync, upstream)
+            return (None, GitBranchSync(), "", "")
+        branch_sync, upstream, head = parse_branch_header(proc.stdout)
+        return (parse_porcelain_v2(proc.stdout), branch_sync, upstream, head)
 
     def _run_numstat_staged(self, cwd: str) -> dict[str, tuple[int, int]] | None:
         """Run ``git diff --cached --numstat -z`` and parse the output.
@@ -1226,23 +1380,10 @@ class GitController(QObject):
         ``--cached`` flag. ``-z`` makes path delimiters NUL so we can
         round-trip filenames containing tabs / newlines safely.
         """
-        cmd = ["git", "diff", "--cached" if cached else None, "--numstat", "-z"]
-        cmd = [c for c in cmd if c is not None]
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=cwd,
-                capture_output=True,
-                timeout=_SCAN_TIMEOUT_SEC,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.warning(
-                "git diff --numstat (cached=%s) failed for %s: %s",
-                cached,
-                cwd,
-                exc,
-            )
+        args = ["diff", "--cached" if cached else None, "--numstat", "-z"]
+        proc = self._run_git([a for a in args if a is not None], cwd, _SCAN_TIMEOUT_SEC)
+        if proc is None:
+            log.warning("git diff --numstat (cached=%s) failed for %s", cached, cwd)
             return None
         if proc.returncode != 0:
             log.warning(
@@ -1312,24 +1453,20 @@ class GitController(QObject):
         through to its own per-directory ``check-ignore`` path, which is
         slower but functionally equivalent.
         """
-        try:
-            proc = subprocess.run(
-                [
-                    "git",
-                    "ls-files",
-                    "--others",
-                    "--ignored",
-                    "--exclude-standard",
-                    "--directory",
-                    "-z",
-                ],
-                cwd=cwd,
-                capture_output=True,
-                timeout=_SCAN_TIMEOUT_SEC,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.warning("git ls-files (ignored) failed for %s: %s", cwd, exc)
+        proc = self._run_git(
+            [
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ],
+            cwd,
+            _SCAN_TIMEOUT_SEC,
+        )
+        if proc is None:
+            log.warning("git ls-files (ignored) failed for %s", cwd)
             return {}
         if proc.returncode != 0:
             log.warning(
@@ -1360,6 +1497,7 @@ class GitController(QObject):
         new_stats: GitStats,
         new_ignored: dict[str, bool],
         new_sync: GitBranchSync,
+        new_branch_name: str = "",
     ) -> None:
         """Swap the map + stats under the lock and emit change signals.
 
@@ -1375,17 +1513,21 @@ class GitController(QObject):
             old_root = self._resolved_root
             old_ignored = self._ignored_set
             old_sync = self._branch_sync
+            old_branch_name = self._branch_name
             self._status_map = new_map
             self._stats = new_stats
             self._resolved_root = resolved
             self._ignored_set = new_ignored
             self._branch_sync = new_sync
+            self._branch_name = new_branch_name
 
         map_or_root_changed = (
             old_map != new_map or old_root != resolved or old_ignored != new_ignored
         )
         stats_changed = old_stats != new_stats
-        sync_changed = old_sync != new_sync
+        # Branch NAME rides the same notify as ahead/behind — both are
+        # `# branch.*` header facts and share every consumer's refresh point.
+        sync_changed = old_sync != new_sync or old_branch_name != new_branch_name
 
         if map_or_root_changed:
             # Counting non-aggregate entries for the log line — directory

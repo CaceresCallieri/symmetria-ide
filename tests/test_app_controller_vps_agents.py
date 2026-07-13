@@ -16,7 +16,7 @@ import time
 import pytest
 from PySide6.QtCore import Qt
 
-from conftest import FakeRemoteContext
+from conftest import FakeRemoteContext, FakeSshfsMount
 from symmetria_ide import ssh_runner
 from symmetria_ide.app import AppController
 from symmetria_ide.server_registry import RemoteServer
@@ -44,6 +44,13 @@ def controller(monkeypatch):
     monkeypatch.setattr(
         "symmetria_ide.app.ssh_runner.close_control_master", lambda server: None
     )
+    # set_location("vps") runs the chrome swap, which would otherwise mount
+    # a REAL sshfs — the fake lands "mounted" synchronously instead.
+    FakeSshfsMount.instances = []
+    monkeypatch.setattr("symmetria_ide.app.SshfsMount", FakeSshfsMount)
+    # ...and the git worker's remote runner must never open a real ssh
+    # (tests that care about run_remote's argv re-patch this themselves).
+    monkeypatch.setattr("symmetria_ide.ssh_runner.run_remote", lambda *a, **k: None)
     # Local spawns must not depend on a claude binary on the test machine.
     monkeypatch.setattr("symmetria_ide.app.shutil.which", lambda name: f"/bin/{name}")
     ctrl = AppController()
@@ -560,3 +567,77 @@ def test_pairing_establishes_and_teardown_stops_hub_link(hub_controller):
     fake.set_paired(None)
     assert forward.stopped >= 1
     assert client.stopped == 1
+
+
+# ---------------------------------------------------------------------------
+# Chrome swap (Phase 3): git runner + tree mount follow the location.
+# ---------------------------------------------------------------------------
+
+
+class _GitSpy:
+    """Records GitController.set_remote / set_local calls."""
+
+    def __init__(self, ctrl: AppController) -> None:
+        self.remote_calls: list[tuple] = []
+        self.local_calls = 0
+        ctrl._git_controller.set_remote = lambda runner, remote_root, mount: (
+            self.remote_calls.append((runner, remote_root, mount))
+        )
+        ctrl._git_controller.set_local = lambda: setattr(
+            self, "local_calls", self.local_calls + 1
+        )
+
+
+def test_toggle_to_vps_swaps_git_and_tree(controller):
+    ctrl, _fake, _spy = controller
+    git_spy = _GitSpy(ctrl)
+    mounts: list[tuple] = []
+    ctrl.treeMountRequested.connect(lambda root, expanded: mounts.append(root))
+    ctrl.set_location("vps")
+    (mount,) = FakeSshfsMount.instances
+    assert mount.mount_calls == 1
+    assert git_spy.remote_calls and git_spy.remote_calls[0][1] == REMOTE_ROOT
+    assert git_spy.remote_calls[0][2] == mount.mountpoint
+    assert mounts and mounts[-1] == mount.mountpoint
+    assert ctrl.vpsProjectLabel == "vigilia-vps:fake"
+
+
+def test_toggle_back_restores_local_chrome(controller):
+    ctrl, _fake, _spy = controller
+    git_spy = _GitSpy(ctrl)
+    ctrl.set_location("vps")
+    mounts: list[str] = []
+    ctrl.treeMountRequested.connect(lambda root, expanded: mounts.append(root))
+    ctrl.set_location("local")
+    assert git_spy.local_calls == 1
+    assert mounts and mounts[-1] == ctrl.displayedRoot
+    # The mount is KEPT for the session (cheap re-toggle); only pairing
+    # loss / shutdown drop it.
+    (mount,) = FakeSshfsMount.instances
+    assert mount.unmount_calls == 0
+
+
+def test_mount_failure_falls_back_to_local_with_alert(controller):
+    ctrl, _fake, _spy = controller
+    _GitSpy(ctrl)
+
+    alerts = _capture(ctrl.locationAlert)
+    # Arrange the fake to land in "failed" instead of "mounted".
+    ctrl.set_location("vps")  # creates the mount (mounted) — reset it:
+    (mount,) = FakeSshfsMount.instances
+    ctrl.set_location("local")
+    mount.result_state = "failed"
+    mount._state = "unmounted"
+    ctrl.set_location("vps")
+    assert ctrl.location == "local"  # bounced back
+    assert any(entry[0] == "VPS files unavailable" for entry in alerts)
+
+
+def test_pairing_loss_drops_the_mount(controller):
+    ctrl, fake, _spy = controller
+    _GitSpy(ctrl)
+    ctrl.set_location("vps")
+    (mount,) = FakeSshfsMount.instances
+    fake.set_paired(None)
+    assert mount.unmount_calls == 1
+    assert ctrl._repo_mount is None
