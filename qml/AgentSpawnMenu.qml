@@ -46,10 +46,21 @@ ModalOverlay {
     // too loud, 15 still a touch big, 13 sits right next to the label.
     readonly property int _headerIconSize: 13
 
+    // In the VPS location the menu spawns/attaches REMOTE sessions: `o`
+    // (harness toggle) disappears — remote is claude-only in v1 — and `a`
+    // appears, opening the RemoteSessionPicker to attach an existing tmux
+    // session (usually phone-started). n/c/r keep their meaning, running
+    // remotely via ssh+tmux.
+    readonly property bool vpsMode: controller.location === "vps"
+
     // OpenCode resume needs a session id — Main.qml routes this to the
     // AgentSessionPicker overlay (carries the dangerous polarity the
     // user chose with the case of the `r` keypress).
     signal resumePickerRequested(bool dangerous)
+
+    // VPS attach — Main.qml routes this to the RemoteSessionPicker overlay
+    // (same handoff shape as resumePickerRequested).
+    signal attachPickerRequested(bool dangerous)
 
     // Override the base open() to reset the harness to the daily-driver
     // default before raising. reassert() (used by Main.qml's modal guard
@@ -85,7 +96,14 @@ ModalOverlay {
     onKeyPressed: function (event) {
         switch (event.key) {
         case Qt.Key_O:
-            root.harness = root.harness === "claude" ? "opencode" : "claude";
+            if (!root.vpsMode)  // remote is claude-only; no harness to toggle
+                root.harness = root.harness === "claude" ? "opencode" : "claude";
+            break;
+        case Qt.Key_A:
+            if (root.vpsMode) {
+                root.visible = false;
+                root.attachPickerRequested(!(event.modifiers & Qt.ShiftModifier));
+            }
             break;
         case Qt.Key_N:
             root._spawn("fresh", !(event.modifiers & Qt.ShiftModifier));
@@ -139,7 +157,8 @@ ModalOverlay {
 
         Text {
             anchors.verticalCenter: parent.verticalCenter
-            text: "Spawn agent #" + (controller.agentOrder.length + 1)
+            text: (root.vpsMode ? "Spawn VPS agent #" : "Spawn agent #")
+                  + (controller.agentOrder.length + 1)
             color: Theme.color.text.strong
             font.family: Theme.font.family
             font.pixelSize: Theme.font.size.sm
@@ -158,14 +177,23 @@ ModalOverlay {
     // width key cell. n/c/r spawn in the current harness; o toggles the
     // harness (its only behaviour — reflected by the header icon above).
     Repeater {
-        model: [
-            { key: "n", label: "new session" },
-            { key: "c", label: "continue" },
-            { key: "r", label: root.harness === "opencode"
-                               ? "resume (session picker)"
-                               : "resume (claude's picker)" },
-            { key: "o", label: "switch harness" },
-        ]
+        // The row set is location-dependent: vps swaps the harness toggle
+        // (`o`) for the attach row (`a` — the resume-a-phone-session flow).
+        model: root.vpsMode
+               ? [
+                   { key: "n", label: "new session" },
+                   { key: "c", label: "continue" },
+                   { key: "r", label: "resume (claude's picker)" },
+                   { key: "a", label: "attach tmux session" },
+               ]
+               : [
+                   { key: "n", label: "new session" },
+                   { key: "c", label: "continue" },
+                   { key: "r", label: root.harness === "opencode"
+                                      ? "resume (session picker)"
+                                      : "resume (claude's picker)" },
+                   { key: "o", label: "switch harness" },
+               ]
 
         delegate: Row {
             id: entryRow

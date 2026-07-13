@@ -16,17 +16,23 @@ from __future__ import annotations
 import logging
 import posixpath
 import threading
+import time
 from collections.abc import Callable
 
 from PySide6.QtCore import QObject, Qt, Signal
 
+from . import agent_harness
 from .agent_bridge import emit_gc_safe
 from .server_registry import RemoteServer, load_servers
-from .ssh_runner import run_remote
+from .ssh_runner import remote_command_argv, run_remote
 
 log = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT = 8.0
+
+# tmux list-sessions -F format for the attach picker: one row per session,
+# tab-separated so names with spaces survive (tmux names can't contain tabs).
+TMUX_LIST_FORMAT = "#{session_name}\t#{session_created}\t#{pane_current_path}"
 
 
 def remote_repo_path(server: RemoteServer, project_root: str) -> str:
@@ -47,6 +53,107 @@ def _default_probe(server: RemoteServer, project_root: str) -> bool:
         timeout=_PROBE_TIMEOUT,
     )
     return result is not None and result.returncode == 0
+
+
+def vps_tmux_session_name(project_root: str, slot: int) -> str:
+    """tmux session name for an IDE-spawned VPS agent: ``<repo>-vps-<slot>``.
+
+    Deliberately NOT ``agent_harness.tmux_session_name`` (its path-hash
+    suffix disambiguates same-basename projects across LOCAL cwds — remotely
+    there is exactly one repo per basename under repos_dir, and the hash
+    reads as noise in the phone app's session list). Slot-keyed, so a
+    restarted IDE re-attaches its own prior sessions via ``new-session -A``
+    instead of piling up fresh ones — the same idempotence the local tmux
+    substrate gets from stable names.
+    """
+    name = posixpath.basename(project_root.rstrip("/"))
+    return f"{name}-vps-{slot}"
+
+
+def parse_tmux_sessions(stdout: str, remote_root: str) -> list[dict]:
+    """Parse ``tmux list-sessions -F TMUX_LIST_FORMAT`` for the attach picker.
+
+    Keeps only sessions whose active pane cwd is the paired repo (or inside
+    it) — a session on another project is attach-able in principle but
+    meaningless in THIS project's picker. Rows are shaped for the picker
+    delegate: ``{"name", "when", "cwd"}``, newest first (matching the
+    opencode picker's recency ordering).
+    """
+    root = remote_root.rstrip("/")
+    rows: list[dict] = []
+    for line in stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        name, created_raw, cwd = parts[0], parts[1], parts[2]
+        if not name:
+            continue
+        if cwd != root and not cwd.startswith(root + "/"):
+            continue
+        try:
+            created = int(created_raw)
+        except ValueError:
+            created = 0
+        when = (
+            time.strftime("%Y-%m-%d %H:%M", time.localtime(created)) if created else ""
+        )
+        rows.append({"name": name, "when": when, "cwd": cwd, "created": created})
+    rows.sort(key=lambda row: row["created"], reverse=True)
+    for row in rows:
+        del row["created"]
+    return rows
+
+
+def remote_agent_argv(
+    server: RemoteServer,
+    record: dict,
+    *,
+    model: str = "",
+    effort: str = "",
+) -> list[str]:
+    """Local argv for a VPS agent pane: ssh -t → tmux new -A → claude.
+
+    The inner claude argv is deliberately MINIMAL compared to the local
+    ``agent_harness.spawn_argv``: no ``env SYMMETRIA_AGENT_ID`` wrapper, no
+    ``--settings`` reporter registration, no ``--mcp-config`` — the VPS
+    agent environment is Vigilia-managed (its hooks report to the server's
+    agent hub keyed by tmux session name; provision/04 installs them). Only
+    the launch-shaping flags travel: dangerous, spawn-type, and the
+    committed marker's model/effort defaults (the marker lives in the repo,
+    so the same defaults apply on both sides of the pairing).
+
+    ``spawn_type == "attach"`` produces an EMPTY inner argv — ``tmux
+    new-session -A`` with no command is a pure attach-or-shell, which is
+    exactly the resume-a-phone-session flow.
+    """
+    spec = agent_harness.HARNESSES[record.get("harness", "claude")]
+    inner: list[str] = []
+    spawn_type = record.get("spawn_type", "fresh")
+    if spawn_type != "attach":
+        inner = [spec.executable]
+        if record.get("dangerous") and spec.dangerous_flag:
+            inner.append(spec.dangerous_flag)
+        inner += list(spec.flags.get(spawn_type, []))
+        if model and spec.model_flag:
+            inner += [spec.model_flag, model]
+        if effort and spec.effort_flag:
+            if not spec.valid_efforts or effort in spec.valid_efforts:
+                inner += [spec.effort_flag, effort]
+            else:
+                log.warning(
+                    "remote_agent_argv: effort %r not in %s's set — skipped",
+                    effort,
+                    spec.name,
+                )
+    wrapped = agent_harness.tmux_wrap(
+        inner,
+        server.tmux_socket,
+        record["tmux_session"],
+        # No conf_path: the VPS tmux server runs Vigilia's mobile-adapted
+        # config (setup/11) — injecting the IDE's local conf would fight it.
+        start_directory=record["remote_root"],
+    )
+    return remote_command_argv(server, wrapped, tty=True)
 
 
 class RemoteContext(QObject):

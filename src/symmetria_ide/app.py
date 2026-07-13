@@ -90,6 +90,7 @@ from .project_browser_marker import (
     resolve_project_root,
     set_browser_agents,
 )
+from . import remote_location
 from .remote_location import RemoteContext
 from . import ssh_runner
 from .tree_state_cache import load_expanded, save_expanded
@@ -507,6 +508,15 @@ class AppController(QObject):
     # Internal cross-thread marshal for the above: the session-list
     # worker emits this; a queued connection re-emits on the GUI thread.
     _opencode_sessions_fetched = Signal(dict)
+    # QML-facing result of `request_remote_tmux_sessions` for the VPS
+    # attach picker: {"ok": bool, "sessions": [{name, when, cwd}, ...]} —
+    # same ok/empty semantics as opencodeSessionsReady above.
+    remoteTmuxSessionsReady = Signal(dict)
+    # Internal cross-thread marshal for the above (same pattern).
+    _remote_tmux_sessions_fetched = Signal(dict)
+    # Internal cross-thread marshal for kill_remote_agent's worker: carries
+    # the slot whose remote tmux session was killed (close follows on GUI).
+    _remote_kill_done = Signal(int)
     # Location toggle (Local ↔ VPS). `locationChanged` notifies the QML-facing
     # `location` property; `vpsAvailabilityChanged` notifies `vpsAvailable` +
     # `vpsServerName` (pairing-probe result — the toggle control only renders
@@ -723,7 +733,15 @@ class AppController(QObject):
         # overlay visibility change. See agent_interrupt.py.
         self._modal_overlay_open: bool = False
         # 0 = no agent focused (empty pool). 1-based slot otherwise.
+        # INVARIANT (location toggle): 0, or a slot whose record location
+        # matches self._location — enforced by focus_agent (which switches
+        # the location to follow a cross-location focus) and by the
+        # set_location handoff below.
         self._focused_term_agent: int = 0
+        # Per-location focus memory for the location-toggle handoff: leaving
+        # a location stashes its focused slot here so returning restores it
+        # (falling back to the location's first ordered slot, then 0).
+        self._focused_by_location: dict[str, int] = {"local": 0, "vps": 0}
         # STT indicator mirrored from snapshot "stt" (0 = no dictation
         # targeting one of our agents). See sttStateChanged.
         self._stt_target_slot: int = 0
@@ -821,6 +839,23 @@ class AppController(QObject):
         # the bridge — it's a direct shell→IDE round-trip on _agent_events. The
         # former inject_requested → _on_bridge_inject wiring was removed; the
         # subscription above stays for opencode activity snapshots.
+        # ----- VPS hub link (location toggle, Phase 2) ---------------------
+        # Sparkles for VPS agents: the paired server runs agent_hub.py (this
+        # repo's headless hub, vendored there by Vigilia) keyed by tmux
+        # session name. We forward its Unix socket over `ssh -N -L` and point
+        # a SECOND AgentBridgeClient at the local end — subscribe-only (the
+        # hub ignores publisher verbs). Created on pairing, torn down on
+        # pairing loss / shutdown. `_on_hub_snapshot` owns ONLY vps-location
+        # slots; `_on_bridge_snapshot` owns the rest (disjointness is the
+        # correctness invariant — see both handlers).
+        self._hub_forward: ssh_runner.SocketForward | None = None
+        self._hub_bridge: AgentBridgeClient | None = None
+        # Forward restart backoff (2s → 30s cap, reset on pairing changes).
+        # Armed only while paired; SocketForward.lost triggers it.
+        self._hub_retry_delay: float = 2.0
+        self._hub_retry_timer = QTimer(self)
+        self._hub_retry_timer.setSingleShot(True)
+        self._hub_retry_timer.timeout.connect(self._restart_hub_forward)
         # ----- Local agent capture (agent-ownership inversion, Phase 1) -----
         # The IDE owns its OWN agents' activity + session_id instead of
         # round-tripping through the shell bridge: each IDE-spawned claude agent
@@ -874,6 +909,17 @@ class AppController(QObject):
         # the GUI thread (§4 P2).
         self._opencode_sessions_fetched.connect(
             self._on_opencode_sessions, Qt.ConnectionType.QueuedConnection
+        )
+        # queued: _remote_tmux_sessions_fetched originates on the one-shot
+        # remote list-sessions worker thread; the QML-facing re-emit must
+        # run on the GUI thread (§4 P2).
+        self._remote_tmux_sessions_fetched.connect(
+            self._on_remote_tmux_sessions, Qt.ConnectionType.QueuedConnection
+        )
+        # queued: _remote_kill_done originates on the one-shot kill worker
+        # thread; close_agent mutates GUI-thread pool state (§4 P2).
+        self._remote_kill_done.connect(
+            self._on_remote_kill_done, Qt.ConnectionType.QueuedConnection
         )
         # ----- Backend signal wiring (chrome rpcnotify relays) -----------
         # These signals originate on the NvimBackend worker thread; Qt's
@@ -992,6 +1038,9 @@ class AppController(QObject):
         # reachable while paired, and a project switch force-resets to
         # "local" before re-probing (a pairing never survives a root change).
         self._location: str = "local"
+        # One-shot deferred smoke spawn (see start()'s SYMMETRIA_IDE_SPAWN_AGENT
+        # hook): (spawn_type, harness) waiting for the pairing probe to land.
+        self._pending_vps_smoke_spawn: tuple[str, str] | None = None
         self._remote_context = RemoteContext(self)
         # same-thread: pairingChanged fires on the GUI thread (RemoteContext
         # marshals its probe-worker result through an internal queued
@@ -1992,14 +2041,55 @@ class AppController(QObject):
             )
             self.locationAlert.emit("VPS not available", detail)
             return
-        self._location = location
+        self._switch_location(location)
         log.info("location: switched to %s", location)
-        self.locationChanged.emit()
 
     @Slot()
     def toggle_location(self) -> None:
         """Chord-facing wrapper (Ctrl+Shift+U): flip local ↔ vps."""
         self.set_location("vps" if self._location == "local" else "local")
+
+    def _switch_location(self, location: str) -> None:
+        """Unguarded location flip + signal fan-out + agent-focus handoff.
+
+        The single internal funnel behind set_location and the two forced
+        paths (project switch, pairing loss). `termAgentsChanged` rides
+        along because `agentOrder` is location-filtered — the chip strip
+        must re-evaluate the moment the location flips.
+        """
+        if location == self._location:
+            return
+        old_location = self._location
+        self._location = location
+        self.locationChanged.emit()
+        self.termAgentsChanged.emit()
+        self._handoff_agent_focus(old_location)
+
+    def _handoff_agent_focus(self, old_location: str) -> None:
+        """Restore the new location's remembered agent focus on toggle.
+
+        Stashes the old location's focused slot, then focuses the new
+        location's remembered slot if it's still alive, else its first
+        ordered slot, else 0 (empty pool → the agent surface shows its
+        empty-state hint). Deliberately does NOT route through focus_agent:
+        that would force the central surface to "agent", and a location
+        toggle must swap context under the CURRENT surface, not yank the
+        user to a different one.
+        """
+        self._focused_by_location[old_location] = self._focused_term_agent
+        order = self._ordered_slots_for_location()
+        target = self._focused_by_location.get(self._location, 0)
+        if target not in order:
+            target = order[0] if order else 0
+        if target != self._focused_term_agent:
+            self._focused_term_agent = target
+            self.focusedAgentChanged.emit()
+        if target:
+            self._focused_by_location[self._location] = target
+            if self._central_surface == "agent":
+                # Only when the agent surface is what the user is looking at
+                # does the pane need real keyboard focus right now.
+                self.focusAgentRequested.emit(target)
 
     def _reprobe_vps_pairing(self) -> None:
         """Root changed: drop to local silently, re-probe the new root.
@@ -2009,9 +2099,7 @@ class AppController(QObject):
         `displayedRootChanged`; also covers the startup seed via start()'s
         synthetic emit.
         """
-        if self._location != "local":
-            self._location = "local"
-            self.locationChanged.emit()
+        self._switch_location("local")
         self._remote_context.probe(self.displayedRoot)
 
     def _on_vps_pairing_changed(self) -> None:
@@ -2020,14 +2108,27 @@ class AppController(QObject):
         The safety net covers pairing being LOST while the user sits in the
         vps context (registry edited, probe of a new root cleared it) — the
         context must never point at a server we no longer trust as paired.
+        Establishing a pairing also (re)establishes the hub link (sparkles
+        for VPS agents); losing it tears the link down.
         """
         self.vpsAvailabilityChanged.emit()
-        if self._location == "vps" and not self._remote_context.paired:
-            self._location = "local"
-            self.locationChanged.emit()
-            self.locationAlert.emit(
-                "VPS unavailable", "Pairing lost — switched back to local."
-            )
+        if self._remote_context.paired:
+            self._ensure_hub_link()
+            # One-shot deferred smoke spawn (SYMMETRIA_IDE_SPAWN_AGENT with
+            # SYMMETRIA_IDE_SPAWN_AGENT_LOCATION=vps) — the probe just paired.
+            pending = self._pending_vps_smoke_spawn
+            if pending is not None:
+                self._pending_vps_smoke_spawn = None
+                spawn_type, harness = pending
+                self.set_location("vps")
+                self.spawn_agent(spawn_type, True, harness)
+        else:
+            self._teardown_hub_link()
+            if self._location == "vps":
+                self._switch_location("local")
+                self.locationAlert.emit(
+                    "VPS unavailable", "Pairing lost — switched back to local."
+                )
 
     def _refresh_project_browser_enabled(self) -> None:
         """Re-read the `.symmetria/ide.json` marker for the current project
@@ -2520,7 +2621,10 @@ class AppController(QObject):
         fire. The three singleton surfaces (terminal/editor/git) always exist.
         """
         if surface == "agent":
-            return bool(self._agent_order)
+            # Location-aware: the agent surface renders the ACTIVE location's
+            # pool; agents parked in the other location don't make it
+            # navigable (they're reached by toggling location first).
+            return bool(self._ordered_slots_for_location())
         if surface == "browser":
             return bool(self._browser_order)
         return True
@@ -2668,6 +2772,23 @@ class AppController(QObject):
     def maxAgentSlots(self) -> int:
         return self._MAX_INSTANCES
 
+    def _agent_location(self, slot: int) -> str:
+        """A pool slot's location tag ("local" default for pre-toggle records)."""
+        return self._term_agents.get(slot, {}).get("location", "local")
+
+    def _ordered_slots_for_location(self, location: str | None = None) -> list[int]:
+        """`_agent_order` filtered to one location (default: the active one).
+
+        The single source for every display-order consumer — the chip
+        strip / Ctrl+N (via `agentOrder`), Ctrl+Shift+H/L cycling, and
+        close-refocus — so dense numbering is always per-location and the
+        three can't drift apart.
+        """
+        wanted = location if location is not None else self._location
+        return [
+            slot for slot in self._agent_order if self._agent_location(slot) == wanted
+        ]
+
     @Property("QVariantList", notify=termAgentsChanged)
     def agentOrder(self) -> list:
         """Internal slots in DISPLAY order — the AgentTopBar chip model.
@@ -2680,8 +2801,15 @@ class AppController(QObject):
         SYMMETRIA_AGENT_ID env and the bridge identity, so they cannot
         renumber post-spawn. New spawns append (the newest agent is
         always the highest number).
+
+        Filtered to the ACTIVE LOCATION (location toggle): the Local tab
+        shows local agents, the VPS tab shows VPS agents, each with its
+        own dense 1..N numbering. The physical `_agent_order` keeps both;
+        `agentSlotActive` below deliberately stays location-BLIND so the
+        other location's panes survive a toggle (their Loaders never
+        deactivate — visibility is gated by focus, not by this list).
         """
-        return list(self._agent_order)
+        return self._ordered_slots_for_location()
 
     @Property("QVariantList", notify=termAgentsChanged)
     def agentSlotActive(self) -> list:
@@ -2878,7 +3006,25 @@ class AppController(QObject):
         if spec is None:
             log.warning("spawn_agent: unknown harness %r — no-op", harness)
             return
-        if shutil.which(spec.executable) is None:
+        vps = self._location == "vps"
+        if vps:
+            # Remote spawns are claude-only in v1 (opencode isn't provisioned
+            # on the Vigilia server) and resolve their executable on the VPS,
+            # so the local PATH check below is skipped.
+            if harness != "claude":
+                log.warning(
+                    "spawn_agent: %s not available on the VPS — claude only",
+                    harness,
+                )
+                self.locationAlert.emit(
+                    "VPS agents are claude-only",
+                    f"{harness} is not provisioned on the server.",
+                )
+                return
+            if self._remote_context.server is None:
+                log.warning("spawn_agent: vps location without a pairing — no-op")
+                return
+        elif shutil.which(spec.executable) is None:
             log.error(
                 "spawn_agent: `%s` not found on PATH — cannot spawn", spec.executable
             )
@@ -2893,7 +3039,7 @@ class AppController(QObject):
             log.warning("spawn_agent: pool full (%d slots)", self._MAX_INSTANCES)
             return
         cwd = self.displayedRoot
-        self._term_agents[slot] = {
+        record = {
             "spawn_type": spawn_type,
             "dangerous": dangerous,
             "harness": harness,
@@ -2912,26 +3058,62 @@ class AppController(QObject):
             # agent's whole lifetime regardless of later root changes.
             "tmux_session": agent_harness.tmux_session_name(cwd, slot),
         }
-        # Display ordering: new agents always APPEND — the newest agent
-        # is the highest chip number, and closing compacts (agentOrder).
-        # A previous iteration had a slot-targeted spawn here
-        # (spawn_agent_in_slot, for Ctrl+N-on-empty); dense order-based
-        # numbering superseded it — the position an agent gets is always
-        # len(order)+1 regardless of which chord opened the menu.
-        self._agent_order.append(slot)
-        self.termAgentsChanged.emit()
-        self._agent_bridge.notify_spawn(self._term_instance_payload(slot))
-        # Publish the new slot to the cross-IDE registry (a resume carries its
-        # session id already; a fresh agent's binds on its first hook event).
-        self._sync_agent_registry()
+        if vps:
+            server = self._remote_context.server
+            assert server is not None  # guarded above
+            record.update(self._vps_record_fields(server, slot, spawn_type))
+        self._register_term_agent(slot, record)
         log.info(
-            "spawn_agent: slot %d (%s %s%s) in %s",
+            "spawn_agent: slot %d (%s %s%s) in %s%s",
             slot,
             harness,
             spawn_type,
             " ⚠ dangerous" if dangerous else "",
-            cwd,
+            record["cwd"],
+            f" [vps:{record['server'].name}]" if vps else "",
         )
+
+    def _vps_record_fields(self, server, slot: int, spawn_type: str) -> dict:
+        """The record fields that make a pool slot a VPS agent.
+
+        - `cwd` becomes the REMOTE repo path (the bridge payload's project
+          label and the tmux start-directory both derive from it).
+        - `tmux_session` uses the vps naming (`<repo>-vps-<slot>` — readable
+          in the phone's session list, per the user's naming decision) and
+          `tmux_socket` is set EAGERLY: for vps agents the tmux wrap is
+          unconditional, and kill_remote_agent gates on it.
+        """
+        remote_root = self._remote_context.remote_root
+        return {
+            "location": "vps",
+            "server": server,
+            "remote_root": remote_root,
+            "cwd": remote_root,
+            "tmux_session": remote_location.vps_tmux_session_name(
+                self.displayedRoot, slot
+            ),
+            "tmux_socket": server.tmux_socket,
+        }
+
+    def _register_term_agent(self, slot: int, record: dict) -> None:
+        """Insert a slot record into the pool and surface it (shared tail of
+        `spawn_agent` and `attach_remote_session`).
+
+        Display ordering: new agents always APPEND — the newest agent is the
+        highest chip number in its location, and closing compacts
+        (agentOrder). VPS records are NOT published to the shell bridge nor
+        the cross-IDE registry: they are not this machine's agents — the
+        server's agent hub owns their identity (keyed by tmux session name)
+        and the phone/dashboard already sees them through it.
+        """
+        self._term_agents[slot] = record
+        self._agent_order.append(slot)
+        self.termAgentsChanged.emit()
+        if record.get("location", "local") == "local":
+            self._agent_bridge.notify_spawn(self._term_instance_payload(slot))
+            # Publish the new slot to the cross-IDE registry (a resume carries
+            # its session id already; a fresh agent binds on its first hook).
+            self._sync_agent_registry()
         self.focus_agent(slot)
 
     @Slot(int, result="QVariantList")
@@ -2949,6 +3131,21 @@ class AppController(QObject):
         if inst is None:
             log.warning("agent_spawn_argv: slot %d not in pool", slot)
             return []
+        if inst.get("location") == "vps":
+            # VPS agents: ssh -t → tmux new -A on the shared socket → claude.
+            # Deliberately none of the local machinery below (env wrapper,
+            # reporter --settings, MCP config) — the VPS agent environment is
+            # Vigilia-managed and its hub keys agents by tmux session name.
+            # Model/effort defaults still apply: the marker is committed, so
+            # the same repo carries the same defaults on both sides.
+            server = inst.get("server")
+            if server is None:
+                log.error("agent_spawn_argv: vps slot %d has no server", slot)
+                return []
+            model, effort = harness_model_effort(self.displayedRoot, inst["harness"])
+            return remote_location.remote_agent_argv(
+                server, inst, model=model, effort=effort
+            )
         spec = agent_harness.HARNESSES.get(inst["harness"])
         if spec is None:
             # spawn_agent validates before storing, so this only fires if
@@ -3096,6 +3293,20 @@ class AppController(QObject):
         if slot not in self._term_agents:
             log.info("focus_agent: slot %d empty — no-op", slot)
             return
+        # Location-follow: focusing a slot from the OTHER location (shell
+        # dashboard click, programmatic focus) switches the location so the
+        # chip strip + chrome match what's on screen — the focusedAgent
+        # invariant (0 or a current-location slot) is enforced here. The
+        # direct field write (not set_location) is deliberate: set_location's
+        # pairing guard could refuse, and the handoff would re-enter focus.
+        slot_location = self._agent_location(slot)
+        if slot_location != self._location:
+            self._focused_by_location[self._location] = self._focused_term_agent
+            self._location = slot_location
+            self.locationChanged.emit()
+            # agentOrder is location-filtered — the chip strip re-evaluates.
+            self.termAgentsChanged.emit()
+        self._focused_by_location[slot_location] = slot
         if self._focused_term_agent != slot:
             self._focused_term_agent = slot
             self.focusedAgentChanged.emit()
@@ -3103,7 +3314,10 @@ class AppController(QObject):
         # means the user is looking at this agent — the badge served its purpose.
         if self._agent_coord_attention.pop(slot, None) is not None:
             self.agentCoordChanged.emit()
-        self._agent_bridge.notify_focus(slot)
+        if slot_location == "local":
+            # VPS agents aren't published to the shell bridge — a focus
+            # notification for an unknown buf would be dropped there anyway.
+            self._agent_bridge.notify_focus(slot)
         self.set_central_surface("agent")
         self.focusAgentRequested.emit(slot)
 
@@ -3271,7 +3485,10 @@ class AppController(QObject):
         surface. Display order (not sorted internal slots) so cycling
         matches the chip strip left-to-right.
         """
-        order = self._agent_order
+        # Cycle within the ACTIVE location's display order — matches the
+        # visible chip strip (the other location's agents are reachable by
+        # toggling location, not by cycling through them invisibly).
+        order = self._ordered_slots_for_location()
         if not order:
             return
         if self._focused_term_agent not in order:
@@ -3294,12 +3511,30 @@ class AppController(QObject):
         if slot not in self._term_agents:
             log.warning("close_agent: slot %d not in pool — no-op", slot)
             return
-        # tmux substrate: a clean close KILLS the agent's session, preserving the
-        # pre-tmux "close = gone" semantics for this first increment (letting a
-        # close DETACH so the agent survives is a deliberate later step). The
-        # helper self-gates on the socket recorded at spawn — a no-op when the
-        # agent never went into tmux. Runs before the record is dropped below.
-        self._kill_agent_tmux_session(self._term_agents[slot])
+        inst = self._term_agents[slot]
+        if inst.get("location") == "vps":
+            # VPS close = DETACH: dropping the record deactivates the Loader,
+            # killing the local ssh client → tmux detaches; the session (and
+            # the claude inside it) keeps running on the server, still
+            # phone-visible. The destructive sibling is kill_remote_agent
+            # (Ctrl+Shift+K + confirm). Toast suppressed after an explicit
+            # kill ("still running" would be a lie) or a connection-loss
+            # close that already alerted (on_agent_finished).
+            if not inst.get("killed") and not inst.get("suppress_detach_toast"):
+                server = inst.get("server")
+                self.locationAlert.emit(
+                    "Detached",
+                    f"{inst.get('tmux_session', 'session')} keeps running on "
+                    f"{server.name if server is not None else 'the server'}.",
+                )
+        else:
+            # tmux substrate (local): a clean close KILLS the agent's session,
+            # preserving the pre-tmux "close = gone" semantics for this first
+            # increment (letting a local close DETACH is a deliberate later
+            # step). The helper self-gates on the socket recorded at spawn — a
+            # no-op when the agent never went into tmux. Runs before the
+            # record is dropped below.
+            self._kill_agent_tmux_session(inst)
         if slot not in self._agent_order:
             # Defensive: _term_agents and _agent_order should always be in sync.
             # A desync here (double-close race or logic bug) would raise ValueError
@@ -3318,28 +3553,40 @@ class AppController(QObject):
             self.termAgentsChanged.emit()
             self._agent_bridge.notify_remove(slot)
             return
-        closed_position = self._agent_order.index(slot)
+        # Display position within the closing agent's OWN location — the
+        # numbering the user sees is per-location, so refocus targets the
+        # left neighbour in that same filtered order.
+        location = self._agent_location(slot)
+        location_order = self._ordered_slots_for_location(location)
+        closed_position = location_order.index(slot)
         # Coordination prune BEFORE the order compaction so a cancellation
         # message can still name the closing agent's display number.
         self._on_coord_agent_closed(slot)
         self._agent_order.remove(slot)
+        location_order.remove(slot)
+        was_vps = location == "vps"
         del self._term_agents[slot]
         self._term_agent_activity.pop(slot, None)
         self._cancel_pending_interrupt_clear(slot)
         self._forget_local_agent(slot)
         self._release_agent_browser_windows(slot)
+        if self._focused_by_location.get(location) == slot:
+            self._focused_by_location[location] = 0
         self.termAgentsChanged.emit()
         self.agentActivityChanged.emit()
-        self._agent_bridge.notify_remove(slot)
+        if not was_vps:
+            # VPS slots were never published to the shell bridge (see
+            # _register_term_agent) — a remove for an unknown buf is noise.
+            self._agent_bridge.notify_remove(slot)
         log.info("close_agent: slot %d closed", slot)
         if self._focused_term_agent == slot:
-            if not self._agent_order:
+            if not location_order:
                 self._focused_term_agent = 0
                 self.focusedAgentChanged.emit()
                 if self._central_surface == "agent":
                     self.set_central_surface("terminal")
             else:
-                self.focus_agent(self._agent_order[max(0, closed_position - 1)])
+                self.focus_agent(location_order[max(0, closed_position - 1)])
 
     def _kill_agent_tmux_session(self, inst: dict) -> None:
         """Best-effort `tmux kill-session` for a closing agent (tmux substrate).
@@ -3394,6 +3641,25 @@ class AppController(QObject):
             return
         lifetime = time.monotonic() - inst.get("spawn_mono", 0.0)
         log.info("on_agent_finished: slot %d exited (lifetime %.1fs)", slot, lifetime)
+        if inst.get("location") == "vps":
+            # For a VPS slot the finished process is the local SSH CLIENT, not
+            # the agent — this fires on detach (`d` inside tmux), a network
+            # drop, or a failed attach; the remote session is (usually) still
+            # alive. Never run the local failed-start heuristics: a fast death
+            # here means ssh/tmux couldn't attach, so say THAT, and suppress
+            # close_agent's "detached, still running" toast which would be
+            # misleading right after a failure alert.
+            server = inst.get("server")
+            if lifetime < self._AGENT_FAST_DEATH_SECONDS:
+                inst["suppress_detach_toast"] = True
+                self.locationAlert.emit(
+                    "VPS agent attach failed",
+                    f"ssh to {server.name if server is not None else 'server'} "
+                    f"exited {lifetime:.1f}s after launch — check connectivity "
+                    "and the shared tmux socket.",
+                )
+            self.close_agent(slot)
+            return
         if lifetime < self._AGENT_FAST_DEATH_SECONDS:
             self._alert_agent_spawn_failed(slot, inst, lifetime)
         self.close_agent(slot)
@@ -3408,9 +3674,7 @@ class AppController(QObject):
         position (the dense chip number) is read BEFORE close_agent compacts
         the order.
         """
-        display_pos = (
-            self._agent_order.index(slot) + 1 if slot in self._agent_order else slot
-        )
+        display_pos = self._display_position(slot)
         harness = inst.get("harness", "claude")
         title = f"Agent #{display_pos} ({harness}) failed to start"
         low, mem_note = _memory_pressure_note()
@@ -3825,15 +4089,22 @@ class AppController(QObject):
         registrant_slot = self._agent_slot_from_id(registrant_id)
         if registrant_slot is None or registrant_slot not in self._term_agents:
             return {"ok": False, "error": "unknown-agent (untagged caller?)"}
+        # Coordination is LOCAL-only in v1: registrants are always local
+        # (VPS agents never carry the <pid>_<slot> header), and the chip
+        # numbers a local agent's user sees are the LOCAL location's dense
+        # order — resolve against that, never the vps chips. Watching a VPS
+        # agent is unsupported (the judge reads local transcripts).
+        local_order = self._ordered_slots_for_location("local")
         if not isinstance(display_num, int) or not (
-            1 <= display_num <= len(self._agent_order)
+            1 <= display_num <= len(local_order)
         ):
             return {
                 "ok": False,
                 "error": f"no agent #{display_num} — there are "
-                f"{len(self._agent_order)} agents",
+                f"{len(local_order)} local agents (VPS agents cannot be "
+                "watched in v1)",
             }
-        watched_slot = self._agent_order[display_num - 1]
+        watched_slot = local_order[display_num - 1]
         watched = self._term_agents[watched_slot]
         result = self._coordination.register(
             watched_slot,
@@ -3876,8 +4147,10 @@ class AppController(QObject):
 
     def _display_position(self, slot: int) -> int:
         """1-based chip number for an internal slot (falls back to the slot
-        itself if it already left the display order)."""
-        return self._agent_order.index(slot) + 1 if slot in self._agent_order else slot
+        itself if it already left the display order). Numbering is dense
+        PER LOCATION (the chip strip the user sees is location-filtered)."""
+        order = self._ordered_slots_for_location(self._agent_location(slot))
+        return order.index(slot) + 1 if slot in order else slot
 
     def _on_coord_busy(self, slot: int) -> None:
         """Busy edge: cancel the slot's pending settle timer (idle flicker)."""
@@ -4345,6 +4618,204 @@ class AppController(QObject):
     def _on_opencode_sessions(self, payload: dict) -> None:
         """GUI-thread re-emit of the worker's session-list result."""
         self.opencodeSessionsReady.emit(payload)
+
+    # ----- VPS agents: attach picker + explicit remote kill ---------------
+
+    @Slot()
+    def request_remote_tmux_sessions(self) -> None:
+        """Fetch the paired server's tmux sessions for the VPS attach picker.
+
+        Lists the SHARED socket (`server.tmux_socket`) — the same sessions
+        the phone app sees — filtered to this project's remote repo by pane
+        cwd, minus the ones this pool already has attached. Async on a
+        one-shot daemon thread (network ssh must never block the GUI);
+        result arrives via remoteTmuxSessionsReady. Template:
+        request_opencode_sessions above.
+        """
+        server = self._remote_context.server
+        remote_root = self._remote_context.remote_root
+        if server is None:
+            self.remoteTmuxSessionsReady.emit({"ok": False, "sessions": []})
+            return
+        attached = {
+            inst.get("tmux_session", "")
+            for inst in self._term_agents.values()
+            if inst.get("location") == "vps"
+        }
+        threading.Thread(
+            target=self._fetch_remote_tmux_sessions,
+            args=(server, remote_root, attached),
+            daemon=True,
+            name="vps-tmux-session-list",
+        ).start()
+
+    def _fetch_remote_tmux_sessions(
+        self, server, remote_root: str, attached: set[str]
+    ) -> None:
+        """Worker-thread body of request_remote_tmux_sessions (one-shot).
+
+        Every path MUST reach the emit — the picker would otherwise stick
+        in "loading" (same contract as _fetch_opencode_sessions). A missing
+        tmux server (`no server running`) is exit 1 with no sessions — a
+        legitimate empty result, not an error.
+        """
+        sessions: list[dict] | None = None
+        try:
+            result = ssh_runner.run_remote(
+                server,
+                [
+                    "tmux",
+                    "-S",
+                    server.tmux_socket,
+                    "list-sessions",
+                    "-F",
+                    remote_location.TMUX_LIST_FORMAT,
+                ],
+                timeout=10,
+            )
+            if result is None:
+                log.error("remote tmux list-sessions: transport failure")
+            elif result.returncode != 0:
+                stderr = (result.stderr or "").strip()
+                if "no server running" in stderr or "No such file" in stderr:
+                    sessions = []  # empty socket = genuinely no sessions
+                else:
+                    log.error(
+                        "remote tmux list-sessions exited %d: %s",
+                        result.returncode,
+                        stderr,
+                    )
+            else:
+                rows = remote_location.parse_tmux_sessions(result.stdout, remote_root)
+                sessions = [row for row in rows if row["name"] not in attached]
+        except Exception:
+            log.exception("remote tmux list-sessions failed")
+        emit_gc_safe(
+            self._remote_tmux_sessions_fetched,
+            {"ok": sessions is not None, "sessions": sessions or []},
+        )
+
+    def _on_remote_tmux_sessions(self, payload: dict) -> None:
+        """GUI-thread re-emit of the worker's remote session-list result."""
+        self.remoteTmuxSessionsReady.emit(payload)
+
+    @Slot(str, bool)
+    def attach_remote_session(self, name: str, dangerous: bool) -> None:
+        """Attach an EXISTING VPS tmux session (usually phone-started) to a
+        pool slot — the resume flow of the location toggle.
+
+        `spawn_type="attach"` makes remote_agent_argv wrap an EMPTY inner
+        argv: `tmux new-session -A -s <name>` is a pure attach when the
+        session exists. `dangerous` is recorded for bookkeeping symmetry
+        (the running claude inside the session already has its own
+        permission mode; we don't relaunch it).
+        """
+        if self._location != "vps" or self._remote_context.server is None:
+            log.warning("attach_remote_session: not in a paired vps context")
+            return
+        if not name:
+            log.warning("attach_remote_session: empty session name — no-op")
+            return
+        for slot, inst in self._term_agents.items():
+            if inst.get("location") == "vps" and inst.get("tmux_session") == name:
+                log.info("attach_remote_session: %s already at slot %d", name, slot)
+                self.focus_agent(slot)
+                return
+        slot = self._next_free_term_slot()
+        if slot is None:
+            log.warning("attach_remote_session: pool full (%d)", self._MAX_INSTANCES)
+            return
+        server = self._remote_context.server
+        record = {
+            "spawn_type": "attach",
+            "dangerous": dangerous,
+            "harness": "claude",
+            "session_id": "",
+            "cwd": self._remote_context.remote_root,
+            "title": "",
+            "spawned_at": int(time.time()),
+            "spawn_mono": time.monotonic(),
+            "location": "vps",
+            "server": server,
+            "remote_root": self._remote_context.remote_root,
+            # The EXISTING session's name — not the slot-derived vps name.
+            "tmux_session": name,
+            "tmux_socket": server.tmux_socket,
+        }
+        self._register_term_agent(slot, record)
+        log.info("attach_remote_session: slot %d ← %s@%s", slot, name, server.name)
+
+    @Slot(int, result=str)
+    def agent_tmux_session_name(self, slot: int) -> str:
+        """The slot's tmux session name ("" when none) — confirm-dialog text."""
+        return str(self._term_agents.get(slot, {}).get("tmux_session", ""))
+
+    @Slot(int)
+    def kill_remote_agent(self, slot: int) -> None:
+        """Explicitly KILL a VPS agent's tmux session (then close the slot).
+
+        The deliberate destructive sibling of close_agent's detach: the
+        session (and the claude inside it) dies on the server, disappearing
+        from the phone too. QML fronts this with a ConfirmDialog. The kill
+        runs on a one-shot daemon worker (network); the slot closes when it
+        reports back, so a slow/failed kill never wedges the GUI.
+        """
+        inst = self._term_agents.get(slot)
+        if inst is None or inst.get("location") != "vps":
+            log.warning("kill_remote_agent: slot %d is not a vps agent", slot)
+            return
+        server = inst.get("server")
+        name = inst.get("tmux_session", "")
+        socket = inst.get("tmux_socket", "")
+        if server is None or not name or not socket:
+            log.error("kill_remote_agent: slot %d record incomplete", slot)
+            self.close_agent(slot)
+            return
+        threading.Thread(
+            target=self._kill_remote_session_worker,
+            args=(server, socket, name, slot),
+            daemon=True,
+            name="vps-kill-session",
+        ).start()
+
+    def _kill_remote_session_worker(
+        self, server, socket: str, name: str, slot: int
+    ) -> None:
+        """Worker-thread body of kill_remote_agent (one-shot).
+
+        Best-effort: a dead/missing session or a transport failure still
+        closes the local slot — the user asked for it gone, and the tmux
+        pruning on the server's hub reaps stragglers.
+        """
+        try:
+            result = ssh_runner.run_remote(
+                server,
+                ["tmux", "-S", socket, "kill-session", "-t", name],
+                timeout=8,
+            )
+            if result is None or result.returncode != 0:
+                log.warning(
+                    "kill_remote_agent: remote kill of %s reported %s",
+                    name,
+                    "transport failure"
+                    if result is None
+                    else f"exit {result.returncode}",
+                )
+        except Exception:
+            log.exception("kill_remote_agent: worker failed")
+        emit_gc_safe(self._remote_kill_done, slot)
+
+    def _on_remote_kill_done(self, slot: int) -> None:
+        """GUI-thread tail of kill_remote_agent: drop the slot.
+
+        Marks the record so close_agent's detach toast stays quiet — the
+        user explicitly killed; "detached, still running" would be a lie.
+        """
+        inst = self._term_agents.get(slot)
+        if inst is None:
+            return
+        inst["killed"] = True
+        self.close_agent(slot)
 
     def _next_free_term_slot(self) -> int | None:
         """Lowest unoccupied terminal-agent slot, or None when full.
@@ -4822,10 +5293,18 @@ class AppController(QObject):
         # cleared (popped) local slot has no entry → it stays cleared. The bridge
         # loop below fills only slots that haven't reported locally yet. Phase 3
         # deletes this whole bridge-derived path.
+        #
+        # VPS slots are carried through unconditionally — they are OWNED by
+        # _on_hub_snapshot (the forwarded server hub); their ids in THIS feed
+        # never match the pid prefix, so without the seed a shell-bridge
+        # snapshot arriving after a hub one would silently wipe every VPS
+        # sparkle. The two handlers rebuild disjoint slot sets by
+        # construction; keep it that way.
         new_activity: dict[int, dict] = {
             slot: activity
             for slot, activity in self._term_agent_activity.items()
             if slot in self._locally_captured_agents
+            or self._agent_location(slot) == "vps"
         }
         for agent in payload.get("agents", []):
             agent_id = str(agent.get("id", ""))
@@ -4874,6 +5353,127 @@ class AppController(QObject):
         # rides the bridge snapshot — the former `_mirror_stt_state(payload["stt"])`
         # call + method were removed. The chip dot is driven directly by
         # `_on_stt_recording` from the IDE's own socket.
+
+    # ----- VPS hub link (sparkles for VPS agents) --------------------------
+
+    def _ensure_hub_link(self) -> None:
+        """(Re)establish the forwarded-hub subscription for the paired server.
+
+        Idempotent — called on every pairing edge. The link is two pieces:
+        a SocketForward (`ssh -N -L <local>:<hub sock>`) and a second
+        AgentBridgeClient subscribed at the local end. The bridge client's
+        own reconnect loop handles the forward flapping (its connect just
+        fails until the socket file is back); the retry timer below only
+        has to keep the ssh child itself alive.
+        """
+        server = self._remote_context.server
+        if server is None:
+            return
+        local_sock = str(ssh_runner.runtime_dir() / f"hub-{server.name}.sock")
+        if (
+            self._hub_forward is not None
+            and self._hub_forward.local_socket == local_sock
+            and self._hub_forward.is_running()
+        ):
+            return  # same server, link healthy — nothing to do
+        self._teardown_hub_link()
+        self._hub_retry_delay = 2.0
+        self._hub_forward = ssh_runner.SocketForward(
+            server, server.hub_socket, local_sock, self
+        )
+        # queued: `lost` originates on the forward's monitor thread; the
+        # retry arm mutates GUI-thread timer state (§4 P2).
+        self._hub_forward.lost.connect(
+            self._on_hub_forward_lost, Qt.ConnectionType.QueuedConnection
+        )
+        self._hub_forward.start()
+        self._hub_bridge = AgentBridgeClient(self, socket_path=local_sock)
+        # queued: snapshot_received originates on the hub client's reader
+        # thread; _on_hub_snapshot mutates GUI-thread pool state (§4 P2).
+        self._hub_bridge.snapshot_received.connect(
+            self._on_hub_snapshot, Qt.ConnectionType.QueuedConnection
+        )
+        self._hub_bridge.start()
+        log.info("hub link: subscribed to %s via %s", server.name, local_sock)
+
+    def _teardown_hub_link(self) -> None:
+        """Stop the forwarded-hub subscription (pairing loss / shutdown)."""
+        self._hub_retry_timer.stop()
+        if self._hub_bridge is not None:
+            self._hub_bridge.stop()
+            self._hub_bridge = None
+        if self._hub_forward is not None:
+            self._hub_forward.stop()
+            self._hub_forward = None
+
+    def _on_hub_forward_lost(self) -> None:
+        """Forward child died — arm the backoff restart (while still paired)."""
+        if not self._remote_context.paired:
+            return
+        delay = self._hub_retry_delay
+        self._hub_retry_delay = min(self._hub_retry_delay * 2, 30.0)
+        log.info("hub forward lost — retrying in %.0fs", delay)
+        self._hub_retry_timer.start(int(delay * 1000))
+
+    def _restart_hub_forward(self) -> None:
+        """Backoff timer fired: respawn the forward child."""
+        if not self._remote_context.paired or self._hub_forward is None:
+            return
+        self._hub_forward.start()
+
+    def _on_hub_snapshot(self, payload: dict) -> None:
+        """Mirror VPS agents' activity out of the forwarded hub snapshot.
+
+        Sibling of `_on_bridge_snapshot` with the OTHER identity scheme: the
+        server hub keys agents by tmux session name (`agents[].id`), so the
+        mapping is session-name → the pool slot that attached it. Owns ONLY
+        vps-location slots; everything else is carried through untouched —
+        the disjointness invariant shared with `_on_bridge_snapshot`.
+
+        Deliberately NO coordination edge taps here: `wait_for_agent`'s
+        judge reads local transcripts, which don't exist for VPS agents —
+        coordination stays local-only in v1 (registration refuses vps
+        slots).
+        """
+        by_session = {
+            inst.get("tmux_session", ""): slot
+            for slot, inst in self._term_agents.items()
+            if inst.get("location") == "vps"
+        }
+        new_activity: dict[int, dict] = {
+            slot: activity
+            for slot, activity in self._term_agent_activity.items()
+            if self._agent_location(slot) != "vps"
+        }
+        titles_changed = False
+        for agent in payload.get("agents", []):
+            slot = by_session.get(str(agent.get("id", "")))
+            if slot is None:
+                continue
+            inst = self._term_agents[slot]
+            # Backfill the resumable session id (same retain-never-clear
+            # rationale as the shell-bridge handler).
+            sid = str(agent.get("session_id", "") or "")
+            if sid and inst["session_id"] != sid:
+                inst["session_id"] = sid
+            # Title backfill: the pane's own OSC title (on_agent_title) wins
+            # when present; until it lands, the hub's title (claude's session
+            # summary, the /rename name) is the best display identity.
+            if not inst.get("title"):
+                hub_title = self._clean_agent_title(str(agent.get("title", "") or ""))
+                if hub_title:
+                    inst["title"] = hub_title
+                    titles_changed = True
+            new_activity[slot] = {
+                "state": agent.get("activity_state", ""),
+                "tool": agent.get("activity_tool", ""),
+                "agentType": agent.get("agent_type", "") or inst["harness"],
+            }
+        if titles_changed:
+            self.termAgentsChanged.emit()
+        if new_activity != self._term_agent_activity:
+            self._term_agent_activity = new_activity
+            self.agentActivityChanged.emit()
 
     def _dispatch_inject(self, payload: dict, fail) -> None:
         """Validate an inject request and hand delivery to QML.
@@ -5613,8 +6213,22 @@ class AppController(QObject):
         if spawn_request:
             spawn_type = "fresh" if spawn_request == "1" else spawn_request
             spawn_type, _, harness = spawn_type.partition(":")
-            log.info("SYMMETRIA_IDE_SPAWN_AGENT=%s — spawning at launch", spawn_request)
-            self.spawn_agent(spawn_type, True, harness or "claude")
+            if os.environ.get("SYMMETRIA_IDE_SPAWN_AGENT_LOCATION") == "vps":
+                # VPS-location smoke: the pairing probe is async, so the
+                # spawn is deferred to the paired edge (one-shot). Exercises
+                # the full toggle → remote spawn → hub-sparkle pipeline
+                # headlessly (docs/dev-workflow.md).
+                self._pending_vps_smoke_spawn = (spawn_type, harness or "claude")
+                log.info(
+                    "SYMMETRIA_IDE_SPAWN_AGENT=%s (vps) — deferred to pairing",
+                    spawn_request,
+                )
+            else:
+                log.info(
+                    "SYMMETRIA_IDE_SPAWN_AGENT=%s — spawning at launch",
+                    spawn_request,
+                )
+                self.spawn_agent(spawn_type, True, harness or "claude")
         # Reload-in-place restore: a reload re-execs with SYMMETRIA_IDE_RESTORE=1,
         # asking us to rebuild the workspace saved during the previous teardown.
         # Cold launches do NOT auto-restore — they only light the
@@ -5980,9 +6594,11 @@ class AppController(QObject):
         # (it shouldn't, but defensive iteration costs nothing).
         for host in list(self._session_hosts.values()):
             host.stop()
-        # Close the paired server's ssh ControlMaster (best-effort; the
+        # Tear down the VPS hub link (forward child + subscriber thread) and
+        # close the paired server's ssh ControlMaster (best-effort; the
         # probes/remote calls opened it). ControlPersist=60 self-reaps after
-        # a crash, so this is only the polite clean-exit path.
+        # a crash, so the master close is only the polite clean-exit path.
+        self._teardown_hub_link()
         if self._remote_context.server is not None:
             ssh_runner.close_control_master(self._remote_context.server)
         # Stop the git worker before nvim — its scan is fast (≤1s join) and
@@ -6643,6 +7259,7 @@ def _reload_env() -> dict[str, str]:
     for key in (
         "QTWEBENGINE_REMOTE_DEBUGGING",
         "SYMMETRIA_IDE_SPAWN_AGENT",
+        "SYMMETRIA_IDE_SPAWN_AGENT_LOCATION",
         "SYMMETRIA_IDE_AGENT_PROMPT",
         "SYMMETRIA_IDE_AGENT_VIEW",
         "SYMMETRIA_IDE_SCREENSHOT",

@@ -23,8 +23,9 @@ import threading
 import time
 
 import pytest
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import Qt
 
+from conftest import FakeRemoteContext
 from symmetria_ide.app import AppController
 from symmetria_ide.remote_location import RemoteContext, remote_repo_path
 from symmetria_ide.server_registry import RemoteServer
@@ -32,46 +33,16 @@ from symmetria_ide.server_registry import RemoteServer
 SERVER = RemoteServer(name="vigilia-vps", host="203.0.113.7")
 
 
-class FakeRemoteContext(QObject):
-    """Same surface AppController consumes; pairing flipped by hand."""
-
-    pairingChanged = Signal()
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._server: RemoteServer | None = None
-        self._probing = False
-        self.probe_calls: list[str] = []
-
-    @property
-    def paired(self) -> bool:
-        return self._server is not None
-
-    @property
-    def probing(self) -> bool:
-        return self._probing
-
-    @property
-    def server(self) -> RemoteServer | None:
-        return self._server
-
-    @property
-    def remote_root(self) -> str:
-        return "/opt/dev/repos/fake" if self._server else ""
-
-    def probe(self, project_root: str) -> None:
-        self.probe_calls.append(project_root)
-
-    def set_paired(self, server: RemoteServer | None) -> None:
-        self._server = server
-        self.pairingChanged.emit()
-
-    def set_probing(self, probing: bool) -> None:
-        self._probing = probing
-
-
 @pytest.fixture
-def controller():
+def controller(monkeypatch):
+    # No-op the hub link + master teardown BEFORE construction: a
+    # set_paired() would otherwise spawn a REAL `ssh -N` forward child
+    # (and shutdown a real `ssh -O exit`) from inside the test run.
+    monkeypatch.setattr(AppController, "_ensure_hub_link", lambda self: None)
+    monkeypatch.setattr(AppController, "_teardown_hub_link", lambda self: None)
+    monkeypatch.setattr(
+        "symmetria_ide.app.ssh_runner.close_control_master", lambda server: None
+    )
     ctrl = AppController()
     fake = FakeRemoteContext()
     # Swap AFTER construction: the real context's pairingChanged connect

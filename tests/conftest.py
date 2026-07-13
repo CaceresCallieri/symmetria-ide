@@ -12,7 +12,7 @@ import inspect
 import sys
 
 import pytest
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, QObject, Signal
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -93,6 +93,56 @@ def construction_source(cls) -> str:
 # Shared test doubles — used by test_app_controller_pool.py,
 # test_app_controller_awaiting.py, and test_app_controller_permission_mode.py
 # ---------------------------------------------------------------------------
+
+
+class FakeRemoteContext(QObject):
+    """Stand-in for remote_location.RemoteContext — no ssh, no threads.
+
+    Exposes the same surface AppController consumes (paired / probing /
+    server / remote_root / probe / pairingChanged); tests flip pairing by
+    hand via set_paired. Single canonical definition (same rule as
+    FakeSessionHost): import from here, don't copy per file.
+
+    Fixtures swapping this in should ALSO no-op the controller's
+    `_ensure_hub_link` / `_teardown_hub_link` (monkeypatch on the class,
+    BEFORE construction) — a set_paired would otherwise spawn a real
+    `ssh -N` forward child from inside the test run.
+    """
+
+    pairingChanged = Signal()
+
+    def __init__(self, remote_root: str = "/opt/dev/repos/fake") -> None:
+        super().__init__()
+        self._server = None
+        self._probing = False
+        self._remote_root = remote_root
+        self.probe_calls: list[str] = []
+
+    @property
+    def paired(self) -> bool:
+        return self._server is not None
+
+    @property
+    def probing(self) -> bool:
+        return self._probing
+
+    @property
+    def server(self):
+        return self._server
+
+    @property
+    def remote_root(self) -> str:
+        return self._remote_root if self._server is not None else ""
+
+    def probe(self, project_root: str) -> None:
+        self.probe_calls.append(project_root)
+
+    def set_paired(self, server) -> None:
+        self._server = server
+        self.pairingChanged.emit()
+
+    def set_probing(self, probing: bool) -> None:
+        self._probing = probing
 
 
 class FakeSessionHost:

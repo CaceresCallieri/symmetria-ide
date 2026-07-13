@@ -376,6 +376,25 @@ Window {
         }
     }
 
+    // Kill a VPS agent's REMOTE tmux session (Ctrl+Shift+K) — the
+    // destructive sibling of Ctrl+Shift+Q, which for VPS agents only
+    // DETACHES (the session keeps running on the server). Guarded to the
+    // vps location + a focused agent; confirmation is mandatory because
+    // the kill also removes the session from the phone.
+    Shortcut {
+        sequences: ["Ctrl+Shift+K"]
+        context: Qt.ApplicationShortcut
+        enabled: controller.agentSurfaceVisible && controller.location === "vps"
+        onActivated: {
+            if (controller.focusedAgent === 0)
+                return;
+            killRemoteDialog.targetSlot = controller.focusedAgent;
+            killRemoteDialog.sessionName =
+                controller.agent_tmux_session_name(controller.focusedAgent);
+            killRemoteDialog.open();
+        }
+    }
+
     // Cycle through occupied slots without reaching for the digit row —
     // agent slots on the agent surface, browser windows on the browser
     // surface (same dispatch-by-visible-surface pattern as Ctrl+Shift+Q).
@@ -2490,6 +2509,9 @@ Window {
         // OpenCode resume needs a session id (`--session` has no
         // interactive picker form) — chain into the session picker.
         onResumePickerRequested: dangerous => agentSessionPicker.open(dangerous)
+        // VPS attach (`a` in vps location) — chain into the remote picker,
+        // which lists the shared tmux socket's sessions over ssh.
+        onAttachPickerRequested: dangerous => remoteSessionPicker.open(dangerous)
     }
 
     // OpenCode session picker — the resume path for the OpenCode
@@ -2497,6 +2519,31 @@ Window {
     AgentSessionPicker {
         id: agentSessionPicker
         onDismissed: root._restoreCentralFocus()
+    }
+
+    // VPS tmux-session picker — the attach path of the location toggle
+    // (attaches an existing phone-visible session into a pool slot).
+    RemoteSessionPicker {
+        id: remoteSessionPicker
+        onDismissed: root._restoreCentralFocus()
+    }
+
+    // Kill-remote-session confirm (Ctrl+Shift+K on a VPS agent). Destroys
+    // the tmux session on the server — the claude inside dies and the
+    // phone loses the session too, hence the mandatory confirm.
+    ConfirmDialog {
+        id: killRemoteDialog
+        property int targetSlot: 0
+        property string sessionName: ""
+        title: "Kill remote session?"
+        confirmText: "Kill"
+        message: "Kill '" + sessionName + "' on " + controller.vpsServerName
+                 + "?\nThe agent inside dies and the phone loses it too."
+        onConfirmed: {
+            controller.kill_remote_agent(killRemoteDialog.targetSlot);
+            root._restoreCentralFocus();
+        }
+        onCancelled: root._restoreCentralFocus()
     }
 
     // Per-project MCP toggles — Window-level modal overlay (Ctrl+Shift+M).
