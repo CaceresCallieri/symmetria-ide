@@ -147,9 +147,13 @@ def test_terminal_view_visibility_gated(main_qml: str):
     factor in agentVisible so the agent overlay hides BOTH central
     surfaces."""
     assert "controller.terminalVisible" in main_qml
+    assert "!controller.agentVisible && !controller.fmVisible" in main_qml
+    # Since the VPS toggle the local pane ALSO gates on the location (the
+    # remote pane owns the terminal surface in the vps location).
+    local_pane_idx = main_qml.index("id: terminalView")
     assert (
-        "!controller.agentVisible && !controller.fmVisible && controller.terminalVisible"
-        in main_qml
+        'controller.location === "local"'
+        in main_qml[local_pane_idx : local_pane_idx + 800]
     )
 
 
@@ -239,7 +243,7 @@ def test_window_activation_considers_terminal_visible(main_qml: str):
     # modal guard is prepended (it has been bumped twice), and a too-small
     # window silently passes/fails on unrelated edits.
     dispatch_block = _extract_braced_body(main_qml, dispatch_idx)
-    assert "terminalView.forceActiveFocus()" in dispatch_block
+    assert "_focusTerminalPane()" in dispatch_block
     assert "controller.focus_agent(controller.focusedAgent)" in dispatch_block
     # Modal guard: re-activation must NOT yank focus out of an open spawn
     # menu (visible-but-deaf menu regression). The guard must run before
@@ -247,7 +251,7 @@ def test_window_activation_considers_terminal_visible(main_qml: str):
     # so a future reordering that moves the guard between branches is caught.
     guard_idx = dispatch_block.find("agentSpawnMenu.visible")
     fm_idx = dispatch_block.find("fmPaneLoader")
-    terminal_idx = dispatch_block.find("terminalView.forceActiveFocus()")
+    terminal_idx = dispatch_block.find("_focusTerminalPane()")
     assert 0 <= guard_idx < fm_idx
     assert guard_idx < terminal_idx
 
@@ -264,7 +268,9 @@ def test_startup_focus_routes_to_terminal_when_visible(main_qml: str):
     assert last_completed >= 0
     body = main_qml[last_completed : last_completed + 1200]
     assert "controller.terminalVisible" in body
-    assert "terminalView.forceActiveFocus()" in body
+    # Terminal focus routes through the location-aware dispatch since the
+    # VPS toggle (two panes, one visible per location).
+    assert "_focusTerminalPane()" in body
 
 
 def test_responsive_sidebar_focus_recovery_is_hide_only(main_qml: str):
@@ -480,3 +486,60 @@ def test_paste_chord_gated_to_terminal_surfaces(main_qml: str):
     assert paste_idx >= 0
     paste_block = main_qml[paste_idx : paste_idx + 400]
     assert "controller.editorVisible || controller.terminalVisible" in paste_block
+
+
+# ---------------------------------------------------------------------------
+# VPS location: the remote terminal pane (Phase 5 of the location toggle)
+# ---------------------------------------------------------------------------
+
+
+def test_remote_terminal_pane_exists_behind_a_loader(main_qml: str):
+    """The vps terminal is a Loader-wrapped second QMLTermWidget — lazy (no
+    ssh child until the first vps entry) and independent of the local pane
+    (which must stay alive across toggles)."""
+    assert "id: remoteTerminalLoader" in main_qml
+    assert "controller.remote_shell_argv()" in main_qml
+
+
+def test_terminal_panes_are_location_exclusive(main_qml: str):
+    """Exactly one terminal pane per location: the local pane gates on
+    location === "local", the remote pane on === "vps" — both under the
+    same terminalVisible surface flag."""
+    assert 'controller.location === "local"' in main_qml
+    local_gate = main_qml.index('controller.location === "local"')
+    # The local pane's visible binding carries the location gate.
+    assert "id: terminalView" in main_qml[: local_gate + 200]
+    remote_start = main_qml.index("id: remoteTerminalLoader")
+    remote_block = main_qml[remote_start : remote_start + 600]
+    assert 'controller.location === "vps"' in remote_block
+
+
+def test_remote_pane_has_no_cwd_poll_timer(main_qml: str):
+    """The cwd-poll Timer belongs ONLY to the local pane: the remote pane's
+    currentDir is the LOCAL ssh process's cwd — feeding it to on_shell_cwd
+    would corrupt the anchor state machine."""
+    remote_start = main_qml.index("id: remoteTerminalLoader")
+    # The remote pane is the last terminal block before the agent surface.
+    remote_block = main_qml[remote_start : main_qml.index("id: agentSurface")]
+    assert "on_shell_cwd" not in remote_block
+    assert "Timer" not in remote_block
+
+
+def test_terminal_focus_routes_through_location_dispatch(main_qml: str):
+    """Every focus-the-terminal site must use _focusTerminalPane (the
+    location-aware dispatch) — a direct terminalView.forceActiveFocus()
+    outside the helper would focus the HIDDEN local pane in vps."""
+    assert "function _focusTerminalPane()" in main_qml
+    helper_start = main_qml.index("function _focusTerminalPane()")
+    helper_block = main_qml[helper_start : helper_start + 400]
+    assert "remoteTerminalLoader.item.forceActiveFocus()" in helper_block
+    # Outside the helper body, no direct terminalView focus calls remain
+    # (the comment at the Ctrl+H NOTE doesn't count — code only).
+    outside = main_qml[:helper_start] + main_qml[helper_start + 400 :]
+    direct_calls = [
+        line
+        for line in outside.splitlines()
+        if "terminalView.forceActiveFocus()" in line
+        and not line.strip().startswith("//")
+    ]
+    assert direct_calls == []

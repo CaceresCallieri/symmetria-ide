@@ -595,7 +595,7 @@ Window {
             else if (controller.gitVisible)
                 gitHistoryView.focusContent();
             else if (controller.terminalVisible)
-                terminalView.forceActiveFocus();
+                root._focusTerminalPane();
             else
                 editor.forceActiveFocus();
         }
@@ -903,7 +903,13 @@ Window {
                 QMLTermWidget {
                     id: terminalView
                     anchors.fill: parent
-                    visible: !controller.agentVisible && !controller.fmVisible && controller.terminalVisible
+                    // Location-gated since the VPS toggle: in the vps
+                    // location the REMOTE pane below owns the terminal
+                    // surface; this local pane stays alive (its shell keeps
+                    // running) and reappears instantly on toggle-back.
+                    visible: !controller.agentVisible && !controller.fmVisible
+                             && controller.terminalVisible
+                             && controller.location === "local"
                     focus: visible
 
                     colorScheme: "Symmetria"
@@ -960,6 +966,91 @@ Window {
                     }
                     onVisibleChanged: if (visible)
                         forceActiveFocus()
+                }
+
+                // VPS-location terminal — a second shell pane running ON the
+                // paired server (`ssh -t` → login shell cd'd into the remote
+                // repo). Lazy behind a Loader: no ssh child spawns until the
+                // user first enters the vps location; the LOCAL pane above
+                // stays alive throughout so toggling back is instant.
+                //
+                // Deliberately NO cwd-poll Timer here: `currentDir` reads the
+                // LOCAL ssh process's cwd via /proc — feeding that into
+                // `controller.on_shell_cwd` would pollute the anchor state
+                // machine with nonsense. The remote shell's cwd is a
+                // server-side fact the IDE doesn't track in v1.
+                //
+                // Death handling: the ssh child exiting (user `exit`, network
+                // drop, laptop sleep) drops the `live` latch → the Loader
+                // tears down. Re-entering the vps location OR re-selecting
+                // the terminal surface while on vps re-latches and respawns a
+                // fresh shell — a retry is one Ctrl+Shift+T away, with no
+                // automatic respawn loop against a dead network.
+                Loader {
+                    id: remoteTerminalLoader
+                    anchors.fill: parent
+                    property bool live: false
+                    active: live
+                    visible: !controller.agentVisible && !controller.fmVisible
+                             && controller.terminalVisible
+                             && controller.location === "vps"
+
+                    Connections {
+                        target: controller
+                        function onLocationChanged() {
+                            if (controller.location === "vps")
+                                remoteTerminalLoader.live = true;
+                        }
+                        function onCentralSurfaceChanged() {
+                            if (controller.location === "vps"
+                                    && controller.terminalVisible)
+                                remoteTerminalLoader.live = true;
+                        }
+                    }
+
+                    onVisibleChanged: if (visible && item)
+                        item.forceActiveFocus()
+
+                    sourceComponent: QMLTermWidget {
+                        id: remoteTerminalView
+
+                        colorScheme: "Symmetria"
+                        useFBORendering: false
+                        fillColor: "transparent"
+                        blinkingCursor: true
+                        margin: Theme.size.terminalPadding
+                        autoCopySelectedText: true
+                        font.family: editorFontFamily
+                        font.pointSize: editorFontPointSize
+                        fallbackFamilies: editorFontFallbacks
+                        font.hintingPreference: Font.PreferFullHinting
+
+                        session: QMLTermSession {
+                            id: remoteShellSession
+                            onFinished: {
+                                console.log("remote shell session finished");
+                                remoteTerminalLoader.live = false;
+                            }
+                        }
+
+                        Component.onCompleted: {
+                            // argv read once at load, like the agent panes
+                            // (QVariantList → manual copy, not a JS Array).
+                            var argv = controller.remote_shell_argv();
+                            if (argv.length === 0) {
+                                remoteTerminalLoader.live = false;
+                                return;
+                            }
+                            var args = [];
+                            for (var i = 1; i < argv.length; i++)
+                                args.push(argv[i]);
+                            remoteShellSession.shellProgram = argv[0];
+                            remoteShellSession.shellProgramArgs = args;
+                            remoteShellSession.startShellProgram();
+                            if (remoteTerminalLoader.visible)
+                                forceActiveFocus();
+                        }
+                    }
                 }
 
                 // IDE-native orchestrator surface — the terminal-agent pool.
@@ -1588,7 +1679,7 @@ Window {
                                 if (controller.agentVisible)
                                     agentPane.forceActiveFocus();
                                 else if (controller.terminalVisible)
-                                    terminalView.forceActiveFocus();
+                                    root._focusTerminalPane();
                                 else
                                     editor.forceActiveFocus();
                             }
@@ -2333,7 +2424,7 @@ Window {
             // The terminal QMLTermWidget accepts focus directly, so a direct
             // forceActiveFocus works (no descendant-walker needed).
             function onFocusTerminalRequested(): void {
-                terminalView.forceActiveFocus();
+                root._focusTerminalPane();
             }
 
         }
@@ -2876,6 +2967,19 @@ Window {
     readonly property bool escapeOverlayOpen: _anyModalVisible() || ideFuzzyFinder.active
     onEscapeOverlayOpenChanged: controller.set_modal_overlay_open(escapeOverlayOpen)
 
+    /// Location-aware terminal-pane focus: the terminal surface is TWO
+    /// panes since the VPS toggle (local shell / remote ssh shell), only
+    /// one visible per location — focusing `terminalView` directly in the
+    /// vps location would land on the hidden local pane and the visible
+    /// remote one would stay deaf. Every "focus the terminal" site routes
+    /// here.
+    function _focusTerminalPane() {
+        if (controller.location === "vps" && remoteTerminalLoader.item)
+            remoteTerminalLoader.item.forceActiveFocus();
+        else
+            terminalView.forceActiveFocus();
+    }
+
     /// Shared focus dispatch: pull active focus into the visible central
     /// surface. Used by Window.onActiveChanged and modal dismissals.
     function _restoreCentralFocus() {
@@ -2937,7 +3041,7 @@ Window {
             // the history list, not the hidden editor).
             gitHistoryView.focusContent();
         else if (controller.terminalVisible)
-            terminalView.forceActiveFocus();
+            root._focusTerminalPane();
         else
             editor.forceActiveFocus();
     }
@@ -3060,7 +3164,7 @@ Window {
         if (controller.fmVisible && fmPaneLoader.item)
             fmPaneLoader.item.forceActiveFocus();
         else if (controller.terminalVisible)
-            terminalView.forceActiveFocus();
+            root._focusTerminalPane();
         else
             editor.forceActiveFocus();
 

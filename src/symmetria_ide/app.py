@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import signal
 import socket
 import subprocess
@@ -2229,6 +2230,26 @@ class AppController(QObject):
                 "Could not mount the remote repo (sshfs) — back to local.",
             )
             self._switch_location("local")
+
+    @Slot(result="QVariantList")
+    def remote_shell_argv(self) -> list:
+        """argv for the VPS terminal pane (read once at Loader load).
+
+        `ssh -t` into a login shell in the paired repo — the vps location's
+        counterpart of the local shell pane. `"$SHELL"` expands inside the
+        remote `sh -c`, so the user gets THEIR server shell (bash on the
+        Vigilia box), not whatever sh resolves to. Empty list when unpaired
+        (the QML Loader treats it as "don't spawn").
+        """
+        server = self._remote_context.server
+        remote_root = self._remote_context.remote_root
+        if server is None or not remote_root:
+            return []
+        return ssh_runner.remote_command_argv(
+            server,
+            ["sh", "-c", f'cd {shlex.quote(remote_root)} && exec "$SHELL" -l'],
+            tty=True,
+        )
 
     def _activate_remote_chrome(self) -> None:
         """Point git + tree at the remote (mount is up, location is vps)."""
