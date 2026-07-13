@@ -52,20 +52,20 @@ Rectangle {
     // Location toggle — Local ↔ VPS context for THIS project. Renders only
     // when the pairing probe found the repo on a registered remote server
     // (controller.vpsAvailable), or defensively while location is already
-    // "vps" so the way back never disappears. Leftmost — location scopes
-    // everything to its right (surfaces, agents), so it reads first.
-    // Collapses to zero width when hidden so the surface switcher slides
-    // back to the bar edge. Same clay-segment anatomy as the switcher
-    // below; Ctrl+Shift+U is the chord twin.
+    // "vps" so the way back never disappears. Pinned to the RIGHT edge
+    // (user decision 2026-07-12 — it was briefly leftmost, which crowded
+    // the surface switcher and muddled the two controls' reading order;
+    // right-aligned it mirrors StatusBar's trailing ⇅ server badge, so
+    // both location cues live on the right rail). Same clay-segment
+    // anatomy as the switcher; Ctrl+Shift+U is the chord twin.
     Row {
         id: locationToggle
-        anchors.left: root.left
-        anchors.leftMargin: Theme.spacing.md
+        anchors.right: root.right
+        anchors.rightMargin: Theme.spacing.md
         anchors.verticalCenter: root.verticalCenter
         spacing: Theme.spacing.sm
         z: 1
         visible: controller.vpsAvailable || controller.location === "vps"
-        width: visible ? implicitWidth : 0
 
         Repeater {
             model: [
@@ -111,11 +111,11 @@ Rectangle {
         }
     }
 
-    // Surface switcher — terminal / editor / agents, pinned after the
-    // location toggle at the bar's left edge (moved here from StatusBar's
-    // center per the 2026-06-11 layout decision; the toggle collapses to
-    // zero width when unpaired so this sits at the original position).
-    // Anchored as a SIBLING of the centering RowLayout,
+    // Surface switcher — terminal / editor / agents, pinned at the bar's
+    // left edge (moved here from StatusBar's center per the 2026-06-11
+    // layout decision; the location toggle lives on the opposite edge so
+    // the two controls never crowd each other). Anchored as a SIBLING of
+    // the centering RowLayout,
     // not a member: the chip strip must stay centered on the WHOLE bar,
     // and a layout member would shift that center by the switcher's
     // width. No overlap at sane widths — chips would need to span half
@@ -125,8 +125,8 @@ Rectangle {
     // focus) remain primary.
     Row {
         id: surfaceSwitcher
-        anchors.left: locationToggle.right
-        anchors.leftMargin: locationToggle.visible ? Theme.spacing.lg : 0
+        anchors.left: root.left
+        anchors.leftMargin: Theme.spacing.md
         anchors.verticalCenter: root.verticalCenter
         spacing: Theme.spacing.sm
         z: 1
