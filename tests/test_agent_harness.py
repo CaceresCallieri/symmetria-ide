@@ -11,7 +11,7 @@ import json
 import re
 
 from symmetria_ide.agent_harness import (
-    CHILD_SESSION_UNSET_ARGS,
+    CLAUDE_ENV_UNSET_ARGS,
     HARNESSES,
     parse_opencode_sessions,
     spawn_argv,
@@ -29,7 +29,7 @@ def test_claude_fresh_dangerous_uses_flag_not_env():
     argv = spawn_argv(HARNESSES["claude"], "fresh", True, "42_1")
     assert argv == [
         "env",
-        *CHILD_SESSION_UNSET_ARGS,
+        *CLAUDE_ENV_UNSET_ARGS,
         "SYMMETRIA_AGENT_ID=42_1",
         "claude",
         "--dangerously-skip-permissions",
@@ -40,7 +40,7 @@ def test_opencode_fresh_dangerous_uses_permission_env():
     argv = spawn_argv(HARNESSES["opencode"], "fresh", True, "42_1")
     assert argv == [
         "env",
-        *CHILD_SESSION_UNSET_ARGS,
+        *CLAUDE_ENV_UNSET_ARGS,
         "SYMMETRIA_AGENT_ID=42_1",
         'OPENCODE_PERMISSION={"*":{"*":"allow"}}',
         "opencode",
@@ -57,7 +57,7 @@ def test_opencode_safe_variant_omits_permission_env():
     argv = spawn_argv(HARNESSES["opencode"], "fresh", False, "42_1")
     assert argv == [
         "env",
-        *CHILD_SESSION_UNSET_ARGS,
+        *CLAUDE_ENV_UNSET_ARGS,
         "SYMMETRIA_AGENT_ID=42_1",
         "opencode",
     ]
@@ -104,9 +104,9 @@ def test_claude_injects_settings_and_sock_env():
     )
     # The sock env rides the env wrapper, right after the agent id, followed by
     # the status-line capability advert.
-    assert argv[: 4 + len(CHILD_SESSION_UNSET_ARGS)] == [
+    assert argv[: 4 + len(CLAUDE_ENV_UNSET_ARGS)] == [
         "env",
-        *CHILD_SESSION_UNSET_ARGS,
+        *CLAUDE_ENV_UNSET_ARGS,
         "SYMMETRIA_AGENT_ID=42_1",
         "SYMMETRIA_IDE_AGENT_SOCK=/run/user/1000/symmetria-ide-agents-42.sock",
         "SYMMETRIA_IDE_STATUSLINE_TAP=1",

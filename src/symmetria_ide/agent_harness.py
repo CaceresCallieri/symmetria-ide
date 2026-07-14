@@ -83,20 +83,51 @@ class AgentHarness:
     valid_efforts: frozenset[str] = frozenset()
 
 
-# `env -u` pairs prepended to EVERY spawn's env wrapper: when the IDE itself
-# was launched from inside a Claude Code session (the standard dev loop — an
-# agent in the stable IDE starts the dev IDE), spawned agents would inherit
-# CLAUDE_CODE_CHILD_SESSION=1 + CLAUDE_CODE_SESSION_ID, and claude then
-# SILENTLY SKIPS persisting the session transcript to
-# ~/.claude/projects/<proj>/<session>.jsonl (verified live 2026-07-03). That
-# breaks the coordination judge ("transcript not found") AND the shell hook's
-# last-message digests. IDE-spawned agents are always top-level user sessions,
-# never children — unset unconditionally (env -u on an absent var is a no-op).
-CHILD_SESSION_UNSET_ARGS: tuple[str, ...] = (
+# `env -u` pairs prepended to EVERY spawn's env wrapper, scrubbing the ambient
+# Claude-session environment an agent must never inherit. Two leak paths feed
+# the ambient env, both real:
+#
+# 1. IDE launched from inside a Claude Code session (the standard dev loop —
+#    an agent in the stable IDE starts the dev IDE): direct-PTY children
+#    inherit the IDE's env.
+# 2. tmux substrate: session commands inherit the TMUX SERVER's environment —
+#    the env of whoever first touched the shared socket. Verified live
+#    2026-07-13: the server had been started from inside a vigilia agent, so
+#    EVERY spawned agent across ALL projects inherited that agent's session env.
+#
+# Per-var consequences (all observed, not theoretical):
+# - CLAUDE_CODE_CHILD_SESSION / CLAUDE_CODE_SESSION_ID: claude SILENTLY SKIPS
+#   persisting the transcript to ~/.claude/projects/<proj>/<session>.jsonl
+#   (verified 2026-07-03) — breaks the coordination judge and the shell hook's
+#   last-message digests.
+# - CLAUDE_JOB_DIR: the new claude ADOPTS the leaked session's job
+#   (~/.claude/jobs/<id>/) and NAMES its session after that job's `name` —
+#   fresh agents in project B were born titled with project A's session title,
+#   poisoning the resume picker of every project on the socket (verified
+#   2026-07-13; the "mesura.consulting … (Branch)" incident).
+# - CLAUDE_EFFORT: silently pins the leaked session's effort on agents whose
+#   project sets no `.symmetria/ide.json` effort default.
+# - CLAUDECODE / CLAUDE_CODE_ENTRYPOINT / CLAUDE_CODE_EXECPATH: nested-claude
+#   markers; a top-level launch must not look like a child of the leaked
+#   session. claude re-sets them itself on startup.
+#
+# IDE-spawned agents are always top-level user sessions — unset unconditionally
+# (env -u on an absent var is a no-op).
+CLAUDE_ENV_UNSET_ARGS: tuple[str, ...] = (
     "-u",
     "CLAUDE_CODE_CHILD_SESSION",
     "-u",
     "CLAUDE_CODE_SESSION_ID",
+    "-u",
+    "CLAUDE_JOB_DIR",
+    "-u",
+    "CLAUDE_EFFORT",
+    "-u",
+    "CLAUDECODE",
+    "-u",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "-u",
+    "CLAUDE_CODE_EXECPATH",
 )
 
 HARNESSES: dict[str, AgentHarness] = {
@@ -199,7 +230,7 @@ def spawn_argv(
     absolute path (see `tmux_wrap` — the tmux server's PATH may differ from the
     IDE's). Empty keeps the bare name.
     """
-    argv = ["env", *CHILD_SESSION_UNSET_ARGS, f"SYMMETRIA_AGENT_ID={agent_id}"]
+    argv = ["env", *CLAUDE_ENV_UNSET_ARGS, f"SYMMETRIA_AGENT_ID={agent_id}"]
     # Exported unconditionally when provided (harmless for opencode, which has no
     # reporter reading it); the settings registration below is what actually
     # wires claude's hook to this socket.

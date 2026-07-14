@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from symmetria_ide.agent_harness import CHILD_SESSION_UNSET_ARGS
+from symmetria_ide.agent_harness import CLAUDE_ENV_UNSET_ARGS
 from symmetria_ide.app import AppController
 
 
@@ -104,7 +104,7 @@ def test_spawn_fresh_dangerous_default_argv(controller):
     # tracks the real socket path / settings string.
     assert argv == [
         "env",
-        *CHILD_SESSION_UNSET_ARGS,
+        *CLAUDE_ENV_UNSET_ARGS,
         f"SYMMETRIA_AGENT_ID={os.getpid()}_1",
         f"SYMMETRIA_IDE_AGENT_SOCK={controller._agent_events.socket_path}",
         "SYMMETRIA_IDE_STATUSLINE_TAP=1",
@@ -156,7 +156,7 @@ def test_spawn_opencode_fresh_dangerous_argv(controller):
     # (no settings_flag) — its agents keep reporting to the shell bridge.
     assert controller.agent_spawn_argv(1) == [
         "env",
-        *CHILD_SESSION_UNSET_ARGS,
+        *CLAUDE_ENV_UNSET_ARGS,
         f"SYMMETRIA_AGENT_ID={os.getpid()}_1",
         f"SYMMETRIA_IDE_AGENT_SOCK={controller._agent_events.socket_path}",
         "SYMMETRIA_IDE_STATUSLINE_TAP=1",
