@@ -93,6 +93,21 @@ def main() -> None:
     # daemon. The IDE uses it to claim an agent's first event to the right slot.
     cwd = os.getcwd()
 
+    # The tool's target file (Edit/Write/... file_path, NotebookEdit's
+    # notebook_path) — the honest "where is the agent WORKING" signal for the
+    # IDE's worktree follow. The session cwd above never moves when an agent
+    # operates in a git worktree via Bash/absolute paths (a Bash-tool `cd`
+    # changes the tool's persistent shell, not the session process), so tool
+    # paths are the only per-event signal that tracks real work location.
+    # Raw passthrough per the curation rule below: WHICH tools count is the
+    # IDE's decision (it gates on tool_name), not the reporter's.
+    tool_input = event.get("tool_input")
+    tool_path = ""
+    if isinstance(tool_input, dict):
+        tool_path = str(
+            tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        )
+
     # Curated passthrough — exactly the fields agent_activity.AgentActivityMachine
     # reads. We forward raw values (no mapping) so all interpretation stays in the
     # IDE. `event_ts_ns` uses CLOCK_REALTIME (time.time_ns) because monotonic
@@ -106,6 +121,9 @@ def main() -> None:
         # cwd lets the IDE derive the true slot when the frozen agent_id lies.
         "cwd": cwd,
         "tool_name": event.get("tool_name", ""),
+        # tool_path drives the IDE's worktree follow (see above); "" when the
+        # event carries no file-target (Bash, Stop, SessionStart, ...).
+        "tool_path": tool_path,
         "permission_mode": event.get("permission_mode", ""),
         "source": event.get("source", ""),
         # is_interrupt is undocumented (a mid-tool Esc may surface here); forward

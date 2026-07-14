@@ -44,8 +44,23 @@ from pathlib import Path
 
 from .fs_atomic import atomic_write_json
 from .project_browser_marker import resolve_project_root
+from .worktree import canonical_project_root
 
 log = logging.getLogger(__name__)
+
+
+def _canonical_root(path: str) -> str:
+    """Main-checkout repo root for `path` — the same-PROJECT comparator.
+
+    `resolve_project_root` alone stops at a linked worktree's own dir (its
+    `.git` pointer file counts as a root marker), so two agents of the same
+    repo — one in the main checkout, one in a worktree — would compare as
+    different projects and slot attribution would reject/misroute the
+    worktree one's first events. Folding to the canonical root makes
+    same-repo worktrees the same project, which is the topology's intent
+    (one IDE per project, worktrees included).
+    """
+    return canonical_project_root(resolve_project_root(path))
 
 
 def _runtime_dir() -> str:
@@ -70,13 +85,22 @@ def _pid_alive(pid: int) -> bool:
 
 
 def write_entry(
-    pid: int, socket_path: str, project_root: str, sessions: dict[str, int]
+    pid: int,
+    socket_path: str,
+    project_root: str,
+    sessions: dict[str, int],
+    roots: list[str] | None = None,
 ) -> None:
     """Publish (atomically) this IDE's routing entry.
 
     `sessions` maps each bound `session_id` → its pool slot. `project_root` is
-    the resolved repo root the IDE currently displays — the bootstrap key for
-    an agent's FIRST event (before its session id is known to anyone).
+    the CANONICAL repo root this IDE owns (the main checkout even while the
+    chrome is re-rooted to a linked worktree) — the bootstrap key for an
+    agent's FIRST event (before its session id is known to anyone). `roots`
+    optionally widens that bootstrap to EVERY root this IDE's agents live in
+    (main checkout + each agent's linked worktree), so a first event reported
+    from inside a worktree still routes here; when omitted, resolution falls
+    back to `[project_root]`.
     Filesystem failures are swallowed by `atomic_write_json` (returns False,
     logged) — a missing entry just falls the reporter back to the frozen env
     socket (old behaviour). A serialization error (a caller bug — `sessions`
@@ -89,6 +113,7 @@ def write_entry(
             "pid": int(pid),
             "socket": socket_path,
             "project_root": project_root,
+            "roots": list(roots) if roots else [project_root],
             "sessions": sessions,
         },
     )
@@ -147,8 +172,12 @@ def resolve_socket(session_id: str, cwd: str) -> str:
     Resolution order (most precise first):
       1. an entry whose `sessions` already knows `session_id` — exact, and
          robust even if the agent `cd`'d out of its launch project;
-      2. an entry whose `project_root` equals `resolve_project_root(cwd)` — the
-         bootstrap for an agent's first event, before its session is bound.
+      2. an entry whose published roots contain `resolve_project_root(cwd)` —
+         the bootstrap for an agent's first event, before its session is
+         bound. `roots` lists every root the IDE's agents live in (main
+         checkout + linked worktrees, published by `_sync_agent_registry`);
+         entries written by older IDE versions lack it and fall back to the
+         single `project_root`.
 
     Dead-pid entries are skipped (a stale file must not capture live events).
     "" lets the reporter fall back to the frozen `SYMMETRIA_IDE_AGENT_SOCK`.
@@ -162,12 +191,13 @@ def resolve_socket(session_id: str, cwd: str) -> str:
     if cwd:
         root = resolve_project_root(cwd)
         for e in entries:
-            # On a project-root tie (two live IDEs on the same repo — possible
-            # since one-IDE-per-project is a convention, not enforced) the first
+            # On a root tie (two live IDEs on the same repo — possible since
+            # one-IDE-per-project is a convention, not enforced) the first
             # entry in glob order wins. Non-deterministic, but acceptable under
             # that topology; the session-map branch above is the precise path
             # once a session is bound.
-            if e.get("project_root") == root and _pid_alive(e.get("pid", -1)):
+            entry_roots = e.get("roots") or [e.get("project_root")]
+            if root in entry_roots and _pid_alive(e.get("pid", -1)):
                 return str(e["socket"])
     return ""
 
@@ -224,8 +254,10 @@ def resolve_slot_for_event(
         # agent's first-event cwd equals its spawn cwd), or when cwd is absent
         # (can't verify → preserve the pre-daemon behaviour). A frozen foreign
         # agent's cwd resolves to a different root → falls through to tier 3.
+        # Canonical comparison so a same-repo linked worktree still counts as
+        # this project (worktree follow: agents legitimately cd/spawn there).
         if slot is not None and slot in term_agents:
-            same_project = not cwd or resolve_project_root(cwd) == resolve_project_root(
+            same_project = not cwd or _canonical_root(cwd) == _canonical_root(
                 term_agents[slot].get("cwd", "")
             )
             if same_project:
@@ -235,12 +267,12 @@ def resolve_slot_for_event(
                 return slot, (session_id if needs_bind else "")
 
     if session_id and cwd:
-        root = resolve_project_root(cwd)
+        root = _canonical_root(cwd)
         candidates = [
             slot
             for slot, inst in term_agents.items()
             if not inst.get("session_id")
-            and resolve_project_root(inst.get("cwd", "")) == root
+            and _canonical_root(inst.get("cwd", "")) == root
         ]
         if candidates:
             # Best-effort bootstrap: pick the newest-spawned unbound slot in this

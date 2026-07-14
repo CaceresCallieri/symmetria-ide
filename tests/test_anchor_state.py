@@ -289,6 +289,51 @@ def test_cwd_changed_fires_while_anchored(controller):
 
 
 # ---------------------------------------------------------------------------
+# Worktree-follow override — the THIRD displayedRoot source (highest wins)
+# ---------------------------------------------------------------------------
+#
+# The override lifecycle (set/clear via `_recompute_agent_root_override`) is
+# exercised with real agent slots in test_app_controller_term_agents.py; here
+# we pin the pure precedence + suppression semantics by setting the fields
+# directly, same as the anchored_root defense-in-depth test above.
+
+
+def test_override_wins_over_anchor_and_cwd(controller):
+    _push_cwd(controller, "/tmp")
+    controller.anchor_to_path("/projects/main")
+    controller._agent_root_override = "/projects/main-wt"
+
+    assert controller.displayedRoot == "/projects/main-wt"
+    # The anchor is latent underneath, not corrupted.
+    assert controller.anchored is True
+
+
+def test_cwd_suppressed_while_override_active(controller):
+    """Sticky-until-re-caused: a shell/nvim cd never snaps the chrome back
+    while the worktree follow is active — same gate as the anchor."""
+    _push_cwd(controller, "/projects/main")
+    controller._agent_root_override = "/projects/main-wt"
+    displayed_emissions = _capture(controller.displayedRootChanged)
+
+    _push_cwd(controller, "/tmp/wandering")
+
+    assert controller.cwd == "/tmp/wandering"  # raw cwd still flows
+    assert controller.displayedRoot == "/projects/main-wt"
+    assert displayed_emissions == []
+
+
+def test_override_clear_reexposes_latent_anchor(controller):
+    _push_cwd(controller, "/tmp")
+    controller.anchor_to_path("/projects/main")
+    controller._agent_root_override = "/projects/main-wt"
+
+    controller._agent_root_override = ""
+
+    assert controller.displayedRoot == "/projects/main"
+    assert controller.anchored is True
+
+
+# ---------------------------------------------------------------------------
 # `_on_anchor_event` routing (integration between Lua payload and slots)
 # ---------------------------------------------------------------------------
 

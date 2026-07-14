@@ -91,6 +91,7 @@ from .project_browser_marker import (
     resolve_project_root,
     set_browser_agents,
 )
+from .worktree import canonical_project_root, linked_worktree_info
 from . import git_subprocess
 from . import remote_location
 from .mount_manager import SshfsMount
@@ -120,6 +121,15 @@ log = logging.getLogger(__name__)
 # same logic points at a VPS socket later. Config (status bar off, window-size
 # latest, sessions survive detach) lives in runtime/agent-tmux.conf.
 _AGENT_TMUX_CONF = _RUNTIME_DIR / "agent-tmux.conf"
+
+# The file-mutating tools whose hook-reported target path (`tool_path`) moves
+# an agent's WORK root for the worktree follow. Deliberately excludes Read/
+# Grep/Glob — exploration must not yank the chrome; "where the agent is
+# CHANGING files" is the signal the feature promises. The session cwd is no
+# substitute: it never moves when an agent works in a worktree via Bash
+# (a Bash-tool `cd` changes the tool's persistent shell, not the session
+# process — diagnosed live on magistralia, 2026-07-13).
+_AGENT_WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
 
 def _agent_tmux_enabled() -> bool:
@@ -483,6 +493,18 @@ class AppController(QObject):
     # agent_coordination.py). Notifies the chip coordination-attention dot
     # list (agentCoordAttention).
     agentCoordChanged = Signal()
+    # Worktree follow (see _recompute_agent_root_override). Two dedicated
+    # signals — NOT termAgentsChanged — because worktree membership changes
+    # rarely (a focus edge or an agent cd-ing across a worktree boundary) and
+    # must not re-evaluate the whole chip row's occupancy/title bindings:
+    #   - agentWorktreeChanged → the per-slot `agentWorktree` name list (chip
+    #     branch glyph);
+    #   - displayingWorktreeChanged → the `displayingWorktree` name the tree
+    #     header glyph binds (separate from displayedRootChanged because the
+    #     override can clear while displayedRoot coincidentally stays equal,
+    #     e.g. the user anchored to the same worktree path).
+    agentWorktreeChanged = Signal()
+    displayingWorktreeChanged = Signal()
     # Internal cross-thread marshal for the coordination judge: the one-shot
     # judge worker thread emits (trigger_id, status, summary); a queued
     # connection delivers _on_judge_verdict on the GUI thread.
@@ -1031,6 +1053,19 @@ class AppController(QObject):
         # NOT a nvim `<leader>` binding (it has to fire from any pane).
         self._anchored: bool = False
         self._anchored_root: str = ""
+        # Worktree follow — the THIRD (and highest-precedence) displayedRoot
+        # source: while the focused agent's live cwd sits inside a linked git
+        # worktree of this project, `_agent_root_override` pins the chrome to
+        # that worktree root. Set/cleared ONLY by
+        # `_recompute_agent_root_override` (focus edges, the focused agent's
+        # hook-reported cwd moves, pool emptying). Deliberately separate from
+        # the anchor: routing the follow through `anchor_to_path` would
+        # corrupt the user's manual anchor state — instead the anchor stays
+        # latent underneath and reasserts the moment the override clears.
+        # `_agent_root_override_name` is the worktree's name (the
+        # `.git/worktrees/<name>` component) for the header glyph/label.
+        self._agent_root_override: str = ""
+        self._agent_root_override_name: str = ""
         # Location state (Local ↔ VPS). Orthogonal to the anchor: `_location`
         # never mutates `displayedRoot` — each remote-aware surface reads its
         # own seam (agent-pool location filter, git runner, tree mount,
@@ -1466,12 +1501,15 @@ class AppController(QObject):
                 # but the DISPLAYED root stays pinned to `_anchored_root`.
                 # Without this gate, anchoring would degrade to a no-op
                 # because every BufEnter would re-fire downstream binds.
-                if not self._anchored:
+                # The worktree-follow override gates identically — while
+                # following the focused agent's worktree, a shell/nvim cd
+                # must not snap the chrome back (sticky-until-re-caused).
+                if not self._anchored and not self._agent_root_override:
                     self.displayedRootChanged.emit()
                 else:
                     log.debug(
-                        "cwd update suppressed (anchored to %s): %s",
-                        self._anchored_root,
+                        "cwd update suppressed (pinned to %s): %s",
+                        self._agent_root_override or self._anchored_root,
                         new_cwd,
                     )
             return
@@ -1888,23 +1926,45 @@ class AppController(QObject):
         """
         return self._cwd
 
+    def _base_displayed_root(self) -> str:
+        """`displayedRoot` WITHOUT the worktree-follow override — the anchor
+        state machine's own answer (anchored root when anchored, else raw
+        cwd). Split out so the override's same-repo gate and the registry's
+        canonical-root publication can compare against the project the user
+        is actually in, not the worktree the chrome is temporarily showing
+        (comparing against `displayedRoot` itself would be circular once the
+        override is active)."""
+        if self._anchored and self._anchored_root:
+            return self._anchored_root
+        return self._cwd
+
     @Property(str, notify=displayedRootChanged)
     def displayedRoot(self) -> str:
         """The effective project root for UI panes.
 
-        Pure function of `_cwd`, `_anchored`, and `_anchored_root`:
-        returns the anchored root when anchored (and non-empty), else
-        the raw cwd. Bound by `FileTreeView.rootPath` and the git
-        controller's `repoRoot`. The `_anchored_root` non-empty guard
-        is defense-in-depth — `anchor_to_current_cwd` won't anchor on
+        Pure function of three sources, highest precedence first:
+        1. `_agent_root_override` — the focused agent's linked-worktree root
+           (worktree follow; see `_recompute_agent_root_override`);
+        2. `_anchored_root` when anchored (and non-empty);
+        3. the raw `_cwd`.
+        Bound by `FileTreeView.rootPath` and the git controller's
+        `repoRoot`. The `_anchored_root` non-empty guard is
+        defense-in-depth — `anchor_to_current_cwd` won't anchor on
         an empty path, but a malformed `:SymmetriaAnchor` payload from
         Lua could still arrive with `""`, and silently falling back to
         cwd in that case is more forgiving than pinning the tree to
         an empty string.
         """
-        if self._anchored and self._anchored_root:
-            return self._anchored_root
-        return self._cwd
+        if self._agent_root_override:
+            return self._agent_root_override
+        return self._base_displayed_root()
+
+    @Property(str, notify=displayingWorktreeChanged)
+    def displayingWorktree(self) -> str:
+        """The linked worktree's name while the chrome is re-rooted to the
+        focused agent's worktree, else "". Drives the branch glyph beside
+        the tree header's root label (Main.qml locationHeader)."""
+        return self._agent_root_override_name
 
     @Property(str, notify=displayedRootChanged)
     def editorRoot(self) -> str:
@@ -2104,6 +2164,11 @@ class AppController(QObject):
                 # Only when the agent surface is what the user is looking at
                 # does the pane need real keyboard focus right now.
                 self.focusAgentRequested.emit(target)
+        # Worktree follow tracks the restored focus (the funnel's vps guard
+        # makes this a no-op when the toggle landed on the vps side, which is
+        # also what prevents re-entering _switch_location via the
+        # displayedRootChanged → _reprobe_vps_pairing chain mid-toggle).
+        self._recompute_agent_root_override()
 
     def _reprobe_vps_pairing(self) -> None:
         """Root changed: drop to local silently, re-probe the new root.
@@ -3002,6 +3067,15 @@ class AppController(QObject):
         """Per-slot OSC titles, indexed `slot - 1`; "" = no title yet."""
         return self._slot_field("title", "")
 
+    @Property("QVariantList", notify=agentWorktreeChanged)
+    def agentWorktree(self) -> list:
+        """Per-slot linked-worktree name, indexed `slot - 1`; "" = the agent
+        lives in the main checkout (or its root is foreign/unknown). Name
+        strings rather than bools so QML gets truthiness for the chip glyph
+        now and a tooltip label later. Dedicated notify (not
+        termAgentsChanged) — see the agentWorktreeChanged signal comment."""
+        return self._slot_field("worktree", "")
+
     @Property("QVariantList", notify=agentStatusChanged)
     def agentModels(self) -> list:
         """Per-slot model display name (status-line tap), indexed `slot - 1`."""
@@ -3206,6 +3280,17 @@ class AppController(QObject):
             log.warning("spawn_agent: pool full (%d slots)", self._MAX_INSTANCES)
             return
         cwd = self.displayedRoot
+        # New agents ALWAYS spawn in the MAIN checkout (user decision,
+        # 2026-07-13 — reverses the short-lived "everything follows" spawn
+        # semantics): when the displayed root is a linked worktree — via the
+        # worktree follow OR a manual cd/anchor into one — redirect the spawn
+        # to the canonical main root. A worktree remains the FOCUSED agent's
+        # world; a fresh agent starts from the project's source of truth.
+        # Deliberately narrow (only worktree roots redirect) so spawning from
+        # a plain subdirectory keeps its current cwd.
+        spawn_main_root = linked_worktree_info(resolve_project_root(cwd))[0]
+        if spawn_main_root:
+            cwd = spawn_main_root
         record = {
             "spawn_type": spawn_type,
             "dangerous": dangerous,
@@ -3224,11 +3309,20 @@ class AppController(QObject):
             # Computed here (not at spawn-argv time) so it is fixed for the
             # agent's whole lifetime regardless of later root changes.
             "tmux_session": agent_harness.tmux_session_name(cwd, slot),
+            # Worktree follow: "" until the agent's work location proves to
+            # be a linked worktree of this project (seeded below for local
+            # spawns, kept current from hook tool paths / cwds). With the
+            # spawn-to-main redirect above, a fresh agent's seed is "" by
+            # construction; the glyph lights later if the agent starts
+            # WRITING inside a worktree.
+            "worktree": "",
         }
         if vps:
             server = self._remote_context.server
             assert server is not None  # guarded above
             record.update(self._vps_record_fields(server, slot, spawn_type))
+        else:
+            record["worktree"] = self._agent_worktree_state(record)[1]
         self._register_term_agent(slot, record)
         log.info(
             "spawn_agent: slot %d (%s %s%s) in %s%s",
@@ -3276,6 +3370,9 @@ class AppController(QObject):
         self._term_agents[slot] = record
         self._agent_order.append(slot)
         self.termAgentsChanged.emit()
+        # agentWorktree is on its own notify (see the signal comment) — a new
+        # slot changes that list too, so the occupancy edge emits both.
+        self.agentWorktreeChanged.emit()
         if record.get("location", "local") == "local":
             self._agent_bridge.notify_spawn(self._term_instance_payload(slot))
             # Publish the new slot to the cross-IDE registry (a resume carries
@@ -3449,6 +3546,78 @@ class AppController(QObject):
         )
 
     @Slot(int)
+    def _agent_worktree_state(self, rec: dict) -> tuple[str, str]:
+        """`(worktree_root, worktree_name)` for a slot record iff its live
+        root is a linked worktree of THIS project, else `("", "")`.
+
+        The live root is, in precedence order: `work_root` (the repo root of
+        the last file a WRITE tool touched — the only signal that tracks an
+        agent working in a worktree via Bash/absolute paths, where the session
+        cwd never moves), then the hook-reported session cwd (`live_cwd`),
+        then the spawn cwd before the first hook arrives. The same-repo gate
+        compares canonical (main-checkout) roots via `_base_displayed_root` —
+        NOT `displayedRoot`, which would be circular while an override is
+        active — so foreign repos and non-repo dirs never count (v1 scope:
+        same-repo worktrees only). Shared by the chip glyph field and the
+        override funnel so the two can never disagree.
+        """
+        agent_root = rec.get("work_root") or resolve_project_root(
+            rec.get("live_cwd") or rec.get("cwd", "")
+        )
+        main_root, name = linked_worktree_info(agent_root)
+        if main_root and main_root == canonical_project_root(
+            resolve_project_root(self._base_displayed_root())
+        ):
+            return agent_root, name
+        return "", ""
+
+    def _recompute_agent_root_override(self) -> None:
+        """Re-derive the worktree-follow override from the FOCUSED agent.
+
+        The single funnel behind every re-cause: focus change (focus_agent),
+        the focused agent's hook-reported cwd moving (`_on_agent_hook`), the
+        pool emptying (close_agent's empty branch), and the location-toggle
+        focus handoff. Follow iff the focused agent's live root is a linked
+        worktree of this project; everything else — main checkout, foreign
+        repo, non-repo dir, no focused agent — CLEARS the override (the
+        anchor/cwd base reasserts underneath).
+
+        VPS contexts are left untouched (returns with no change): a vps
+        agent's cwd is a remote path that never flows through local hooks,
+        and recomputing during a location toggle would re-enter
+        `_switch_location` via `displayedRootChanged` → `_reprobe_vps_pairing`
+        and bounce the user's toggle straight back to local.
+        """
+        slot = self._focused_term_agent
+        rec = self._term_agents.get(slot)
+        if self._location != "local" or (
+            rec is not None and rec.get("location", "local") != "local"
+        ):
+            return
+        target_root, target_name = (
+            ("", "") if rec is None else (self._agent_worktree_state(rec))
+        )
+        if (
+            target_root == self._agent_root_override
+            and target_name == self._agent_root_override_name
+        ):
+            return
+        prior_displayed = self.displayedRoot
+        self._agent_root_override = target_root
+        self._agent_root_override_name = target_name
+        self.displayingWorktreeChanged.emit()
+        if self.displayedRoot != prior_displayed:
+            self.displayedRootChanged.emit()
+        if target_root:
+            log.info(
+                "worktree follow: chrome re-rooted to %s (worktree '%s', slot %d)",
+                target_root,
+                target_name,
+                slot,
+            )
+        else:
+            log.info("worktree follow: override cleared")
+
     def focus_agent(self, slot: int) -> None:
         """Focus the slot's terminal and bring the agent surface forward.
 
@@ -3485,6 +3654,10 @@ class AppController(QObject):
             # VPS agents aren't published to the shell bridge — a focus
             # notification for an unknown buf would be dropped there anyway.
             self._agent_bridge.notify_focus(slot)
+        # Worktree follow: the chrome re-roots to (or away from) the freshly
+        # focused agent's worktree. After the location-follow above so the
+        # funnel's vps guard sees the settled location.
+        self._recompute_agent_root_override()
         self.set_central_surface("agent")
         self.focusAgentRequested.emit(slot)
 
@@ -3718,6 +3891,7 @@ class AppController(QObject):
             self._forget_local_agent(slot)
             self._release_agent_browser_windows(slot)
             self.termAgentsChanged.emit()
+            self.agentWorktreeChanged.emit()
             self._agent_bridge.notify_remove(slot)
             return
         # Display position within the closing agent's OWN location — the
@@ -3740,6 +3914,7 @@ class AppController(QObject):
         if self._focused_by_location.get(location) == slot:
             self._focused_by_location[location] = 0
         self.termAgentsChanged.emit()
+        self.agentWorktreeChanged.emit()
         self.agentActivityChanged.emit()
         if not was_vps:
             # VPS slots were never published to the shell bridge (see
@@ -3750,6 +3925,9 @@ class AppController(QObject):
             if not location_order:
                 self._focused_term_agent = 0
                 self.focusedAgentChanged.emit()
+                # Pool emptied without routing through focus_agent — clear
+                # any worktree follow left by the closed agent.
+                self._recompute_agent_root_override()
                 if self._central_surface == "agent":
                     self.set_central_surface("terminal")
             else:
@@ -5070,11 +5248,31 @@ class AppController(QObject):
                 for slot, inst in self._term_agents.items()
                 if inst.get("session_id")
             }
+            # Publish the CANONICAL main-checkout root, derived from the
+            # pre-override base — while the chrome follows an agent's
+            # worktree, displayedRoot IS that worktree, and publishing it as
+            # project_root would break first-event routing for main-checkout
+            # agents (their reporter would find no matching root and fall
+            # back to the daemon-frozen env socket, possibly another IDE).
+            # `roots` additionally lists each live local agent's own resolved
+            # root, so a first event reported from INSIDE a worktree (agent
+            # spawned or cd'd there) still routes to this IDE.
+            project_root = canonical_project_root(
+                resolve_project_root(self._base_displayed_root())
+            )
+            roots = [project_root]
+            for inst in self._term_agents.values():
+                if inst.get("location", "local") != "local":
+                    continue
+                root = resolve_project_root(inst.get("live_cwd") or inst.get("cwd", ""))
+                if root and root not in roots:
+                    roots.append(root)
             agent_registry.write_entry(
                 os.getpid(),
                 self._agent_events.socket_path,
-                resolve_project_root(self.displayedRoot),
+                project_root,
                 sessions,
+                roots=roots,
             )
         except Exception:
             log.warning("agent registry sync failed", exc_info=True)
@@ -5253,6 +5451,39 @@ class AppController(QObject):
         # correct and can't collide with a frozen-id sibling in another project.
         payload = {**payload, "agent_id": f"{os.getpid()}_{slot}"}
         agent_id = payload["agent_id"]
+        # Live work-location capture (worktree follow), two signals in NEW
+        # fields — never overwriting the spawn-time "cwd", which slot
+        # attribution (resolve_slot_for_event tiers 2–3), the bridge's project
+        # label, and the tmux session name all derive from:
+        #   - `live_cwd`  — the session's real os.getcwd() (every hook). Only
+        #     moves if the SESSION itself relocates (spawned in a worktree);
+        #     a Bash-tool `cd` never moves it.
+        #   - `work_root` — the resolved repo root of the last WRITE-tool
+        #     target path (`tool_path`, forwarded by the reporter). THE signal
+        #     that follows an agent editing a worktree it never cd'd into.
+        #     Stored pre-resolved so it only "changes" when the agent's edits
+        #     cross a repo boundary, not on every file.
+        # On either change, re-derive the slot's worktree name (chip glyph)
+        # and — when this is the focused agent — the chrome override.
+        rec = self._term_agents[slot]
+        roots_changed = False
+        event_cwd = str(payload.get("cwd", "") or "")
+        if event_cwd and rec.get("live_cwd") != event_cwd:
+            rec["live_cwd"] = event_cwd
+            roots_changed = True
+        tool_path = str(payload.get("tool_path", "") or "")
+        if tool_path and payload.get("tool_name") in _AGENT_WRITE_TOOLS:
+            work_root = resolve_project_root(tool_path)
+            if work_root and rec.get("work_root") != work_root:
+                rec["work_root"] = work_root
+                roots_changed = True
+        if roots_changed:
+            worktree_name = self._agent_worktree_state(rec)[1]
+            if rec.get("worktree", "") != worktree_name:
+                rec["worktree"] = worktree_name
+                self.agentWorktreeChanged.emit()
+            if slot == self._focused_term_agent:
+                self._recompute_agent_root_override()
         # A real hook event supersedes any speculative Esc-interrupt clear armed
         # for this slot: the agent is genuinely transitioning, and the event
         # itself sets the correct state below (it may even BE a clear, e.g. Stop).

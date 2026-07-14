@@ -506,6 +506,44 @@ Rectangle {
                                 onClicked: controller.focus_agent_browser(chip.slot)
                             }
                         }
+
+                        // Worktree indicator — this agent's live root is a
+                        // linked git worktree of the project (worktree
+                        // follow); focusing the chip re-roots the tree + git
+                        // chrome there. Presence-only (no dot/pulse layers —
+                        // sibling browserIndicator carries those precedents
+                        // if attention semantics ever grow here). Same
+                        // QVariantList indexing discipline as above: index
+                        // then coerce (no Array.isArray).
+                        Item {
+                            id: worktreeIndicator
+                            anchors.verticalCenter: parent.verticalCenter
+                            readonly property string worktreeName:
+                                String(controller.agentWorktree[chip.slot - 1] || "")
+                            visible: worktreeIndicator.worktreeName.length > 0
+                            width: worktreeIndicator.visible
+                                ? worktreeGlyph.implicitWidth : 0
+                            height: worktreeGlyph.implicitHeight
+
+                            Text {
+                                id: worktreeGlyph
+                                anchors.centerIn: parent
+                                // nf-oct-git_branch — worktree mark. Escape
+                                // form on purpose: a literal private-use-area
+                                // glyph here once arrived as an EMPTY string
+                                // (dropped in an edit pipeline) and silently
+                                // rendered nothing — the escape is diff-visible.
+                                text: "\uf418"
+                                font.family: editorFontFamily
+                                font.pixelSize: Theme.font.size.sm
+                                // Accent (not text.dim): the glyph is a state
+                                // badge — "this agent lives in a worktree" —
+                                // and must read at a glance like the header's
+                                // twin, not blend into the chip title.
+                                color: Theme.color.accent.primary
+                                renderType: Text.NativeRendering
+                            }
+                        }
                     }
 
                     // Click-to-focus convenience; keyboard (Ctrl+N) is primary.

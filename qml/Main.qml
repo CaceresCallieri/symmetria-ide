@@ -259,15 +259,28 @@ Window {
             sequences: ["Ctrl+" + (index + 1)]
             context: Qt.ApplicationShortcut
             onActivated: {
-                // Modal guard: don't switch/spawn agents while ANY modal
+                // Modal guard: don't switch/spawn agents while another modal
                 // overlay is open (it would stack / yank focus — ping-pong).
-                if (root._anyModalVisible())
+                // The spawn menu itself is EXEMPT (same idiom as Ctrl+Shift+A):
+                // pressing Ctrl+N with the menu open means "never mind, take
+                // me to agent N" — without the exemption, a Ctrl+3 that opened
+                // the menu left every Ctrl+1/2 dead until an explicit Esc
+                // (reported live 2026-07-13).
+                if (root._anyModalVisible() && !agentSpawnMenu.visible)
                     return;
                 var order = controller.agentOrder;
-                if (index < order.length)
+                if (index < order.length) {
+                    // Visible-gated: an unconditional dismiss() would emit a
+                    // spurious dismissed() → _restoreCentralFocus() even when
+                    // no menu was open.
+                    if (agentSpawnMenu.visible)
+                        agentSpawnMenu.dismiss();
                     controller.focus_agent(order[index]);
-                else
+                } else {
+                    // open() is idempotent — re-asserts the key catcher when
+                    // the menu is already up.
                     agentSpawnMenu.open();
+                }
             }
         }
     }
@@ -1938,6 +1951,30 @@ Window {
                                 elide: Text.ElideMiddle
                                 verticalAlignment: Text.AlignVCenter
                                 Layout.fillWidth: true
+                            }
+
+                            // Worktree glyph — the chrome is re-rooted to
+                            // the focused agent's linked worktree (worktree
+                            // follow). Accent-colored branch mark so the
+                            // header reads "you are looking at a worktree"
+                            // at a glance, beside the path that already
+                            // changed. Nerd Font via editorFontFamily (the
+                            // chrome UI font may lack the glyph).
+                            Text {
+                                id: worktreeGlyph
+                                //  = nf-oct-git_branch. Escape form on
+                                // purpose: a literal private-use-area glyph
+                                // here once survived review as an EMPTY string
+                                // (dropped in an edit pipeline) and rendered
+                                // as nothing — the escape is diff-visible.
+                                text: "\uf418"
+                                visible: controller.displayingWorktree !== ""
+                                color: Theme.color.accent.primary
+                                font.family: editorFontFamily
+                                font.pixelSize: Theme.font.size.sm
+                                verticalAlignment: Text.AlignVCenter
+                                Layout.alignment: Qt.AlignVCenter
+                                renderType: Text.NativeRendering
                             }
 
                             // Anchor dot — appears only when anchored.

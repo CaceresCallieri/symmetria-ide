@@ -30,6 +30,14 @@ def _mkrepo(base, name):
     return str(root)
 
 
+def _mkworktree(base, main, name="wt"):
+    """A linked-worktree checkout of `main` (a `.git` pointer FILE)."""
+    wt = base / name
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {main}/.git/worktrees/{name}\n")
+    return str(wt)
+
+
 # ---------------------------------------------------------------------------
 # registry write / resolve_socket / reap
 # ---------------------------------------------------------------------------
@@ -92,6 +100,44 @@ def test_reap_dead_removes_dead_but_keeps_live(registry_env, monkeypatch):
     agent_registry.reap_dead()
     files = {p.name for p in agent_registry.registry_dir().glob("*.json")}
     assert files == {"701.json"}
+
+
+def test_resolve_by_worktree_root_via_roots_list(registry_env):
+    """A first event reported from inside a linked worktree routes here when
+    the IDE published that worktree in its `roots` list."""
+    main = _mkrepo(registry_env, "proj")
+    wt = _mkworktree(registry_env, main)
+    agent_registry.write_entry(700, "/run/sock-700.sock", main, {}, roots=[main, wt])
+    sub = os.path.join(wt, "src")
+    os.makedirs(sub)
+    assert agent_registry.resolve_socket("unbound", sub) == "/run/sock-700.sock"
+
+
+def test_resolve_without_roots_falls_back_to_project_root(registry_env):
+    """Entries written by older IDE versions (no `roots` key) still resolve
+    via the single `project_root`."""
+    import json
+
+    main = _mkrepo(registry_env, "proj")
+    agent_registry.registry_dir().mkdir(parents=True, exist_ok=True)
+    (agent_registry.registry_dir() / "700.json").write_text(
+        json.dumps(
+            {
+                "pid": 700,
+                "socket": "/run/sock-700.sock",
+                "project_root": main,
+                "sessions": {},
+            }
+        )
+    )
+    assert agent_registry.resolve_socket("unbound", main) == "/run/sock-700.sock"
+
+
+def test_write_entry_defaults_roots_to_project_root(registry_env):
+    main = _mkrepo(registry_env, "proj")
+    agent_registry.write_entry(700, "/run/sock-700.sock", main, {})
+    entry = next(iter(agent_registry._read_entries()))
+    assert entry["roots"] == [main]
 
 
 def test_read_tolerates_corrupt_entry(registry_env):
@@ -185,6 +231,33 @@ def test_slot_claim_matches_by_root_not_exact_cwd(tmp_path):
     agents = _agents(slot1=("", root, 1.0))
     slot, bind = agent_registry.resolve_slot_for_event(
         agents, my_pid=700, session_id="sess-Q", cwd=sub, agent_id_env="999_1"
+    )
+    assert slot == 1
+    assert bind == "sess-Q"
+
+
+def test_slot_env_match_accepted_from_same_repo_worktree(tmp_path):
+    """Canonical-root comparison: an agent that cd'd into a linked worktree of
+    its OWN repo before binding its session is still the same project — the
+    tier-2 guard must not reject it (worktree follow)."""
+    main = _mkrepo(tmp_path, "proj")
+    wt = _mkworktree(tmp_path, main)
+    agents = _agents(slot2=("", main, 1.0))
+    slot, bind = agent_registry.resolve_slot_for_event(
+        agents, my_pid=700, session_id="sess-wt", cwd=wt, agent_id_env="700_2"
+    )
+    assert slot == 2
+    assert bind == "sess-wt"
+
+
+def test_slot_claim_matches_worktree_cwd_to_main_slot(tmp_path):
+    """Tier-3 bootstrap claim with a worktree cwd: canonicalization folds the
+    worktree onto the main checkout's project."""
+    main = _mkrepo(tmp_path, "proj")
+    wt = _mkworktree(tmp_path, main)
+    agents = _agents(slot1=("", main, 1.0))
+    slot, bind = agent_registry.resolve_slot_for_event(
+        agents, my_pid=700, session_id="sess-Q", cwd=wt, agent_id_env="999_1"
     )
     assert slot == 1
     assert bind == "sess-Q"

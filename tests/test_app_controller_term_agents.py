@@ -1534,3 +1534,286 @@ def test_on_shared_usage_ignores_staler_peer_value(usage_controller):
     }
     c._on_shared_usage_changed()
     assert c.accountUsage5hPct == 20  # local fresher value retained
+
+
+# ---------------------------------------------------------------------------
+# Worktree follow — live cwd capture + focused-agent chrome re-rooting
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def worktree_env(tmp_path):
+    """(main_root, worktree_root): a fake main checkout + linked worktree."""
+    main = tmp_path / "proj"
+    (main / ".git").mkdir(parents=True)
+    wt = tmp_path / "proj-wt"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {main}/.git/worktrees/feature-x\n")
+    return str(main), str(wt)
+
+
+def _push_cwd(ctrl, path: str) -> None:
+    """Simulate one `cwd` capsule (same shape test_anchor_state uses)."""
+    ctrl._route_capsule({"id": "cwd", "label": "", "value": path})
+
+
+def test_hook_cwd_stored_as_live_cwd_not_cwd(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Bash", session_id="s1", cwd=wt)
+    )
+    rec = controller._term_agents[1]
+    # The spawn-time cwd is load-bearing for attribution/bridge/tmux naming —
+    # the live cwd lands in its own field.
+    assert rec["cwd"] == main
+    assert rec["live_cwd"] == wt
+
+
+def test_focused_worktree_agent_reroots_chrome(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)  # slot 1, focused
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Bash", session_id="s1", cwd=wt)
+    )
+    assert controller.displayedRoot == wt
+    assert controller.displayingWorktree == "feature-x"
+    assert controller.agentWorktree[0] == "feature-x"
+
+
+def test_unfocused_agent_hook_does_not_reroot(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)  # slot 1
+    controller.spawn_agent("fresh", True)  # slot 2 — focused (spawn focuses)
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Bash", session_id="s1", cwd=wt)
+    )
+    # Slot 1's glyph lights, but the chrome follows only the FOCUSED agent.
+    assert controller.agentWorktree[0] == "feature-x"
+    assert controller.displayedRoot == main
+    assert controller.displayingWorktree == ""
+
+
+def test_focus_switch_follows_and_returns(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)  # slot 1
+    controller.spawn_agent("fresh", True)  # slot 2 — focused
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Bash", session_id="s1", cwd=wt)
+    )
+    controller.focus_agent(1)
+    assert controller.displayedRoot == wt
+    assert controller.displayingWorktree == "feature-x"
+    # Back to a main-checkout agent → chrome snaps back.
+    controller.focus_agent(2)
+    assert controller.displayedRoot == main
+    assert controller.displayingWorktree == ""
+
+
+def test_focused_agent_cd_out_clears_immediately(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Bash", session_id="s1", cwd=wt)
+    )
+    assert controller.displayedRoot == wt
+    controller._on_agent_hook(
+        _hook(1, "PostToolUse", tool_name="Bash", session_id="s1", cwd=main)
+    )
+    assert controller.displayedRoot == main
+    assert controller.displayingWorktree == ""
+    assert controller.agentWorktree[0] == ""
+
+
+def test_foreign_repo_root_does_not_follow(controller, worktree_env, tmp_path):
+    main, _wt = worktree_env
+    foreign = tmp_path / "other"
+    (foreign / ".git").mkdir(parents=True)
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Bash", session_id="s1", cwd=main)
+    )
+    controller._on_agent_hook(
+        _hook(1, "PostToolUse", tool_name="Bash", session_id="s1", cwd=str(foreign))
+    )
+    # v1 scope: only same-repo linked worktrees follow — a foreign repo clears.
+    assert controller.displayedRoot == main
+    assert controller.displayingWorktree == ""
+    assert controller.agentWorktree[0] == ""
+
+
+def test_shell_cd_sticky_while_following(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Bash", session_id="s1", cwd=wt)
+    )
+    _push_cwd(controller, "/tmp/wandering")
+    # Sticky-until-re-caused: the shell cd updates _cwd silently only.
+    assert controller.cwd == "/tmp/wandering"
+    assert controller.displayedRoot == wt
+
+
+def test_close_last_agent_clears_follow(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Bash", session_id="s1", cwd=wt)
+    )
+    assert controller.displayedRoot == wt
+    controller.close_agent(1)
+    assert controller.displayedRoot == main
+    assert controller.displayingWorktree == ""
+
+
+def test_spawn_while_following_spawns_in_main(controller, worktree_env):
+    """New agents ALWAYS spawn in the main checkout (user decision 2026-07-13,
+    reversing the short-lived "everything follows" spawn semantics): even with
+    the chrome re-rooted to a worktree, a fresh agent starts from the
+    project's source of truth."""
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Bash", session_id="s1", cwd=wt)
+    )
+    assert controller.displayedRoot == wt  # follow active
+    controller.spawn_agent("fresh", True)  # slot 2
+    rec = controller._term_agents[2]
+    assert rec["cwd"] == main
+    assert controller.agentWorktree[1] == ""
+    # Spawning routes through focus_agent(2) — a main-checkout agent — so the
+    # follow CLEARS and the chrome returns to main with the new agent.
+    assert controller.displayedRoot == main
+
+
+def test_spawn_from_manually_displayed_worktree_spawns_in_main(
+    controller, worktree_env
+):
+    """Same rule when the user cd'd/anchored the chrome into a worktree with
+    no follow involved: the spawn redirects to the canonical main root."""
+    main, wt = worktree_env
+    _push_cwd(controller, wt)
+    controller.spawn_agent("fresh", True)
+    assert controller._term_agents[1]["cwd"] == main
+    assert controller.agentWorktree[0] == ""
+
+
+def test_agent_worktree_signal_emits_only_on_change(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    emissions: list[None] = []
+    controller.agentWorktreeChanged.connect(lambda: emissions.append(None))
+    hook = _hook(1, "PreToolUse", tool_name="Bash", session_id="s1", cwd=wt)
+    controller._on_agent_hook(hook)
+    controller._on_agent_hook(dict(hook, hook_event_name="PostToolUse"))
+    assert len(emissions) == 1
+
+
+# ---------------------------------------------------------------------------
+# Worktree follow via WRITE-tool paths (tool_path) — the session cwd never
+# moves when an agent works in a worktree through Bash, so the reporter
+# forwards each tool's target path and the IDE follows where edits land.
+# ---------------------------------------------------------------------------
+
+
+def test_write_tool_path_in_worktree_follows(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    # Session cwd stays in main (the magistralia case) — only the Edit's
+    # file_path reveals the worktree.
+    controller._on_agent_hook(
+        _hook(
+            1,
+            "PreToolUse",
+            tool_name="Edit",
+            tool_path=f"{wt}/src/app.py",
+            session_id="s1",
+            cwd=main,
+        )
+    )
+    assert controller._term_agents[1]["work_root"] == wt
+    assert controller.displayedRoot == wt
+    assert controller.displayingWorktree == "feature-x"
+    assert controller.agentWorktree[0] == "feature-x"
+
+
+def test_read_tool_path_does_not_follow(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(
+            1,
+            "PreToolUse",
+            tool_name="Read",
+            tool_path=f"{wt}/README.md",
+            session_id="s1",
+            cwd=main,
+        )
+    )
+    # Exploration must not yank the chrome — only write tools count.
+    assert "work_root" not in controller._term_agents[1]
+    assert controller.displayedRoot == main
+    assert controller.displayingWorktree == ""
+
+
+def test_write_back_in_main_returns(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(
+            1,
+            "PreToolUse",
+            tool_name="Edit",
+            tool_path=f"{wt}/src/app.py",
+            session_id="s1",
+            cwd=main,
+        )
+    )
+    assert controller.displayedRoot == wt
+    controller._on_agent_hook(
+        _hook(
+            1,
+            "PreToolUse",
+            tool_name="Write",
+            tool_path=f"{main}/notes.md",
+            session_id="s1",
+            cwd=main,
+        )
+    )
+    # Last write wins: editing the main checkout pulls the chrome back.
+    assert controller.displayedRoot == main
+    assert controller.displayingWorktree == ""
+    assert controller.agentWorktree[0] == ""
+
+
+def test_tool_path_never_touches_spawn_cwd(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(
+            1,
+            "PreToolUse",
+            tool_name="Edit",
+            tool_path=f"{wt}/src/app.py",
+            session_id="s1",
+            cwd=main,
+        )
+    )
+    rec = controller._term_agents[1]
+    # Attribution/bridge/tmux still key on the spawn-time cwd.
+    assert rec["cwd"] == main
+    assert rec["live_cwd"] == main
