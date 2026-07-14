@@ -3948,16 +3948,14 @@ class AppController(QObject):
                 self.focus_agent(location_order[max(0, closed_position - 1)])
 
     def _kill_agent_tmux_session(self, inst: dict) -> None:
-        """Best-effort `tmux kill-session` for a closing agent (tmux substrate).
+        """`tmux kill-session` for a closing agent (tmux substrate).
 
         Gated on the socket recorded at spawn (`tmux_socket`): absent means the
         agent never went into tmux (flag off, or the wrap fell back to a direct
         PTY), so there is nothing to kill. Uses that recorded socket — not a fresh
         env read — so a mid-session SYMMETRIA_IDE_TMUX_SOCKET change can't leak the
-        real session. Synchronous and user-initiated; a local kill is ~ms, and the
-        2s timeout is a safety bound on a pathological tmux, not the expected cost.
-        A missing session (already dead) is not an error — tmux reports "can't find
-        session" and we ignore it.
+        real session. Exec-level semantics (timeouts, missing-session tolerance)
+        live on `_tmux_kill_session`.
         """
         socket = inst.get("tmux_socket")
         name = inst.get("tmux_session")

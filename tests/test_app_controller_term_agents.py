@@ -211,6 +211,41 @@ def test_agent_spawn_argv_wraps_in_tmux_when_enabled(controller, monkeypatch, tm
     assert any(a == "claude" or a.endswith("/claude") for a in argv)
 
 
+def test_agent_spawn_argv_kills_orphan_session_before_create(
+    controller, monkeypatch, tmp_path
+):
+    # Spawn semantics win over silent re-adoption: before returning the
+    # `new-session -A` wrap, agent_spawn_argv must kill any surviving orphan
+    # with the slot's deterministic name — otherwise -A would ATTACH it and
+    # the requested spawn type (fresh/resume/continue) would never run.
+    sock = str(tmp_path / "t.sock")
+    monkeypatch.setenv("SYMMETRIA_IDE_AGENT_TMUX", "1")
+    monkeypatch.setenv("SYMMETRIA_IDE_TMUX_SOCKET", sock)
+    calls: list = []
+    monkeypatch.setattr(
+        "symmetria_ide.app.subprocess.run", lambda *a, **k: calls.append(a[0])
+    )
+    controller.spawn_agent("resume", True)
+    argv = controller.agent_spawn_argv(1)
+    assert len(calls) == 1, "expected exactly one orphan kill at spawn"
+    kill_argv = calls[0]
+    assert "kill-session" in kill_argv
+    assert "-S" in kill_argv and sock in kill_argv
+    session_name = argv[argv.index("-s") + 1]
+    assert kill_argv[-1] == session_name  # kills exactly the name -A would adopt
+
+
+def test_agent_spawn_argv_no_orphan_kill_without_tmux(controller, monkeypatch):
+    # Flag unset: direct-PTY spawns must not shell out to tmux at all.
+    calls: list = []
+    monkeypatch.setattr(
+        "symmetria_ide.app.subprocess.run", lambda *a, **k: calls.append(a[0])
+    )
+    controller.spawn_agent("fresh", True)
+    controller.agent_spawn_argv(1)
+    assert calls == []
+
+
 def test_close_agent_kills_tmux_session_when_wrapped(controller, monkeypatch, tmp_path):
     sock = str(tmp_path / "t.sock")
     monkeypatch.setenv("SYMMETRIA_IDE_AGENT_TMUX", "1")
@@ -221,6 +256,7 @@ def test_close_agent_kills_tmux_session_when_wrapped(controller, monkeypatch, tm
     )
     controller.spawn_agent("fresh", True)
     controller.agent_spawn_argv(1)  # records inst["tmux_socket"] — the wrap succeeded
+    calls.clear()  # drop the spawn-time orphan kill; this test targets close
     controller.close_agent(1)
     assert calls, "expected a tmux kill-session on close"
     argv = calls[0]
