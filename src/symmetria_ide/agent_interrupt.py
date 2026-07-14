@@ -94,10 +94,10 @@ def should_arm_interrupt_clear(
 class EscapeWatcher(QObject):
     """Window-level event filter that reports (never consumes) Escape presses.
 
-    Install on each top-level window — NEVER on the ``QGuiApplication`` (see the
-    module docstring: app-level install is the 2026-07-13 SEGV). ``on_escape``
-    is invoked on the GUI thread for every ``Key_Escape`` ``KeyPress`` the window
-    dispatches;
+    Install on each top-level window — NEVER on the ``QGuiApplication`` (see
+    the module docstring: app-level install is the 2026-07-13 SEGV).
+    ``on_escape`` is invoked on the GUI thread for every ``Key_Escape``
+    ``KeyPress`` dispatched to a filtered window;
     the controller decides whether it matters. ``eventFilter`` always returns
     ``False`` — the terminal still needs the Escape to perform the interrupt.
     """
@@ -107,8 +107,9 @@ class EscapeWatcher(QObject):
         self._on_escape = on_escape
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 (Qt override)
-        # Cheap early-out: an app-level filter sees the full event firehose, so
-        # bail on anything that isn't a key press before touching key data.
+        # Cheap early-out: a window-level filter still sees every event the
+        # window dispatches, so bail on anything that isn't a key press before
+        # touching key data.
         if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
             self._on_escape()
         # NEVER consume — returning True here would swallow the Escape and break

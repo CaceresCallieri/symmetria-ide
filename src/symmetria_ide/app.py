@@ -5610,6 +5610,42 @@ class AppController(QObject):
     # Esc-interrupt recovery (agent_interrupt.py) — the non-hook fallback edge
     # ------------------------------------------------------------------
 
+    def _install_escape_watcher(self) -> None:
+        """Install the Esc-observing filter on each top-level window.
+
+        Deliberately NOT on the QGuiApplication: an app-level Python event
+        filter forces PySide to create a wrapper (getWrapperForQObject) for
+        EVERY QObject any event in the process targets — including
+        QtWebEngine/Chromium's storm of ephemeral internals, some
+        mid-destruction. Wrapping one of those SEGVs the GUI thread
+        (coredump 2026-07-13: notify → filter glue → getWrapperForQObject →
+        nested QDynamicPropertyChangeEvent → second wrapper creation → crash;
+        the gotcha #10 family). Key events reach the QQuickWindow before Qt
+        Quick routes them to the focused item, so a window-level filter still
+        sees every Escape the QMLTermWidget receives, and each install target
+        is a stable, already-wrapped top-level window — in practice exactly
+        one (Main.qml's Window; QML popups/overlays are Items, not QWindows).
+        Windows created AFTER this runs are not filtered — fine while the
+        single-window assumption holds; revisit if a second top-level window
+        ever appears. Do NOT "simplify" this back to
+        app.installEventFilter(...) — that is the IDE-killing crash, not an
+        equivalent install point. The filter never consumes the key, so the
+        terminal still performs the interrupt. run() calls start() after
+        engine.load, so the window exists when start() reaches this; headless
+        tests without a window just skip the install (warned, never app-level).
+        """
+        self._escape_watcher = EscapeWatcher(self.on_terminal_escape, parent=self)
+        top_windows = QGuiApplication.topLevelWindows()
+        if top_windows:
+            for window in top_windows:
+                window.installEventFilter(self._escape_watcher)
+        else:
+            log.warning(
+                "EscapeWatcher: no top-level window at install time — "
+                "Esc-interrupt sparkle clear disabled (never fall back to an "
+                "app-level filter)"
+            )
+
     @Slot()
     def on_terminal_escape(self) -> None:
         """An Escape press was observed (EscapeWatcher) — maybe arm a clear.
@@ -6542,33 +6578,9 @@ class AppController(QObject):
         self.displayedRootChanged.connect(self._sync_agent_registry)
         # Observe Escape presses so we can return a focused agent's sparkle to
         # idle on a user interrupt (Claude fires no hook for that —
-        # agent_interrupt.py). The filter only notifies; on_terminal_escape gates
-        # and defers. Installed on each TOP-LEVEL WINDOW, deliberately NOT on the
-        # QGuiApplication: an app-level Python event filter forces PySide to
-        # create a wrapper (getWrapperForQObject) for EVERY QObject any event in
-        # the process targets — including QtWebEngine/Chromium's storm of
-        # ephemeral internals, some mid-destruction. Wrapping one of those SEGVs
-        # the GUI thread (coredump 2026-07-13: notify → filter glue →
-        # getWrapperForQObject → nested QDynamicPropertyChangeEvent → second
-        # wrapper creation → crash; the gotcha #10 family). Key events reach the
-        # QQuickWindow before Qt Quick routes them to the focused item, so a
-        # window-level filter still sees every Escape the QMLTermWidget receives,
-        # with `watched` always the one stable, already-wrapped window. Do NOT
-        # "simplify" this back to app_instance.installEventFilter — that is the
-        # IDE-killing crash, not an equivalent install point. The filter never
-        # consumes the key, so the terminal still performs the interrupt.
-        # run() calls start() after engine.load, so the window exists here;
-        # headless tests without a window just skip the install.
-        self._escape_watcher = EscapeWatcher(self.on_terminal_escape, parent=self)
-        top_windows = QGuiApplication.topLevelWindows()
-        if top_windows:
-            for window in top_windows:
-                window.installEventFilter(self._escape_watcher)
-        else:
-            log.warning(
-                "EscapeWatcher: no top-level window at start() — Esc-interrupt "
-                "sparkle clear disabled (never fall back to an app-level filter)"
-            )
+        # agent_interrupt.py). Window-level install, NEVER app-level — the
+        # rationale (and the 2026-07-13 SEGV it prevents) lives on the method.
+        self._install_escape_watcher()
         # Cross-IDE account-usage peer file: begin watching, then adopt whatever a
         # peer last wrote so a freshly-launched IDE shows usage IMMEDIATELY — before
         # any of its own agents transact (the persistence win of a file channel).
