@@ -3526,6 +3526,18 @@ class AppController(QObject):
         # server. Reached only when the wrap succeeds, so its presence on the slot
         # record also tells close_agent the agent really went into tmux.
         inst["tmux_socket"] = socket
+        # Spawn semantics win over silent re-adoption (user decision 2026-07-13):
+        # session names are deterministic and sessions deliberately outlive the
+        # IDE, so after a restart an ORPHAN with this slot's name may survive on
+        # the socket — `new-session -A` would then ATTACH it and the requested
+        # spawn type (fresh/resume/continue argv) would silently never run ("I
+        # pressed resume and got an old conversation"). Kill any pre-existing
+        # session with this name first; the orphan's CONVERSATION is not lost —
+        # its transcript persists and stays reachable via claude's own resume
+        # picker. A future startup-reconciliation feature (re-adopting orphans as
+        # visible chips at project open) would supersede this kill for slots it
+        # re-binds; until then, an explicit spawn must mean what it says.
+        self._tmux_kill_session(socket, inst["tmux_session"], context="spawn_agent")
         # The wrap succeeded, so the tmux session is real now: re-publish the
         # bridge payload so it carries the addressable tmux_session. The
         # spawn-time payload (notify_spawn in spawn_agent) omitted it because the
@@ -3951,6 +3963,16 @@ class AppController(QObject):
         name = inst.get("tmux_session")
         if not socket or not name:
             return
+        self._tmux_kill_session(socket, name, context="close_agent")
+
+    @staticmethod
+    def _tmux_kill_session(socket: str, name: str, context: str) -> None:
+        """Best-effort synchronous `tmux kill-session` (shared by close + spawn).
+
+        A missing session (already dead) is not an error — tmux reports "can't
+        find session" and we ignore it. ~ms locally; the 2s timeout is a safety
+        bound on a pathological tmux, not the expected cost.
+        """
         try:
             subprocess.run(
                 ["tmux", "-S", socket, "kill-session", "-t", name],
@@ -3960,7 +3982,7 @@ class AppController(QObject):
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            log.warning("close_agent: tmux kill-session %s failed: %s", name, exc)
+            log.warning("%s: tmux kill-session %s failed: %s", context, name, exc)
 
     @Slot()
     def close_focused_agent(self) -> None:

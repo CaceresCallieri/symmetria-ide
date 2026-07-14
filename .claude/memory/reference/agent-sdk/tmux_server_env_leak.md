@@ -49,12 +49,14 @@ showed 0 CLAUDE/SYMMETRIA vars. Note `-gu` is NOT enough — it only deletes the
 global-table entry; the server's base environ still flows through. `-gr` is the
 removal mark that actually strips vars from new processes.
 
-**Related latent issue (flagged, not fixed):** deterministic tmux session names
-+ `new-session -A` mean an IDE restart leaves orphan sessions that a later spawn
-silently ATTACHES — the requested spawn type (fresh/resume/continue) is ignored
-because the inner argv only runs on creation. Design tension between "re-adopt
-after restart" and "spawn means what it says"; needs a user decision
-(kill-orphan vs skip-to-free-slot vs startup reconciliation/adoption).
+**Related issue, ALSO fixed (user decision 2026-07-13, same day):** deterministic
+tmux session names + `new-session -A` meant an IDE restart left orphan sessions
+that a later spawn silently ATTACHED — the requested spawn type
+(fresh/resume/continue) never ran. Policy chosen: spawn semantics win —
+`agent_spawn_argv` kills any pre-existing session with the slot's name before
+creating (`_tmux_kill_session`, shared with the close path). Orphan transcripts
+persist and stay resumable. A future startup-reconciliation feature (re-adopt
+orphans as visible chips at project open) would supersede the kill.
 
 See also [daemon_freezes_agent_env](./daemon_freezes_agent_env.md) — same class
 of ambient-identity poisoning, different vector (CC daemon spare pool vs tmux
