@@ -63,6 +63,19 @@ QtObject {
         }
     }
 
+    // ─── Icon glyphs ─────────────────────────────────────────────
+    // Nerd Font glyphs shared across chrome surfaces. Written as \u
+    // ESCAPES, never literal private-use-area characters: a literal PUA
+    // glyph once arrived through an edit pipeline as an EMPTY string and
+    // silently rendered nothing (zero-width Text, no warning). The escape
+    // is diff-visible and encoding-proof. Bind via Theme.glyph.* so each
+    // codepoint lives in exactly one place. Render with font.family:
+    // editorFontFamily (the chrome UI font may lack icon glyphs).
+    readonly property QtObject glyph: QtObject {
+        // nf-oct-git_branch — the worktree mark (tree header + agent chips).
+        readonly property string worktree: "\uf418"
+    }
+
     // ─── Color ───────────────────────────────────────────────────
     readonly property QtObject color: QtObject {
         // Backgrounds — matte pill palette.

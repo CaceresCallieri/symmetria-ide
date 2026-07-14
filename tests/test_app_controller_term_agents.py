@@ -1817,3 +1817,33 @@ def test_tool_path_never_touches_spawn_cwd(controller, worktree_env):
     # Attribution/bridge/tmux still key on the spawn-time cwd.
     assert rec["cwd"] == main
     assert rec["live_cwd"] == main
+
+
+# ---------------------------------------------------------------------------
+# QML slot registration — guards against decorator displacement: inserting a
+# new method between a @Slot decorator and its def silently re-targets the
+# decorator, unregistering the original method from the metaobject. QML then
+# sees `undefined` and every callsite throws at runtime while the Python test
+# suite (which calls methods directly) stays green. Happened live to
+# focus_agent on 2026-07-13 (Ctrl+1..5 went dead).
+# ---------------------------------------------------------------------------
+
+
+def test_qml_facing_slots_are_registered():
+    meta = AppController.staticMetaObject
+    registered = {
+        bytes(meta.method(i).name()).decode() for i in range(meta.methodCount())
+    }
+    qml_called = {
+        "focus_agent",
+        "close_agent",
+        "spawn_agent",
+        "anchor_to_path",
+        "release_anchor",
+        "focus_agent_browser",
+        "set_central_surface",
+        "cycle_agent_focus",
+        "respond_to_permission",
+    }
+    missing = qml_called - registered
+    assert not missing, f"QML-facing methods missing from metaobject: {missing}"

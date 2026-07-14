@@ -1964,10 +1964,7 @@ Window {
                                 id: worktreeGlyph
                                 //  = nf-oct-git_branch. Escape form on
                                 // purpose: a literal private-use-area glyph
-                                // here once survived review as an EMPTY string
-                                // (dropped in an edit pipeline) and rendered
-                                // as nothing — the escape is diff-visible.
-                                text: "\uf418"
+                                text: Theme.glyph.worktree
                                 visible: controller.displayingWorktree !== ""
                                 color: Theme.color.accent.primary
                                 font.family: editorFontFamily

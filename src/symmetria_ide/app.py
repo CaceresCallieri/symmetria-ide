@@ -3545,7 +3545,6 @@ class AppController(QObject):
             start_directory=inst["cwd"],
         )
 
-    @Slot(int)
     def _agent_worktree_state(self, rec: dict) -> tuple[str, str]:
         """`(worktree_root, worktree_name)` for a slot record iff its live
         root is a linked worktree of THIS project, else `("", "")`.
@@ -3561,6 +3560,8 @@ class AppController(QObject):
         same-repo worktrees only). Shared by the chip glyph field and the
         override funnel so the two can never disagree.
         """
+        # `work_root` is stored PRE-resolved (in _on_agent_hook) and must not
+        # be re-resolved here; live_cwd/cwd are raw paths resolved on read.
         agent_root = rec.get("work_root") or resolve_project_root(
             rec.get("live_cwd") or rec.get("cwd", "")
         )
@@ -3618,6 +3619,7 @@ class AppController(QObject):
         else:
             log.info("worktree follow: override cleared")
 
+    @Slot(int)
     def focus_agent(self, slot: int) -> None:
         """Focus the slot's terminal and bring the agent surface forward.
 
@@ -5472,7 +5474,14 @@ class AppController(QObject):
             rec["live_cwd"] = event_cwd
             roots_changed = True
         tool_path = str(payload.get("tool_path", "") or "")
-        if tool_path and payload.get("tool_name") in _AGENT_WRITE_TOOLS:
+        # isabs guard: claude tool paths are absolute in practice, but a
+        # relative one would make resolve_project_root walk a meaningless
+        # relative chain — skip rather than derive a nonsense work_root.
+        if (
+            tool_path
+            and os.path.isabs(tool_path)
+            and payload.get("tool_name") in _AGENT_WRITE_TOOLS
+        ):
             work_root = resolve_project_root(tool_path)
             if work_root and rec.get("work_root") != work_root:
                 rec["work_root"] = work_root

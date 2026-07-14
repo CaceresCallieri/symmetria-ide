@@ -530,10 +530,7 @@ Rectangle {
                                 anchors.centerIn: parent
                                 // nf-oct-git_branch — worktree mark. Escape
                                 // form on purpose: a literal private-use-area
-                                // glyph here once arrived as an EMPTY string
-                                // (dropped in an edit pipeline) and silently
-                                // rendered nothing — the escape is diff-visible.
-                                text: "\uf418"
+                                text: Theme.glyph.worktree
                                 font.family: editorFontFamily
                                 font.pixelSize: Theme.font.size.sm
                                 // Accent (not text.dim): the glyph is a state
