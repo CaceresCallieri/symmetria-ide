@@ -19,6 +19,7 @@ import pytest
 
 from symmetria_ide.agent_harness import CLAUDE_ENV_UNSET_ARGS
 from symmetria_ide.app import AppController
+from symmetria_ide.worktree import linked_worktree_info
 
 
 class FakeBridge:
@@ -427,7 +428,14 @@ def test_spawn_publishes_bridge_instance_payload(controller, bridge):
     assert inst["agent_type"] == "claude"
     assert inst["dangerous"] is True
     assert inst["color_idx"] == 1
-    assert inst["project"] == os.path.basename(controller.displayedRoot)
+    # When the suite runs from a LINKED worktree (e.g. the stable tree),
+    # spawn_agent deliberately redirects the spawn to the MAIN checkout
+    # (worktree follow, 2026-07-13), so the published project label is the
+    # main root's basename — not displayedRoot's. In the primary checkout
+    # (the dev tree) linked_worktree_info returns ("", "") and this reduces
+    # to the plain displayedRoot expectation.
+    main_root, _ = linked_worktree_info(controller.displayedRoot)
+    assert inst["project"] == os.path.basename(main_root or controller.displayedRoot)
     # Flag off by default: no addressable tmux session is advertised. A non-tmux
     # agent has no standalone session, so the phone must not be told to open one.
     assert "tmux_session" not in inst
