@@ -15,9 +15,12 @@ holds the slot's last ``thinking``/``working`` state forever and the chip's
 sparkle lies about a quiet agent. This module supplies the missing edge from
 the one signal the IDE actually has: the Escape keystroke itself.
 
-``EscapeWatcher`` is an application-level event filter (installed on the
-``QGuiApplication``) that OBSERVES — never consumes — ``Key_Escape`` presses
-and notifies the controller via a callback. It is deliberately dumb: every
+``EscapeWatcher`` is an event filter installed on each TOP-LEVEL WINDOW
+(⚠ NEVER on the ``QGuiApplication`` — an app-level Python filter makes PySide
+wrap every QObject any event targets, and wrapping QtWebEngine's ephemeral
+mid-destruction internals SEGVs the GUI thread; coredump 2026-07-13, see the
+install site in app.py) that OBSERVES — never consumes — ``Key_Escape``
+presses and notifies the controller via a callback. It is deliberately dumb: every
 "does this Esc mean interrupt?" decision lives in the controller, where the
 per-slot state is (mirrors the reporter-vs-``agent_activity`` split). The
 filter MUST return ``False`` so the keystroke still reaches the terminal and
@@ -89,10 +92,12 @@ def should_arm_interrupt_clear(
 
 
 class EscapeWatcher(QObject):
-    """App-level event filter that reports (never consumes) Escape presses.
+    """Window-level event filter that reports (never consumes) Escape presses.
 
-    Install on the ``QGuiApplication`` instance. ``on_escape`` is invoked on the
-    GUI thread for every ``Key_Escape`` ``KeyPress`` the application dispatches;
+    Install on each top-level window — NEVER on the ``QGuiApplication`` (see the
+    module docstring: app-level install is the 2026-07-13 SEGV). ``on_escape``
+    is invoked on the GUI thread for every ``Key_Escape`` ``KeyPress`` the window
+    dispatches;
     the controller decides whether it matters. ``eventFilter`` always returns
     ``False`` — the terminal still needs the Escape to perform the interrupt.
     """
