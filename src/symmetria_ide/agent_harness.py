@@ -32,6 +32,16 @@ class AgentHarness:
     name: str
     executable: str
     label: str
+    # Flags appended to EVERY spawn of this harness, right after the
+    # executable. claude carries `--no-chrome`: with the user's global
+    # `claudeInChromeDefaultEnabled`, every claude session auto-connects the
+    # Claude-in-Chrome extension MCP (the user's REAL Chrome). Inside the IDE
+    # that breaks the browser containment principle — agents open tabs in an
+    # escaped Hyprland window with no chip globe / Ctrl+Shift+B / attribution,
+    # and several concurrent agents sharing the one extension is flaky. IDE
+    # agents must only ever see the injected symmetria-browser/chrome-devtools
+    # servers, so the integration is disabled per-invocation, unconditionally.
+    base_flags: tuple[str, ...] = ()
     # Flag appended when spawning dangerous (claude); None = no flag form.
     dangerous_flag: str | None = None
     # Env pairs exported when spawning dangerous (opencode). (k, v) tuples
@@ -135,6 +145,7 @@ HARNESSES: dict[str, AgentHarness] = {
         name="claude",
         executable="claude",
         label="Claude",
+        base_flags=("--no-chrome",),
         dangerous_flag="--dangerously-skip-permissions",
         flags={"fresh": [], "resume": ["-r"], "continue": ["-c"]},
         mcp_config_flag="--mcp-config",
@@ -256,6 +267,7 @@ def spawn_argv(
     # the tmux server's inherited PATH). Empty = use the bare name (legacy PTY,
     # where the child inherits the IDE's own PATH).
     argv.append(executable or harness.executable)
+    argv += harness.base_flags
     if dangerous and harness.dangerous_flag:
         argv.append(harness.dangerous_flag)
     if mcp_config_path and harness.mcp_config_flag:

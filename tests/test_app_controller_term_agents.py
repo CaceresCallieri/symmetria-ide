@@ -109,6 +109,7 @@ def test_spawn_fresh_dangerous_default_argv(controller):
         f"SYMMETRIA_IDE_AGENT_SOCK={controller._agent_events.socket_path}",
         "SYMMETRIA_IDE_STATUSLINE_TAP=1",
         "claude",
+        "--no-chrome",
         "--dangerously-skip-permissions",
         "--settings",
         controller._agent_reporter_settings,

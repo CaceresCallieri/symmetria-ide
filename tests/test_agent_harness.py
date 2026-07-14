@@ -32,8 +32,27 @@ def test_claude_fresh_dangerous_uses_flag_not_env():
         *CLAUDE_ENV_UNSET_ARGS,
         "SYMMETRIA_AGENT_ID=42_1",
         "claude",
+        "--no-chrome",
         "--dangerously-skip-permissions",
     ]
+
+
+def test_claude_always_disables_claude_in_chrome():
+    # Containment: with the user's global claudeInChromeDefaultEnabled, a bare
+    # claude would auto-connect the Claude-in-Chrome extension (the user's REAL
+    # Chrome) — escaped windows, no chip globe, no attribution, and agents
+    # picking it over the injected symmetria-browser tools. Every claude spawn
+    # (safe or dangerous, any spawn type) must carry --no-chrome.
+    for spawn_type in ("fresh", "continue", "resume"):
+        for dangerous in (True, False):
+            argv = spawn_argv(HARNESSES["claude"], spawn_type, dangerous, "42_1")
+            assert "--no-chrome" in argv
+
+
+def test_opencode_has_no_chrome_flag():
+    # --no-chrome is a claude CLI flag; opencode would fail to launch with it.
+    argv = spawn_argv(HARNESSES["opencode"], "fresh", True, "42_1")
+    assert "--no-chrome" not in argv
 
 
 def test_opencode_fresh_dangerous_uses_permission_env():
