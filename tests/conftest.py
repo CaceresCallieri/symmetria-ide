@@ -69,8 +69,17 @@ def _isolate_xdg_runtime(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("xdg_runtime")))
 
 
+@pytest.fixture(scope="session")
+def _tmux_sock_dir(tmp_path_factory):
+    """One throwaway directory for the whole run to hold the fake tmux socket
+    path. Session-scoped because nothing ever creates the socket — a per-test
+    ``mktemp`` would leave ~1500 empty directories behind for a value that is
+    only ever read."""
+    return tmp_path_factory.mktemp("tmux_sock")
+
+
 @pytest.fixture(autouse=True)
-def _isolate_agent_tmux(monkeypatch, tmp_path_factory):
+def _isolate_agent_tmux(monkeypatch, _tmux_sock_dir):
     """Neutralise the tmux substrate's environment for every test.
 
     Without this the suite KILLS THE DEVELOPER'S OWN AGENT SESSION. Three
@@ -101,8 +110,7 @@ def _isolate_agent_tmux(monkeypatch, tmp_path_factory):
     ``_isolate_xdg_state`` (tests opt in locally; last writer wins)."""
     monkeypatch.delenv("SYMMETRIA_IDE_AGENT_TMUX", raising=False)
     monkeypatch.setenv(
-        "SYMMETRIA_IDE_TMUX_SOCKET",
-        str(tmp_path_factory.mktemp("tmux_sock") / "agent-tmux.sock"),
+        "SYMMETRIA_IDE_TMUX_SOCKET", str(_tmux_sock_dir / "agent-tmux.sock")
     )
 
 

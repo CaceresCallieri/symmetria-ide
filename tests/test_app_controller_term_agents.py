@@ -10,6 +10,7 @@ queued delivery path).
 from __future__ import annotations
 
 import concurrent.futures
+import errno
 import io
 import os
 import re
@@ -19,7 +20,7 @@ import time
 import pytest
 
 from symmetria_ide.agent_harness import CLAUDE_ENV_UNSET_ARGS
-from symmetria_ide.app import AppController, _existing_root
+from symmetria_ide.app import AppController, _agent_tmux_socket, _existing_root
 from symmetria_ide.worktree import linked_worktree_info
 
 
@@ -1907,6 +1908,13 @@ def test_existing_root_leaves_empty_untouched(tmp_path):
 
 
 def test_deleted_followed_worktree_releases_the_chrome(controller, worktree_env):
+    # ANCHORING into the worktree is what makes this test pin the repair. The
+    # override alone is released without it: deleting a worktree takes its .git
+    # pointer file with it, so linked_worktree_info() already answers ("","")
+    # and the pre-existing recompute clears the follow on its own. Only the
+    # anchor survives a deletion and needs _drop_vanished_roots to release it —
+    # verified by stubbing the repair to a no-op, which leaves this test failing
+    # and the override-only version passing.
     main, wt = worktree_env
     _push_cwd(controller, main)
     controller.spawn_agent("fresh", True)
@@ -1914,12 +1922,64 @@ def test_deleted_followed_worktree_releases_the_chrome(controller, worktree_env)
         _hook(1, "PreToolUse", tool_name="Write", tool_path=f"{wt}/a.py", cwd=main)
     )
     assert controller.displayedRoot == wt  # following
+    controller.anchor_to_path(wt)
 
     shutil.rmtree(wt)
     controller._recompute_agent_root_override()
 
+    assert controller.anchored is False
     assert controller.displayedRoot == main
     assert controller.displayingWorktree == ""
+    # The chip's branch glyph must clear too — it is refreshed from hooks, and
+    # a deleted worktree produces no further hook to trigger one.
+    assert controller.agentWorktree[0] == ""
+
+
+def test_drop_vanished_roots_is_inert_in_vps_location(controller, tmp_path):
+    # In vps the roots are server paths behind an SSHFS mount: stat'ing them
+    # blocks the GUI thread on a hung mount and answers False on a stale one,
+    # which would release a live anchor because the network hiccuped.
+    live = tmp_path / "live"
+    live.mkdir()
+    _push_cwd(controller, str(live))
+    controller.anchor_to_path("/srv/definitely/not/here")
+    controller._location = "vps"
+
+    controller._drop_vanished_roots()
+
+    assert controller.anchored is True
+    assert controller.displayedRoot == "/srv/definitely/not/here"
+
+
+def test_unreachable_mount_does_not_release_the_anchor(
+    controller, tmp_path, monkeypatch
+):
+    # ENOTCONN (stale SSHFS) means "still there, unreachable" — only ENOENT
+    # means gone. Releasing on the former yanks the chrome out from under a
+    # user whose mount merely flapped.
+    live = tmp_path / "live"
+    live.mkdir()
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    _push_cwd(controller, str(live))
+    controller.anchor_to_path(str(mount))
+
+    def _stale(path):
+        raise OSError(errno.ENOTCONN, "Transport endpoint is not connected")
+
+    monkeypatch.setattr("symmetria_ide.app.os.lstat", _stale)
+    controller._drop_vanished_roots()
+
+    assert controller.anchored is True
+    assert controller.displayedRoot == str(mount)
+
+
+def test_agent_tmux_socket_defaults_to_the_shared_vigilia_socket(monkeypatch):
+    # The conftest fixture sets this env for every test, so the default branch
+    # is otherwise unreachable from the suite — and that default is precisely
+    # the value whose reach caused the self-kill incident.
+    monkeypatch.delenv("SYMMETRIA_IDE_TMUX_SOCKET", raising=False)
+    assert _agent_tmux_socket() == os.path.expanduser("~/.vigilia/tmux.sock")
 
 
 def test_deleted_anchor_is_released(controller, tmp_path):
@@ -1977,7 +2037,13 @@ def test_agent_start_dir_for_vps_slot_stays_local(controller, worktree_env):
     _push_cwd(controller, main)
     controller.spawn_agent("fresh", True)
     controller._term_agents[1].update({"location": "vps", "cwd": "/srv/remote/repo"})
-    assert controller.agent_start_dir(1) == controller.displayedRoot
+    start_dir = controller.agent_start_dir(1)
+    assert start_dir == controller.displayedRoot
+    # Explicit about the failure being guarded: the remote path must never be
+    # handed to a local chdir, and whatever IS returned has to be real — both
+    # would be violated if the vps branch moved below the _existing_root call.
+    assert start_dir != "/srv/remote/repo"
+    assert os.path.isdir(start_dir)
 
 
 # ---------------------------------------------------------------------------

@@ -1271,6 +1271,7 @@ Window {
                                     // spawn-in-the-main-checkout redirect and
                                     // fed the process a root that could have been
                                     // deleted (see controller.agent_start_dir).
+
                                     // claude exited on its own (/exit or crash)
                                     // — Python drops the slot, which flips the
                                     // Loader off. Idempotent with an explicit

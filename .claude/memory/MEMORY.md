@@ -39,6 +39,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Notification system is Symmetria Shell, not swaync](reference/host/notification_system.md) — do not invoke swaync-client or makoctl
 - [fff.nvim watches nvim's cwd](reference/host/fff_watcher_roots_at_cwd.md) — never root embedded nvim at $HOME; recursive Rust watch → thermal runaway. Fix spans IDE + dotfiles
 - [STT chip stuck = stale hub broadcast](reference/host/stt_chip_hub_broadcast.md) — IDE reads hub stt field, shell reads local AgentService; fix is hub self-heal in agent-bridge.py
+- [Shim the binary for subprocess forensics](reference/host/shim_the_binary_for_subprocess_forensics.md) — log $* from a PATH shim; don't infer cause from exit codes
 
 ## Reference — nvim-rpc — `reference/nvim-rpc/` (NeoVim `--listen` socket, pynvim RPC-only, msgpack)
 

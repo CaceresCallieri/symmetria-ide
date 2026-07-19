@@ -1993,8 +1993,26 @@ class AppController(QObject):
         worktree-follow recompute and `spawn_agent`). A transient disappearance
         (a directory briefly gone mid-`git checkout`) costs at most a re-anchor;
         that is the accepted trade for never spawning into a dead path.
+
+        LOCAL ONLY, and only for roots that are genuinely GONE. In the vps
+        location the roots are server paths reached through an SSHFS mount, and
+        both failure modes there are wrong: `os.path.isdir` on a hung mount
+        blocks the GUI thread, and on a stale one (`ENOTCONN`) it answers False
+        for a directory that still exists — silently yanking the user's anchor
+        because the network hiccuped. Hence the location guard, and
+        `_root_is_gone`'s errno discrimination for the local case.
+
+        Emission is deliberately a SINGLE tail emit, not one per branch: with
+        two, the first fires while the second dead root is still installed, so
+        every `displayedRootChanged` consumer (nvim cwd-sync, the git root, the
+        tree mount, the vps re-probe) does a full round-trip against a path this
+        method already knows is gone — and the re-entry through
+        `_reprobe_vps_pairing` lands back here mid-repair.
         """
-        if self._agent_root_override and not os.path.isdir(self._agent_root_override):
+        if self._location != "local":
+            return
+        prior_displayed = self.displayedRoot
+        if self._agent_root_override and _root_is_gone(self._agent_root_override):
             log.info(
                 "worktree follow: %s no longer exists — clearing override",
                 self._agent_root_override,
@@ -2002,19 +2020,24 @@ class AppController(QObject):
             self._agent_root_override = ""
             self._agent_root_override_name = ""
             self.displayingWorktreeChanged.emit()
-            self.displayedRootChanged.emit()
         if (
             self._anchored
             and self._anchored_root
-            and not os.path.isdir(self._anchored_root)
+            and _root_is_gone(self._anchored_root)
         ):
             log.info(
                 "anchor: %s no longer exists — releasing anchor",
                 self._anchored_root,
             )
-            self._anchored = False
-            self._anchored_root = ""
-            self.anchoredChanged.emit()
+            # Delegate rather than re-implement: release_anchor owns the
+            # anchor-release semantics (including its own change-guarded
+            # emits), and a second copy here would drift from it.
+            self.release_anchor()
+        # May duplicate the emit release_anchor already made when BOTH sources
+        # were dead. That is deliberate: a redundant emit only re-evaluates
+        # bindings to the same value, whereas suppressing it needs to know
+        # whether the delegate emitted — and guessing wrong drops a real change.
+        if self.displayedRoot != prior_displayed:
             self.displayedRootChanged.emit()
 
     @Property(str, notify=displayingWorktreeChanged)
@@ -2036,7 +2059,11 @@ class AppController(QObject):
         there for `workspace_autocd` to fire). See `_clamp_editor_root` for the
         thermal-bug rationale and why the clamp moved here from the process cwd.
         """
-        return _clamp_editor_root(self.displayedRoot, self._home)
+        # `_existing_root` first: nvim is a PROCESS seam too, and a dead root
+        # fails its start the same way it failed the agent panes'.
+        return _clamp_editor_root(
+            _existing_root(self.displayedRoot, self._home), self._home
+        )
 
     @Property(str, notify=displayedRootChanged)
     def displayedRootCompact(self) -> str:
@@ -3343,7 +3370,13 @@ class AppController(QObject):
         # but that is the last line of defence — the record should already hold
         # a real directory (it also names the tmux session and the bridge label).
         self._drop_vanished_roots()
-        cwd = self.displayedRoot
+        # The repair covers the anchor and the follow override; a raw `_cwd`
+        # that vanished (the shell or nvim cd'd somewhere later deleted, with no
+        # anchor and no follow) has no state to release, so degrade on read too.
+        # This is not belt-and-braces: `record["cwd"]` becomes tmux's
+        # `new-session -c`, and the tmux substrate — not the direct-PTY path —
+        # is what both launchers actually run.
+        cwd = _existing_root(self.displayedRoot, self._home)
         # New agents ALWAYS spawn in the MAIN checkout (user decision,
         # 2026-07-13 — reverses the short-lived "everything follows" spawn
         # semantics): when the displayed root is a linked worktree — via the
@@ -3466,16 +3499,18 @@ class AppController(QObject):
         a path on the SERVER, and the process this KSession starts is the local
         ssh client. They get the local displayed root, as before.
         """
+        fallback = _existing_root(self.displayedRoot, self._home)
         inst = self._term_agents.get(slot)
         if inst is None:
             # A Loader can only activate for a registered slot, so this is
             # defensive — the displayed root is the same answer the pane got
-            # before this method existed.
+            # before this method existed, minus any dead path (every return
+            # here feeds a chdir, so none of them may hand back a ghost).
             log.warning("agent_start_dir: slot %d not in pool", slot)
-            return self.displayedRoot
+            return fallback
         if inst.get("location", "local") == "vps":
-            return self.displayedRoot
-        return _existing_root(inst.get("cwd", ""), self._home) or self.displayedRoot
+            return fallback
+        return _existing_root(inst.get("cwd", ""), self._home) or fallback
 
     @Slot(int, result="QVariantList")
     def agent_spawn_argv(self, slot: int) -> list:
@@ -3714,6 +3749,14 @@ class AppController(QObject):
         target_root, target_name = (
             ("", "") if rec is None else (self._agent_worktree_state(rec))
         )
+        # Keep the focused agent's CHIP glyph in step with the follow. The
+        # record's `worktree` field is otherwise refreshed only when a hook
+        # moves the agent's work root, so a worktree DELETED under it left the
+        # branch glyph lit forever: the chrome released the follow, but no
+        # further hook ever changed `work_root` to trigger a refresh.
+        if rec is not None and rec.get("worktree", "") != target_name:
+            rec["worktree"] = target_name
+            self.agentWorktreeChanged.emit()
         if (
             target_root == self._agent_root_override
             and target_name == self._agent_root_override_name
@@ -7531,10 +7574,37 @@ def _clamp_editor_root(root: str, home: str) -> str:
     return root
 
 
+def _root_is_gone(root: str) -> bool:
+    """True only when ``root`` is genuinely ABSENT from the filesystem.
+
+    Deliberately not ``not os.path.isdir(root)``: ``isdir`` collapses "deleted"
+    and "unreachable" into the same False, and the two demand opposite
+    responses. A stale SSHFS mount raises ``ENOTCONN`` (and a broken one
+    ``EIO``) for directories that still exist on the server — treating those as
+    deleted would release the user's anchor and jump the chrome because the
+    network hiccuped, with nothing actually gone. Only ``ENOENT``/``ENOTDIR``
+    mean the path is really no longer there.
+
+    ``lstat`` rather than ``stat``: a dangling symlink is itself a usable
+    directory entry that ``stat`` would report as missing, and the caller's
+    question is "did this path disappear", not "does it resolve".
+    """
+    if not root:
+        return False
+    try:
+        os.lstat(root)
+    except OSError as e:
+        return e.errno in (errno.ENOENT, errno.ENOTDIR)
+    return False
+
+
 def _existing_root(root: str, home: str) -> str:
     """The nearest ancestor of ``root`` that still exists on disk.
 
-    Scoped to the seams that hand a directory to a PROCESS. A root can VANISH
+    Applied at the seams that hand a directory to a PROCESS — the agent pty
+    (`agent_start_dir`), the spawn record's cwd (which becomes tmux's
+    `new-session -c`), and the embedded nvim's root (`editorRoot`). A root can
+    VANISH
     under a live IDE — the case that motivated this (2026-07-18): an agent
     worked inside a Claude-Code-native worktree
     (``<repo>/.claude/worktrees/<name>``), the worktree-follow re-rooted the
@@ -7554,11 +7624,14 @@ def _existing_root(root: str, home: str) -> str:
     for the narrow case where a directory dies between that repair and the
     fork of the pty.
 
-    ``home`` is the FLOOR, not merely a hint: walking up from a deleted path
-    can otherwise reach ``/``, and starting a shell — or worse, rooting a
-    recursive file watcher — at the filesystem root is a bigger failure than
-    the one being fixed (see ``_clamp_editor_root`` for the thermal history).
-    An empty ``root`` passes through untouched.
+    ``home`` is the LAST-RESORT fallback, consulted only when the walk reaches
+    ``/`` — an ancestor outside ``$HOME`` is returned as-is (a dead
+    ``/opt/x/y`` yields ``/opt``, not ``$HOME``). It is not a containment
+    boundary; its job is narrower: never hand back ``/`` itself, because
+    starting a shell — or worse, rooting a recursive file watcher — at the
+    filesystem root is a bigger failure than the one being fixed (see
+    ``_clamp_editor_root`` for the thermal history). An empty ``root`` passes
+    through untouched.
     """
     if not root or os.path.isdir(root):
         return root
