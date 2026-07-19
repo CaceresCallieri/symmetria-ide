@@ -1262,7 +1262,15 @@ Window {
 
                                 session: QMLTermSession {
                                     id: agentSession
-                                    initialWorkingDirectory: controller.displayedRoot
+                                    // initialWorkingDirectory is NOT bound here:
+                                    // it is set one-shot from the slot record in
+                                    // Component.onCompleted below, alongside argv.
+                                    // Binding it to displayedRoot made the pane
+                                    // chdir wherever the chrome happened to be
+                                    // pointing, which both defeated the
+                                    // spawn-in-the-main-checkout redirect and
+                                    // fed the process a root that could have been
+                                    // deleted (see controller.agent_start_dir).
                                     // claude exited on its own (/exit or crash)
                                     // — Python drops the slot, which flips the
                                     // Loader off. Idempotent with an explicit
@@ -1282,6 +1290,10 @@ Window {
                                     // setEnvironment is not QML-reachable.
                                     var argv = controller.agent_spawn_argv(slotLoader.slot)
                                     if (argv.length > 0) {
+                                        // Must precede startShellProgram(): the
+                                        // session reads it when it forks the pty.
+                                        agentSession.initialWorkingDirectory =
+                                            controller.agent_start_dir(slotLoader.slot)
                                         agentSession.shellProgram = argv[0]
                                         // Manual copy, not argv.slice(1):
                                         // QVariantList from a PySide slot is

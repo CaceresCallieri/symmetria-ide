@@ -1954,10 +1954,68 @@ class AppController(QObject):
         Lua could still arrive with `""`, and silently falling back to
         cwd in that case is more forgiving than pinning the tree to
         an empty string.
+
+        Deliberately NOT filtered through `_existing_root`: this property is a
+        contract — it returns what the state machine believes, verbatim, and
+        several callers compare it against stored state (`_agent_worktree_state`,
+        the registry's canonical root, the marker path). A root that has been
+        deleted is repaired at the source instead, by `_drop_vanished_roots`;
+        the degrade to a live directory belongs only at the seams that hand a
+        path to a PROCESS (see `agent_start_dir`), where a dead path is fatal
+        rather than merely wrong.
         """
         if self._agent_root_override:
             return self._agent_root_override
         return self._base_displayed_root()
+
+    def _drop_vanished_roots(self) -> None:
+        """Release root state that points at a directory which no longer exists.
+
+        A project root can VANISH under a live IDE — the motivating case
+        (2026-07-18): an agent worked inside a Claude-Code-native worktree
+        (`<repo>/.claude/worktrees/<name>`), the worktree-follow re-rooted the
+        chrome there, the worktree was then removed, and nothing revalidated
+        the root. The chrome kept naming a path that was gone (an "Empty" tree
+        labelled with a ghost project) and every agent spawned from it died.
+
+        Repairing here — rather than degrading `displayedRoot` on read — keeps
+        the property honest and emits the normal change signals, so the tree,
+        git surfaces and status bar all follow the fallback the state machine
+        genuinely made. Both sources are dropped, for different reasons:
+
+        - the worktree-follow override is DERIVED state, recomputed from the
+          focused agent on the next edge, so losing it costs nothing;
+        - an anchor is user state, but an anchor to a deleted directory is not
+          usable state — every read of it is wrong and every spawn from it
+          fails — so it is released rather than preserved.
+
+        Called from the funnels that already run on the relevant edges (the
+        worktree-follow recompute and `spawn_agent`). A transient disappearance
+        (a directory briefly gone mid-`git checkout`) costs at most a re-anchor;
+        that is the accepted trade for never spawning into a dead path.
+        """
+        if self._agent_root_override and not os.path.isdir(self._agent_root_override):
+            log.info(
+                "worktree follow: %s no longer exists — clearing override",
+                self._agent_root_override,
+            )
+            self._agent_root_override = ""
+            self._agent_root_override_name = ""
+            self.displayingWorktreeChanged.emit()
+            self.displayedRootChanged.emit()
+        if (
+            self._anchored
+            and self._anchored_root
+            and not os.path.isdir(self._anchored_root)
+        ):
+            log.info(
+                "anchor: %s no longer exists — releasing anchor",
+                self._anchored_root,
+            )
+            self._anchored = False
+            self._anchored_root = ""
+            self.anchoredChanged.emit()
+            self.displayedRootChanged.emit()
 
     @Property(str, notify=displayingWorktreeChanged)
     def displayingWorktree(self) -> str:
@@ -3279,6 +3337,12 @@ class AppController(QObject):
         if slot is None:
             log.warning("spawn_agent: pool full (%d slots)", self._MAX_INSTANCES)
             return
+        # Repair a vanished root BEFORE reading it: an agent spawned into a
+        # deleted directory dies as QProcess FailedToStart, so `cwd` below must
+        # not be a ghost. `agent_start_dir` degrades once more at the pty seam,
+        # but that is the last line of defence — the record should already hold
+        # a real directory (it also names the tmux session and the bridge label).
+        self._drop_vanished_roots()
         cwd = self.displayedRoot
         # New agents ALWAYS spawn in the MAIN checkout (user decision,
         # 2026-07-13 — reverses the short-lived "everything follows" spawn
@@ -3379,6 +3443,39 @@ class AppController(QObject):
             # its session id already; a fresh agent binds on its first hook).
             self._sync_agent_registry()
         self.focus_agent(slot)
+
+    @Slot(int, result=str)
+    def agent_start_dir(self, slot: int) -> str:
+        """The working directory the slot's QMLTermSession must chdir into.
+
+        Read once at Loader load, next to `agent_spawn_argv` — the spawn spec
+        is frozen at load time, so this is deliberately NOT a live binding
+        (gotcha #3 does not apply).
+
+        The pane used to bind `initialWorkingDirectory: controller.displayedRoot`
+        directly, which broke the "new agents ALWAYS spawn in the MAIN checkout"
+        decision (2026-07-13) in a way that only showed up off the tmux path:
+        the redirect in `spawn_agent` lands in `record["cwd"]`, and under tmux
+        that value reaches the agent via `new-session -c`, but the OUTER
+        KSession still chdir'd to the live `displayedRoot` — the worktree. Off
+        the tmux substrate that outer chdir IS the agent's cwd, so the redirect
+        was silently a no-op. Sourcing both from the record keeps the two
+        halves of the spawn honest about the same directory.
+
+        VPS slots are the one case that must NOT use the record: their `cwd` is
+        a path on the SERVER, and the process this KSession starts is the local
+        ssh client. They get the local displayed root, as before.
+        """
+        inst = self._term_agents.get(slot)
+        if inst is None:
+            # A Loader can only activate for a registered slot, so this is
+            # defensive — the displayed root is the same answer the pane got
+            # before this method existed.
+            log.warning("agent_start_dir: slot %d not in pool", slot)
+            return self.displayedRoot
+        if inst.get("location", "local") == "vps":
+            return self.displayedRoot
+        return _existing_root(inst.get("cwd", ""), self._home) or self.displayedRoot
 
     @Slot(int, result="QVariantList")
     def agent_spawn_argv(self, slot: int) -> list:
@@ -3607,6 +3704,13 @@ class AppController(QObject):
             rec is not None and rec.get("location", "local") != "local"
         ):
             return
+        # A vanished root is most likely to be noticed HERE: the follow is what
+        # re-roots the chrome into a worktree, and a worktree is exactly the
+        # kind of directory that gets deleted under a live IDE. Run before the
+        # recompute so a dead ANCHOR is released too — a deleted worktree fails
+        # `linked_worktree_info` and clears the override on its own, which would
+        # otherwise just re-expose a ghost anchor underneath it.
+        self._drop_vanished_roots()
         target_root, target_name = (
             ("", "") if rec is None else (self._agent_worktree_state(rec))
         )
@@ -7425,6 +7529,49 @@ def _clamp_editor_root(root: str, home: str) -> str:
         os.makedirs(scratch, exist_ok=True)
         return scratch
     return root
+
+
+def _existing_root(root: str, home: str) -> str:
+    """The nearest ancestor of ``root`` that still exists on disk.
+
+    Scoped to the seams that hand a directory to a PROCESS. A root can VANISH
+    under a live IDE — the case that motivated this (2026-07-18): an agent
+    worked inside a Claude-Code-native worktree
+    (``<repo>/.claude/worktrees/<name>``), the worktree-follow re-rooted the
+    chrome there, and the worktree was then removed. There the dead path is not
+    merely wrong, it is fatal: ``QProcess::setWorkingDirectory`` with a
+    non-existent dir fails as ``FailedToStart``, and Qt does NOT emit
+    ``finished`` in that case — so the agent pane's ``onFinished`` never fired,
+    the slot was never dropped, and the user got a permanently BLACK pane under
+    a live-looking chip. (The fork now surfaces that error as a session finish
+    too — MODIFICATIONS.md #16 — but this is what stops the spawn from being
+    handed a dead path in the first place.)
+
+    NOT applied to ``displayedRoot``: that property is a contract that returns
+    what the state machine believes, and callers compare it against stored
+    state. Dead roots are repaired at the source by
+    ``AppController._drop_vanished_roots``; this is the last line of defence
+    for the narrow case where a directory dies between that repair and the
+    fork of the pty.
+
+    ``home`` is the FLOOR, not merely a hint: walking up from a deleted path
+    can otherwise reach ``/``, and starting a shell — or worse, rooting a
+    recursive file watcher — at the filesystem root is a bigger failure than
+    the one being fixed (see ``_clamp_editor_root`` for the thermal history).
+    An empty ``root`` passes through untouched.
+    """
+    if not root or os.path.isdir(root):
+        return root
+    current = root
+    while True:
+        parent = os.path.dirname(current)
+        if parent == current or parent == os.sep:
+            # Walked out of every live directory. `home` is the floor; if even
+            # that is gone, hand the original back rather than invent a root.
+            return home if os.path.isdir(home) else root
+        if os.path.isdir(parent):
+            return parent
+        current = parent
 
 
 def _resolve_launch_dir(path_arg: str | None) -> str | None:

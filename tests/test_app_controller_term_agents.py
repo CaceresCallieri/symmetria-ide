@@ -13,12 +13,13 @@ import concurrent.futures
 import io
 import os
 import re
+import shutil
 import time
 
 import pytest
 
 from symmetria_ide.agent_harness import CLAUDE_ENV_UNSET_ARGS
-from symmetria_ide.app import AppController
+from symmetria_ide.app import AppController, _existing_root
 from symmetria_ide.worktree import linked_worktree_info
 
 
@@ -1865,6 +1866,121 @@ def test_tool_path_never_touches_spawn_cwd(controller, worktree_env):
 
 
 # ---------------------------------------------------------------------------
+# Vanished roots — a project root deleted under a live IDE (2026-07-18).
+#
+# Live failure: an agent worked inside a Claude-Code-native worktree
+# (`<repo>/.claude/worktrees/<name>`), the follow re-rooted the chrome there,
+# and the worktree was then removed. The chrome kept naming the dead path, and
+# the next agent spawned INTO it — QProcess fails such a start as
+# FailedToStart, which emits no `finished`, so the slot was never dropped and
+# the pane stayed black forever under a live-looking chip.
+#
+# Note the spawn-to-main redirect could not save it: `resolve_project_root`
+# walks UP to the first ancestor holding `.git`, so on a deleted worktree it
+# silently returns the MAIN root, `linked_worktree_info` then answers "not a
+# worktree", and no redirect fires. The guard is only reachable while the
+# worktree still exists — hence the repair below.
+# ---------------------------------------------------------------------------
+
+
+def test_existing_root_passes_through_a_live_directory(tmp_path):
+    live = str(tmp_path)
+    assert _existing_root(live, str(tmp_path)) == live
+
+
+def test_existing_root_falls_back_to_nearest_live_ancestor(tmp_path):
+    ghost = tmp_path / "repo" / ".claude" / "worktrees" / "gone"
+    (tmp_path / "repo").mkdir()
+    assert _existing_root(str(ghost), str(tmp_path)) == str(tmp_path / "repo")
+
+
+def test_existing_root_floors_at_home_instead_of_filesystem_root(tmp_path):
+    # Walking up from a fully dead absolute path must not land on "/": starting
+    # a shell — or rooting a recursive watcher — there is a worse failure than
+    # the one being fixed (see _clamp_editor_root's thermal history).
+    home = str(tmp_path)
+    assert _existing_root("/nonexistent-top/nested/deeper", home) == home
+
+
+def test_existing_root_leaves_empty_untouched(tmp_path):
+    assert _existing_root("", str(tmp_path)) == ""
+
+
+def test_deleted_followed_worktree_releases_the_chrome(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Write", tool_path=f"{wt}/a.py", cwd=main)
+    )
+    assert controller.displayedRoot == wt  # following
+
+    shutil.rmtree(wt)
+    controller._recompute_agent_root_override()
+
+    assert controller.displayedRoot == main
+    assert controller.displayingWorktree == ""
+
+
+def test_deleted_anchor_is_released(controller, tmp_path):
+    live = tmp_path / "live"
+    live.mkdir()
+    doomed = tmp_path / "doomed"
+    doomed.mkdir()
+    _push_cwd(controller, str(live))
+    controller.anchor_to_path(str(doomed))
+    assert controller.displayedRoot == str(doomed)
+
+    shutil.rmtree(doomed)
+    controller._drop_vanished_roots()
+
+    # An anchor to a directory that no longer exists is not usable state: every
+    # read of it is wrong and every spawn from it fails.
+    assert controller.anchored is False
+    assert controller.displayedRoot == str(live)
+
+
+def test_spawn_after_worktree_deletion_uses_a_real_directory(controller, worktree_env):
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Write", tool_path=f"{wt}/a.py", cwd=main)
+    )
+    shutil.rmtree(wt)
+
+    controller.spawn_agent("fresh", True)  # slot 2 — the spawn that used to die
+
+    assert controller._term_agents[2]["cwd"] == main
+    assert os.path.isdir(controller.agent_start_dir(2))
+
+
+def test_agent_start_dir_uses_the_record_not_the_live_chrome(controller, worktree_env):
+    # The pty's working directory must come from the slot record, so the
+    # "new agents always spawn in the MAIN checkout" redirect holds even off
+    # the tmux path (where the outer chdir IS the agent's cwd). Binding it to
+    # displayedRoot instead made that decision a silent no-op.
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Write", tool_path=f"{wt}/a.py", cwd=main)
+    )
+    assert controller.displayedRoot == wt  # chrome followed...
+    assert controller.agent_start_dir(1) == main  # ...but the pty did not
+
+
+def test_agent_start_dir_for_vps_slot_stays_local(controller, worktree_env):
+    # A vps record's cwd is a path on the SERVER; the process this KSession
+    # starts is the local ssh client, so it must chdir locally.
+    main, _wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller._term_agents[1].update({"location": "vps", "cwd": "/srv/remote/repo"})
+    assert controller.agent_start_dir(1) == controller.displayedRoot
+
+
+# ---------------------------------------------------------------------------
 # QML slot registration — guards against decorator displacement: inserting a
 # new method between a @Slot decorator and its def silently re-targets the
 # decorator, unregistering the original method from the metaobject. QML then
@@ -1883,6 +1999,7 @@ def test_qml_facing_slots_are_registered():
         "focus_agent",
         "close_agent",
         "spawn_agent",
+        "agent_start_dir",
         "anchor_to_path",
         "release_anchor",
         "focus_agent_browser",
