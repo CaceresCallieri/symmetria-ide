@@ -69,6 +69,43 @@ def _isolate_xdg_runtime(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("xdg_runtime")))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_agent_tmux(monkeypatch, tmp_path_factory):
+    """Neutralise the tmux substrate's environment for every test.
+
+    Without this the suite KILLS THE DEVELOPER'S OWN AGENT SESSION. Three
+    behaviours compound, each harmless alone (verified 2026-07-18 by shimming
+    ``tmux`` and capturing eight real ``kill-session`` invocations aimed at the
+    session the test run was itself living in):
+
+    - the IDE launchers export ``SYMMETRIA_IDE_AGENT_TMUX=1``, and an agent pane
+      INHERITS it — so a suite run from inside the IDE (the normal workflow)
+      silently enables the substrate in tests that never opted in;
+    - ``_agent_tmux_socket()`` reads the env at CALL time and defaults to the
+      real ``~/.vigilia/tmux.sock``, so with the socket unset those tests talk
+      to the live tmux server;
+    - the session NAME is ``tmux_session_name(displayedRoot, slot)`` and a test
+      controller's root is the test process's cwd — this repo — so the suite
+      generates precisely the name a real agent working in this repo already
+      holds (``symmetria-ide-<hash>-1``), and ``kill-session`` lands on it.
+
+    Clearing the flag also fixes the visible half of the same leak: argv
+    assertions expecting the bare ``env`` wrapper got a ``tmux`` wrap and failed
+    for anyone running the suite inside the IDE. The throwaway socket stays as
+    defence in depth — a kill that escapes anyway can then only reach an empty
+    tmux server that nothing is attached to.
+
+    This is containment, not a substitute for mocking: tests asserting the
+    ``tmux`` argv should still monkeypatch ``symmetria_ide.app.subprocess.run``
+    so they never shell out at all. Same override semantics as
+    ``_isolate_xdg_state`` (tests opt in locally; last writer wins)."""
+    monkeypatch.delenv("SYMMETRIA_IDE_AGENT_TMUX", raising=False)
+    monkeypatch.setenv(
+        "SYMMETRIA_IDE_TMUX_SOCKET",
+        str(tmp_path_factory.mktemp("tmux_sock") / "agent-tmux.sock"),
+    )
+
+
 def construction_source(cls) -> str:
     """Return ``__init__`` source concatenated with every ``_init_*`` helper.
 
