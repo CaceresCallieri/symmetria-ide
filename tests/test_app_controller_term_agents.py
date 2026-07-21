@@ -2110,3 +2110,98 @@ def test_qml_facing_slots_are_registered():
     }
     missing = qml_called - registered
     assert not missing, f"QML-facing methods missing from metaobject: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Bash-write attribution (v2 per-agent change filter): the Pre/Post
+# snapshot-diff correlation in _on_bash_probe_ready + _submit_bash_probe. The
+# probe results are hand-delivered (per the no-processEvents-in-tests rule);
+# probe_dirty_leaves / bash_delta themselves are covered in
+# test_agent_bash_attribution.py.
+# ---------------------------------------------------------------------------
+
+
+def test_bash_probe_ready_folds_delta_into_touched(controller):
+    slot = 1
+    controller._term_agents[slot] = {"cwd": "/x", "touched": set()}
+    # Pre arrives first — window incomplete, touched untouched.
+    controller._on_bash_probe_ready(slot, "pre", {"/r/a"})
+    assert controller._term_agents[slot]["touched"] == set()
+    # Post arrives — the newly-dirty file (/r/b) folds into touched.
+    controller._on_bash_probe_ready(slot, "post", {"/r/a", "/r/b"})
+    assert controller._term_agents[slot]["touched"] == {"/r/b"}
+    # Window cleared so the next command starts fresh.
+    assert controller._term_agents[slot]["_bash_pre"] is None
+    assert controller._term_agents[slot]["_bash_post"] is None
+
+
+def test_bash_probe_ready_is_order_independent(controller):
+    slot = 1
+    controller._term_agents[slot] = {"cwd": "/x", "touched": set()}
+    # Post before pre — same delta once both edges are in.
+    controller._on_bash_probe_ready(slot, "post", {"/r/a", "/r/b"})
+    assert controller._term_agents[slot]["touched"] == set()
+    controller._on_bash_probe_ready(slot, "pre", {"/r/a"})
+    assert controller._term_agents[slot]["touched"] == {"/r/b"}
+
+
+def test_bash_probe_ready_closed_agent_is_noop(controller):
+    # rec gone (agent closed between submit and result) → no crash, no-op.
+    controller._on_bash_probe_ready(99, "post", {"/r/a"})
+    assert 99 not in controller._term_agents
+
+
+def test_bash_probe_ready_skips_already_touched(controller):
+    slot = 1
+    controller._term_agents[slot] = {"cwd": "/x", "touched": {"/r/b"}}
+    controller._on_bash_probe_ready(slot, "pre", {"/r/a"})
+    controller._on_bash_probe_ready(slot, "post", {"/r/a", "/r/b"})
+    # /r/b was already tracked → no change.
+    assert controller._term_agents[slot]["touched"] == {"/r/b"}
+
+
+class _NoopFuture:
+    def add_done_callback(self, cb):  # noqa: ARG002 — probe not awaited in this test
+        pass
+
+
+def test_submit_bash_probe_pre_resets_window_and_probes_work_root(
+    controller, tmp_path, monkeypatch
+):
+    slot = 1
+    root = os.path.realpath(str(tmp_path))
+    rec = {
+        "cwd": root,
+        "work_root": root,
+        "_bash_pre": {"stale"},
+        "_bash_post": {"stale"},
+    }
+    controller._term_agents[slot] = rec
+    calls: list = []
+    monkeypatch.setattr(
+        controller._bash_probe_pool,
+        "submit",
+        lambda fn, *args: (calls.append((fn, args)), _NoopFuture())[1],
+    )
+    controller._submit_bash_probe(slot, rec, "PreToolUse")
+    # Pre resets the window and probes the agent's work_root.
+    assert rec["_bash_pre"] is None and rec["_bash_post"] is None
+    assert calls and calls[0][1] == (root,)
+
+
+def test_submit_bash_probe_post_preserves_baseline(controller, tmp_path, monkeypatch):
+    slot = 1
+    root = os.path.realpath(str(tmp_path))
+    rec = {
+        "cwd": root,
+        "work_root": root,
+        "_bash_pre": {"baseline"},
+        "_bash_post": None,
+    }
+    controller._term_agents[slot] = rec
+    monkeypatch.setattr(
+        controller._bash_probe_pool, "submit", lambda *a, **k: _NoopFuture()
+    )
+    controller._submit_bash_probe(slot, rec, "PostToolUse")
+    # Post must NOT clobber the Pre baseline (only Pre resets the window).
+    assert rec["_bash_pre"] == {"baseline"}

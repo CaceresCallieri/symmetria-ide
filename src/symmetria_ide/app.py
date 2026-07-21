@@ -15,6 +15,7 @@ by QML polling.
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import ClassVar, TypedDict
 
 import argparse
@@ -58,6 +59,7 @@ from . import agent_harness
 from . import agent_registry
 from .account_usage_store import AccountUsageStore
 from .agent_activity import AgentActivityMachine
+from .agent_bash_attribution import bash_delta, probe_dirty_leaves
 from .agent_bridge import AgentBridgeClient, emit_gc_safe
 from .agent_events import AgentEventsServer
 from .agent_interrupt import (
@@ -513,6 +515,11 @@ class AppController(QObject):
     # statusChanged) so none of those re-evaluate the whole chip row or the
     # main changes list; only the two per-agent properties re-bind.
     focusedAgentChangesChanged = Signal()
+    # v2 Bash-write attribution: a pool worker probes the agent's git dirty set
+    # on each Bash edge and hands (slot, "pre"|"post", leaf-set) back to the GUI
+    # thread (see _submit_bash_probe / _on_bash_probe_ready). object carries a
+    # set[str]; the connection is queued + GC-suspended at the emit (gotcha #10).
+    _bashProbeReady = Signal(int, str, object)
     # Internal cross-thread marshal for the coordination judge: the one-shot
     # judge worker thread emits (trigger_id, status, summary); a queued
     # connection delivers _on_judge_verdict on the GUI thread.
@@ -1173,6 +1180,17 @@ class AppController(QObject):
             Qt.ConnectionType.QueuedConnection,
         )
         self.focusedAgentChanged.connect(self.focusedAgentChangesChanged)
+        # v2 Bash-write attribution: each Bash edge submits a `git status` probe
+        # (subprocess) to this pool, off the GUI thread; the leaf-set hops back
+        # via _bashProbeReady (queued) → _on_bash_probe_ready, which folds the
+        # PostToolUse − PreToolUse delta into the agent's `touched` set.
+        self._bash_probe_pool = ThreadPoolExecutor(
+            max_workers=3, thread_name_prefix="bash-attrib"
+        )
+        # queued: bash-attrib pool → AppController GUI (§4 P2)
+        self._bashProbeReady.connect(
+            self._on_bash_probe_ready, Qt.ConnectionType.QueuedConnection
+        )
         # ----- Git HISTORY provider (read-only comprehension surface) ------
         # The read-only counterpart to GitController: where the status
         # controller answers "what is uncommitted right now", this answers
@@ -3275,6 +3293,66 @@ class AppController(QObject):
         """Clear the focused-agent changes memo. Connected to
         focusedAgentChangesChanged first, so it runs before any QML re-read."""
         self._focused_agent_changes_cache = None
+
+    def _submit_bash_probe(self, slot: int, rec: dict, hook_event: str) -> None:
+        """Probe the agent's git dirty set for one Bash edge, off the GUI thread.
+
+        On PreToolUse we reset the window and capture the baseline; on
+        PostToolUse the after-state. `_on_bash_probe_ready` (GUI thread) folds
+        the (post − pre) delta into `touched` once both edges are in. Scoped to
+        the agent's live work root — same precedence as the worktree follow, so
+        Bash writes land where the chrome is already pointed."""
+        root = rec.get("work_root") or resolve_project_root(
+            rec.get("live_cwd") or rec.get("cwd", "")
+        )
+        if not root:
+            return
+        phase = "pre" if hook_event == "PreToolUse" else "post"
+        if phase == "pre":
+            # New command window — drop any half-captured prior window so a lost
+            # PostToolUse can't pair a stale baseline with the next command.
+            rec["_bash_pre"] = None
+            rec["_bash_post"] = None
+        future = self._bash_probe_pool.submit(probe_dirty_leaves, root)
+        future.add_done_callback(
+            lambda f, s=slot, p=phase: self._emit_bash_probe(s, p, f)
+        )
+
+    def _emit_bash_probe(self, slot: int, phase: str, future: Future) -> None:
+        """Pool-thread callback: hop the probe result onto the GUI thread.
+
+        GC suspended around the cross-thread emit per gotcha #10 (the set
+        payload allocates during queued marshalling)."""
+        try:
+            leaves = future.result()
+        except Exception:
+            log.exception("bash probe failed (slot %d, %s)", slot, phase)
+            return
+        emit_gc_safe(self._bashProbeReady, slot, phase, leaves)
+
+    @Slot(int, str, object)
+    def _on_bash_probe_ready(self, slot: int, phase: str, leaves: object) -> None:
+        """GUI thread: store one Bash-window snapshot; when both edges are in,
+        fold the (post − pre) delta into the slot's `touched` set.
+
+        Order-independent: whichever of pre/post arrives second triggers the
+        diff. A closed agent (rec gone) or a non-set payload is a no-op."""
+        rec = self._term_agents.get(slot)
+        if rec is None or not isinstance(leaves, set):
+            return
+        rec["_bash_" + phase] = leaves
+        pre = rec.get("_bash_pre")
+        post = rec.get("_bash_post")
+        if pre is None or post is None:
+            return  # window not complete yet
+        rec["_bash_pre"] = None
+        rec["_bash_post"] = None
+        added = bash_delta(pre, post) - rec.setdefault("touched", set())
+        if not added:
+            return
+        rec["touched"] |= added
+        if slot == self._focused_term_agent:
+            self.focusedAgentChangesChanged.emit()
 
     @Property("QVariant", notify=focusedAgentChangesChanged)
     def focusedAgentChangesPathSet(self) -> dict:
@@ -5776,6 +5854,17 @@ class AppController(QObject):
                 # background agent's edits recompute lazily when it's focused.
                 if slot == self._focused_term_agent:
                     self.focusedAgentChangesChanged.emit()
+        # v2 Bash-write attribution: a Bash command leaves no `tool_path`, so
+        # snapshot-diff the agent's repo around it — a `git status` probe on the
+        # PreToolUse edge (baseline) and again on PostToolUse; the files that
+        # turned dirty in between are what the command wrote, and get folded into
+        # `touched` like a write-tool edit (see _on_bash_probe_ready). Probes
+        # shell out, so they run on the bash-attrib pool, never on this thread.
+        if payload.get("tool_name") == "Bash" and payload.get("hook_event_name") in (
+            "PreToolUse",
+            "PostToolUse",
+        ):
+            self._submit_bash_probe(slot, rec, str(payload.get("hook_event_name", "")))
         if roots_changed:
             worktree_name = self._agent_worktree_state(rec)[1]
             if rec.get("worktree", "") != worktree_name:
@@ -7310,6 +7399,10 @@ class AppController(QObject):
         # socket (reap_dead would clean it eventually, but a clean exit is tidy).
         agent_registry.remove_entry(os.getpid())
         self._account_usage_store.stop()
+        # Stop the Bash-attribution probe pool; cancel queued probes and don't
+        # wait on any in-flight `git status` (a wedged probe would delay exit up
+        # to its 5s timeout — the pool's threads are reaped at interpreter exit).
+        self._bash_probe_pool.shutdown(wait=False, cancel_futures=True)
         # Signal the browser MCP server to exit and drop its config file
         # (daemon thread; reaped with the process either way).
         self._browser_mcp_server.stop()
