@@ -112,6 +112,10 @@ FocusScope {
     // flips it while the panel sub-pane holds focus.
     property var agentPathFilter: ({})
     property int agentCount: 0
+    // The focused agent's 1-based slot (0 = none). Used only to word the
+    // empty-state honestly — "no agent focused" vs "no changes from this agent"
+    // — so `scope === "agent"` with an empty pool doesn't imply an agent exists.
+    property int focusedAgentSlot: 0
     property string scope: "all"
     // True only in agent scope with nothing to show — drives the empty-state
     // line. Kept distinct from the whole-repo clean case (which hard-hides the
@@ -211,12 +215,18 @@ FocusScope {
     // Inert while collapsed — no stray clicks land on the invisible tree.
     enabled: !collapsed
 
-    // Keyboard-first scope toggle: "a" flips all ⇄ este agente. Gated on
+    // Keyboard-first scope toggle: "a" flips all ⇄ this agent. Gated on
     // `activeFocus` (the FocusScope reports true whenever the embedded tree
     // owns focus — see the file header) so it fires ONLY while the changes
     // sub-pane is focused; elsewhere "a" types normally. Wins over the inner
     // ListView's key handling because a matching Shortcut is dispatched before
     // per-item key delivery. Mouse parity lives on the header segments below.
+    // SAFE against key-hijack: the embedded bare FmUi.FileTreeView hosts NO
+    // focusable text input (verified — rename/create/fuzzy are separate popup
+    // components the full FileManager wires, not this tree) and does not bind
+    // `a`, so this can neither steal a keystroke from a text field nor shadow a
+    // tree op. If a future FM change adds an inline text field here, tighten
+    // this gate (e.g. require the ListView, not a TextInput, to hold focus).
     Shortcut {
         sequence: "a"
         enabled: root.activeFocus
@@ -273,7 +283,7 @@ FocusScope {
                 // The "a" Shortcut is the keyboard path; these give mouse
                 // parity + discoverability (they are not mouse-REQUIRED).
                 Text {
-                    text: "todos"
+                    text: "all"
                     color: root.scope === "all"
                         ? Theme.color.accent.primary
                         : Theme.color.text.dim
@@ -286,7 +296,7 @@ FocusScope {
                     }
                 }
                 Text {
-                    text: "este agente"
+                    text: "this agent"
                     color: root.scope === "agent"
                         ? Theme.color.accent.primary
                         : Theme.color.text.dim
@@ -437,7 +447,11 @@ FocusScope {
             Layout.fillWidth: true
             Layout.topMargin: Theme.spacing.xs
             visible: root.agentScopeEmpty
-            text: "Sin cambios de este agente"
+            // Word it honestly: no agent at all vs a focused agent with nothing
+            // uncommitted. `scope === "agent"` can outlive the pool emptying.
+            text: root.focusedAgentSlot === 0
+                ? "No focused agent"
+                : "No changes from this agent"
             wrapMode: Text.WordWrap
             color: Theme.color.text.dim
             font.family: Theme.font.family

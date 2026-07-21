@@ -2051,6 +2051,7 @@ Window {
                         // swaps its embedded tree between this and pathFilter.
                         agentPathFilter: controller.focusedAgentChangesPathSet
                         agentCount: controller.focusedAgentChangesCount
+                        focusedAgentSlot: controller.focusedAgent
                         // Same activation contract as the main FileTreeView:
                         // open the path in nvim and re-focus the editor so
                         // the user can immediately start editing. Routed

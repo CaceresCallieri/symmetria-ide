@@ -116,3 +116,41 @@ def test_fold_never_counts_dir_aggregate_as_leaf(tmp_path: Path) -> None:
     status_map = {"src": _dir("src")}
     keep_real = {os.path.realpath(_abs(root, "src"))}
     assert _fold_agent_changes(status_map, root, keep_real) == ({}, 0)
+
+
+def test_fold_resolves_touched_path_through_symlink(tmp_path: Path) -> None:
+    """A tool_path captured through a symlinked dir realpaths to the canonical
+    leaf and still matches git's rel key — the realpath rationale of the fold."""
+    root = _make_repo(tmp_path)  # has src/foo.py
+    link = Path(root) / "link"
+    link.symlink_to(Path(root) / "src")  # link/foo.py -> src/foo.py
+    status_map = {"src/foo.py": _mod("src/foo.py"), "src": _dir("src")}
+    # The agent edited the file via the symlink; `touched` stores its realpath.
+    touched = {os.path.realpath(str(link / "foo.py"))}
+    out, count = _fold_agent_changes(status_map, root, touched)
+    assert count == 1
+    assert out[_abs(root, "src/foo.py")] is True
+    assert out[_abs(root, "src")] is True
+
+
+def test_fold_dedupes_shared_ancestor(tmp_path: Path) -> None:
+    """Two leaves under a common dir yield that ancestor exactly once."""
+    root = _make_repo(tmp_path)  # has src/foo.py, src/bar.py
+    status_map = {
+        "src/foo.py": _mod("src/foo.py"),
+        "src/bar.py": _mod("src/bar.py"),
+        "src": _dir("src"),
+    }
+    keep_real = {
+        os.path.realpath(_abs(root, "src/foo.py")),
+        os.path.realpath(_abs(root, "src/bar.py")),
+    }
+    out, count = _fold_agent_changes(status_map, root, keep_real)
+    assert count == 2
+    # Exactly: root + src (once) + the two leaves — no duplicate ancestor rows.
+    assert set(out) == {
+        root,
+        _abs(root, "src"),
+        _abs(root, "src/foo.py"),
+        _abs(root, "src/bar.py"),
+    }

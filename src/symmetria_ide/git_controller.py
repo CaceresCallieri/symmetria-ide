@@ -618,28 +618,44 @@ def _fold_agent_changes(
     synthesized by ``_add_directory_aggregates``). ``keep_real`` is the
     caller's target files, ALREADY realpath-normalized. Returns
     ``({absPath: True, ...}, leaf_count)`` covering every dirty LEAF (skipping
-    ``·`` aggregates) whose realpath is in ``keep_real``, plus each such leaf's
-    ancestor directories up to — and including — ``resolved_root``. That is
-    exactly the membership shape ``FileTreeView.pathFilter`` needs to render
-    those files and no others; ``leaf_count`` excludes the synthesized dirs.
+    ``·`` aggregates) that ``keep_real`` names, plus each such leaf's ancestor
+    directories up to — and including — ``resolved_root``. That is exactly the
+    membership shape ``FileTreeView.pathFilter`` needs to render those files
+    and no others; ``leaf_count`` excludes the synthesized dirs.
+
+    Iterates the (small) ``keep_real`` set, NOT the (potentially large) dirty
+    tree: each touched file is mapped to its repo-relative key via
+    ``os.path.relpath`` and looked up in ``status_map`` — O(touched) dict
+    lookups with ZERO per-leaf ``realpath`` syscalls (the earlier forward form
+    realpath'd every dirty leaf in the repo on the GUI thread, which janked on
+    large changesets). ``resolved_root`` is realpath'd ONCE so the relpath
+    lands on the same footing as the already-canonical ``keep_real`` entries —
+    that is what lets a ``tool_path`` captured through a symlink still match
+    git's canonical rel key. The OUTPUT paths join back onto the ORIGINAL
+    ``resolved_root`` (what ``changedPathSet`` emits and the FM tree keys on),
+    so a symlinked root stays consistent with the rest of the panel.
 
     No Qt, no lock: the caller snapshots ``_status_map``/``_resolved_root``
-    and normalizes ``keep`` first, so this stays a unit-testable pure fold.
-    Each git leaf is realpath'd for the membership test because git derives
-    its abs paths from the canonical ``rev-parse`` root while a hook's
-    ``tool_path`` may arrive through a symlink — but the ORIGINAL git-rooted
-    path is what lands in the output dict (the path the FM tree keys on).
+    and realpath-normalizes ``keep`` first, so this stays a unit-testable pure
+    fold.
     """
     if not status_map or not resolved_root or not keep_real:
         return {}, 0
+    root_real = os.path.realpath(resolved_root)
     out: dict[str, bool] = {resolved_root: True}
     count = 0
-    for rel, status in status_map.items():
-        if status.char == "·":  # ancestor-dir aggregate, not a leaf
+    for real_path in keep_real:
+        rel = os.path.relpath(real_path, root_real)
+        # Outside the repo (a foreign-repo edit) → skip. Bare `.`/`..` or a
+        # `..`-prefixed rel all mean "not under root".
+        if rel == os.curdir or rel == os.pardir or rel.startswith(os.pardir + os.sep):
             continue
+        status = status_map.get(rel)
+        if status is None or status.char == "·":
+            continue  # the touched file is clean, or the key is a dir aggregate
         abs_leaf = os.path.join(resolved_root, rel)
-        if os.path.realpath(abs_leaf) not in keep_real:
-            continue
+        if abs_leaf in out:
+            continue  # two touched paths resolved to the same leaf
         out[abs_leaf] = True
         count += 1
         # Walk up to the repo root, adding each ancestor dir so the FM tree
@@ -1031,6 +1047,10 @@ class GitController(QObject):
             m, root = self._status_map, self._resolved_root
         if not m or not root:
             return {}, 0
+        # The sole caller (AppController._focused_agent_changes) already stores
+        # realpath'd paths in `touched`, so this is idempotent belt-and-braces
+        # — cheap for the small touched set, and keeps the method correct if a
+        # future caller passes raw paths (the fold requires canonical input).
         keep_real = {os.path.realpath(p) for p in keep_abs}
         return _fold_agent_changes(m, root, keep_real)
 

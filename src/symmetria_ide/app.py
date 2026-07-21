@@ -1159,6 +1159,14 @@ class AppController(QObject):
         # the two @Property bodies run only when QML re-reads them. statusChanged
         # fires on the git worker thread, so it hops the GUI thread via a queued
         # connection (same discipline as GitStatusListModel's own connect).
+        # `_focused_agent_changes_cache` memoizes the (pathSet, count) tuple so
+        # the two properties don't each recompute the fold on one edge; the
+        # invalidation slot is connected FIRST so it runs before QML re-reads on
+        # the same signal (QML's read is lazy either way).
+        self._focused_agent_changes_cache: tuple[dict, int] | None = None
+        self.focusedAgentChangesChanged.connect(
+            self._invalidate_focused_agent_changes_cache
+        )
         # queued: GitController worker → AppController GUI (§4 P2)
         self._git_controller.statusChanged.connect(
             self.focusedAgentChangesChanged,
@@ -3246,12 +3254,27 @@ class AppController(QObject):
         The focused slot's write-tool provenance (`touched`) intersected with
         the git dirty set via `GitController.changed_path_set_for`. Shared by
         the two QML-facing properties below so the intersection is expressed
-        once. `({}, 0)` when no agent is focused or it has touched nothing."""
+        once, and memoized in `_focused_agent_changes_cache` (invalidated on
+        `focusedAgentChangesChanged`) so the two properties don't each run the
+        fold on a single recompute edge. `({}, 0)` when no agent is focused or
+        it has touched nothing."""
+        if self._focused_agent_changes_cache is not None:
+            return self._focused_agent_changes_cache
         rec = self._term_agents.get(self._focused_term_agent)
         touched = rec.get("touched") if rec else None
-        if not touched:
-            return {}, 0
-        return self._git_controller.changed_path_set_for(touched)
+        result = (
+            ({}, 0)
+            if not touched
+            else self._git_controller.changed_path_set_for(touched)
+        )
+        self._focused_agent_changes_cache = result
+        return result
+
+    @Slot()
+    def _invalidate_focused_agent_changes_cache(self) -> None:
+        """Clear the focused-agent changes memo. Connected to
+        focusedAgentChangesChanged first, so it runs before any QML re-read."""
+        self._focused_agent_changes_cache = None
 
     @Property("QVariant", notify=focusedAgentChangesChanged)
     def focusedAgentChangesPathSet(self) -> dict:
