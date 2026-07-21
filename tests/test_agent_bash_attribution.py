@@ -45,10 +45,11 @@ def test_probe_clean_repo_is_empty(tmp_path: Path) -> None:
     assert probe_dirty_leaves(root) == set()
 
 
-def test_probe_non_repo_and_blank_are_empty(tmp_path: Path) -> None:
-    # A directory that is not a git repo → git status fails → empty set.
-    assert probe_dirty_leaves(os.path.realpath(str(tmp_path))) == set()
-    assert probe_dirty_leaves("") == set()
+def test_probe_non_repo_and_blank_are_none(tmp_path: Path) -> None:
+    # Not a git repo → git status fails → None (a FAILURE, distinct from a clean
+    # repo's empty set, so the caller aborts the window instead of over-attributing).
+    assert probe_dirty_leaves(os.path.realpath(str(tmp_path))) is None
+    assert probe_dirty_leaves("") is None
 
 
 def test_bash_delta_keeps_only_newly_dirty(tmp_path: Path) -> None:

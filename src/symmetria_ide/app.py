@@ -516,10 +516,13 @@ class AppController(QObject):
     # main changes list; only the two per-agent properties re-bind.
     focusedAgentChangesChanged = Signal()
     # v2 Bash-write attribution: a pool worker probes the agent's git dirty set
-    # on each Bash edge and hands (slot, "pre"|"post", leaf-set) back to the GUI
-    # thread (see _submit_bash_probe / _on_bash_probe_ready). object carries a
-    # set[str]; the connection is queued + GC-suspended at the emit (gotcha #10).
-    _bashProbeReady = Signal(int, str, object)
+    # on each Bash edge and hands (slot, window-generation, "pre"|"post",
+    # leaf-set-or-None) back to the GUI thread (see _submit_bash_probe /
+    # _on_bash_probe_ready). The generation tags each command's window so a
+    # probe result that lands out of order (pool max_workers>1) or after the
+    # slot is reused is dropped, not mispaired. object carries a set[str] on
+    # success or None on probe failure; queued + GC-suspended (gotcha #10).
+    _bashProbeReady = Signal(int, int, str, object)
     # Internal cross-thread marshal for the coordination judge: the one-shot
     # judge worker thread emits (trigger_id, status, summary); a queued
     # connection delivers _on_judge_verdict on the GUI thread.
@@ -3297,57 +3300,70 @@ class AppController(QObject):
     def _submit_bash_probe(self, slot: int, rec: dict, hook_event: str) -> None:
         """Probe the agent's git dirty set for one Bash edge, off the GUI thread.
 
-        On PreToolUse we reset the window and capture the baseline; on
-        PostToolUse the after-state. `_on_bash_probe_ready` (GUI thread) folds
-        the (post − pre) delta into `touched` once both edges are in. Scoped to
-        the agent's live work root — same precedence as the worktree follow, so
-        Bash writes land where the chrome is already pointed."""
-        root = rec.get("work_root") or resolve_project_root(
-            rec.get("live_cwd") or rec.get("cwd", "")
-        )
-        if not root:
-            return
+        Each command is a WINDOW tagged by a per-slot generation, captured at
+        PreToolUse and carried through to the result: a probe that lands after
+        the next command's Pre (pool reorder) or after the slot is reused is
+        dropped, not mispaired (see `_on_bash_probe_ready`). PostToolUse reuses
+        the Pre edge's cached root — `resolve_project_root` walks the filesystem
+        and can't change between the two edges of one command. Scoped to the
+        agent's live work root, same precedence as the worktree follow."""
         phase = "pre" if hook_event == "PreToolUse" else "post"
         if phase == "pre":
-            # New command window — drop any half-captured prior window so a lost
-            # PostToolUse can't pair a stale baseline with the next command.
-            rec["_bash_pre"] = None
-            rec["_bash_post"] = None
+            rec["_bash_gen"] = rec.get("_bash_gen", 0) + 1
+            rec["_bash_win"] = {}
+            rec["_bash_root"] = rec.get("work_root") or resolve_project_root(
+                rec.get("live_cwd") or rec.get("cwd", "")
+            )
+        gen = rec.get("_bash_gen", 0)
+        root = rec.get("_bash_root", "")
+        if not gen or not root:
+            return  # a Post with no preceding Pre this session, or no repo
         future = self._bash_probe_pool.submit(probe_dirty_leaves, root)
         future.add_done_callback(
-            lambda f, s=slot, p=phase: self._emit_bash_probe(s, p, f)
+            lambda f, s=slot, g=gen, p=phase: self._emit_bash_probe(s, g, p, f)
         )
 
-    def _emit_bash_probe(self, slot: int, phase: str, future: Future) -> None:
+    def _emit_bash_probe(self, slot: int, gen: int, phase: str, future: Future) -> None:
         """Pool-thread callback: hop the probe result onto the GUI thread.
 
         GC suspended around the cross-thread emit per gotcha #10 (the set
         payload allocates during queued marshalling)."""
+        if future.cancelled():
+            return  # app shutting down (cancel_futures) — not a real failure
         try:
             leaves = future.result()
         except Exception:
             log.exception("bash probe failed (slot %d, %s)", slot, phase)
             return
-        emit_gc_safe(self._bashProbeReady, slot, phase, leaves)
+        emit_gc_safe(self._bashProbeReady, slot, gen, phase, leaves)
 
-    @Slot(int, str, object)
-    def _on_bash_probe_ready(self, slot: int, phase: str, leaves: object) -> None:
+    @Slot(int, int, str, object)
+    def _on_bash_probe_ready(
+        self, slot: int, gen: int, phase: str, leaves: object
+    ) -> None:
         """GUI thread: store one Bash-window snapshot; when both edges are in,
         fold the (post − pre) delta into the slot's `touched` set.
 
-        Order-independent: whichever of pre/post arrives second triggers the
-        diff. A closed agent (rec gone) or a non-set payload is a no-op."""
+        Drops results from a SUPERSEDED window — a probe-pool reorder landing
+        after the next command's Pre, or this slot reused by another agent
+        (fresh rec → fresh/absent generation). Order-independent within a
+        window: whichever of pre/post arrives second triggers the diff. A
+        `None` snapshot is a probe FAILURE (not a clean repo) and ABORTS the
+        window rather than over-attributing the whole dirty set (#2)."""
         rec = self._term_agents.get(slot)
-        if rec is None or not isinstance(leaves, set):
+        if rec is None or gen != rec.get("_bash_gen"):
+            return  # agent closed, or result from a superseded window
+        if leaves is None:
+            rec["_bash_win"] = {}  # probe failed → abort this window, don't fold
             return
-        rec["_bash_" + phase] = leaves
-        pre = rec.get("_bash_pre")
-        post = rec.get("_bash_post")
-        if pre is None or post is None:
+        if not isinstance(leaves, set):
+            return
+        win = rec.setdefault("_bash_win", {})
+        win[phase] = leaves
+        if "pre" not in win or "post" not in win:
             return  # window not complete yet
-        rec["_bash_pre"] = None
-        rec["_bash_post"] = None
-        added = bash_delta(pre, post) - rec.setdefault("touched", set())
+        rec["_bash_win"] = {}
+        added = bash_delta(win["pre"], win["post"]) - rec.setdefault("touched", set())
         if not added:
             return
         rec["touched"] |= added

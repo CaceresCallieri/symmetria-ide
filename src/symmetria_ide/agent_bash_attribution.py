@@ -27,32 +27,45 @@ from __future__ import annotations
 import os
 
 from .git_controller import parse_porcelain_v2
-from .git_subprocess import run_git
+from .git_subprocess import LOCAL_GIT
 
 # git status is cheap; the bound only guards against a wedged git process
 # holding a probe-pool worker. Matches git_subprocess._RESOLVE_TIMEOUT_SEC.
 _STATUS_TIMEOUT_SEC = 5.0
 
 
-def probe_dirty_leaves(root: str) -> set[str]:
-    """Realpath'd absolute paths of every git-dirty leaf under `root`.
+def probe_dirty_leaves(root: str) -> set[str] | None:
+    """Realpath'd absolute paths of every git-dirty leaf under `root`, or
+    ``None`` on probe FAILURE (not a repo, git missing, timeout, lock loss).
 
-    Runs `git -C <root> status --porcelain=v2 -z` and reuses
-    `parse_porcelain_v2` (which emits leaves only — the `·` dir aggregates are
-    synthesized elsewhere, in GitController's scan). Empty set on any failure
-    (not a repo, git missing, timeout) — a probe must never break attribution.
+    The ``None`` vs empty-set distinction is load-bearing: a failed Pre probe
+    that returned an empty *set* would read as "clean baseline" and cause the
+    Post probe's ENTIRE pre-existing dirty set to be attributed to one (possibly
+    read-only) Bash command. Returning ``None`` lets the caller ABORT the
+    attribution window instead of over-attributing; a genuinely CLEAN repo
+    returns an empty set (success). Reuses `parse_porcelain_v2`, which emits
+    leaves only — the `·` dir aggregates are synthesized elsewhere.
+
+    Runs with ``core.optionalLocks=false`` (``GIT_OPTIONAL_LOCKS=0`` semantics)
+    so the probe neither fails on, nor creates, ``.git/index.lock`` contention
+    with the concurrent GitController scan / WorktreeWatcher on the same repo.
 
     WORKER-THREAD ONLY: it spawns a subprocess. Realpath'd so results compare
     equal to the `touched` set (which stores `os.path.realpath(tool_path)`) and
     to the fold's canonical matching in `_fold_agent_changes`.
     """
     if not root:
-        return set()
-    blob = run_git(root, "status", "--porcelain=v2", "-z", timeout=_STATUS_TIMEOUT_SEC)
-    if not blob:
-        return set()
+        return None
+    proc = LOCAL_GIT.execute(
+        root,
+        ["-c", "core.optionalLocks=false", "status", "--porcelain=v2", "-z"],
+        timeout=_STATUS_TIMEOUT_SEC,
+    )
+    if proc is None or proc.returncode != 0:
+        return None  # failure — the caller aborts the attribution window
     return {
-        os.path.realpath(os.path.join(root, rel)) for rel in parse_porcelain_v2(blob)
+        os.path.realpath(os.path.join(root, rel))
+        for rel in parse_porcelain_v2(proc.stdout)
     }
 
 
