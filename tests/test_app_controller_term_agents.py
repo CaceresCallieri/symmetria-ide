@@ -929,6 +929,31 @@ def test_bare_opencode_title_is_suppressed(controller):
     assert controller.agentTitles[0] == ""
 
 
+def test_bare_hostname_title_is_suppressed(controller):
+    # Under the tmux substrate `set-titles-string "#T"` forwards the pane
+    # title, which defaults to the machine hostname before the harness sets
+    # its own OSC title. A freshly-spawned chip must not flash the hostname.
+    import socket
+
+    controller.spawn_agent("fresh", True)
+    controller.on_agent_title(1, socket.gethostname())
+    assert controller.agentTitles[0] == ""
+    # And case-insensitively, matching the other placeholder guards.
+    controller.on_agent_title(1, socket.gethostname().upper())
+    assert controller.agentTitles[0] == ""
+
+
+def test_hostname_substring_is_not_suppressed(controller):
+    # The guard is an EXACT (case-insensitive) match, not a substring — a
+    # real session summary that merely contains the hostname survives.
+    import socket
+
+    real = f"deploy to {socket.gethostname()} box"
+    controller.spawn_agent("fresh", True)
+    controller.on_agent_title(1, real)
+    assert controller.agentTitles[0] == real
+
+
 # claude's spinner alphabet is unstable across versions — a glyph
 # outside the old hardcoded strip set leaked a tofu box into the
 # chip AND defeated the "Claude Code" suppression (the screenshot

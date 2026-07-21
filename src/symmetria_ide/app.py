@@ -4221,6 +4221,20 @@ class AppController(QObject):
     # into the chip AND broke the "Claude Code" placeholder match below.
     _TITLE_PREFIX_RE = re.compile(r"^[^\w~/.]+")
 
+    # Lowercased hostname forms tmux's `#{pane_title}` defaults to before the
+    # harness sets its own OSC title (see _clean_agent_title). Both the full
+    # name and its first label — `gethostname()` may return an FQDN while tmux
+    # shows the short form. Computed once at class-definition time; the host
+    # name does not change within a session.
+    _HOSTNAME_PLACEHOLDERS: ClassVar[frozenset[str]] = frozenset(
+        h
+        for h in (
+            socket.gethostname().lower(),
+            socket.gethostname().split(".", 1)[0].lower(),
+        )
+        if h
+    )
+
     @classmethod
     def _clean_agent_title(cls, title: str) -> str:
         """Normalise claude's OSC title for chip display.
@@ -4239,6 +4253,14 @@ class AppController(QObject):
         # "opencode" is what the OpenCode TUI reports before (and between)
         # meaningful titles, same role as claude's "Claude Code".
         if cleaned.lower() in ("claude code", "opencode"):
+            return ""
+        # Under the tmux substrate, `set-titles-string "#T"` forwards the pane
+        # title, which DEFAULTS to the machine hostname (e.g. "arch") in the
+        # sub-second window before the harness emits its first OSC title. Treat
+        # the bare hostname as a placeholder too, so a freshly-spawned chip never
+        # flashes the hostname. (No-op on the direct-PTY path — KSession there
+        # only ever sees the harness's own titles, never the hostname.)
+        if cleaned.lower() in cls._HOSTNAME_PLACEHOLDERS:
             return ""
         return cleaned
 
