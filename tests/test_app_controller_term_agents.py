@@ -15,6 +15,7 @@ import io
 import os
 import re
 import shutil
+import socket
 import time
 
 import pytest
@@ -306,6 +307,19 @@ def test_shipped_agent_tmux_conf_exists():
     from symmetria_ide.app import _AGENT_TMUX_CONF
 
     assert _AGENT_TMUX_CONF.exists(), f"shipped tmux conf missing at {_AGENT_TMUX_CONF}"
+
+
+def test_shipped_agent_tmux_conf_forwards_titles():
+    # The load-bearing half of the OSC-title fix lives in the conf, NOT in
+    # Python: without these two lines tmux swallows the harness's title and
+    # every AgentTopBar chip renders as a bare slot number (the
+    # _clean_agent_title tests above are a no-op without them). This guards
+    # against an accidental revert that the Python-only tests can't catch.
+    from symmetria_ide.app import _AGENT_TMUX_CONF
+
+    text = _AGENT_TMUX_CONF.read_text()
+    assert "set -g set-titles on" in text
+    assert 'set -g set-titles-string "#T"' in text
 
 
 def test_spawn_unknown_harness_is_a_no_op(controller):
@@ -933,8 +947,6 @@ def test_bare_hostname_title_is_suppressed(controller):
     # Under the tmux substrate `set-titles-string "#T"` forwards the pane
     # title, which defaults to the machine hostname before the harness sets
     # its own OSC title. A freshly-spawned chip must not flash the hostname.
-    import socket
-
     controller.spawn_agent("fresh", True)
     controller.on_agent_title(1, socket.gethostname())
     assert controller.agentTitles[0] == ""
@@ -946,8 +958,6 @@ def test_bare_hostname_title_is_suppressed(controller):
 def test_hostname_substring_is_not_suppressed(controller):
     # The guard is an EXACT (case-insensitive) match, not a substring — a
     # real session summary that merely contains the hostname survives.
-    import socket
-
     real = f"deploy to {socket.gethostname()} box"
     controller.spawn_agent("fresh", True)
     controller.on_agent_title(1, real)

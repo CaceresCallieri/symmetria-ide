@@ -4243,16 +4243,19 @@ class AppController(QObject):
         bare product name ("Claude Code" — what claude reports before a
         session has a real summary) as NO title, so the chip shows just
         the animated sparkle + slot number until a meaningful session
-        name exists.
+        name exists. The bare machine hostname is treated the same way —
+        under the tmux substrate it is what the pane title defaults to
+        before the harness sets its own (see the hostname check below).
         """
         # One trailing strip suffices: the regex already consumes leading
         # whitespace (it's a non-word character), and the strip removes
         # the separator space the glyph left behind plus any tail.
         cleaned = cls._TITLE_PREFIX_RE.sub("", title).strip()
+        cleaned_lower = cleaned.lower()
         # Bare product names are placeholders, not session summaries —
         # "opencode" is what the OpenCode TUI reports before (and between)
         # meaningful titles, same role as claude's "Claude Code".
-        if cleaned.lower() in ("claude code", "opencode"):
+        if cleaned_lower in ("claude code", "opencode"):
             return ""
         # Under the tmux substrate, `set-titles-string "#T"` forwards the pane
         # title, which DEFAULTS to the machine hostname (e.g. "arch") in the
@@ -4260,7 +4263,11 @@ class AppController(QObject):
         # the bare hostname as a placeholder too, so a freshly-spawned chip never
         # flashes the hostname. (No-op on the direct-PTY path — KSession there
         # only ever sees the harness's own titles, never the hostname.)
-        if cleaned.lower() in cls._HOSTNAME_PLACEHOLDERS:
+        # Tradeoff: exact-match heuristic — a genuine one-word summary equal to
+        # the hostname would also be suppressed. Vanishingly unlikely (real
+        # titles are multi-word and sparkle-prefixed) and preferable to a
+        # hostname flash on every spawn; not worth per-slot first-title state.
+        if cleaned_lower in cls._HOSTNAME_PLACEHOLDERS:
             return ""
         return cleaned
 
