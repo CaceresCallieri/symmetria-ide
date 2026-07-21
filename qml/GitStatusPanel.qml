@@ -103,6 +103,22 @@ FocusScope {
     // empty-but-valid on first paint.
     property var pathFilter: ({})
 
+    // --- Per-agent change scope (v1) -------------------------------------
+    // The FOCUSED agent's uncommitted changes as a `pathFilter`-shaped
+    // membership map (its write-tool provenance ∩ the git dirty set) plus the
+    // leaf count, supplied by `AppController.focusedAgentChangesPathSet` /
+    // `focusedAgentChangesCount`. `scope` toggles between the whole-repo
+    // changeset ("all") and just this map ("agent"); the "a" Shortcut below
+    // flips it while the panel sub-pane holds focus.
+    property var agentPathFilter: ({})
+    property int agentCount: 0
+    property string scope: "all"
+    // True only in agent scope with nothing to show — drives the empty-state
+    // line. Kept distinct from the whole-repo clean case (which hard-hides the
+    // panel via `visible:`) so the toggle stays reachable when THIS agent owns
+    // none of the repo's changes.
+    readonly property bool agentScopeEmpty: scope === "agent" && agentCount === 0
+
     // Optional upper bound on the pane's height. `-1` (default) preserves
     // pure content-fit behaviour. Consumers in a tall column (e.g.
     // Main.qml's side panel) bind this to a fraction of the column
@@ -195,6 +211,18 @@ FocusScope {
     // Inert while collapsed — no stray clicks land on the invisible tree.
     enabled: !collapsed
 
+    // Keyboard-first scope toggle: "a" flips all ⇄ este agente. Gated on
+    // `activeFocus` (the FocusScope reports true whenever the embedded tree
+    // owns focus — see the file header) so it fires ONLY while the changes
+    // sub-pane is focused; elsewhere "a" types normally. Wins over the inner
+    // ListView's key handling because a matching Shortcut is dispatched before
+    // per-item key delivery. Mouse parity lives on the header segments below.
+    Shortcut {
+        sequence: "a"
+        enabled: root.activeFocus
+        onActivated: root.scope = root.scope === "agent" ? "all" : "agent"
+    }
+
     // Chrome — same matte tone the status bar and which-key overlay use.
     // Drops slightly darker than the (transparent) main file tree below
     // to separate visually.
@@ -222,12 +250,54 @@ FocusScope {
             Layout.fillWidth: true
             spacing: Theme.spacing.xxs
 
-            Text {
+            RowLayout {
                 Layout.fillWidth: true
-                text: "Changes" + (root.model ? " · " + root.model.count : "")
-                color: Theme.color.text.dim
-                font.family: Theme.font.family
-                font.pixelSize: Theme.font.size.xs
+                spacing: Theme.spacing.sm
+
+                Text {
+                    Layout.fillWidth: true
+                    // Count follows the active scope: whole-repo file count in
+                    // "all", the focused agent's leaf count in "agent".
+                    text: {
+                        const n = root.scope === "agent"
+                            ? root.agentCount
+                            : (root.model ? root.model.count : 0);
+                        return "Changes · " + n;
+                    }
+                    color: Theme.color.text.dim
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                }
+
+                // Scope segments — the active one lifts to the accent colour.
+                // The "a" Shortcut is the keyboard path; these give mouse
+                // parity + discoverability (they are not mouse-REQUIRED).
+                Text {
+                    text: "todos"
+                    color: root.scope === "all"
+                        ? Theme.color.accent.primary
+                        : Theme.color.text.dim
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.scope = "all"
+                    }
+                }
+                Text {
+                    text: "este agente"
+                    color: root.scope === "agent"
+                        ? Theme.color.accent.primary
+                        : Theme.color.text.dim
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.scope = "agent"
+                    }
+                }
             }
 
             Repeater {
@@ -341,6 +411,9 @@ FocusScope {
             id: changesTree
             Layout.fillWidth: true
             Layout.fillHeight: true
+            // Hidden (and excluded from the layout) when the agent scope has
+            // nothing to show — the empty-state line below takes its place.
+            visible: !root.agentScopeEmpty
 
             rootPath: root.repoRoot
             initialExpandDepth: -1
@@ -348,9 +421,27 @@ FocusScope {
             showHidden: true
             compactScale: 0.75
             statusProvider: root.statusProvider
-            pathFilter: root.pathFilter
+            // Whole-repo changeset in "all"; the focused agent's touched ∩
+            // dirty map in "agente". rootPath stays the displayed repo either
+            // way, so the agent map only renders paths under it (foreign-repo
+            // edits are a v1 no-show, by design).
+            pathFilter: root.scope === "agent" ? root.agentPathFilter : root.pathFilter
 
             onFileActivated: (path) => root.fileActivated(path)
+        }
+
+        // Empty-state for the "este agente" scope. The panel itself stays
+        // visible (there ARE repo changes, else `visible:` would hard-hide
+        // it) so the toggle is reachable — this agent just owns none of them.
+        Text {
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.spacing.xs
+            visible: root.agentScopeEmpty
+            text: "Sin cambios de este agente"
+            wrapMode: Text.WordWrap
+            color: Theme.color.text.dim
+            font.family: Theme.font.family
+            font.pixelSize: Theme.font.size.xs
         }
     }
 }

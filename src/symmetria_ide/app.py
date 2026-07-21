@@ -505,6 +505,14 @@ class AppController(QObject):
     #     e.g. the user anchored to the same worktree path).
     agentWorktreeChanged = Signal()
     displayingWorktreeChanged = Signal()
+    # Focused-agent change attribution (v1 side-panel filter). The focused
+    # slot's uncommitted-changes view is derived from its write-tool
+    # provenance (`touched`) ∩ the git dirty set, so it must recompute on
+    # THREE unrelated edges — a git scan, a focus change, and the focused
+    # agent editing a new file. Its own signal (not termAgentsChanged / not
+    # statusChanged) so none of those re-evaluate the whole chip row or the
+    # main changes list; only the two per-agent properties re-bind.
+    focusedAgentChangesChanged = Signal()
     # Internal cross-thread marshal for the coordination judge: the one-shot
     # judge worker thread emits (trigger_id, status, summary); a queued
     # connection delivers _on_judge_verdict on the GUI thread.
@@ -1143,6 +1151,20 @@ class AppController(QObject):
         # the panel's ListView. Auto-refreshes on the controller's
         # statusChanged via a queued connection (handled internally).
         self._git_status_list = GitStatusListModel(self._git_controller, self)
+        # Per-agent change attribution (v1 side-panel filter): the focused
+        # agent's "este agente" view is `touched ∩ git-dirty`, so re-emit
+        # focusedAgentChangesChanged on BOTH a new git scan and a focus edge
+        # (the third edge — the focused agent editing a new file — is emitted
+        # inline in _on_agent_hook). Signal-to-signal keeps the recompute lazy:
+        # the two @Property bodies run only when QML re-reads them. statusChanged
+        # fires on the git worker thread, so it hops the GUI thread via a queued
+        # connection (same discipline as GitStatusListModel's own connect).
+        # queued: GitController worker → AppController GUI (§4 P2)
+        self._git_controller.statusChanged.connect(
+            self.focusedAgentChangesChanged,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self.focusedAgentChanged.connect(self.focusedAgentChangesChanged)
         # ----- Git HISTORY provider (read-only comprehension surface) ------
         # The read-only counterpart to GitController: where the status
         # controller answers "what is uncommitted right now", this answers
@@ -3217,6 +3239,40 @@ class AppController(QObject):
     def focusedAgent(self) -> int:
         """1-based focused slot; 0 = none (empty pool)."""
         return self._focused_term_agent
+
+    def _focused_agent_changes(self) -> tuple[dict, int]:
+        """`(pathSet, count)` for the FOCUSED agent's uncommitted changes.
+
+        The focused slot's write-tool provenance (`touched`) intersected with
+        the git dirty set via `GitController.changed_path_set_for`. Shared by
+        the two QML-facing properties below so the intersection is expressed
+        once. `({}, 0)` when no agent is focused or it has touched nothing."""
+        rec = self._term_agents.get(self._focused_term_agent)
+        touched = rec.get("touched") if rec else None
+        if not touched:
+            return {}, 0
+        return self._git_controller.changed_path_set_for(touched)
+
+    @Property("QVariant", notify=focusedAgentChangesChanged)
+    def focusedAgentChangesPathSet(self) -> dict:
+        """`{absPath: True}` for the FM `pathFilter`, narrowed to the FOCUSED
+        agent's uncommitted changes: the write-tool files it touched this
+        session that are ALSO git-dirty, plus their ancestor dirs + repo root.
+
+        Drives the side panel's "este agente" scope. Empty when no agent is
+        focused, it has touched nothing, or nothing it touched is dirty.
+
+        v1 scope (deliberate — see the side-panel notes in CLAUDE.md): the
+        intersection is against the DISPLAYED repo's dirty set, so foreign-repo
+        edits (worktree-follow cleared) don't appear here, and Bash-driven
+        writes (no `tool_path`) are invisible. Both are v2 follow-ups."""
+        return self._focused_agent_changes()[0]
+
+    @Property(int, notify=focusedAgentChangesChanged)
+    def focusedAgentChangesCount(self) -> int:
+        """Leaf-file count behind `focusedAgentChangesPathSet` (dirs excluded)
+        — the side panel's "Changes · N" number while in "este agente" scope."""
+        return self._focused_agent_changes()[1]
 
     @Property("QVariantList", notify=agentActivityChanged)
     def agentActivity(self) -> list:
@@ -5682,6 +5738,21 @@ class AppController(QObject):
             if work_root and rec.get("work_root") != work_root:
                 rec["work_root"] = work_root
                 roots_changed = True
+            # v1 per-agent change attribution: remember the CONCRETE file the
+            # agent edited (not just its repo root, which is all `work_root`
+            # keeps) so the side panel can filter the changeset to "este
+            # agente" — the touched ∩ git-dirty intersection computed in
+            # `_focused_agent_changes`. realpath so it compares equal to git's
+            # canonical rev-parse paths. Session-scoped: the set dies with the
+            # slot record on close_agent (no persistence across sessions).
+            touched = rec.setdefault("touched", set())
+            real_path = os.path.realpath(tool_path)
+            if real_path not in touched:
+                touched.add(real_path)
+                # Only the focused agent's set feeds a live binding; a
+                # background agent's edits recompute lazily when it's focused.
+                if slot == self._focused_term_agent:
+                    self.focusedAgentChangesChanged.emit()
         if roots_changed:
             worktree_name = self._agent_worktree_state(rec)[1]
             if rec.get("worktree", "") != worktree_name:

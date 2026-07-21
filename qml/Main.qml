@@ -2046,6 +2046,11 @@ Window {
                         repoRoot: gitController.repoRoot
                         statusProvider: gitProviderAdapter
                         pathFilter: gitController.changedPathSet
+                        // Per-agent scope (v1): the focused agent's uncommitted
+                        // changes (touched ∩ git-dirty). The panel's "a" toggle
+                        // swaps its embedded tree between this and pathFilter.
+                        agentPathFilter: controller.focusedAgentChangesPathSet
+                        agentCount: controller.focusedAgentChangesCount
                         // Same activation contract as the main FileTreeView:
                         // open the path in nvim and re-focus the editor so
                         // the user can immediately start editing. Routed
