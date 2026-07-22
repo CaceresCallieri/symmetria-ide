@@ -2244,6 +2244,7 @@ def test_focused_agent_changes_follows_focus_via_focus_agent(controller, monkeyp
 
     controller.focus_agent(1)
     assert controller.focusedAgentChangesCount == 1  # agent 1's own change
+    assert controller.focusedAgentChangesPathSet == {"/x/a": True}
 
     fired: list = []
     controller.focusedAgentChangesChanged.connect(lambda: fired.append(1))

@@ -166,7 +166,7 @@ Window {
         onActivated: controller.toggle_git_history()
     }
 
-    // Toggle the Active Changes scope: all ⇄ this agent (D = diff/delta scope).
+    // Toggle the Active Changes scope: all ⇄ this agent (D = diff scope).
     // The in-panel `a` key only fires when the changes sub-pane holds focus,
     // which buried the per-agent view — this global chord flips it from ANY
     // surface. "this agent" narrows the changeset to the FOCUSED agent's

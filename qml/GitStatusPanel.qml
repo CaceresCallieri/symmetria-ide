@@ -220,7 +220,9 @@ FocusScope {
     // owns focus — see the file header) so it fires ONLY while the changes
     // sub-pane is focused; elsewhere "a" types normally. Wins over the inner
     // ListView's key handling because a matching Shortcut is dispatched before
-    // per-item key delivery. Mouse parity lives on the header segments below.
+    // per-item key delivery. `root.scope` has THREE writers that all flip the
+    // same property directly: this `a` key, the header segment clicks below, and
+    // Main.qml's global `Ctrl+Shift+D` ApplicationShortcut.
     // SAFE against key-hijack: the embedded bare FmUi.FileTreeView hosts NO
     // focusable text input (verified — rename/create/fuzzy are separate popup
     // components the full FileManager wires, not this tree) and does not bind
@@ -286,6 +288,12 @@ FocusScope {
                 // Ctrl+Shift+D (global) or `a` in-panel; the clicks are parity.
                 Row {
                     Layout.alignment: Qt.AlignVCenter
+                    // Right margin gives the rightmost segment's clay shadow room
+                    // to render inside the panel's `clip: true` root — PillSurface
+                    // shadows paint OUTSIDE the pill, so a flush edge would slice
+                    // the active "this agent" segment's convex shadow (see the
+                    // PillSurface header gotcha).
+                    Layout.rightMargin: Theme.spacing.xs
                     spacing: Theme.spacing.xxs
 
                     Repeater {
@@ -365,36 +373,38 @@ FocusScope {
                      n:   (root.stats && root.stats.untrackedCount) || 0},
                 ]
                 delegate: RowLayout {
+                    id: bucket
+                    required property var modelData
                     // Repo-wide staged/unstaged/untracked aggregates — they
                     // don't apply per-agent, so hide them in "this agent" scope
                     // (the header count already conveys the agent's file count).
                     // Otherwise "this agent · 0" would sit above misleading
                     // repo-wide +N buckets (the live-demo inconsistency).
-                    visible: modelData.n > 0 && root.scope === "all"
+                    visible: bucket.modelData.n > 0 && root.scope === "all"
                     spacing: Theme.spacing.xs
 
                     Text {
-                        text: modelData.icon
+                        text: bucket.modelData.icon
                         color: Theme.color.text.normal
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.xs
                     }
                     Text {
-                        visible: modelData.add > 0
-                        text: "+" + modelData.add
+                        visible: bucket.modelData.add > 0
+                        text: "+" + bucket.modelData.add
                         color: Theme.color.diff.addedFg
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.xs
                     }
                     Text {
-                        visible: modelData.del > 0
-                        text: "-" + modelData.del
+                        visible: bucket.modelData.del > 0
+                        text: "-" + bucket.modelData.del
                         color: Theme.color.diff.removedFg
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.xs
                     }
                     Text {
-                        text: "(" + modelData.n + ")"
+                        text: "(" + bucket.modelData.n + ")"
                         color: Theme.color.text.dim
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.xs
