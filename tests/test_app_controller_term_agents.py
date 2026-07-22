@@ -2225,3 +2225,30 @@ def test_submit_bash_probe_post_reuses_cached_root_and_generation(
     # Post does NOT bump the generation and reuses the Pre edge's cached root.
     assert rec["_bash_gen"] == 5
     assert seen and seen[0] == (root,)
+
+
+def test_focused_agent_changes_follows_focus_via_focus_agent(controller, monkeypatch):
+    """Focusing a DIFFERENT agent through the real `focus_agent` path re-emits
+    focusedAgentChangesChanged and the "this agent" scope recomputes for the
+    NEW slot — the diagnostic for the live "doesn't change per agent" report.
+    Stubs the git intersection to echo the touched set so slots differ without
+    a real repo/scan."""
+    monkeypatch.setattr(
+        controller._git_controller,
+        "changed_path_set_for",
+        lambda keep: ({p: True for p in keep}, len(keep)),
+    )
+    controller._term_agents[1] = {"cwd": "/x", "location": "local", "touched": {"/x/a"}}
+    controller._term_agents[2] = {"cwd": "/x", "location": "local"}  # no touched
+    controller._agent_order = [1, 2]
+
+    controller.focus_agent(1)
+    assert controller.focusedAgentChangesCount == 1  # agent 1's own change
+
+    fired: list = []
+    controller.focusedAgentChangesChanged.connect(lambda: fired.append(1))
+    controller.focus_agent(2)
+    assert fired, "focusedAgentChangesChanged did not fire on focus change"
+    # The scope FOLLOWS focus: agent 2 touched nothing → empty.
+    assert controller.focusedAgentChangesCount == 0
+    assert controller.focusedAgentChangesPathSet == {}

@@ -166,6 +166,20 @@ Window {
         onActivated: controller.toggle_git_history()
     }
 
+    // Toggle the Active Changes scope: all ⇄ this agent (D = diff/delta scope).
+    // The in-panel `a` key only fires when the changes sub-pane holds focus,
+    // which buried the per-agent view — this global chord flips it from ANY
+    // surface. "this agent" narrows the changeset to the FOCUSED agent's
+    // uncommitted work (its write-tool + Bash provenance ∩ git-dirty); "all"
+    // is the repo-wide default. No-op-ish when the panel is hidden (clean
+    // tree) — the scope still flips and applies once changes appear.
+    Shortcut {
+        sequences: ["Ctrl+Shift+D"]
+        context: Qt.ApplicationShortcut
+        onActivated: gitStatusPanel.scope =
+            gitStatusPanel.scope === "agent" ? "all" : "agent"
+    }
+
     // Jump to the FOCUSED agent's browser — go watch what the agent is doing
     // (or see the page it left once idle; the window lives as long as the
     // agent does). The keyboard twin of clicking an agent chip's globe. The

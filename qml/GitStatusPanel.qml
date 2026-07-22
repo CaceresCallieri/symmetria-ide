@@ -279,33 +279,60 @@ FocusScope {
                     font.pixelSize: Theme.font.size.xs
                 }
 
-                // Scope segments — the active one lifts to the accent colour.
-                // The "a" Shortcut is the keyboard path; these give mouse
-                // parity + discoverability (they are not mouse-REQUIRED).
-                Text {
-                    text: "all"
-                    color: root.scope === "all"
-                        ? Theme.color.accent.primary
-                        : Theme.color.text.dim
-                    font.family: Theme.font.family
-                    font.pixelSize: Theme.font.size.xs
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.scope = "all"
-                    }
-                }
-                Text {
-                    text: "this agent"
-                    color: root.scope === "agent"
-                        ? Theme.color.accent.primary
-                        : Theme.color.text.dim
-                    font.family: Theme.font.family
-                    font.pixelSize: Theme.font.size.xs
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.scope = "agent"
+                // Scope switcher — clay two-segment control (same idiom as
+                // GitHistoryView's tab header / AgentTopBar's surface switcher):
+                // the ACTIVE scope raises into a clay capsule, the inactive
+                // stays flat. Reads as a proper toggle at a glance. Keyboard:
+                // Ctrl+Shift+D (global) or `a` in-panel; the clicks are parity.
+                Row {
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: Theme.spacing.xxs
+
+                    Repeater {
+                        model: [
+                            {scope: "all", label: "all"},
+                            {scope: "agent", label: "this agent"},
+                        ]
+                        delegate: Item {
+                            id: seg
+                            required property var modelData
+                            readonly property bool isCurrent: root.scope === seg.modelData.scope
+
+                            height: Theme.size.modeBadgeHeight
+                            implicitWidth: segLabel.implicitWidth + Theme.spacing.sm * 2
+
+                            PillSurface {
+                                anchors.fill: parent
+                                radius: height / 2
+                                elevated: seg.isCurrent
+                                color: seg.isCurrent ? Theme.color.bg.selected : "transparent"
+                                borderColor: seg.isCurrent
+                                    ? Theme.color.border.hairline
+                                    : "transparent"
+                            }
+
+                            Text {
+                                id: segLabel
+                                anchors.centerIn: parent
+                                text: seg.modelData.label
+                                color: seg.isCurrent
+                                    ? Theme.color.text.strong
+                                    : Theme.color.text.dim
+                                font.family: Theme.font.family
+                                font.pixelSize: Theme.font.size.xs
+                                font.weight: seg.isCurrent
+                                    ? Theme.font.weight.bold
+                                    : Theme.font.weight.medium
+                                font.letterSpacing: 0.6
+                                renderType: Text.NativeRendering
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.scope = seg.modelData.scope
+                            }
+                        }
                     }
                 }
             }
@@ -338,7 +365,12 @@ FocusScope {
                      n:   (root.stats && root.stats.untrackedCount) || 0},
                 ]
                 delegate: RowLayout {
-                    visible: modelData.n > 0
+                    // Repo-wide staged/unstaged/untracked aggregates — they
+                    // don't apply per-agent, so hide them in "this agent" scope
+                    // (the header count already conveys the agent's file count).
+                    // Otherwise "this agent · 0" would sit above misleading
+                    // repo-wide +N buckets (the live-demo inconsistency).
+                    visible: modelData.n > 0 && root.scope === "all"
                     spacing: Theme.spacing.xs
 
                     Text {
