@@ -75,7 +75,12 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
     CompletionModel,
 )
 from .git_branch_controller import GitBranchController, GitBranchListModel
-from .git_controller import GitController, GitStatusListModel, _fold_agent_changes
+from .git_controller import (
+    GitController,
+    GitStatus,
+    GitStatusListModel,
+    _fold_agent_changes,
+)
 from .gh_pr_controller import GhPrController, GhPrListModel, GhPrTimelineModel
 from .git_log_controller import GitLogController, GitLogListModel
 from .git_ops_controller import GitOpsController
@@ -141,9 +146,18 @@ _AGENT_WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 # Symmetria-ecosystem multi-repo session (IDE + agents-ui + the fork).
 _FOREIGN_SECTION_CAP = 4
 
+# Per-root re-probe throttle for foreign `git status`. `_refresh_foreign_changes`
+# rides EVERY displayed-changes edge (200ms git scans during active editing), so
+# without this a foreign repo is re-probed continuously even when unchanged. A
+# root with a cached snapshot is re-probed at most once per this interval; the
+# cache serves in between. 1s keeps the section live without a subprocess storm.
+_FOREIGN_PROBE_THROTTLE_SEC = 1.0
+
 
 def _partition_foreign_touched(
-    touched: set[str], displayed_real: str
+    touched: set[str],
+    displayed_real: str,
+    resolve_cache: dict[str, str] | None = None,
 ) -> dict[str, set[str]]:
     """Group an agent's ``touched`` paths by the git repo they live in,
     EXCLUDING the currently-displayed repo.
@@ -159,19 +173,28 @@ def _partition_foreign_touched(
 
     ``displayed_real`` is the realpath of the displayed repo root; each touched
     path's resolved root is realpath-compared against it so a symlinked checkout
-    still classifies its own files as "displayed", not foreign. Filesystem I/O
-    (``resolve_project_root`` stats up the tree) but bounded by the small
-    ``touched`` set; the caller memoizes so it doesn't run per QML re-read.
+    still classifies its own files as "displayed", not foreign.
 
     ``resolve_project_root`` returns ``start`` itself (not "") when no ``.git``
     ancestor exists, and also treats a bare ``.symmetria/`` dir as a root — so a
     loose file under no git repo would otherwise group as its own "repo". We
     require an actual ``.git`` at the resolved root to keep those out: a path
     with no git repo has nothing uncommitted to show.
+
+    ``resolve_project_root`` stats UP the tree (O(depth) syscalls), and this runs
+    on the GUI thread on every displayed-changes edge, so ``resolve_cache`` (a
+    caller-owned ``path -> resolved_root`` dict) memoizes it: a path's repo root
+    doesn't move within a session, so a cache hit skips the walk entirely. Pass
+    ``None`` (tests) to bypass the cache.
     """
     groups: dict[str, set[str]] = {}
     for p in touched:
-        r = resolve_project_root(p)
+        if resolve_cache is not None and p in resolve_cache:
+            r = resolve_cache[p]
+        else:
+            r = resolve_project_root(p)
+            if resolve_cache is not None:
+                resolve_cache[p] = r
         if not r or not os.path.exists(os.path.join(r, ".git")):
             continue  # not inside a git repo → nothing uncommitted to show
         if os.path.realpath(r) == displayed_real:
@@ -571,12 +594,20 @@ class AppController(QObject):
     _bashProbeReady = Signal(int, int, str, object)
     # Per-agent change filter, MULTI-ROOT (v2): the focused agent's changes in
     # git repos OTHER than the displayed one, as collapsible side-panel sections
-    # (write-tool + Bash provenance ∩ each foreign repo's dirty set). Fires on
-    # every displayed-changes edge (a foreign refresh rides _refresh_foreign_
-    # changes off focusedAgentChangesChanged) AND when a foreign `git status`
-    # probe returns. focusedAgentChangesTotalCount notifies on THIS signal (not
-    # focusedAgentChangesChanged) so the header total tracks foreign + displayed.
+    # (write-tool + Bash provenance ∩ each foreign repo's dirty set). Fires ONLY
+    # when the foreign SECTION LIST actually changes — a foreign probe lands with
+    # a fresh map, or a root is pruned. Deliberately NOT on every displayed edge:
+    # the QML foreign Repeater's `model` binds `focusedAgentForeignChanges`
+    # (notify = this signal), and a per-edge emit would rebuild the array
+    # reference every 200ms scan, churning the embedded FileTreeView delegates.
     focusedAgentForeignChangesChanged = Signal()
+    # The focused agent's CROSS-REPO total count (displayed + foreign). A separate
+    # signal because the total moves on BOTH a displayed-changes edge AND a
+    # foreign-list change, and a @Property binds only ONE notify — both
+    # focusedAgentChangesChanged and focusedAgentForeignChangesChanged are wired
+    # to re-emit it (see __init__). This keeps the header total live without
+    # coupling the foreign Repeater's model to every displayed scan.
+    focusedAgentTotalCountChanged = Signal()
     # A foreign-repo `git status` probe result (probe_status_map) hops the GUI
     # thread here: (repo_root, status_map-or-None). None is a probe FAILURE (the
     # cached snapshot is kept, not wiped). Queued + GC-suspended (gotcha #10).
@@ -1255,21 +1286,39 @@ class AppController(QObject):
         # Per-agent change filter, MULTI-ROOT (v2): the focused agent's changes
         # in FOREIGN repos (not the displayed one). `_foreign_status_cache` maps
         # a foreign repo root → its last probed `git status` map; `_inflight`
-        # dedups overlapping probes for the same root; the `(list, total,
-        # overflow)` projection is memoized like the displayed one. A foreign
-        # refresh rides EVERY displayed-changes edge (focusedAgentChangesChanged
-        # → _refresh_foreign_changes), which submits probes for any foreign root
-        # the focused agent touched and prunes roots it no longer does. Self-
-        # limiting: the common case (no foreign work) partitions to an empty set
-        # → no probes, zero overhead.
-        self._foreign_status_cache: dict[str, dict] = {}
+        # dedups overlapping probes for the same root; `_probe_last` throttles
+        # per-root re-probes (monotonic timestamps); `_resolve_root_cache`
+        # memoizes the up-the-tree `resolve_project_root` walk (roots don't move
+        # in a session); the `(list, total, overflow)` projection is memoized like
+        # the displayed one. A foreign refresh rides EVERY displayed-changes edge
+        # (focusedAgentChangesChanged → _refresh_foreign_changes), submitting
+        # throttled probes for touched foreign roots and pruning roots no longer
+        # touched. Self-limiting: the common case (no foreign work) partitions to
+        # an empty set → no probes, zero overhead. Probes run on their OWN pool
+        # (not the shared bash-attrib pool) so a foreign burst can't delay a
+        # timing-critical Bash pre/post attribution probe.
+        self._foreign_status_cache: dict[str, dict[str, GitStatus]] = {}
         self._foreign_probe_inflight: set[str] = set()
+        self._foreign_probe_last: dict[str, float] = {}
+        self._foreign_wanted: set[str] = set()
+        self._resolve_root_cache: dict[str, str] = {}
         self._focused_agent_foreign_cache: tuple[list, int, int] | None = None
+        self._foreign_probe_pool = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="foreign-status"
+        )
         self.focusedAgentForeignChangesChanged.connect(
             self._invalidate_focused_agent_foreign_cache
         )
         self.focusedAgentChangesChanged.connect(self._refresh_foreign_changes)
-        # queued: bash-attrib pool → AppController GUI (§4 P2)
+        # The cross-repo header total moves on EITHER a displayed edge or a
+        # foreign-list change; both re-emit its dedicated notify so the @Property
+        # stays live without binding the foreign Repeater's model to displayed
+        # scans (see focusedAgentTotalCountChanged).
+        self.focusedAgentChangesChanged.connect(self.focusedAgentTotalCountChanged)
+        self.focusedAgentForeignChangesChanged.connect(
+            self.focusedAgentTotalCountChanged
+        )
+        # queued: foreign-status pool → AppController GUI (§4 P2)
         self._foreignProbeReady.connect(
             self._on_foreign_probe_ready, Qt.ConnectionType.QueuedConnection
         )
@@ -3504,33 +3553,61 @@ class AppController(QObject):
         """Recompute the focused agent's foreign-repo groups and (re)probe them.
 
         Rides EVERY `focusedAgentChangesChanged` edge (focus change, git scan,
-        the agent editing a new file). Submits a `git status` probe for each
-        foreign root the focused agent touched (deduped against in-flight),
-        prunes cache/in-flight for roots it no longer touches, and emits
-        `focusedAgentForeignChangesChanged` so the projection rebuilds from
-        whatever is cached now — a pruned root disappears immediately, a fresh
-        one appears when its probe lands. Empty groups (the common no-foreign
-        case) submit nothing: zero overhead."""
+        the agent editing a new file). For each foreign root the focused agent
+        touched, submits a THROTTLED `git status` probe — skipped if one is in
+        flight, or if a cached snapshot was refreshed within
+        `_FOREIGN_PROBE_THROTTLE_SEC` — on the DEDICATED foreign pool (so a
+        foreign burst never delays a timing-critical Bash probe). Prunes
+        cache/in-flight/throttle state for roots no longer touched.
+
+        Emits `focusedAgentForeignChangesChanged` ONLY when the WANTED root set
+        changed (focus moved, a root entered/left) — NOT on every edge, because
+        that signal is the QML foreign Repeater's model notify and a per-scan
+        emit would rebuild its delegates every 200ms. A probe landing with a
+        genuinely new map emits from `_on_foreign_probe_ready`; the header total
+        tracks plain displayed edges via `focusedAgentTotalCountChanged`. Empty
+        groups (the common no-foreign case) submit nothing: zero overhead."""
         rec = self._term_agents.get(self._focused_term_agent)
         touched = rec.get("touched") if rec else None
         groups = _partition_foreign_touched(
-            touched or set(), self._displayed_repo_real()
+            touched or set(), self._displayed_repo_real(), self._resolve_root_cache
         )
         wanted = set(groups)
-        # Drop cache + in-flight for roots the focused agent no longer touches
-        # (focus moved to an agent working elsewhere, or the file was reverted).
+        # Drop cache + in-flight + throttle state for roots the focused agent no
+        # longer touches (focus moved to an agent working elsewhere, or the file
+        # was reverted). A prune shrinks the visible section list right away.
+        pruned = False
         for stale in [r for r in self._foreign_status_cache if r not in wanted]:
             del self._foreign_status_cache[stale]
+            pruned = True
         self._foreign_probe_inflight &= wanted
+        for gone in [r for r in self._foreign_probe_last if r not in wanted]:
+            del self._foreign_probe_last[gone]
+        now = time.monotonic()
         for root in wanted:
             if root in self._foreign_probe_inflight:
                 continue  # a probe for this root is already running
+            # A root with a fresh-enough cached snapshot isn't re-probed; one
+            # with no snapshot yet always is (first discovery).
+            if (
+                root in self._foreign_status_cache
+                and (now - self._foreign_probe_last.get(root, 0.0))
+                < _FOREIGN_PROBE_THROTTLE_SEC
+            ):
+                continue
             self._foreign_probe_inflight.add(root)
-            future = self._bash_probe_pool.submit(probe_status_map, root)
+            self._foreign_probe_last[root] = now
+            future = self._foreign_probe_pool.submit(probe_status_map, root)
             future.add_done_callback(lambda f, r=root: self._emit_foreign_probe(r, f))
-        # Rebuild from current cache immediately (prunes take effect now; fresh
-        # roots fill in when their probe lands via _on_foreign_probe_ready).
-        self.focusedAgentForeignChangesChanged.emit()
+        # Rebuild the projection now ONLY if the section composition can have
+        # changed here — the wanted set differs (focus moved, a cached-fresh root
+        # entered/left) or a cached root was just pruned. A same-agent editing
+        # burst keeps `wanted` stable with no prune, so it must NOT emit (that
+        # would churn the Repeater every 200ms); newly-probed roots emit from
+        # `_on_foreign_probe_ready` instead.
+        if pruned or wanted != self._foreign_wanted:
+            self._foreign_wanted = set(wanted)
+            self.focusedAgentForeignChangesChanged.emit()
 
     def _emit_foreign_probe(self, root: str, future: Future) -> None:
         """Pool-thread callback: hop a foreign `git status` result onto the GUI
@@ -3541,7 +3618,12 @@ class AppController(QObject):
         try:
             status_map = future.result()
         except Exception:
+            # Report the FAILURE as a None result rather than swallowing it:
+            # `_on_foreign_probe_ready` is the only place that clears
+            # `_foreign_probe_inflight`, so a bare return here would strand this
+            # root in-flight forever and permanently block its re-probe.
             log.exception("foreign status probe failed (%s)", root)
+            emit_gc_safe(self._foreignProbeReady, root, None)
             return
         emit_gc_safe(self._foreignProbeReady, root, status_map)
 
@@ -3552,19 +3634,22 @@ class AppController(QObject):
         Drops the result if the focused agent no longer touches `root` (focus
         moved between submit and return). A `None` map is a probe FAILURE — keep
         any prior snapshot rather than wiping it, so a transient git error
-        doesn't make the foreign section flicker out. On a fresh map, cache it
-        and re-emit so the projection picks it up."""
+        doesn't make the foreign section flicker out. On a map that DIFFERS from
+        the cached one, store it and re-emit; an identical re-probe result skips
+        the emit so an unchanged foreign repo doesn't churn the Repeater."""
         self._foreign_probe_inflight.discard(root)
         rec = self._term_agents.get(self._focused_term_agent)
         touched = rec.get("touched") if rec else None
         groups = _partition_foreign_touched(
-            touched or set(), self._displayed_repo_real()
+            touched or set(), self._displayed_repo_real(), self._resolve_root_cache
         )
         if root not in groups:
             self._foreign_status_cache.pop(root, None)
             return  # no longer a foreign root for the focused agent
         if status_map is None:
             return  # probe failure — keep the prior snapshot, don't wipe
+        if self._foreign_status_cache.get(root) == status_map:
+            return  # unchanged since the last probe — no projection change
         self._foreign_status_cache[root] = status_map
         self.focusedAgentForeignChangesChanged.emit()
 
@@ -3577,13 +3662,18 @@ class AppController(QObject):
         header total stays honest); `overflow` is how many sections the cap hid.
         Memoized in `_focused_agent_foreign_cache` (invalidated on
         focusedAgentForeignChangesChanged) so the three QML-facing properties
-        below share one fold pass per edge."""
+        below share one fold pass per edge.
+
+        `total_foreign_count` counts only repos whose probe has ALREADY landed,
+        so on first entry to a foreign-heavy agent the header total ticks UPWARD
+        as probes arrive (a brief progressive count, not a bug) — each landing
+        emits focusedAgentForeignChangesChanged and re-folds."""
         if self._focused_agent_foreign_cache is not None:
             return self._focused_agent_foreign_cache
         rec = self._term_agents.get(self._focused_term_agent)
         touched = rec.get("touched") if rec else None
         groups = _partition_foreign_touched(
-            touched or set(), self._displayed_repo_real()
+            touched or set(), self._displayed_repo_real(), self._resolve_root_cache
         )
         sections: list[dict] = []
         total = 0
@@ -3634,16 +3724,18 @@ class AppController(QObject):
         sections' file counts still land in `focusedAgentChangesTotalCount`."""
         return self._focused_agent_foreign()[2]
 
-    @Property(int, notify=focusedAgentForeignChangesChanged)
+    @Property(int, notify=focusedAgentTotalCountChanged)
     def focusedAgentChangesTotalCount(self) -> int:
         """The focused agent's TOTAL uncommitted file count across ALL repos —
         displayed + every foreign repo (uncapped). The panel's top-of-panel
         "Changes · N" and its agent-scope empty-state both key on this.
 
-        Notifies on `focusedAgentForeignChangesChanged` (not the displayed
-        signal): `_refresh_foreign_changes` re-emits it on every displayed edge
-        too, so this single notify catches both the displayed and foreign
-        deltas — a @Property can bind only one notify signal."""
+        Notifies on its own `focusedAgentTotalCountChanged`, which BOTH
+        `focusedAgentChangesChanged` (displayed delta) and
+        `focusedAgentForeignChangesChanged` (foreign delta) are wired to re-emit
+        (see __init__) — a @Property binds only one notify signal, and this keeps
+        the total live on either delta WITHOUT coupling the foreign Repeater's
+        model to every displayed scan."""
         return self._focused_agent_changes()[1] + self._focused_agent_foreign()[1]
 
     @Slot(str, str, result="QVariantMap")
@@ -7708,10 +7800,12 @@ class AppController(QObject):
         # socket (reap_dead would clean it eventually, but a clean exit is tidy).
         agent_registry.remove_entry(os.getpid())
         self._account_usage_store.stop()
-        # Stop the Bash-attribution probe pool; cancel queued probes and don't
-        # wait on any in-flight `git status` (a wedged probe would delay exit up
-        # to its 5s timeout — the pool's threads are reaped at interpreter exit).
+        # Stop the Bash-attribution + foreign-status probe pools; cancel queued
+        # probes and don't wait on any in-flight `git status` (a wedged probe
+        # would delay exit up to its 5s timeout — pool threads are reaped at
+        # interpreter exit).
         self._bash_probe_pool.shutdown(wait=False, cancel_futures=True)
+        self._foreign_probe_pool.shutdown(wait=False, cancel_futures=True)
         # Signal the browser MCP server to exit and drop its config file
         # (daemon thread; reaped with the process either way).
         self._browser_mcp_server.stop()

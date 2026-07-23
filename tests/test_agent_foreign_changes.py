@@ -244,3 +244,61 @@ def test_foreign_probe_failure_keeps_prior_snapshot(controller, tmp_path) -> Non
     controller._on_foreign_probe_ready(foreign, None)
     assert len(controller.focusedAgentForeignChanges) == 1
     assert foreign in controller._foreign_status_cache
+
+
+def test_foreign_sections_capped_but_total_counts_all(controller, tmp_path) -> None:
+    """More foreign repos than the display cap: sections cap, overflow reports
+    the rest, and the header TOTAL still counts every foreign file (no silent
+    cap)."""
+    from symmetria_ide.app import _FOREIGN_SECTION_CAP
+
+    displayed = _init_repo(tmp_path / "displayed")
+    controller._cwd = displayed
+    _feed_displayed_status(controller, displayed)
+
+    n = _FOREIGN_SECTION_CAP + 2
+    foreigns = [_init_repo(tmp_path / f"foreign{i}") for i in range(n)]
+    touched = set()
+    for fr in foreigns:
+        (Path(fr) / "gen.txt").write_text("x\n")
+        touched.add(os.path.realpath(os.path.join(fr, "gen.txt")))
+    controller._term_agents[1] = {"cwd": displayed, "touched": touched}
+    controller._focused_term_agent = 1
+    for fr in foreigns:
+        controller._on_foreign_probe_ready(fr, probe_status_map(fr))
+
+    assert len(controller.focusedAgentForeignChanges) == _FOREIGN_SECTION_CAP
+    assert controller.focusedAgentForeignOverflow == 2
+    # Displayed repo is clean for this agent (0); every foreign file counts.
+    assert controller.focusedAgentChangesTotalCount == n
+
+
+def test_foreign_probe_exception_reports_none(controller) -> None:
+    """A raised probe (parse/git error) must surface as a None result, not a
+    swallowed return — otherwise the root stays wedged in `_foreign_probe_inflight`
+    forever and never re-probes (finding C1)."""
+    from concurrent.futures import Future
+
+    received: list[tuple[str, object]] = []
+    controller._foreignProbeReady.connect(lambda r, m: received.append((r, m)))
+    fut: Future = Future()
+    fut.set_exception(RuntimeError("boom"))
+    controller._emit_foreign_probe("/some/foreign/root", fut)
+    assert received == [("/some/foreign/root", None)]
+
+
+def test_foreign_none_result_clears_inflight(controller, tmp_path) -> None:
+    """The None (failure) result discards the root from in-flight so a later
+    refresh re-probes it — the unwedging half of finding C1's fix."""
+    displayed = _init_repo(tmp_path / "displayed")
+    foreign = _init_repo(tmp_path / "foreign")
+    controller._cwd = displayed
+    (Path(foreign) / "gen.txt").write_text("x\n")
+    controller._term_agents[1] = {
+        "cwd": displayed,
+        "touched": {os.path.realpath(os.path.join(foreign, "gen.txt"))},
+    }
+    controller._focused_term_agent = 1
+    controller._foreign_probe_inflight.add(foreign)
+    controller._on_foreign_probe_ready(foreign, None)
+    assert foreign not in controller._foreign_probe_inflight
