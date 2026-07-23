@@ -1,13 +1,17 @@
-// Active Changes panel — a path-filtered FileTreeView of pending git
+// Active Changes panel — path-filtered FileTreeView(s) of pending git
 // changes.
 //
 // Sits ABOVE the main FileTreeView in the side panel column. Auto-hidden
-// when the working tree is clean or we're not in a git repo
-// (model.count == 0). The body is an embedded `FmUi.FileTreeView` whose
-// `pathFilter` prop restricts visible rows to the set of currently-changed
-// paths (plus their ancestors up to the repo root). The tree is
-// always-expanded by default — `initialExpandDepth: -1` with the FM's
-// existing caps (`maxExpandDepth: 8`, `_autoExpandModelCeiling: 100`,
+// when the working tree is clean or we're not in a git repo — UNLESS the
+// focused agent has changes in a foreign repo while the displayed repo is
+// clean (see the `visible:` guard). The body is a Flickable of per-repo
+// SECTIONS, each an embedded `FmUi.FileTreeView` whose `pathFilter` prop
+// restricts visible rows to that section's changed paths (plus ancestors up
+// to its repo root). In "all" scope there is a single unlabelled section (the
+// whole displayed repo); in "agent" scope there is the focused agent's
+// displayed-repo slice plus one section per FOREIGN repo it also changed (see
+// `_sections`). Each tree is always-expanded by default — `initialExpandDepth:
+// -1` with the FM's caps (`maxExpandDepth: 8`, `_autoExpandModelCeiling: 100`,
 // `_autoExpandFanoutCap: 200`) bounding the worst case.
 //
 // Each row carries a small status badge (M/A/D/?/U/R/C) via the FM's
@@ -41,8 +45,11 @@
 //      function that delegates `forceActiveFocus()` to the FM's
 //      internal `view` ListView. The outer Item is NOT a FocusScope,
 //      so calling `forceActiveFocus()` on it is a no-op for keys.
-//   2. This panel's `focusInternal()` proxy — forwards to
-//      `changesTree.focusInternal()` so consumers don't reach inside.
+//   2. This panel's `focusInternal()` proxy — forwards to the FIRST
+//      section's tree (the displayed repo) so consumers don't reach
+//      inside. Foreign sections below it are mouse-focusable (a click
+//      focuses their own ListView; the FocusScope bubbles it); keyboard
+//      descent INTO a foreign section is a v1 follow-up.
 //   3. Main.qml's Ctrl+J / Ctrl+K ApplicationShortcuts — vim-style
 //      directional sub-pane nav. Ctrl+K (up) lands here, Ctrl+J
 //      (down) lands on the main tree. Both gated on
@@ -59,6 +66,7 @@
 // move focus proactively before Qt silently drops it.
 
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Layouts
 import Symmetria.FileManager.UI as FmUi
 import "design"
@@ -103,25 +111,84 @@ FocusScope {
     // empty-but-valid on first paint.
     property var pathFilter: ({})
 
-    // --- Per-agent change scope (v1) -------------------------------------
-    // The FOCUSED agent's uncommitted changes as a `pathFilter`-shaped
-    // membership map (its write-tool provenance ∩ the git dirty set) plus the
-    // leaf count, supplied by `AppController.focusedAgentChangesPathSet` /
-    // `focusedAgentChangesCount`. `scope` toggles between the whole-repo
-    // changeset ("all") and just this map ("agent"); the "a" Shortcut below
-    // flips it while the panel sub-pane holds focus.
+    // --- Per-agent change scope -----------------------------------------
+    // The FOCUSED agent's uncommitted changes. `agentPathFilter`/`agentCount`
+    // are the DISPLAYED repo's slice (its write-tool + Bash provenance ∩ the
+    // displayed repo's dirty set), from `AppController.focusedAgentChangesPathSet`
+    // / `focusedAgentChangesCount`. `scope` toggles between the whole-repo
+    // changeset ("all") and this per-agent view ("agent"); the "a" Shortcut
+    // below flips it while the panel sub-pane holds focus.
     property var agentPathFilter: ({})
     property int agentCount: 0
+    // Multi-root (v2): the same agent's changes in git repos OTHER than the
+    // displayed one, as section descriptors `[{root, label, pathFilter, count}]`
+    // (`AppController.focusedAgentForeignChanges`), the count of sections the
+    // display cap hid (`focusedAgentForeignOverflow`), and the cross-repo TOTAL
+    // file count (`focusedAgentChangesTotalCount`) that heads the panel and
+    // decides the empty state. Foreign sections use `foreignStatusProvider`, a
+    // ROOT-PARAMETERISED `statusForPath(root, abs)` provider (a per-section shim
+    // closes over each section's root — see the Repeater below).
+    property int agentTotalCount: 0
+    property var foreignChanges: []
+    property int foreignOverflow: 0
+    property var foreignStatusProvider: null
     // The focused agent's 1-based slot (0 = none). Used only to word the
     // empty-state honestly — "no agent focused" vs "no changes from this agent"
     // — so `scope === "agent"` with an empty pool doesn't imply an agent exists.
     property int focusedAgentSlot: 0
     property string scope: "all"
-    // True only in agent scope with nothing to show — drives the empty-state
-    // line. Kept distinct from the whole-repo clean case (which hard-hides the
-    // panel via `visible:`) so the toggle stays reachable when THIS agent owns
-    // none of the repo's changes.
-    readonly property bool agentScopeEmpty: scope === "agent" && agentCount === 0
+    // True only in agent scope with nothing to show ANYWHERE (displayed + every
+    // foreign repo) — drives the empty-state line. Keyed on the cross-repo TOTAL
+    // so an agent working ENTIRELY in a foreign repo (displayed repo clean for
+    // it) is NOT treated as empty. Kept distinct from the whole-repo clean case
+    // (which hard-hides the panel via `visible:`) so the toggle stays reachable.
+    readonly property bool agentScopeEmpty: scope === "agent" && agentTotalCount === 0
+
+    // The panel body's per-repo SECTIONS. Unifies both scopes into one Repeater
+    // (DRY — one FileTreeView delegate config, one sizing model):
+    //   • "all" scope  → a single UNLABELLED section = the whole displayed repo
+    //     (exactly the pre-multi-root body).
+    //   • "agent" scope → the displayed-repo slice (if it has changes) plus one
+    //     section per FOREIGN repo. Section headers appear only when there is
+    //     more than one section (`labelled`), so a single-repo agent view still
+    //     reads as a bare tree.
+    // `foreignChanges` is a QVariantList: use `.length`/indexing, NOT
+    // `Array.isArray` (fails on QVariantList in Qt 6.11 — see the memory note).
+    readonly property var _sections: {
+        if (scope !== "agent")
+            return [{
+                root: repoRoot, filter: pathFilter,
+                count: (model ? model.count : 0),
+                label: "", foreign: false, labelled: false
+            }];
+        var out = [];
+        var multi = foreignChanges && foreignChanges.length > 0;
+        if (agentCount > 0)
+            out.push({
+                root: repoRoot, filter: agentPathFilter, count: agentCount,
+                label: _basename(repoRoot), foreign: false, labelled: multi
+            });
+        if (foreignChanges) {
+            for (var i = 0; i < foreignChanges.length; i++) {
+                var f = foreignChanges[i];
+                out.push({
+                    root: f.root, filter: f.pathFilter, count: f.count,
+                    label: f.label, foreign: true, labelled: true
+                });
+            }
+        }
+        return out;
+    }
+
+    // Last path segment, for section header labels. Trailing slashes trimmed so
+    // "/a/b/" and "/a/b" both read "b".
+    function _basename(path: string): string {
+        if (!path)
+            return "";
+        var p = path.replace(/\/+$/, "");
+        var i = p.lastIndexOf("/");
+        return i >= 0 ? p.substring(i + 1) : p;
+    }
 
     // Optional upper bound on the pane's height. `-1` (default) preserves
     // pure content-fit behaviour. Consumers in a tall column (e.g.
@@ -166,13 +233,26 @@ FocusScope {
     // Main.qml — a future chord can hand focus to either tree
     // identically. See the file header comment for the focus routing
     // rationale (FocusScope, ApplicationShortcut gating, auto-fallback).
+    // Focus the FIRST section's tree (the displayed repo in agent scope, or the
+    // whole-repo tree in "all" scope). Foreign sections below it are reachable
+    // by mouse (clicking focuses their own ListView; FocusScope bubbles it) —
+    // keyboard descent INTO a foreign section is a v1 follow-up.
     function focusInternal(): void {
-        changesTree.focusInternal();
+        if (sectionRepeater.count > 0) {
+            var first = sectionRepeater.itemAt(0);
+            if (first && first.focusInternal)
+                first.focusInternal();
+        }
     }
 
     // Auto-hide when there are no changes. Hidden state collapses the
     // vertical real estate so the main file tree below claims it back.
-    visible: model && model.count > 0
+    // The `|| agent-scope total` clause keeps the panel ALIVE when the focused
+    // agent has changes only in a FOREIGN repo while the displayed repo is clean
+    // (model.count == 0) — the multi-root motivating case; without it the panel
+    // (and the foreign sections + the scope toggle) would hard-hide.
+    visible: (model && model.count > 0)
+             || (scope === "agent" && agentTotalCount > 0)
     // Include the asymmetric top+bottom margins so the chrome Rectangle
     // matches the actual content layout. Without the `+ topMargin +
     // bottomMargin`, ColumnLayout inside this Item gets anchors.fill with
@@ -269,10 +349,12 @@ FocusScope {
                 Text {
                     Layout.fillWidth: true
                     // Count follows the active scope: whole-repo file count in
-                    // "all", the focused agent's leaf count in "agent".
+                    // "all", the focused agent's CROSS-REPO total (displayed +
+                    // every foreign repo) in "agent" — each section carries its
+                    // own per-repo count in its header below.
                     text: {
                         const n = root.scope === "agent"
-                            ? root.agentCount
+                            ? root.agentTotalCount
                             : (root.model ? root.model.count : 0);
                         return "Changes · " + n;
                     }
@@ -414,72 +496,193 @@ FocusScope {
             }
         }
 
-        // The tree-shaped list of changed files. Reuses the FM's
-        // FileTreeView with `pathFilter` narrowing visible rows to the
-        // current changeset.
+        // The per-repo change sections. One embedded FM FileTreeView per
+        // section (whole repo in "all" scope; the agent's displayed-repo slice
+        // + one per foreign repo in "agent" scope), narrowed by each section's
+        // `pathFilter`, stacked in a single Flickable so the whole set scrolls
+        // as one when it exceeds the panel's maxHeight cap.
         //
-        // Sizing is dual-mode. The inner FileTreeView sets
-        // `Layout.fillHeight: true`, so it claims whatever vertical
-        // space the panel was granted. Two cases:
-        //   1. Panel under maxHeight (or maxHeight unset). The root
-        //      Item's `implicitHeight` is the sum of header impl +
-        //      tree impl (= contentHeight + padding), so the
-        //      `Layout.preferredHeight: implicitHeight` upstream
-        //      hands the panel exactly enough room for all rows.
-        //      fillHeight gives the tree the remaining granted height,
-        //      which in this case equals its contentHeight, and the
-        //      ScrollBar stays hidden (FM-side gate:
-        //      `view.contentHeight > view.height + 0.5`).
-        //   2. Panel clamped by maxHeight. Tree gets less than its
-        //      contentHeight, the FM ListView starts scrolling, and
-        //      the ScrollBar appears. Users mouse-wheel through the
-        //      changeset within the cap; when the cap is engaged,
-        //      the main FileTreeView below is guaranteed at least
-        //      `column.height - maxHeight` of vertical space.
+        // Sizing: each FileTreeView is CONTENT-sized (`Layout.preferredHeight:
+        // implicitHeight` = contentHeight + padding — NO per-tree fillHeight),
+        // and the Flickable's own `implicitHeight` is bound to the section
+        // column's, so the panel's content-fit implicitHeight binding upstream
+        // still works. The Flickable takes `Layout.fillHeight`, so when the
+        // panel clamps to maxHeight it shrinks below the column's height and
+        // scrolls (contentHeight > height). Under the cap it fits exactly and
+        // the ScrollBar stays hidden. (The pre-multi-root body was a single
+        // fillHeight tree relying on the FM ListView's own scrollbar; the outer
+        // Flickable replaces that so N stacked trees share one scroll region.)
         //
-        // `respectGitignore: false` is deliberate — users genuinely want
-        // to see force-added gitignored files (e.g. a build artifact
-        // added with `git add -f`); hiding them would lie about the
-        // working-tree state.
-        //
-        // `showHidden: true` is the same principle applied to dotfiles
-        // and dotdirs (`.claude/`, `.config/`, `.github/`, `.vscode/`).
-        // The FM's default hides them as filesystem noise; a CHANGED
-        // dotfile is by definition not noise, so suppressing it would lie
-        // about the working-tree state the same way hiding gitignored adds
-        // would. The pathFilter already bounds visible rows to the actual
-        // changeset, so flipping this on does not expose unrelated
-        // dotfiles — only the changed paths themselves and their
-        // ancestor directories up to the repo root. NOTE: the main
-        // general-purpose tree in Main.qml now ALSO sets `showHidden: true`
-        // (an IDE project root is dotfile-dense and users expect those
-        // visible) — do NOT reintroduce the old assumption that hiding
-        // dotfiles is "right for the general-purpose tree."
-        //
-        // `compactScale: 0.75` makes rows tighter than the main tree
-        // below — the changes pane benefits from packing more rows
-        // into the vertical space it claims.
-        FmUi.FileTreeView {
-            id: changesTree
+        // `respectGitignore: false` — users genuinely want force-added
+        // gitignored files (`git add -f`) visible; hiding them would lie about
+        // the working tree. `showHidden: true` — a CHANGED dotfile is not noise
+        // (the pathFilter already bounds rows to the actual changeset).
+        // `compactScale: 0.75` packs rows tighter than the main tree below.
+        Flickable {
+            id: bodyFlick
             Layout.fillWidth: true
             Layout.fillHeight: true
+            // Bind implicitHeight to the section column so the panel's
+            // content-fit implicitHeight (which sums `content`'s children)
+            // accounts for the real content, not a Flickable's default 0.
+            implicitHeight: bodyCol.implicitHeight
+            contentWidth: width
+            contentHeight: bodyCol.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height + 0.5
             // Hidden (and excluded from the layout) when the agent scope has
             // nothing to show — the empty-state line below takes its place.
             visible: !root.agentScopeEmpty
+            ScrollBar.vertical: ScrollBar {
+                policy: bodyFlick.interactive ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+            }
 
-            rootPath: root.repoRoot
-            initialExpandDepth: -1
-            respectGitignore: false
-            showHidden: true
-            compactScale: 0.75
-            statusProvider: root.statusProvider
-            // Whole-repo changeset in "all"; the focused agent's touched ∩
-            // dirty map in "agente". rootPath stays the displayed repo either
-            // way, so the agent map only renders paths under it (foreign-repo
-            // edits are a v1 no-show, by design).
-            pathFilter: root.scope === "agent" ? root.agentPathFilter : root.pathFilter
+            ColumnLayout {
+                id: bodyCol
+                width: bodyFlick.width
+                spacing: Theme.spacing.xs
 
-            onFileActivated: (path) => root.fileActivated(path)
+                Repeater {
+                    id: sectionRepeater
+                    model: root._sections
+
+                    delegate: ColumnLayout {
+                        id: sectionItem
+                        required property var modelData
+                        Layout.fillWidth: true
+                        spacing: Theme.spacing.xxs
+                        // Sections start EXPANDED (see the collapse chevron);
+                        // clicking the header folds a repo away when a busy
+                        // agent has touched many.
+                        property bool sectionCollapsed: false
+
+                        // Forwards focus to this section's tree so the panel's
+                        // `focusInternal()` (→ first section) reaches a ListView.
+                        function focusInternal(): void {
+                            sectionTree.focusInternal();
+                        }
+
+                        // Section header — collapse chevron + (foreign) repo
+                        // glyph + repo label + per-repo count. Only rendered for
+                        // `labelled` sections (agent scope with >1 repo, or any
+                        // foreign repo); a lone "all"/single-repo section shows
+                        // just its tree, exactly as before multi-root.
+                        MouseArea {
+                            id: sectionHeader
+                            Layout.fillWidth: true
+                            visible: sectionItem.modelData.labelled
+                            Layout.preferredHeight: visible
+                                ? sectionHeaderRow.implicitHeight
+                                : 0
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: sectionItem.sectionCollapsed =
+                                !sectionItem.sectionCollapsed
+
+                            RowLayout {
+                                id: sectionHeaderRow
+                                anchors.fill: parent
+                                spacing: Theme.spacing.xxs
+
+                                Text {
+                                    text: sectionItem.sectionCollapsed ? "▶" : "▼"
+                                    color: Theme.color.text.dim
+                                    font.family: Theme.font.family
+                                    font.pixelSize: Theme.font.size.xs
+                                }
+                                Text {
+                                    // Foreign repos carry the repo glyph; the
+                                    // displayed section is "home" — no glyph.
+                                    visible: sectionItem.modelData.foreign
+                                    text: Theme.glyph.repo
+                                    color: Theme.color.text.dim
+                                    // Icon font — the chrome UI font may lack it.
+                                    font.family: editorFontFamily
+                                    font.pixelSize: Theme.font.size.xs
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: sectionItem.modelData.label
+                                    // The displayed repo reads slightly stronger
+                                    // than the foreign ones — "you are here".
+                                    color: sectionItem.modelData.foreign
+                                        ? Theme.color.text.normal
+                                        : Theme.color.text.strong
+                                    font.family: Theme.font.family
+                                    font.pixelSize: Theme.font.size.xs
+                                    font.weight: Theme.font.weight.medium
+                                    elide: Text.ElideMiddle
+                                }
+                                Text {
+                                    text: "· " + sectionItem.modelData.count
+                                    color: Theme.color.text.dim
+                                    font.family: Theme.font.family
+                                    font.pixelSize: Theme.font.size.xs
+                                }
+                            }
+                        }
+
+                        FmUi.FileTreeView {
+                            id: sectionTree
+                            Layout.fillWidth: true
+                            // Content-sized (see the Flickable sizing note).
+                            Layout.preferredHeight: implicitHeight
+                            visible: !sectionItem.sectionCollapsed
+
+                            rootPath: sectionItem.modelData.root
+                            initialExpandDepth: -1
+                            respectGitignore: false
+                            showHidden: true
+                            compactScale: 0.75
+                            // Displayed section → the shared displayed provider;
+                            // foreign section → a per-section shim closing over
+                            // this section's root (the FM seam is one-arg
+                            // `statusForPath(abs)`, the foreign provider is
+                            // two-arg `statusForPath(root, abs)`).
+                            statusProvider: sectionItem.modelData.foreign
+                                ? foreignShim
+                                : root.statusProvider
+                            pathFilter: sectionItem.modelData.filter
+
+                            onFileActivated: (path) => root.fileActivated(path)
+                        }
+
+                        // Per-section foreign status shim (see above). Inert for
+                        // the displayed section (that tree uses root.statusProvider).
+                        QtObject {
+                            id: foreignShim
+                            signal statusChanged
+                            function statusForPath(abs) {
+                                return root.foreignStatusProvider
+                                    ? root.foreignStatusProvider.statusForPath(
+                                        sectionItem.modelData.root, abs)
+                                    : null;
+                            }
+                        }
+                        Connections {
+                            target: root.foreignStatusProvider
+                            enabled: sectionItem.modelData.foreign
+                            function onStatusChanged(): void {
+                                foreignShim.statusChanged();
+                            }
+                        }
+                    }
+                }
+
+                // Foreign repos beyond the display cap (`_FOREIGN_SECTION_CAP`).
+                // Their file counts still land in the header total — only the
+                // sections are hidden (the "no silent caps" rule).
+                Text {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.spacing.xxs
+                    visible: root.scope === "agent" && root.foreignOverflow > 0
+                    text: "+" + root.foreignOverflow
+                        + (root.foreignOverflow === 1 ? " more repo" : " more repos")
+                    color: Theme.color.text.dim
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                }
+            }
         }
 
         // Empty-state for the "este agente" scope. The panel itself stays

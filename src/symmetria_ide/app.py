@@ -59,7 +59,7 @@ from . import agent_harness
 from . import agent_registry
 from .account_usage_store import AccountUsageStore
 from .agent_activity import AgentActivityMachine
-from .agent_bash_attribution import bash_delta, probe_dirty_leaves
+from .agent_bash_attribution import bash_delta, probe_dirty_leaves, probe_status_map
 from .agent_bridge import AgentBridgeClient, emit_gc_safe
 from .agent_events import AgentEventsServer
 from .agent_interrupt import (
@@ -75,7 +75,7 @@ from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registr
     CompletionModel,
 )
 from .git_branch_controller import GitBranchController, GitBranchListModel
-from .git_controller import GitController, GitStatusListModel
+from .git_controller import GitController, GitStatusListModel, _fold_agent_changes
 from .gh_pr_controller import GhPrController, GhPrListModel, GhPrTimelineModel
 from .git_log_controller import GitLogController, GitLogListModel
 from .git_ops_controller import GitOpsController
@@ -132,6 +132,52 @@ _AGENT_TMUX_CONF = _RUNTIME_DIR / "agent-tmux.conf"
 # (a Bash-tool `cd` changes the tool's persistent shell, not the session
 # process — diagnosed live on magistralia, 2026-07-13).
 _AGENT_WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+# Per-agent change filter, multi-root (v2): cap how many FOREIGN-repo sections
+# the side panel renders so an agent that touched many repos can't grow the
+# panel unbounded. Sections beyond the cap collapse to a "+N repos" overflow
+# line; the header TOTAL still counts every foreign change (capping display,
+# never the count — the "no silent caps" rule). 4 covers every realistic
+# Symmetria-ecosystem multi-repo session (IDE + agents-ui + the fork).
+_FOREIGN_SECTION_CAP = 4
+
+
+def _partition_foreign_touched(
+    touched: set[str], displayed_real: str
+) -> dict[str, set[str]]:
+    """Group an agent's ``touched`` paths by the git repo they live in,
+    EXCLUDING the currently-displayed repo.
+
+    Returns ``{repo_root: {paths}}`` for FOREIGN repos only — the displayed
+    repo's touched paths are dropped here because the existing displayed-repo
+    fold (``changed_path_set_for``) already covers them. A path under no git
+    repo is dropped (no "uncommitted" concept to show). The repo root is the
+    innermost ``.git`` ancestor (``resolve_project_root``), so a submodule /
+    nested repo counts as its OWN foreign group — which is correct: the parent
+    repo's status map lists a submodule as one entry, never its inner files, so
+    those files would never appear in the displayed fold anyway.
+
+    ``displayed_real`` is the realpath of the displayed repo root; each touched
+    path's resolved root is realpath-compared against it so a symlinked checkout
+    still classifies its own files as "displayed", not foreign. Filesystem I/O
+    (``resolve_project_root`` stats up the tree) but bounded by the small
+    ``touched`` set; the caller memoizes so it doesn't run per QML re-read.
+
+    ``resolve_project_root`` returns ``start`` itself (not "") when no ``.git``
+    ancestor exists, and also treats a bare ``.symmetria/`` dir as a root — so a
+    loose file under no git repo would otherwise group as its own "repo". We
+    require an actual ``.git`` at the resolved root to keep those out: a path
+    with no git repo has nothing uncommitted to show.
+    """
+    groups: dict[str, set[str]] = {}
+    for p in touched:
+        r = resolve_project_root(p)
+        if not r or not os.path.exists(os.path.join(r, ".git")):
+            continue  # not inside a git repo → nothing uncommitted to show
+        if os.path.realpath(r) == displayed_real:
+            continue  # displayed repo — the main fold already owns these
+        groups.setdefault(r, set()).add(p)
+    return groups
 
 
 def _agent_tmux_enabled() -> bool:
@@ -523,6 +569,18 @@ class AppController(QObject):
     # slot is reused is dropped, not mispaired. object carries a set[str] on
     # success or None on probe failure; queued + GC-suspended (gotcha #10).
     _bashProbeReady = Signal(int, int, str, object)
+    # Per-agent change filter, MULTI-ROOT (v2): the focused agent's changes in
+    # git repos OTHER than the displayed one, as collapsible side-panel sections
+    # (write-tool + Bash provenance ∩ each foreign repo's dirty set). Fires on
+    # every displayed-changes edge (a foreign refresh rides _refresh_foreign_
+    # changes off focusedAgentChangesChanged) AND when a foreign `git status`
+    # probe returns. focusedAgentChangesTotalCount notifies on THIS signal (not
+    # focusedAgentChangesChanged) so the header total tracks foreign + displayed.
+    focusedAgentForeignChangesChanged = Signal()
+    # A foreign-repo `git status` probe result (probe_status_map) hops the GUI
+    # thread here: (repo_root, status_map-or-None). None is a probe FAILURE (the
+    # cached snapshot is kept, not wiped). Queued + GC-suspended (gotcha #10).
+    _foreignProbeReady = Signal(str, object)
     # Internal cross-thread marshal for the coordination judge: the one-shot
     # judge worker thread emits (trigger_id, status, summary); a queued
     # connection delivers _on_judge_verdict on the GUI thread.
@@ -1193,6 +1251,27 @@ class AppController(QObject):
         # queued: bash-attrib pool → AppController GUI (§4 P2)
         self._bashProbeReady.connect(
             self._on_bash_probe_ready, Qt.ConnectionType.QueuedConnection
+        )
+        # Per-agent change filter, MULTI-ROOT (v2): the focused agent's changes
+        # in FOREIGN repos (not the displayed one). `_foreign_status_cache` maps
+        # a foreign repo root → its last probed `git status` map; `_inflight`
+        # dedups overlapping probes for the same root; the `(list, total,
+        # overflow)` projection is memoized like the displayed one. A foreign
+        # refresh rides EVERY displayed-changes edge (focusedAgentChangesChanged
+        # → _refresh_foreign_changes), which submits probes for any foreign root
+        # the focused agent touched and prunes roots it no longer does. Self-
+        # limiting: the common case (no foreign work) partitions to an empty set
+        # → no probes, zero overhead.
+        self._foreign_status_cache: dict[str, dict] = {}
+        self._foreign_probe_inflight: set[str] = set()
+        self._focused_agent_foreign_cache: tuple[list, int, int] | None = None
+        self.focusedAgentForeignChangesChanged.connect(
+            self._invalidate_focused_agent_foreign_cache
+        )
+        self.focusedAgentChangesChanged.connect(self._refresh_foreign_changes)
+        # queued: bash-attrib pool → AppController GUI (§4 P2)
+        self._foreignProbeReady.connect(
+            self._on_foreign_probe_ready, Qt.ConnectionType.QueuedConnection
         )
         # ----- Git HISTORY provider (read-only comprehension surface) ------
         # The read-only counterpart to GitController: where the status
@@ -3379,17 +3458,231 @@ class AppController(QObject):
         Drives the side panel's "este agente" scope. Empty when no agent is
         focused, it has touched nothing, or nothing it touched is dirty.
 
-        v1 scope (deliberate — see the side-panel notes in CLAUDE.md): the
-        intersection is against the DISPLAYED repo's dirty set, so foreign-repo
-        edits (worktree-follow cleared) don't appear here, and Bash-driven
-        writes (no `tool_path`) are invisible. Both are v2 follow-ups."""
+        This is the DISPLAYED repo's slice only. Changes the agent made in OTHER
+        repos are surfaced as separate sections via `focusedAgentForeignChanges`
+        (multi-root, v2); the header's "Changes · N" uses the cross-repo
+        `focusedAgentChangesTotalCount`, while this map feeds the displayed
+        repo's own section (and the whole body in the no-foreign-work case)."""
         return self._focused_agent_changes()[0]
 
     @Property(int, notify=focusedAgentChangesChanged)
     def focusedAgentChangesCount(self) -> int:
-        """Leaf-file count behind `focusedAgentChangesPathSet` (dirs excluded)
-        — the side panel's "Changes · N" number while in "este agente" scope."""
+        """Leaf-file count behind `focusedAgentChangesPathSet` (dirs excluded) —
+        the DISPLAYED repo's per-agent file count. Labels the displayed-repo
+        section header when foreign sections exist; the panel's top-of-panel
+        total is `focusedAgentChangesTotalCount` (displayed + all foreign)."""
         return self._focused_agent_changes()[1]
+
+    # ----- Per-agent change filter, MULTI-ROOT (v2) ----------------------
+    # The focused agent's changes in git repos OTHER than the displayed one,
+    # as collapsible side-panel sections. Data flow mirrors the displayed
+    # fold, only the status_map source differs: partition `touched` by repo,
+    # probe each foreign root's `git status` off-thread, fold each with the
+    # SAME pure `_fold_agent_changes`. See CLAUDE.md "Per-agent change filter".
+
+    @Slot()
+    def _invalidate_focused_agent_foreign_cache(self) -> None:
+        """Clear the foreign-changes projection memo. Connected to
+        focusedAgentForeignChangesChanged FIRST so it runs before any QML
+        re-read on the same emit (QML's read is lazy either way)."""
+        self._focused_agent_foreign_cache = None
+
+    def _displayed_repo_real(self) -> str:
+        """Realpath of the innermost git repo containing the displayed root, or
+        "" if none. The partition key that separates "displayed" from "foreign".
+
+        Uses `resolve_project_root(displayedRoot)` rather than the git
+        controller's resolved root so worktree-follow (which re-roots
+        `displayedRoot` to a linked worktree) classifies that worktree's own
+        files as displayed, and the MAIN checkout's files as foreign — the
+        symmetric, correct behaviour for either follow direction."""
+        root = resolve_project_root(self.displayedRoot or "")
+        return os.path.realpath(root) if root else ""
+
+    @Slot()
+    def _refresh_foreign_changes(self) -> None:
+        """Recompute the focused agent's foreign-repo groups and (re)probe them.
+
+        Rides EVERY `focusedAgentChangesChanged` edge (focus change, git scan,
+        the agent editing a new file). Submits a `git status` probe for each
+        foreign root the focused agent touched (deduped against in-flight),
+        prunes cache/in-flight for roots it no longer touches, and emits
+        `focusedAgentForeignChangesChanged` so the projection rebuilds from
+        whatever is cached now — a pruned root disappears immediately, a fresh
+        one appears when its probe lands. Empty groups (the common no-foreign
+        case) submit nothing: zero overhead."""
+        rec = self._term_agents.get(self._focused_term_agent)
+        touched = rec.get("touched") if rec else None
+        groups = _partition_foreign_touched(
+            touched or set(), self._displayed_repo_real()
+        )
+        wanted = set(groups)
+        # Drop cache + in-flight for roots the focused agent no longer touches
+        # (focus moved to an agent working elsewhere, or the file was reverted).
+        for stale in [r for r in self._foreign_status_cache if r not in wanted]:
+            del self._foreign_status_cache[stale]
+        self._foreign_probe_inflight &= wanted
+        for root in wanted:
+            if root in self._foreign_probe_inflight:
+                continue  # a probe for this root is already running
+            self._foreign_probe_inflight.add(root)
+            future = self._bash_probe_pool.submit(probe_status_map, root)
+            future.add_done_callback(lambda f, r=root: self._emit_foreign_probe(r, f))
+        # Rebuild from current cache immediately (prunes take effect now; fresh
+        # roots fill in when their probe lands via _on_foreign_probe_ready).
+        self.focusedAgentForeignChangesChanged.emit()
+
+    def _emit_foreign_probe(self, root: str, future: Future) -> None:
+        """Pool-thread callback: hop a foreign `git status` result onto the GUI
+        thread. GC suspended around the emit per gotcha #10 (the map payload
+        allocates during queued marshalling)."""
+        if future.cancelled():
+            return  # app shutting down (cancel_futures) — not a real failure
+        try:
+            status_map = future.result()
+        except Exception:
+            log.exception("foreign status probe failed (%s)", root)
+            return
+        emit_gc_safe(self._foreignProbeReady, root, status_map)
+
+    @Slot(str, object)
+    def _on_foreign_probe_ready(self, root: str, status_map: object) -> None:
+        """GUI thread: store one foreign repo's `git status` snapshot.
+
+        Drops the result if the focused agent no longer touches `root` (focus
+        moved between submit and return). A `None` map is a probe FAILURE — keep
+        any prior snapshot rather than wiping it, so a transient git error
+        doesn't make the foreign section flicker out. On a fresh map, cache it
+        and re-emit so the projection picks it up."""
+        self._foreign_probe_inflight.discard(root)
+        rec = self._term_agents.get(self._focused_term_agent)
+        touched = rec.get("touched") if rec else None
+        groups = _partition_foreign_touched(
+            touched or set(), self._displayed_repo_real()
+        )
+        if root not in groups:
+            self._foreign_status_cache.pop(root, None)
+            return  # no longer a foreign root for the focused agent
+        if status_map is None:
+            return  # probe failure — keep the prior snapshot, don't wipe
+        self._foreign_status_cache[root] = status_map
+        self.focusedAgentForeignChangesChanged.emit()
+
+    def _focused_agent_foreign(self) -> tuple[list, int, int]:
+        """`(sections, total_foreign_count, overflow)` for the focused agent.
+
+        `sections` is the capped list of `{root, label, pathFilter, count}`
+        section descriptors (one per foreign repo WITH changes back from its
+        probe); `total_foreign_count` sums EVERY foreign repo (uncapped, so the
+        header total stays honest); `overflow` is how many sections the cap hid.
+        Memoized in `_focused_agent_foreign_cache` (invalidated on
+        focusedAgentForeignChangesChanged) so the three QML-facing properties
+        below share one fold pass per edge."""
+        if self._focused_agent_foreign_cache is not None:
+            return self._focused_agent_foreign_cache
+        rec = self._term_agents.get(self._focused_term_agent)
+        touched = rec.get("touched") if rec else None
+        groups = _partition_foreign_touched(
+            touched or set(), self._displayed_repo_real()
+        )
+        sections: list[dict] = []
+        total = 0
+        for root in sorted(groups):
+            status_map = self._foreign_status_cache.get(root)
+            if not status_map:
+                continue  # probe not back yet (or empty/clean repo)
+            path_filter, count = _fold_agent_changes(status_map, root, groups[root])
+            if count == 0:
+                continue  # the agent's touches in this repo are all clean now
+            total += count
+            sections.append(
+                {
+                    "root": root,
+                    "label": os.path.basename(root),
+                    "pathFilter": path_filter,
+                    "count": count,
+                }
+            )
+        overflow = 0
+        if len(sections) > _FOREIGN_SECTION_CAP:
+            overflow = len(sections) - _FOREIGN_SECTION_CAP
+            log.info(
+                "agent foreign changes: %d repos with changes, showing %d "
+                "(+%d hidden by cap)",
+                len(sections),
+                _FOREIGN_SECTION_CAP,
+                overflow,
+            )
+            sections = sections[:_FOREIGN_SECTION_CAP]
+        result = (sections, total, overflow)
+        self._focused_agent_foreign_cache = result
+        return result
+
+    @Property("QVariantList", notify=focusedAgentForeignChangesChanged)
+    def focusedAgentForeignChanges(self) -> list:
+        """Collapsible per-repo section descriptors for the focused agent's
+        changes OUTSIDE the displayed repo: `[{root, label, pathFilter, count}]`,
+        capped at `_FOREIGN_SECTION_CAP`. Each drives one embedded FileTreeView
+        (rooted at `root`, narrowed by `pathFilter`) in GitStatusPanel's agent
+        scope. Empty in the common single-repo case."""
+        return self._focused_agent_foreign()[0]
+
+    @Property(int, notify=focusedAgentForeignChangesChanged)
+    def focusedAgentForeignOverflow(self) -> int:
+        """How many foreign-repo sections the display cap hid (0 when under the
+        cap) — drives the panel's "+N repos más" overflow line. The hidden
+        sections' file counts still land in `focusedAgentChangesTotalCount`."""
+        return self._focused_agent_foreign()[2]
+
+    @Property(int, notify=focusedAgentForeignChangesChanged)
+    def focusedAgentChangesTotalCount(self) -> int:
+        """The focused agent's TOTAL uncommitted file count across ALL repos —
+        displayed + every foreign repo (uncapped). The panel's top-of-panel
+        "Changes · N" and its agent-scope empty-state both key on this.
+
+        Notifies on `focusedAgentForeignChangesChanged` (not the displayed
+        signal): `_refresh_foreign_changes` re-emits it on every displayed edge
+        too, so this single notify catches both the displayed and foreign
+        deltas — a @Property can bind only one notify signal."""
+        return self._focused_agent_changes()[1] + self._focused_agent_foreign()[1]
+
+    @Slot(str, str, result="QVariantMap")
+    def agentForeignStatusForPath(self, root: str, absolute_path: str) -> dict:
+        """A foreign repo's git status for one absolute path — the multi-root
+        twin of `GitController.statusForPath`, backing each foreign section's
+        FileTreeView status badges.
+
+        `root` selects the cached foreign status map; the path is made
+        repo-relative (the porcelain key footing) to look it up. Returns the
+        same `{char, state, tooltip, path, additions, deletions, origPath?}`
+        shape the displayed provider returns, or `{}` for a clean/unknown path
+        or an uncached root — the FM seam treats `{}` as "no badge"."""
+        status_map = self._foreign_status_cache.get(root)
+        if not status_map:
+            return {}
+        rel = os.path.relpath(absolute_path, root)
+        if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+            # Not under `root` as given — retry on realpath'd footing so a
+            # symlinked root/path still matches its canonical foreign key.
+            rel = os.path.relpath(
+                os.path.realpath(absolute_path), os.path.realpath(root)
+            )
+            if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+                return {}  # path is genuinely outside this foreign repo
+        status = status_map.get(rel)
+        if status is None:
+            return {}
+        result: dict[str, object] = {
+            "char": status.char,
+            "state": status.state,
+            "tooltip": status.tooltip,
+            "path": status.path,
+            "additions": status.additions,
+            "deletions": status.deletions,
+        }
+        if status.orig_path is not None:
+            result["origPath"] = status.orig_path
+        return result
 
     @Property("QVariantList", notify=agentActivityChanged)
     def agentActivity(self) -> list:

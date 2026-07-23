@@ -25,9 +25,13 @@ is missed. The cases that motivated v2 are the slow ones.
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
 from .git_controller import parse_porcelain_v2
 from .git_subprocess import LOCAL_GIT
+
+if TYPE_CHECKING:
+    from .git_controller import GitStatus
 
 # git status is cheap; the bound only guards against a wedged git process
 # holding a probe-pool worker. Matches git_subprocess._RESOLVE_TIMEOUT_SEC.
@@ -67,6 +71,38 @@ def probe_dirty_leaves(root: str) -> set[str] | None:
         os.path.realpath(os.path.join(root, rel))
         for rel in parse_porcelain_v2(proc.stdout)
     }
+
+
+def probe_status_map(root: str) -> dict[str, GitStatus] | None:
+    """Full git status map for ``root`` (repo-relative rel → :class:`GitStatus`),
+    or ``None`` on probe FAILURE (not a repo, git missing, timeout, lock loss).
+
+    The multi-root twin of :func:`probe_dirty_leaves`: same subprocess + parse,
+    but returns the PARSED MAP (per-file status char + rename origin) instead of
+    just the leaf set. The per-agent change filter's FOREIGN-repo sections need
+    those chars to render M/A/?/D badges — the leaf set alone can't. The same
+    ``None`` vs empty-map contract holds: ``None`` is a failure the caller must
+    not treat as "clean" (a foreign section would vanish spuriously), whereas a
+    genuinely clean repo returns an empty ``{}``.
+
+    NOTE: line-count deltas (``additions``/``deletions``) are left at 0 — the
+    numstat merge that populates them lives in ``GitController._do_scan`` and is
+    displayed-repo-only, so foreign sections show badges without the ``+N -M``
+    accessory. Acceptable for v1 (the badge is the signal; counts are polish).
+
+    Runs with ``core.optionalLocks=false`` for the same lock-contention reason
+    as :func:`probe_dirty_leaves`. WORKER-THREAD ONLY (spawns a subprocess).
+    """
+    if not root:
+        return None
+    proc = LOCAL_GIT.execute(
+        root,
+        ["-c", "core.optionalLocks=false", "status", "--porcelain=v2", "-z"],
+        timeout=_STATUS_TIMEOUT_SEC,
+    )
+    if proc is None or proc.returncode != 0:
+        return None  # failure — the caller keeps any prior snapshot, no wipe
+    return parse_porcelain_v2(proc.stdout)
 
 
 def bash_delta(pre: set[str], post: set[str]) -> set[str]:

@@ -2060,11 +2060,19 @@ Window {
                         repoRoot: gitController.repoRoot
                         statusProvider: gitProviderAdapter
                         pathFilter: gitController.changedPathSet
-                        // Per-agent scope (v1): the focused agent's uncommitted
+                        // Per-agent scope: the focused agent's uncommitted
                         // changes (touched ∩ git-dirty). The panel's "a" toggle
                         // swaps its embedded tree between this and pathFilter.
+                        // `agentPathFilter`/`agentCount` are the DISPLAYED repo's
+                        // slice; the multi-root props below carry the FOREIGN
+                        // repos the agent also worked in (separate sections) and
+                        // the cross-repo TOTAL for the panel header + empty-state.
                         agentPathFilter: controller.focusedAgentChangesPathSet
                         agentCount: controller.focusedAgentChangesCount
+                        agentTotalCount: controller.focusedAgentChangesTotalCount
+                        foreignChanges: controller.focusedAgentForeignChanges
+                        foreignOverflow: controller.focusedAgentForeignOverflow
+                        foreignStatusProvider: gitForeignProviderAdapter
                         focusedAgentSlot: controller.focusedAgent
                         // Same activation contract as the main FileTreeView:
                         // open the path in nvim and re-focus the editor so
@@ -2579,7 +2587,7 @@ Window {
             // branch (returns null above).
             return {
                 char: s.char,
-                color: _colorForOperation(s.char),
+                color: colorForOperation(s.char),
                 tooltip: s.tooltip,
                 // Resolved-root-relative path (= GitStatusListModel.displayName).
                 // The git viewer's changes tree keys its working-diff request
@@ -2600,7 +2608,12 @@ Window {
         // Active Changes summary (GitStatusPanel), not by badge colour. Mirrors
         // the FM standalone's `_gitStatusObj` so both surfaces render git status
         // identically; `state` is retained on the payload only for the tooltip.
-        function _colorForOperation(char) {
+        //
+        // PUBLIC (no leading underscore): the per-agent foreign-changes provider
+        // (`gitForeignProviderAdapter` below) reuses this exact char→colour
+        // mapping so foreign-repo badges match the displayed repo's — one source
+        // of truth for the operation-colour grammar.
+        function colorForOperation(char) {
             switch (char) {
             case "M":            // modified
             case "T":            // type-changed — a modification in kind
@@ -2641,6 +2654,44 @@ Window {
         target: gitController
         function onStatusChanged(): void {
             gitProviderAdapter.statusChanged();
+        }
+    }
+
+    // Per-agent change filter, MULTI-ROOT (v2): the status provider for the
+    // FOREIGN-repo sections in GitStatusPanel's agent scope. Same shape as
+    // `gitProviderAdapter` but ROOT-PARAMETERISED — `statusForPath(root, abs)`
+    // takes the foreign repo root as its first arg (each section closes over
+    // its own root in a per-delegate shim; see GitStatusPanel). Backed by
+    // `controller.agentForeignStatusForPath`, which reads the IDE-side cache of
+    // that repo's probed `git status`. Reuses `gitProviderAdapter`'s
+    // `colorForOperation` so foreign badges match the displayed repo's.
+    QtObject {
+        id: gitForeignProviderAdapter
+
+        signal statusChanged
+
+        function statusForPath(root, absolutePath) {
+            var s = controller.agentForeignStatusForPath(root, absolutePath);
+            if (!s || !s.char)
+                return null;
+            return {
+                char: s.char,
+                color: gitProviderAdapter.colorForOperation(s.char),
+                tooltip: s.tooltip,
+                displayName: s.path,
+                adds: s.additions,
+                dels: s.deletions
+            };
+        }
+    }
+
+    // Re-emit on every foreign-changes edge so each section's FileTreeView
+    // invalidates its badge bindings when a foreign probe lands. Sibling (not
+    // child) of the QtObject for the same reason as gitProviderAdapter's.
+    Connections {
+        target: controller
+        function onFocusedAgentForeignChangesChanged(): void {
+            gitForeignProviderAdapter.statusChanged();
         }
     }
 

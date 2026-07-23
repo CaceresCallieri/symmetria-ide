@@ -74,6 +74,10 @@ QtObject {
     readonly property QtObject glyph: QtObject {
         // nf-oct-git_branch — the worktree mark (tree header + agent chips).
         readonly property string worktree: "\uf418"
+        // nf-oct-repo — a foreign-repo section header in the per-agent
+        // changes panel (a repo the focused agent changed OTHER than the
+        // displayed one). Escape, never the literal PUA char (Theme rule).
+        readonly property string repo: "\uf401"
     }
 
     // ─── Color ───────────────────────────────────────────────────
