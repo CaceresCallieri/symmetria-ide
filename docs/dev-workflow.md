@@ -222,32 +222,41 @@ When the app exits, nvim sometimes shows `process_exited return_code = -9` in st
 - QML files under `qml/` are loaded via `QUrl.fromLocalFile(str(_qml_dir() / "Main.qml"))`. Hot-reload would need `pyside6_live_coding`; not wired up yet.
 - Pyright warnings about relative imports not resolving and `QAbstractItemModel override` signatures are PySide6 stub mismatches, not real issues. Runtime works.
 
-## QtWebEngine / browser surface (Phase 4 Stage 1)
+## The agentic browser (external Google Chrome)
 
-- **Init ordering is load-bearing.** `QtWebEngineQuick.initialize()` runs in `run()` AFTER the `QSurfaceFormat` block and BEFORE `QGuiApplication` (it installs the shared GL context Chromium needs). Calling it after the QML engine loads `import QtWebEngine` throws.
-- **The embedded browser pool is pure-Python testable**, but a render smoke is NOT in the pytest suite: the session-scoped `QCoreApplication` fixture (conftest) can't coexist with the `QGuiApplication` QtWebEngine requires. Smoke it standalone instead:
-  ```sh
-  # minimal QtWebEngine QML instantiation (no full app):
-  QT_QPA_PLATFORM=offscreen python - <<'PY'
-  import sys
-  from PySide6.QtGui import QGuiApplication
-  from PySide6.QtQml import QQmlApplicationEngine
-  from PySide6.QtWebEngineQuick import QtWebEngineQuick
-  QtWebEngineQuick.initialize(); app = QGuiApplication(sys.argv)
-  e = QQmlApplicationEngine()
-  e.loadData(b'import QtQuick\nimport QtQuick.Window\nimport QtWebEngine\nWindow{visible:true;WebEngineView{anchors.fill:parent;url:"about:blank"}}', "smoke.qml")
-  print("loaded:", bool(e.rootObjects()))
-  PY
-  # full-app engine load (exercises BrowserSurface.qml bindings):
-  QT_QPA_PLATFORM=offscreen SYMMETRIA_IDE_SCREENSHOT=/tmp/shot.png PYTHONPATH=src python -m symmetria_ide
-  ```
-  Under `offscreen` you'll see benign `Vulkan`/`GPUInfo not initialized` warnings — QtWebEngine falls back to software compositing and still renders a frame. The real GPU/Wayland behavior is only observable in a live Hyprland session (`PYTHONPATH=src python -m symmetria_ide`, then `Ctrl+Shift+B`); confirm `hyprctl clients` shows only the IDE window (no escaped Chromium).
-- **`WebEngineProfile` persistence quirk (regression-noted in `qml/BrowserSurface.qml`):** persistence needs `offTheRecord=false` WITH a `storageName`, but the inline declarative form (`storageName: "…"; offTheRecord: false`) logs `Storage name is empty…` because QtWebEngine evaluates `offTheRecord` before `storageName`. `storageName` alone is silent but leaves `offTheRecord=true` (NOT persistent). The warning-free + persistent form sets `offTheRecord` in `Component.onCompleted` (after `storageName`). Verified empirically on QtWebEngine 6.11. Do not inline it back.
+The embedded QtWebEngine surface was retired 2026-07-27 — the browser is now a real
+Chrome process the IDE spawns, pinned to the IDE's workspace by a Hyprland rule.
+See CLAUDE.md "The browser panes" for the model; this section is how to exercise it.
+
+- **The suite can never spawn Chrome or touch your compositor.** `tests/conftest.py`
+  sets `SYMMETRIA_IDE_CHROME_BIN` to a nonexistent path and deletes
+  `HYPRLAND_INSTANCE_SIGNATURE` (`_isolate_browser_host`), so `chrome_executable()`
+  returns `""` and `hyprctl` is never shelled out to. Tests that need browser
+  behaviour inject `conftest.FakeChromeHost`. Do not "fix" a test by re-enabling
+  the real binary — the risk is a suite run opening windows on your screen, or
+  installing a window rule that outlives it.
+- **Live check without launching the IDE** — instantiate `ChromeHost` directly under
+  a `QCoreApplication`, point `XDG_DATA_HOME` at a scratch dir so your real browser
+  profiles are untouched, apply the pin rule by hand (a bare script has no Hyprland
+  window for `ChromeHost` to resolve), then `open_window(...)` and read back
+  `hyprctl clients -j`. Assert: the windows carry class `symmetria-browser-<pid>`,
+  they land on the target workspace, and `hyprctl activeworkspace` is UNCHANGED —
+  `silent` placement is the whole point.
+- **Two behaviours are only observable live, and both were found that way:**
+  Chrome always opens a window at launch, so a cold start must be pointed AT the
+  requested url or you get a stray `chrome://newtab/` that CDP discovers FIRST; and
+  the CDP attach always loses the race against a cold Chrome, so the client retries
+  on a timer and the first window binds its target through discovery, not the
+  `Target.createTarget` reply.
+- **Reading the window state:** `hyprctl clients -j` filtered by class is the ground
+  truth for placement; the IDE's own view is `controller._browser_tabs`. A window
+  present in Hyprland but absent from the registry means adoption did not happen
+  (check for a `chrome://` url — those are deliberately never adopted).
 
 ## Browser MCP server (Phase 4 Stage 2b/4 — agent control)
 
-- **Stage 4 split (see CLAUDE.md "The browser panes"):** the IDE-side server now exposes only `browser_open` + `browser_list_windows` (visible-window allocation + url↔window correlation). Page DRIVING (navigate/eval/screenshot/network/perf/snapshot/click/fill) is delegated to off-the-shelf `chrome-devtools-mcp`, injected per-agent (needs `node`/`npx`) and pointed at the embedded view's CDP endpoint (`QTWEBENGINE_REMOTE_DEBUGGING`, set in `app.run()` before `QtWebEngineQuick.initialize()`).
+- **Stage 4 split (see CLAUDE.md "The browser panes"):** the IDE-side server now exposes only `browser_open` + `browser_list_windows` (visible-window allocation + url↔window correlation). Page DRIVING (navigate/eval/screenshot/network/perf/snapshot/click/fill) is delegated to off-the-shelf `chrome-devtools-mcp`, injected per-agent (needs `node`/`npx`) and pointed at the IDE-owned Chrome's CDP endpoint (`SYMMETRIA_IDE_CDP_PORT`, reserved in `app.run()` at startup and passed to Chrome as `--remote-debugging-port` when it spawns lazily).
 - Needs `python-mcp` (`paru -S python-mcp`, AUR — pulls uvicorn/starlette). Optional: `AppController.start()` starts the server but failure is non-fatal, and `SYMMETRIA_IDE_BROWSER_MCP=0` disables it (manual browsing still works). Each IDE instance binds its OWN ephemeral port (the multi-instance topology rules out a fixed port) and writes a per-launch claude-shaped config to `$TMPDIR/symmetria-browser-mcp-<pid>.json` (per-agent configs add the `chrome-devtools` stdio entry alongside it); `agent_harness.spawn_argv` appends `--mcp-config <that path>` to claude agents.
 - **The pieces are unit-tested but the network stack isn't in pytest** (the `QCoreApplication` fixture can't host uvicorn cleanly). End-to-end check is a standalone harness: build the app engine, `controller.start()` + `open_browser(...)`, then from a separate thread run an MCP client (`mcp.client.streamable_http.streamablehttp_client(controller._browser_mcp_server.url)`) and `call_tool("browser_list_windows", {})` — expect `{ok:true, windows:[…], focused:N}` in the result's `content[].text` (FastMCP returns the dict there, NOT always `structuredContent`). The Qt event loop MUST be running (`app.exec()` on the main thread) so the bridge's queued signals deliver. To exercise chrome-devtools driving, point `npx chrome-devtools-mcp --browserUrl http://127.0.0.1:<cdp_port>` at the same instance and `select_page` by the `browser_open`-returned url.
 - Importing `uvicorn` emits 2 upstream `websockets` `DeprecationWarning`s in the suite — third-party, not a leak (`-W error::ResourceWarning` is clean).
-- **⚠ Render-dependent CDP ops (`take_screenshot`, screencast) need a COMPOSITED window.** They stall on an inactive Hyprland workspace (the QtQuick render loop throttles when the surface isn't being composited) and never complete under `QT_QPA_PLATFORM=offscreen` (no continuous frame driver) — but work LIVE the instant the window is visible (verified: a 377 KB PNG via chrome-devtools `take_screenshot`). Render-*independent* CDP ops (`navigate_page`/`evaluate_script`/network/console/DOM/`select_page`) work regardless, headless or not. Same root cause as the retired Stage-2 `runJavaScript`-offscreen caveat: no frame driver offscreen. Do not chase the headless screenshot stall as a code bug.
+- **Render-dependent CDP ops were a QtWebEngine limitation and should no longer bite.** `take_screenshot` and screencast used to stall on an inactive Hyprland workspace and never complete offscreen, because the embedded view's frames came from OUR throttled QtQuick render loop. Real Chrome renders itself, so the constraint moves to Chrome's own occlusion behaviour — re-measure rather than assuming either the old caveat or its absence.

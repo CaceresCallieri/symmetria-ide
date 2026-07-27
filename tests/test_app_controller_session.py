@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from conftest import FakeChromeHost
 
 from symmetria_ide import session_store
 from symmetria_ide.app import AppController
@@ -126,18 +127,15 @@ def test_save_session_deletes_when_empty(controller):
 def test_save_session_skips_blank_browser_windows(controller):
     c = controller
     c._browser_tabs = {
-        1: {"url": "about:blank", "title": ""},
-        2: {"url": "https://example.com", "title": "Ex"},
+        1: {"url": "about:blank", "title": "", "target": ""},
+        2: {"url": "https://example.com", "title": "Ex", "target": "T-2"},
     }
     c._browser_order = [1, 2]
-    c._focused_browser = 2
 
     c.save_session()
 
     data = session_store.load(c.displayedRoot)
     assert [b["url"] for b in data["browsers"]] == ["https://example.com"]
-    # focused is the 1-based index into the FILTERED list (blank dropped).
-    assert data["focused_browser"] == 1
 
 
 # --- session_id backfill (the keystone) ------------------------------------
@@ -207,7 +205,10 @@ def test_restore_session_resumes_with_id_and_fresh_without(controller):
     assert c._central_surface == "agent"
 
 
-def test_restore_session_reopens_browser_windows(controller):
+def test_restore_session_reopens_browser_windows(controller, monkeypatch):
+    """Restore drives the real open path, so it needs a Chrome stand-in — the
+    suite's env isolation otherwise (correctly) refuses to launch a browser."""
+    monkeypatch.setattr("symmetria_ide.app.ChromeHost", FakeChromeHost)
     c = controller
     session_store.save(
         c.displayedRoot,
@@ -217,6 +218,20 @@ def test_restore_session_reopens_browser_windows(controller):
     c.restore_session()
 
     assert [t["url"] for t in c._browser_tabs.values()] == ["https://example.com"]
+
+
+def test_restore_session_without_chrome_degrades_quietly(controller):
+    """No Chrome installed must not break session restore — the agents and
+    editor state still come back, the windows simply don't."""
+    session_store.save(
+        c_root := controller.displayedRoot,
+        {"central_surface": "terminal", "browsers": [{"url": "https://example.com"}]},
+    )
+    assert c_root  # the manifest key the restore reads back
+
+    controller.restore_session()
+
+    assert controller._browser_tabs == {}
 
 
 def test_restore_session_noop_without_saved_session(controller):
@@ -240,7 +255,7 @@ def test_saved_session_agents_lists_descriptors(controller):
 
 def test_request_teardown_clean_close_opens_confirm(controller, monkeypatch):
     c = controller
-    monkeypatch.setattr(c._backend, "query_buffers", lambda: [])
+    monkeypatch.setattr(c._backend, "query_buffers", list)
     seen = []
     c.cleanTeardownRequested.connect(lambda: seen.append("clean"))
     c.dirtyTeardownRequested.connect(lambda p: seen.append(("dirty", p)))
@@ -252,7 +267,7 @@ def test_request_teardown_clean_close_opens_confirm(controller, monkeypatch):
 
 def test_request_teardown_clean_reload_proceeds(controller, monkeypatch):
     c = controller
-    monkeypatch.setattr(c._backend, "query_buffers", lambda: [])
+    monkeypatch.setattr(c._backend, "query_buffers", list)
     quit_calls = []
     monkeypatch.setattr(c, "authorize_and_quit", lambda: quit_calls.append(1))
 
@@ -316,7 +331,7 @@ def test_reload_env_sets_restore_and_strips_oneshot(monkeypatch):
     from symmetria_ide import app as app_module
 
     monkeypatch.setenv("PYTHONPATH", "/x/src")
-    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "12345")
+    monkeypatch.setenv("SYMMETRIA_IDE_CDP_PORT", "12345")
     monkeypatch.setenv("SYMMETRIA_IDE_SPAWN_AGENT", "fresh")
     monkeypatch.setenv("SYMMETRIA_IDE_AGENT_PROMPT", "hi")
     monkeypatch.setenv("SYMMETRIA_IDE_AGENT_VIEW", "1")
@@ -328,7 +343,7 @@ def test_reload_env_sets_restore_and_strips_oneshot(monkeypatch):
     assert env["SYMMETRIA_IDE_RESTORE"] == "1"
     assert env["PYTHONPATH"] == "/x/src"  # dev/stable identity rides through
     for popped in (
-        "QTWEBENGINE_REMOTE_DEBUGGING",
+        "SYMMETRIA_IDE_CDP_PORT",
         "SYMMETRIA_IDE_SPAWN_AGENT",
         "SYMMETRIA_IDE_AGENT_PROMPT",
         "SYMMETRIA_IDE_AGENT_VIEW",

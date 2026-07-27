@@ -52,7 +52,6 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QGuiApplication, QSurfaceFormat
 from PySide6.QtQml import QQmlApplicationEngine, QmlElement
-from PySide6.QtWebEngineQuick import QtWebEngineQuick
 
 from . import agent_coordination
 from . import agent_harness
@@ -68,6 +67,7 @@ from .agent_interrupt import (
     should_arm_interrupt_clear,
 )
 from .browser_mcp import BrowserMcpBridge, BrowserMcpServer
+from .chrome_host import ChromeHost
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .trace import trace
 from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registration
@@ -530,35 +530,22 @@ class AppController(QObject):
     # system is under pressure. Main.qml surfaces it as a transient Toast so
     # the user sees WHY the chip vanished instead of a mystery ~250ms flap.
     agentSpawnFailed = Signal(str, str)
-    # Embedded browser pool (the agentic-browser surface — QtWebEngine
-    # WebEngineViews on the "browser" central surface). Mirrors the
-    # terminal-agent pool's signal shape: `browserTabsChanged` covers slot
-    # occupancy AND titles/urls (one notify keeps the chip strip's bindings
-    # in lockstep); `focusedBrowserChanged` is the focused-slot notify;
-    # `focusBrowserRequested` carries the slot so the matching WebEngineView
-    # delegate can forceActiveFocus (sibling of focusAgentRequested).
+    # Browser window registry (real Google Chrome, external process — see
+    # chrome_host.py). No QML surface consumes these: the windows are Chrome's
+    # own, pinned by Hyprland to this IDE's workspace. `browserTabsChanged`
+    # survives as the internal notify that keeps the agent-chip globe counts
+    # coherent when a window opens/closes/renames.
     browserTabsChanged = Signal()
-    focusedBrowserChanged = Signal()
-    focusBrowserRequested = Signal(int)
-    # One-way latch: fires the first time ANY browser window is opened (manual
-    # Ctrl+T or an agent's browser_open). Main.qml gates the BrowserSurface
-    # Loader on the `browserEverOpened` property this notifies, so the whole
-    # QtWebEngine scaffolding (the `import QtWebEngine` QML module + the
-    # persistent WebEngineProfile) is deferred off cold start — it cost ~430ms
-    # of engine.load eagerly, for a surface most launches never use (measured
-    # via SYMMETRIA_IDE_TRACE). Never resets — once WebEngine is up it stays up.
-    browserEverOpenedChanged = Signal()
-    # Agent ↔ browser links — which agent owns/drives which browser window.
-    # Drives the browser glyph on the AgentTopBar chips (the agent-owned
-    # browser's PRIMARY entry point since the standalone tab was removed). The
-    # ownership counts (glyph visible) are populated by _claim_browser_window in
-    # _open_browser_for_mcp; the attention flags (glyph dot) by
-    # _set_browser_attention_for_mcp (the agent's explicit
-    # browser_request_attention call); the activity flags (glyph pulse) are
-    # DORMANT since the chrome-devtools-mcp migration — nothing calls
-    # _record_browser_attribution now (page driving bypasses our bridge), so
-    # agentBrowserActive stays all-False until a future CDP monitor re-activates
-    # the hook. One notify covers all three (count / attention / active).
+    # Agent ↔ browser links — which agent owns which browser window. Drives the
+    # browser glyph on the AgentTopBar chips: ownership counts (glyph visible)
+    # come from _claim_browser_window in _open_browser_for_mcp; attention flags
+    # (glyph dot) from _set_browser_attention_for_mcp (the agent's explicit
+    # browser_request_attention call). One notify covers both.
+    #
+    # The former third axis — an in-flight "pulse" — is gone. It went dormant
+    # when page driving moved to chrome-devtools-mcp (agent → CDP directly,
+    # bypassing our bridge) and was removed with the embedded engine rather
+    # than left as a permanently-False binding.
     agentBrowserChanged = Signal()
     # Agent coordination (wait_for_agent dependency triggers — see
     # agent_coordination.py). Notifies the chip coordination-attention dot
@@ -882,33 +869,27 @@ class AppController(QObject):
         # spawns append, closes remove — chip numbers and the Ctrl+N
         # chords address POSITIONS in this list, never internal slots.
         self._agent_order: list[int] = []
-        # Embedded browser pool (agentic-browser surface). Per-slot record:
-        # {url, title}. No subprocess/bridge — a "window" is a WebEngineView
-        # the QML Loader owns. Slot numbering is 1-based (1.._MAX_INSTANCES),
-        # _browser_order is the dense DISPLAY order (spawns append, closes
-        # compact), _focused_browser is 0 when the pool is empty.
+        # Browser window registry (real Chrome — see chrome_host.py). Per-slot
+        # record: {url, title}. Slot numbering is 1-based (1.._MAX_INSTANCES);
+        # _browser_order is the dense DISPLAY order (opens append, closes
+        # compact). No focused-slot field: the windows are Hyprland's, and
+        # focusing one would yank the user across workspaces.
         self._browser_tabs: dict[int, dict[str, str]] = {}
         self._browser_order: list[int] = []
-        self._focused_browser: int = 0
-        # One-way latch behind the lazy BrowserSurface Loader (see
-        # browserEverOpenedChanged). False until the first window opens.
-        self._browser_ever_opened: bool = False
+        # The Chrome process itself, built on FIRST browser use (a project that
+        # never opens a browser never pays for one) — see _ensure_chrome_host.
+        self._chrome_host: ChromeHost | None = None
         # Agent ↔ browser attribution (drives the chip browser glyph).
-        # agent slot -> internal browser slots it owns, newest-driven LAST
-        # (the jump target for focus_agent_browser). Pruned when a window or
-        # the agent closes.
+        # agent slot -> internal browser slots it owns, newest-driven LAST.
+        # Pruned when a window or the agent closes.
         self._agent_browser_windows: dict[int, list[int]] = {}
-        # agent slot -> count of browser ops currently in flight (>0 = pulse).
-        self._agent_browser_active: dict[int, int] = {}
         # agent slot -> attention message ("" = no message). PRESENCE of the
         # key = the attention dot is lit on that agent's browser globe; the
         # value carries the agent's optional reason (browser_request_attention)
-        # for a future tooltip/desktop notification. Set by the agent's
-        # explicit MCP call, cleared when the user views the window
-        # (focus_agent_browser), the window closes, or the agent dies.
+        # for the desktop notification. Set by the agent's explicit MCP call,
+        # cleared when the user checks in on it (notify_focused_agent_browser),
+        # the window closes, or the agent dies.
         self._agent_browser_attention: dict[int, str] = {}
-        # Phase 4 Stage 2a: drives the embedded WebEngineViews via
-        # QML-delivered runJavaScript (the views aren't Python-drivable).
         # The IDE-hosted browser MCP server. The bridge marshals agents' MCP
         # tool calls (uvicorn thread) ONTO the GUI thread; the server runs
         # FastMCP+uvicorn and is started in start() (unless
@@ -3047,29 +3028,18 @@ class AppController(QObject):
         """
         return self._central_surface == "git"
 
-    @Property(bool, notify=centralSurfaceChanged)
-    def browserSurfaceVisible(self) -> bool:
-        """True when the embedded browser pool owns the central area.
-
-        The agentic-browser surface (qml/BrowserSurface.qml) — embedded
-        QtWebEngine views, a sibling of editor/terminal/agent/git under
-        `mainContent`, gated on the same single `centralSurfaceChanged`
-        notify so the booleans stay XOR. Embedding (vs an agent-spawned
-        Chromium) is what keeps the browser from creating a top-level
-        Hyprland window — see CLAUDE.md "The browser panes".
-        """
-        return self._central_surface == "browser"
-
     @Slot(str)
     def set_central_surface(self, surface: str) -> None:
-        """Make `surface` ("terminal"|"editor"|"agent"|"git"|"browser") central.
+        """Make `surface` ("terminal"|"editor"|"agent"|"git") central.
 
         Idempotent (no signal on no-op) and validating — the generic
-        primitive behind the StatusBar switcher segments and
-        `focus_agent`'s / `focus_browser`'s auto-switch. The dedicated
-        `swap_to_*` slots remain as chord-facing wrappers.
+        primitive behind the StatusBar switcher segments and `focus_agent`'s
+        auto-switch. The dedicated `swap_to_*` slots remain as chord-facing
+        wrappers. "browser" was a valid surface until the embedded
+        QtWebEngine pool was retired for external Chrome; it is rejected now,
+        and returns only if the nested-compositor backend lands.
         """
-        if surface not in ("terminal", "editor", "agent", "git", "browser"):
+        if surface not in ("terminal", "editor", "agent", "git"):
             log.warning("set_central_surface: unknown surface %r — no-op", surface)
             return
         if self._central_surface == surface:
@@ -3095,7 +3065,8 @@ class AppController(QObject):
         `_surface_is_navigable`). Replaces the old hard-coded "return to
         terminal" that the editor/git/browser/terminal toggles each duplicated,
         so back-navigation follows the user's actual trail instead of always
-        dumping them on the terminal.
+        dumping them on the terminal. (The browser was one of those toggles
+        until its surface was retired for external Chrome.)
         """
         prev = self._previous_surface
         if prev and prev != self._central_surface and self._surface_is_navigable(prev):
@@ -3103,12 +3074,12 @@ class AppController(QObject):
         return "terminal"
 
     def _surface_is_navigable(self, surface: str) -> bool:
-        """True unless `surface` is an agent/browser pool that has since emptied.
+        """True unless `surface` is an agent pool that has since emptied.
 
         The previous-pointer can name a surface whose backing pool was emptied
         AFTER we recorded it — e.g. you're on the agent surface, switch to git
         (`_previous_surface="agent"`), then close the last agent. Returning
-        "back" to an agent/browser surface with no slots is a dead end (a blank
+        "back" to an agent surface with no slots is a dead end (a blank
         pane), so an emptied pool counts as non-navigable and the back-target
         falls back to the terminal. Centralizing the check here (rather than
         scrubbing `_previous_surface` in every close handler) covers all close
@@ -3121,8 +3092,6 @@ class AppController(QObject):
             # pool; agents parked in the other location don't make it
             # navigable (they're reached by toggling location first).
             return bool(self._ordered_slots_for_location())
-        if surface == "browser":
-            return bool(self._browser_order)
         return True
 
     @Slot()
@@ -3208,39 +3177,56 @@ class AppController(QObject):
             self.swap_to_git()
 
     @Slot()
-    def jump_to_focused_agent_browser(self) -> None:
-        """Jump to the FOCUSED agent's browser window (bound to `Ctrl+Shift+B`).
+    def notify_focused_agent_browser(self) -> None:
+        """Report where the FOCUSED agent's browser is (bound to `Ctrl+Shift+B`).
 
-        This is how you go **watch what your agent is doing in the browser** —
-        or see the page it LEFT once it finished (the window persists as long as
-        the agent is alive, so an idle agent's last view is still there to
-        inspect). The keyboard twin of clicking an agent chip's globe, and the
-        entry point now that the standalone browser tab is gone and the browser
-        is reached only through its owning agent:
+        This used to JUMP: the browser was an embedded surface, so going to look
+        at it was a surface swap costing nothing. With real Chrome the windows
+        are Hyprland's, and "jumping" would mean dragging the user to another
+        workspace mid-task. The user chose notify-don't-yank, so the chord
+        answers the question ("where is it, how many windows?") and leaves the
+        going to them.
 
-        - Already on the browser surface → return **back** to the surface you
-          came from (`_surface_back_target`, not hard-coded terminal — same
-          swap-last-two shape as the other surface chords; since you reach the
-          browser through an agent, "back" is usually that agent surface).
-        - Else, if the focused agent owns ≥1 browser window → jump to its
-          newest-driven one (and clear its attention dot, via
-          focus_agent_browser).
-        - Else → no-op (the agent-only reachability choice: the browser exists
-          only as something an agent owns; with no owned window there is
-          nowhere to jump). Logged so the dead press is explainable.
+        No-op with a log when the focused agent owns no window — the browser is
+        reachable only through the agent that owns it, so there is nothing to
+        report otherwise.
         """
-        if self._central_surface == "browser":
-            self.set_central_surface(self._surface_back_target())
-            return
         slot = self._focused_term_agent
-        if slot and self._agent_browser_windows.get(slot):
-            self.focus_agent_browser(slot)
-        else:
+        owned = self._agent_browser_windows.get(slot) if slot else None
+        if not owned:
             log.info(
-                "jump_to_focused_agent_browser: focused agent (%s) owns no "
+                "notify_focused_agent_browser: focused agent (%s) owns no "
                 "browser window — no-op",
                 slot or "none",
             )
+            return
+        self._announce_agent_browser(slot, owned)
+
+    def _announce_agent_browser(self, agent_slot: int, owned: list[int]) -> None:
+        """Toast naming the agent, its workspace, and its window count.
+
+        Checking in on the agent's browser is also what clears its attention
+        dot: the user has now been told what the agent flagged, so the badge
+        has served its purpose.
+        """
+        message = self._agent_browser_attention.pop(agent_slot, None)
+        if message is not None:
+            self.agentBrowserChanged.emit()  # clear-on-view: dot off
+        workspace = (
+            self._chrome_host.workspace_label() if self._chrome_host is not None else ""
+        )
+        display_number = self._display_number_for_agent(agent_slot)
+        where = f"workspace {workspace}" if workspace else "this workspace"
+        count = len(owned)
+        body = f"{count} window{'s' if count != 1 else ''} on {where}"
+        if message:
+            body = f"{body}\n{message}"
+        self._notify_desktop(f"Agent {display_number} · browser", body)
+
+    def _display_number_for_agent(self, agent_slot: int) -> int:
+        """The chip number the user sees, not the frozen internal slot."""
+        order = self._ordered_slots_for_location()
+        return order.index(agent_slot) + 1 if agent_slot in order else agent_slot
 
     @Slot()
     def focus_terminal(self) -> None:
@@ -3811,25 +3797,12 @@ class AppController(QObject):
         ]
 
     @Property("QVariantList", notify=agentBrowserChanged)
-    def agentBrowserActive(self) -> list:
-        """Per-slot 'a browser op is in flight' flag, indexed `slot - 1` →
-        drives the chip glyph's pulse. DORMANT since the chrome-devtools-mcp
-        migration: nothing sets the counter anymore (the op-path that did was
-        retired — driving flows agent→chrome-devtools-mcp→CDP, bypassing our
-        bridge), so this is permanently all-False in production. Kept as the
-        hook a future CDP monitor re-activates (see _record_browser_attribution)."""
-        return [
-            self._agent_browser_active.get(slot, 0) > 0
-            for slot in range(1, self._MAX_INSTANCES + 1)
-        ]
-
-    @Property("QVariantList", notify=agentBrowserChanged)
     def agentBrowserAttention(self) -> list:
         """Per-slot 'this agent wants you to look at its browser' flag, indexed
         `slot - 1` → drives the attention dot on the chip's browser glyph. Set
-        by the agent's explicit browser_request_attention MCP call; cleared on
-        view (focus_agent_browser), window close, or agent death. Unlike
-        agentBrowserActive (the dormant in-flight pulse), this is live."""
+        by the agent's explicit browser_request_attention MCP call; cleared
+        when the user checks in (notify_focused_agent_browser), on window
+        close, or on agent death."""
         return [
             slot in self._agent_browser_attention
             for slot in range(1, self._MAX_INSTANCES + 1)
@@ -4382,25 +4355,18 @@ class AppController(QObject):
 
     @Slot(int)
     def focus_agent_browser(self, agent_slot: int) -> None:
-        """Jump to the browser window the agent is driving (chip glyph click).
+        """Report on the agent's browser (chip glyph click).
 
-        Focuses the agent's newest-driven still-open window, which switches
-        the central surface to "browser" via the existing focus_browser. No-op
-        when the agent owns no open window (the glyph wouldn't be visible then,
-        but the guard keeps the binding safe). The 'jump to what they're doing'
-        action from the AgentTopBar browser glyph — and the keyboard
-        jump_to_focused_agent_browser chord.
-
-        Viewing the window is what clears the agent's attention dot: the user
-        has now seen what the agent flagged, so the badge has served its purpose.
+        The mouse twin of `notify_focused_agent_browser`. Kept under the old
+        name because it is the AgentTopBar binding, but it no longer focuses
+        anything: the windows are Chrome's, and raising one means a workspace
+        switch the user did not ask for.
         """
         owned = self._agent_browser_windows.get(agent_slot)
         if not owned:
             log.info("focus_agent_browser: agent %d owns no window — no-op", agent_slot)
             return
-        if self._agent_browser_attention.pop(agent_slot, None) is not None:
-            self.agentBrowserChanged.emit()  # clear-on-view: dot off
-        self.focus_browser(owned[-1])  # newest-driven = the jump target
+        self._announce_agent_browser(agent_slot, owned)
 
     def _agent_slot_from_id(self, agent_id: str) -> int | None:
         """Map a browser-MCP `<ide_pid>_<slot>` agent id to our chip slot.
@@ -4430,68 +4396,18 @@ class AppController(QObject):
             owned.remove(browser_slot)  # re-driving → bump to newest
         owned.append(browser_slot)
 
-    def _record_browser_attribution(
-        self, agent_id: str, browser_slot: int, phase: str
-    ) -> None:
-        """Record that an agent is driving a browser window (GUI thread).
-
-        DORMANT since the chrome-devtools-mcp migration (Stage 4): page driving
-        now flows agent → chrome-devtools-mcp → embedded CDP endpoint, bypassing
-        our bridge, so nothing calls this for the in-flight PULSE anymore (the
-        ownership glyph + click-jump still work — browser_open claims ownership
-        directly via _claim_browser_window in _open_browser_for_mcp). This is
-        the hook the deferred pulse-restoration follow-up re-activates: an
-        IDE-owned CDP monitor maps targetId→slot→agent and calls this with
-        "start"/"end" around observed CDP activity. See docs/phases.md Phase 4.
-
-        `phase` "start" claims OWNERSHIP of the window for the agent and marks
-        it actively driving (+1 in-flight → the chip pulse); "end" clears that
-        activity (-1). Untagged / foreign ids are dropped by
-        _agent_slot_from_id, so external clients never touch the chips.
-
-        The emit is guarded so an "end" that doesn't actually decrement (e.g. a
-        late op result arriving after the agent was closed and its counter
-        dropped) doesn't fire a spurious agentBrowserChanged re-bind.
-        """
-        agent_slot = self._agent_slot_from_id(agent_id)
-        if agent_slot is None:
-            return
-        changed = False
-        if phase == "start":
-            self._claim_browser_window(agent_slot, browser_slot)
-            self._agent_browser_active[agent_slot] = (
-                self._agent_browser_active.get(agent_slot, 0) + 1
-            )
-            changed = True
-        elif phase == "end":
-            if self._agent_browser_active.get(agent_slot, 0) > 0:
-                self._agent_browser_active[agent_slot] -= 1
-                changed = True
-        if changed:
-            self.agentBrowserChanged.emit()
-
     def _release_agent_browser_windows(self, agent_slot: int) -> None:
         """On agent death: close the windows the agent SOLELY owns, then forget
         its links. Called from close_agent in place of a bare
         _drop_agent_browser_links.
 
-        Closing the tab made the browser reachable only through its owning
-        agent, so a window left behind by a dead agent would be both leaking
-        RAM (the WebEngineView stays alive) AND unreachable (no globe, no tab).
-        We therefore close each owned window UNLESS another still-living agent
-        also owns it (co-driven windows — two agents driving the same window
-        both link it; keep it for the survivor). Iterate a copy: close_browser
-        mutates _agent_browser_windows via _drop_browser_window_links.
-
-        Surface side-effect (intentional, inherited from close_browser): if the
-        user is ON the browser surface viewing the very window a dying agent
-        solely owned, close_browser falls back to the terminal — the same
-        landing as a manual last-window close. That is NOT the notify-don't-yank
-        rule being violated (that rule is about an agent OPENING a window); here
-        the window the user was looking at no longer exists, so terminal is the
-        only sensible home. A background agent dying while you view a DIFFERENT
-        window doesn't touch your surface (close_browser only refocuses when the
-        closed slot WAS the focused one).
+        The browser is reachable only through its owning agent, so a window
+        left behind by a dead agent would be an orphan: a Chrome window sitting
+        on the workspace with nothing in the IDE referring to it. We therefore
+        close each owned window UNLESS another still-living agent also owns it
+        (co-driven windows — two agents driving the same window both link it;
+        keep it for the survivor). Iterate a copy: close_browser mutates
+        _agent_browser_windows via _drop_browser_window_links.
         """
         for browser_slot in list(self._agent_browser_windows.get(agent_slot, ())):
             shared = any(
@@ -4500,21 +4416,16 @@ class AppController(QObject):
                 if other != agent_slot
             )
             if not shared:
-                self.close_browser(browser_slot)  # frees the WebEngineView
+                self._close_browser_window(browser_slot)
         self._drop_agent_browser_links(agent_slot)
 
     def _drop_agent_browser_links(self, agent_slot: int) -> None:
-        """Forget an agent's browser ownership + activity + attention (on agent
-        close). Does NOT close windows — _release_agent_browser_windows does
-        that first; this is the bookkeeping-only tail."""
+        """Forget an agent's browser ownership + attention (on agent close).
+        Does NOT close windows — _release_agent_browser_windows does that
+        first; this is the bookkeeping-only tail."""
         removed = self._agent_browser_windows.pop(agent_slot, None)
-        removed_active = self._agent_browser_active.pop(agent_slot, None)
         removed_attn = self._agent_browser_attention.pop(agent_slot, None)
-        if (
-            removed is not None
-            or removed_active is not None
-            or removed_attn is not None
-        ):
+        if removed is not None or removed_attn is not None:
             self.agentBrowserChanged.emit()
 
     def _drop_browser_window_links(self, browser_slot: int) -> None:
@@ -4842,158 +4753,157 @@ class AppController(QObject):
         self._agent_bridge.notify_title(slot, title)
 
     # ------------------------------------------------------------------
-    # Embedded browser pool (agentic-browser surface)
+    # Browser window registry (real Google Chrome, external process)
     # ------------------------------------------------------------------
     #
-    # Mirrors the terminal-agent pool, minus the subprocess/argv/bridge
-    # machinery: a "browser window" is just a QtWebEngine WebEngineView
-    # pointed at a URL, embedded in our own window so it never creates a
-    # top-level Hyprland surface (the containment principle — see CLAUDE.md
-    # "The browser panes"). The QML side (qml/BrowserSurface.qml) holds a
-    # FIXED Repeater of `maxBrowserSlots` Loaders; each Loader's `active`
-    # binds to `browserSlotActive[index]` and instantiates a WebEngineView
-    # that reads its initial URL from `browserUrls[index]` ONCE at load.
-    # open/close are state flips the Loaders react to — Python never touches
-    # the view (navigation, title, back/forward are all QML-local).
+    # A "browser window" is a window of the ONE Chrome process this IDE owns
+    # (chrome_host.py): its own --user-data-dir, its own --class, and a
+    # Hyprland rule pinning every window it maps to THIS IDE's workspace
+    # (hyprland_ipc.py). Containment is by window rule, not by embedding —
+    # the QtWebEngine pool that used to render these in-window was retired
+    # because it could not do the job (no Target.createTarget, screenshots
+    # stalling off-workspace, no extensions, no real logins).
+    #
+    # What survives from the embedded era is the SLOT REGISTRY: slot → window,
+    # 1..MAX_INSTANCES. It is what `browser_list_windows` numbers, what
+    # `_agent_browser_windows` attributes to agents, and what the session
+    # manifest persists — so keeping it means the MCP contract and the chip
+    # globe did not have to change shape. There is deliberately no focus
+    # concept anymore: focusing a Chrome window would mean yanking the user
+    # to another Hyprland workspace, and the user chose notify-don't-yank
+    # (see `notify_focused_agent_browser`).
 
-    @Property(int, constant=True)
-    def maxBrowserSlots(self) -> int:
-        return self._MAX_INSTANCES
+    def _ensure_chrome_host(self) -> ChromeHost:
+        """Build the ChromeHost on first use, rooted at the current project.
 
-    @Property(bool, notify=browserEverOpenedChanged)
-    def browserEverOpened(self) -> bool:
-        """True once any browser window has been opened this session.
-
-        Main.qml binds the BrowserSurface Loader's `active` to this, deferring
-        the eager QtWebEngine instantiation (~430ms of engine.load) until the
-        user/agent actually opens a browser. See browserEverOpenedChanged.
+        Lazily constructed rather than built in `__init__` for two reasons:
+        cold start shouldn't pay for a browser most sessions never open, and
+        the project root isn't settled at construction time (the anchor state
+        machine may still move it). Once built it is NOT re-rooted — a running
+        Chrome cannot change `--user-data-dir`, and one IDE serves one project.
         """
-        return self._browser_ever_opened
-
-    @Property("QVariantList", notify=browserTabsChanged)
-    def browserOrder(self) -> list:
-        """Internal slots in DISPLAY order — the BrowserSurface chip model.
-
-        Same dense, position-based numbering as `agentOrder`: the chip
-        number is the 1-based POSITION here, not the internal slot. Closing
-        a window compacts the numbering while internal slots stay frozen
-        (they key the Loader delegates, which must not churn).
-        """
-        return list(self._browser_order)
-
-    @Property("QVariantList", notify=browserTabsChanged)
-    def browserSlotActive(self) -> list:
-        """Per-slot occupancy, indexed `slot - 1` (len == maxBrowserSlots).
-
-        The Loaders' `active` binding — a stable-length list so the fixed
-        Repeater never churns delegates (delegate teardown destroys a live
-        WebEngineView and its navigation history; see BrowserSurface.qml).
-        """
-        return [
-            slot in self._browser_tabs for slot in range(1, self._MAX_INSTANCES + 1)
-        ]
-
-    @Property("QVariantList", notify=browserTabsChanged)
-    def browserTitles(self) -> list:
-        """Per-slot page titles, indexed `slot - 1`; "" = no title yet."""
-        return [
-            self._browser_tabs.get(slot, {}).get("title", "")
-            for slot in range(1, self._MAX_INSTANCES + 1)
-        ]
-
-    @Property("QVariantList", notify=browserTabsChanged)
-    def browserUrls(self) -> list:
-        """Per-slot URLs, indexed `slot - 1`.
-
-        Each delegate reads its slot's entry ONCE at creation to set the
-        WebEngineView's initial URL — it is NOT a live binding (a live
-        binding would fight user navigation). `on_browser_url` keeps the
-        value current for chip display only; the view is never re-driven
-        from it, so there is no navigation feedback loop.
-        """
-        return [
-            self._browser_tabs.get(slot, {}).get("url", "")
-            for slot in range(1, self._MAX_INSTANCES + 1)
-        ]
-
-    @Property(int, notify=focusedBrowserChanged)
-    def focusedBrowser(self) -> int:
-        """1-based focused slot; 0 = none (empty pool)."""
-        return self._focused_browser
+        if self._chrome_host is None:
+            self._chrome_host = ChromeHost(self.displayedRoot, parent=self)
+            # Both are same-thread (CDP lives on the GUI thread by design —
+            # see cdp_client), so a plain auto connection is correct here.
+            self._chrome_host.windowUpdated.connect(self._on_chrome_window_updated)
+            self._chrome_host.windowGone.connect(self._on_chrome_window_gone)
+        return self._chrome_host
 
     @Slot()
     @Slot(str)
     @Slot(str, bool)
-    def open_browser(self, url: str = "about:blank", focus: bool = True) -> None:
-        """Allocate the lowest free slot for a browser window.
+    def open_browser(self, url: str = "about:blank", focus: bool = True) -> str:
+        """Allocate the lowest free slot and ask Chrome for a new window.
 
-        The QML Loader reacting to `browserSlotActive` instantiates the
-        WebEngineView and loads `url`. New windows APPEND in display order
-        (newest = highest chip number), matching the agent pool.
+        Returns "" on success or an error code (`pool-full`,
+        `chrome-not-installed`, …) — `_open_browser_for_mcp` surfaces it to the
+        calling agent.
 
-        `focus` (default True) controls whether opening also brings the browser
-        surface forward + focuses the new window. Manual opens (`Ctrl+T`) focus —
-        the user asked to see it. Agent opens (`_open_browser_for_mcp`) pass
-        `focus=False`: now that the browser is agent-owned, an agent opening a
-        window must NOT yank the user's surface; it only lights the chip globe,
-        and the user jumps on their own terms (the globe / Ctrl+Shift+B).
+        New windows APPEND in display order (newest = highest number),
+        matching the agent pool. `focus` is accepted for call-site
+        compatibility but IGNORED: raising an external Chrome window means
+        pulling the user across workspaces, which is exactly what the
+        notify-don't-yank decision rules out.
+
+        The slot is reserved BEFORE Chrome answers. Window creation is
+        asynchronous (CDP round-trip, or a `--new-window` handoff to the
+        running process), and the calling agent needs its window number in the
+        tool result — so the slot is the synchronous half of the contract and
+        the CDP target id is bound later, when the target is discovered.
         """
         slot = self._next_free_browser_slot()
         if slot is None:
             log.warning("open_browser: pool full (%d slots)", self._MAX_INSTANCES)
-            return
-        # Flip the lazy-load latch FIRST: emitting browserEverOpenedChanged
-        # activates the BrowserSurface Loader synchronously (Qt signal emission
-        # is synchronous), so the surface — and its inner per-slot view pool —
-        # exist before the browserTabsChanged emit below drives the slot's view
-        # delegate. Latched once; the WebEngine scaffolding stays up thereafter.
-        if not self._browser_ever_opened:
-            self._browser_ever_opened = True
-            self.browserEverOpenedChanged.emit()
-        self._browser_tabs[slot] = {"url": url or "about:blank", "title": ""}
+            return "pool-full"
+        target_url = url or "about:blank"
+        error = self._ensure_chrome_host().open_window(
+            target_url, lambda result, s=slot: self._bind_browser_target(s, result)
+        )
+        if error:
+            log.warning("open_browser: %s", error)
+            return error
+        self._browser_tabs[slot] = {"url": target_url, "title": "", "target": ""}
         self._browser_order.append(slot)
         self.browserTabsChanged.emit()
-        log.info("open_browser: slot %d → %s (focus=%s)", slot, url, focus)
-        if focus:
-            self.focus_browser(slot)
+        log.info("open_browser: slot %d → %s", slot, target_url)
+        return ""
 
-    @Slot(int)
-    def focus_browser(self, slot: int) -> None:
-        """Focus the slot's view and bring the browser surface forward.
+    def _bind_browser_target(self, slot: int, result: dict) -> None:
+        """Attach the CDP target id to the slot that requested the window."""
+        target_id = str((result or {}).get("targetId", ""))
+        if not target_id or slot not in self._browser_tabs:
+            return
+        self._browser_tabs[slot]["target"] = target_id
 
-        Mirrors `focus_agent`: focusing from ANY surface lands on the
-        browser surface with that window visible, so chip clicks / chords
-        double as surface switchers. No-op (with log) on empty slots.
+    def _slot_for_target(self, target_id: str) -> int | None:
+        for slot, tab in self._browser_tabs.items():
+            if tab.get("target") == target_id:
+                return slot
+        return None
+
+    @Slot(str, str, str)
+    def _on_chrome_window_updated(self, target_id: str, url: str, title: str) -> None:
+        """CDP told us a page target appeared or changed.
+
+        Also the ADOPTION path: a window opened without a CDP round-trip (the
+        cold-start and `--new-window` paths, used before CDP attaches) carries
+        no target id, and target discovery is how we learn it. Unmatched
+        targets bind to the oldest slot still missing one. Targets with no slot
+        waiting are the user's own tabs/windows — deliberately ignored rather
+        than adopted, since the registry tracks windows the IDE handed out.
+
+        `chrome://` targets are never adopted. Chrome opens a new-tab page in
+        several situations we don't control, and adopting one would point a
+        slot at a window the agent never asked for — leaving the real window
+        unattributed and un-closable.
         """
-        if slot not in self._browser_tabs:
-            log.info("focus_browser: slot %d empty — no-op", slot)
+        slot = self._slot_for_target(target_id)
+        if slot is None:
+            if url.startswith("chrome://"):
+                return
+            slot = next(
+                (s for s in self._browser_order if not self._browser_tabs[s]["target"]),
+                None,
+            )
+            if slot is None:
+                return
+            self._browser_tabs[slot]["target"] = target_id
+        tab = self._browser_tabs[slot]
+        if tab["url"] == url and tab["title"] == title:
             return
-        if self._focused_browser != slot:
-            self._focused_browser = slot
-            self.focusedBrowserChanged.emit()
-        self.set_central_surface("browser")
-        self.focusBrowserRequested.emit(slot)
+        tab["url"] = url
+        tab["title"] = title
+        self.browserTabsChanged.emit()
 
-    @Slot(int)
-    def cycle_browser_focus(self, direction: int) -> None:
-        """Move focus to the next/previous window in DISPLAY order (wraps)."""
-        order = self._browser_order
-        if not order:
-            return
-        if self._focused_browser not in order:
-            self.focus_browser(order[0])
-            return
-        idx = order.index(self._focused_browser)
-        self.focus_browser(order[(idx + direction) % len(order)])
+    @Slot(str)
+    def _on_chrome_window_gone(self, target_id: str) -> None:
+        """The user closed one of our windows — drop its slot."""
+        slot = self._slot_for_target(target_id)
+        if slot is not None:
+            self.close_browser(slot)
+
+    def _close_browser_window(self, slot: int) -> None:
+        """Close the actual Chrome window AND drop the slot.
+
+        `close_browser` alone only forgets the registry entry; this is the
+        path for when the IDE is the one deciding the window should go (an
+        owning agent died), so the window must not outlive the decision.
+        """
+        target_id = self._browser_tabs.get(slot, {}).get("target", "")
+        if target_id and self._chrome_host is not None:
+            self._chrome_host.close_window(target_id)
+        self.close_browser(slot)
 
     @Slot(int)
     def close_browser(self, slot: int) -> None:
-        """Drop the slot — the QML Loader deactivates and frees the view.
+        """Drop the slot from the registry.
 
-        Display numbering compacts (survivors renumber via `browserOrder`).
-        Refocus goes to the PREVIOUS window in display order; closing the
-        last window falls back to the terminal (the home surface), exactly
-        as `close_agent` does.
+        Display numbering compacts (survivors renumber). Closing the Chrome
+        window itself is the caller's job — `_release_agent_browser_windows`
+        does it through ChromeHost when an owning agent dies; a user closing
+        the window with Ctrl+W reaches us the other way, via the CDP
+        target-destroyed event.
         """
         if slot not in self._browser_tabs:
             log.warning("close_browser: slot %d not in pool — no-op", slot)
@@ -5011,56 +4921,11 @@ class AppController(QObject):
             self._drop_browser_window_links(slot)
             self.browserTabsChanged.emit()
             return
-        closed_position = self._browser_order.index(slot)
         self._browser_order.remove(slot)
         del self._browser_tabs[slot]
         self._drop_browser_window_links(slot)
         self.browserTabsChanged.emit()
         log.info("close_browser: slot %d closed", slot)
-        if self._focused_browser == slot:
-            if not self._browser_order:
-                self._focused_browser = 0
-                self.focusedBrowserChanged.emit()
-                if self._central_surface == "browser":
-                    self.set_central_surface("terminal")
-            else:
-                self.focus_browser(self._browser_order[max(0, closed_position - 1)])
-
-    @Slot()
-    def close_focused_browser(self) -> None:
-        """Close the focused browser window (chip close button / chord)."""
-        if self._focused_browser:
-            self.close_browser(self._focused_browser)
-
-    @Slot(int, str)
-    def on_browser_title(self, slot: int, title: str) -> None:
-        """QML callback for WebEngineView.titleChanged."""
-        if slot not in self._browser_tabs:
-            return
-        title = (title or "").strip()
-        if self._browser_tabs[slot]["title"] == title:
-            return
-        self._browser_tabs[slot]["title"] = title
-        self.browserTabsChanged.emit()
-
-    @Slot(int, str)
-    def on_browser_url(self, slot: int, url: str) -> None:
-        """QML callback for WebEngineView.urlChanged (display state only).
-
-        Records the live URL for chip display; the value is NEVER fed back
-        to the view (the delegate reads `browserUrls` once at creation), so
-        this cannot create a navigation feedback loop.
-        """
-        if slot not in self._browser_tabs:
-            return
-        # Stored verbatim (no strip, unlike on_browser_title): the QML side
-        # passes WebEngineView.url.toString(), which is already a normalized
-        # URL, and trailing/leading whitespace in a URL is meaningful — so
-        # there is nothing to trim and trimming could corrupt a valid URL.
-        if self._browser_tabs[slot]["url"] == url:
-            return
-        self._browser_tabs[slot]["url"] = url
-        self.browserTabsChanged.emit()
 
     def _next_free_browser_slot(self) -> int | None:
         """Lowest unoccupied browser slot, or None when full.
@@ -5077,7 +4942,12 @@ class AppController(QObject):
         """The `browser_list_windows` MCP tool body. GUI-thread only.
 
         Reports windows by DISPLAY position (the same numbering the other
-        tools' `window` arg takes) — never internal slots."""
+        tools' `window` arg takes) — never internal slots.
+
+        No `focused` key since the external-Chrome migration: the windows are
+        Hyprland's, so "which one is focused" is a question about the user's
+        compositor, not about IDE state, and a constant 0 would have been a
+        lie dressed as data."""
         windows = []
         for position, slot in enumerate(self._browser_order, start=1):
             tab = self._browser_tabs.get(slot, {})
@@ -5088,52 +4958,49 @@ class AppController(QObject):
                     "url": tab.get("url", ""),
                 }
             )
-        focused_position = 0
-        if self._focused_browser in self._browser_order:
-            focused_position = self._browser_order.index(self._focused_browser) + 1
-        return {"ok": True, "windows": windows, "focused": focused_position}
+        return {"ok": True, "windows": windows}
 
     def _open_browser_for_mcp(self, url: str, agent_id: str = "") -> dict:
         """The `browser_open` MCP tool body. GUI-thread only.
 
-        Opens a new window so an agent has an autonomous entry point (the
-        other tools only drive EXISTING windows). Returns the new window's
-        DISPLAY number, or a pool-full error. Opens with `focus=False`: now
-        that the browser is agent-owned (no standalone tab), an agent opening a
-        window must NOT yank the user's surface — it only lights the chip globe,
-        and the user jumps on their own terms (the globe / Ctrl+Shift+B). When
-        the agent has something worth showing it calls browser_request_attention
-        to light the attention dot.
+        Opens a new window so an agent has an autonomous entry point. Returns
+        the new window's DISPLAY number, or an error code. The window opens
+        WITHOUT being raised: it maps on the IDE's workspace via the Hyprland
+        pin rule, silently, so an agent browsing never pulls the user off what
+        they are doing. When the agent has something worth showing it calls
+        browser_request_attention to light the attention dot on its chip.
 
         `agent_id` (from the X-Symmetria-Agent header) claims OWNERSHIP of the
-        new window for the spawning agent, so its chip shows the browser glyph
-        and a click jumps here. Ownership is claimed WITHOUT a pulse — since
-        the chrome-devtools-mcp migration the in-flight pulse is DORMANT (page
-        driving bypasses our bridge; see `_record_browser_attribution`), so the
-        glyph is static until a future CDP monitor re-activates it.
+        new window for the spawning agent, so its chip shows the browser glyph.
+
+        Known v1 gap: a window the agent creates directly through
+        chrome-devtools-mcp (`new_page`) never passes through here, so it is
+        unattributed and unpooled. Closing that gap needs an IDE-side CDP
+        monitor mapping targetId→agent; the discovery feed this registry
+        already consumes is where that would hook in.
         """
         before = len(self._browser_order)
-        self.open_browser(url or "about:blank", focus=False)
-        if len(self._browser_order) > before:
-            new_slot = self._browser_order[-1]
-            agent_slot = self._agent_slot_from_id(agent_id)
-            if agent_slot is not None:
-                self._claim_browser_window(agent_slot, new_slot)
-                self.agentBrowserChanged.emit()
-            tab = self._browser_tabs.get(new_slot, {})
-            # Return url/title so the agent can correlate THIS window to a
-            # chrome-devtools-mcp page (select_page). These are the values
-            # known at open time — the COMMITTED url/title settle after the
-            # view navigates (mirrored live into browser_list_windows), so an
-            # agent should read browser_list_windows for the settled url before
-            # select_page. See the browser_open tool docstring.
-            return {
-                "ok": True,
-                "window": len(self._browser_order),
-                "url": tab.get("url", ""),
-                "title": tab.get("title", ""),
-            }
-        return {"ok": False, "error": "pool-full"}
+        error = self.open_browser(url or "about:blank")
+        if error:
+            return {"ok": False, "error": error}
+        if len(self._browser_order) <= before:
+            return {"ok": False, "error": "pool-full"}
+        new_slot = self._browser_order[-1]
+        agent_slot = self._agent_slot_from_id(agent_id)
+        if agent_slot is not None:
+            self._claim_browser_window(agent_slot, new_slot)
+            self.agentBrowserChanged.emit()
+        tab = self._browser_tabs.get(new_slot, {})
+        # url/title are the values known at REQUEST time — the committed ones
+        # settle once Chrome navigates and arrive via CDP target discovery.
+        # An agent correlating this window to a chrome-devtools-mcp page should
+        # read browser_list_windows for the settled url before select_page.
+        return {
+            "ok": True,
+            "window": len(self._browser_order),
+            "url": tab.get("url", ""),
+            "title": tab.get("title", ""),
+        }
 
     def _set_browser_attention_for_mcp(self, agent_id: str, message: str = "") -> dict:
         """The `browser_request_attention` MCP tool body. GUI-thread only.
@@ -7554,20 +7421,16 @@ class AppController(QObject):
                 focused_agent_pos = len(agents)
 
         browsers: list[dict] = []
-        focused_browser_pos = 0
         for slot in self._browser_order:
             url = self._browser_tabs.get(slot, {}).get("url", "")
             if not url or url == "about:blank":
                 continue
             browsers.append({"url": url})
-            if slot == self._focused_browser:
-                focused_browser_pos = len(browsers)
 
         return {
             "anchored": self._anchored,
             "central_surface": self._central_surface,
             "focused_agent": focused_agent_pos,
-            "focused_browser": focused_browser_pos,
             "agents": agents,
             "browsers": browsers,
             "editor": self._capture_editor_state(),
@@ -7669,17 +7532,11 @@ class AppController(QObject):
                 continue
             url = str(entry.get("url", "") or "")
             if url:
-                # focus=False: don't yank the surface mid-restore; the saved
-                # central surface is applied last.
-                self.open_browser(url, focus=False)
-        focused_browser = manifest.get("focused_browser", 0)
-        if isinstance(focused_browser, int) and 1 <= focused_browser <= len(
-            self._browser_order
-        ):
-            # Set focus WITHOUT focus_browser (which would switch to the browser
-            # surface) — the saved surface wins below.
-            self._focused_browser = self._browser_order[focused_browser - 1]
-            self.focusedBrowserChanged.emit()
+                self.open_browser(url)
+        # NOTE: manifests written before the external-Chrome migration also
+        # carry "focused_browser". It is ignored — there is no focused-window
+        # concept now (the windows are Hyprland's, and raising one would yank
+        # the user across workspaces). Old manifests stay loadable.
 
         editor = manifest.get("editor") or {}
         if isinstance(editor, dict) and editor.get("files"):
@@ -7809,6 +7666,12 @@ class AppController(QObject):
         # Signal the browser MCP server to exit and drop its config file
         # (daemon thread; reaped with the process either way).
         self._browser_mcp_server.stop()
+        # Tear down the browser: CDP session, Hyprland event reader, the
+        # workspace pin rule, and Chrome itself. The rule matters most — rules
+        # live in the running compositor, so an IDE that exits without
+        # releasing its class leaves one pointing at a workspace forever.
+        if self._chrome_host is not None:
+            self._chrome_host.stop()
         # Stop every pooled session host first — the subprocesses are
         # the noisier of the two and we'd rather have their workers
         # joined before nvim's shutdown handshake owns the event loop.
@@ -8549,14 +8412,14 @@ def _reload_env() -> dict[str, str]:
     Two adjustments:
       - SET SYMMETRIA_IDE_RESTORE=1 so the new process auto-restores the
         session we just saved (cold launches, lacking it, only offer restore).
-      - POP QTWEBENGINE_REMOTE_DEBUGGING so run()'s probe reserves a FRESH CDP
+      - POP SYMMETRIA_IDE_CDP_PORT so run()'s probe reserves a FRESH CDP
         port (the old number is being torn down with us), and POP the one-shot
         launch hooks so they don't double-fire on top of the restore.
     """
     env = dict(os.environ)
     env["SYMMETRIA_IDE_RESTORE"] = "1"
     for key in (
-        "QTWEBENGINE_REMOTE_DEBUGGING",
+        "SYMMETRIA_IDE_CDP_PORT",
         "SYMMETRIA_IDE_SPAWN_AGENT",
         "SYMMETRIA_IDE_SPAWN_AGENT_LOCATION",
         "SYMMETRIA_IDE_AGENT_PROMPT",
@@ -8594,46 +8457,40 @@ def run() -> int:
     # Must run before the engine spawns the terminal panes — see _export_host_window_pid().
     _export_host_window_pid()
 
-    # Enable Chrome DevTools Protocol on the embedded QtWebEngine. The env var
-    # is consumed ONCE inside initialize() below (Chromium binds the port at
-    # startup), so it must be set here. We reserve a free ephemeral port via a
-    # bind-probe, then CLOSE it and hand Chromium only the number — unlike
-    # browser_mcp.py's server (which keeps its probe socket OPEN and gives it
-    # to uvicorn via serve(sockets=[…])), Chromium binds the port itself and
-    # cannot consume a Python socket, so the close→Chromium-binds gap is an
-    # unavoidable but narrow TOCTOU (single-threaded, before the Qt event loop
-    # exists; acceptable for a single-user IDE). The env var is the SINGLE
-    # SOURCE OF TRUTH for the port — read it back from os.environ where needed
-    # (browser_mcp.agent_config_path) rather than threading it through. This is
-    # what lets spawned agents drive the contained browser via chrome-devtools-mcp
-    # (--browserUrl). Skipped when the browser MCP is disabled or the var is
-    # already set (explicit override / spike). See CLAUDE.md "The browser panes".
+    # Reserve the Chrome DevTools Protocol port for the agentic browser. We
+    # reserve a free ephemeral port via a bind-probe, then CLOSE it and hand
+    # Chrome only the number (--remote-debugging-port) — unlike browser_mcp.py's
+    # server, which keeps its probe socket OPEN and gives it to uvicorn via
+    # serve(sockets=[…]); Chrome binds the port itself and cannot consume a
+    # Python socket, so the close→Chrome-binds gap is an unavoidable but narrow
+    # TOCTOU (acceptable for a single-user IDE).
+    #
+    # Reserved HERE, at startup, even though Chrome itself spawns LAZILY on the
+    # first browser_open (chrome_host.py). That ordering is deliberate: the env
+    # var is the SINGLE SOURCE OF TRUTH for the port and browser_mcp reads it
+    # back when building each agent's chrome-devtools-mcp entry (--browserUrl),
+    # so an agent spawned before Chrome exists still gets the right port — the
+    # tools simply fail until Chrome is up. Threading the port through at spawn
+    # time instead would make early agents permanently browser-less.
+    #
+    # Formerly QTWEBENGINE_REMOTE_DEBUGGING, consumed by QtWebEngineQuick.
+    # initialize(). The embedded engine is gone (see the note in Main.qml where
+    # the browser surface used to be), so the name would now be a lie.
     if os.environ.get("SYMMETRIA_IDE_BROWSER_MCP") != "0" and not os.environ.get(
-        "QTWEBENGINE_REMOTE_DEBUGGING"
+        "SYMMETRIA_IDE_CDP_PORT"
     ):
         _cdp_probe = socket.socket()
         try:
             _cdp_probe.bind(("127.0.0.1", 0))
-            os.environ["QTWEBENGINE_REMOTE_DEBUGGING"] = str(
-                _cdp_probe.getsockname()[1]
-            )
+            os.environ["SYMMETRIA_IDE_CDP_PORT"] = str(_cdp_probe.getsockname()[1])
             log.info(
-                "CDP remote debugging on 127.0.0.1:%s",
-                os.environ["QTWEBENGINE_REMOTE_DEBUGGING"],
+                "CDP remote debugging reserved on 127.0.0.1:%s",
+                os.environ["SYMMETRIA_IDE_CDP_PORT"],
             )
         except OSError:
             log.warning("could not reserve a CDP port; agent browser tools disabled")
         finally:
             _cdp_probe.close()
-
-    # QtWebEngine MUST initialize before QGuiApplication: it installs the
-    # shared OpenGL context (AA_ShareOpenGLContexts) the Chromium compositor
-    # needs to paint the embedded browser surface into our scene graph.
-    # Calling it after the QML engine loads `import QtWebEngine` is too late
-    # and throws. Placed after the QSurfaceFormat block above so the shared
-    # context inherits the alpha-buffer request. See qml/BrowserSurface.qml
-    # and CLAUDE.md "The browser panes".
-    QtWebEngineQuick.initialize()
 
     # Resolve `symmetria-ide [PATH]` and chdir before QGuiApplication +
     # AppController (which reads os.getcwd() in __init__). The path is stripped

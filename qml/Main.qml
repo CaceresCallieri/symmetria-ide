@@ -183,31 +183,19 @@ Window {
     // Jump to the FOCUSED agent's browser — go watch what the agent is doing
     // (or see the page it left once idle; the window lives as long as the
     // agent does). The keyboard twin of clicking an agent chip's globe. The
-    // browser is agent-owned: there is no standalone browser tab anymore, so
-    // you reach it only through the agent that owns it. 'B' still names the
-    // browser, and the shape holds: already on the browser surface → BACK to
-    // the surface you came from (usually the owning agent, not hard-coded
-    // terminal); otherwise jump to the focused agent's newest-owned
-    // window (clearing its attention dot). If the focused agent owns no window,
-    // it's a no-op (agent-only reachability — see jump_to_focused_agent_browser).
-    // The pool is QtWebEngine views embedded so they never escape into a
-    // separate Hyprland window. See qml/BrowserSurface.qml.
+    // browser is agent-owned: you reach it only through the agent that owns
+    // it. Since the QtWebEngine surface was retired for real Google Chrome
+    // (an external process whose windows Hyprland pins to THIS IDE's
+    // workspace — see chrome_host.py), there is no in-window browser surface
+    // to swap to, so 'B' REPORTS instead of navigating: a toast naming the
+    // agent, its workspace and window count. Deliberate — the user chose
+    // notify-don't-yank, and a focus jump would drag them out of the
+    // workspace they are working in. Re-examine when the nested-compositor
+    // backend lands and the browser becomes an in-window surface again.
     Shortcut {
         sequences: ["Ctrl+Shift+B"]
         context: Qt.ApplicationShortcut
-        onActivated: controller.jump_to_focused_agent_browser()
-    }
-
-    // New browser window — the standard browser "new tab" idiom, gated to the
-    // browser surface so nvim/terminal keep Ctrl+T elsewhere. The new (blank)
-    // window's address bar is focused (BrowserSurface.focusActive), so the
-    // keyboard loop is: Ctrl+T → type a URL → Enter. This is what makes the
-    // browser surface operable without a mouse (keyboard-first, non-neg #1).
-    Shortcut {
-        sequences: ["Ctrl+T"]
-        context: Qt.ApplicationShortcut
-        enabled: controller.browserSurfaceVisible
-        onActivated: controller.open_browser()
+        onActivated: controller.notify_focused_agent_browser()
     }
 
     // IDE-wide file-manager toggle. Promoted out of the nvim layer
@@ -388,19 +376,15 @@ Window {
         }
     }
 
-    // Close the focused slot. Shared between the agent and browser pools —
-    // whichever surface is visible owns the chord (the two are never visible
-    // together, so there is no ambiguity).
+    // Close the focused agent slot. Formerly shared with the browser pool
+    // (dispatch-by-visible-surface); the browser surface is gone — Chrome
+    // windows are external and close with their own Ctrl+W — so this is
+    // agent-only again.
     Shortcut {
         sequences: ["Ctrl+Shift+Q"]
         context: Qt.ApplicationShortcut
-        enabled: controller.agentSurfaceVisible || controller.browserSurfaceVisible
-        onActivated: {
-            if (controller.browserSurfaceVisible)
-                controller.close_focused_browser();
-            else
-                controller.close_focused_agent();
-        }
+        enabled: controller.agentSurfaceVisible
+        onActivated: controller.close_focused_agent()
     }
 
     // Kill a VPS agent's REMOTE tmux session (Ctrl+Shift+K) — the
@@ -422,30 +406,20 @@ Window {
         }
     }
 
-    // Cycle through occupied slots without reaching for the digit row —
-    // agent slots on the agent surface, browser windows on the browser
-    // surface (same dispatch-by-visible-surface pattern as Ctrl+Shift+Q).
+    // Cycle through occupied agent slots without reaching for the digit row.
+    // Formerly dispatched by visible surface (agent vs browser); the browser
+    // pool no longer lives in-window, so this is agent-only again.
     Shortcut {
         sequences: ["Ctrl+Shift+H"]
         context: Qt.ApplicationShortcut
-        enabled: controller.agentSurfaceVisible || controller.browserSurfaceVisible
-        onActivated: {
-            if (controller.browserSurfaceVisible)
-                controller.cycle_browser_focus(-1);
-            else
-                controller.cycle_agent_focus(-1);
-        }
+        enabled: controller.agentSurfaceVisible
+        onActivated: controller.cycle_agent_focus(-1)
     }
     Shortcut {
         sequences: ["Ctrl+Shift+L"]
         context: Qt.ApplicationShortcut
-        enabled: controller.agentSurfaceVisible || controller.browserSurfaceVisible
-        onActivated: {
-            if (controller.browserSurfaceVisible)
-                controller.cycle_browser_focus(1);
-            else
-                controller.cycle_agent_focus(1);
-        }
+        enabled: controller.agentSurfaceVisible
+        onActivated: controller.cycle_agent_focus(1)
     }
 
     // ~Half-page scroll of the focused agent terminal — Ctrl+U/D mirror vim's
@@ -612,13 +586,6 @@ Window {
                 // slot — the delegate's onFocusAgentRequested handler lands
                 // it on the visible agent terminal.
                 controller.focus_agent(controller.focusedAgent);
-            else if (controller.browserSurfaceVisible)
-                // Embedded browser surface: focus_browser re-emits
-                // focusBrowserRequested → BrowserSurface.focusActive() lands
-                // focus on the page (or address bar for a blank window).
-                // No-ops on an empty pool. Without this branch the fall-through
-                // would focus the hidden editor.
-                controller.focus_browser(controller.focusedBrowser);
             else if (controller.gitVisible)
                 gitHistoryView.focusContent();
             else if (controller.terminalVisible)
@@ -1343,39 +1310,19 @@ Window {
                     }
                 }
 
-                // Embedded browser surface — sibling central surface (the
-                // agentic-browser pool). QtWebEngine WebEngineViews embedded
-                // so the browser renders into THIS window and never creates a
-                // top-level Hyprland surface (containment by construction).
-                // Gated on the same XOR as the other central surfaces;
-                // `browserSurfaceVisible` is derived from
-                // `centralSurface == "browser"`. Ctrl+Shift+B toggles it.
-                // Deferred until the FIRST browser open (manual Ctrl+T or an
-                // agent's browser_open flips controller.browserEverOpened).
-                // Eager instantiation cost cold start ~430ms — the `import
-                // QtWebEngine` QML module load + the persistent WebEngineProfile
-                // creation — for a surface most launches never touch (measured
-                // via SYMMETRIA_IDE_TRACE: engine.load ~696ms → ~268ms with this
-                // stubbed). The inner view pool is already lazy (per-slot
-                // Loaders), so this only defers the WebEngine SCAFFOLDING.
-                // Activation is synchronous and the latch is set BEFORE the slot
-                // becomes active (AppController.open_browser), so the surface +
-                // its pool exist before focus_browser / the view delegate run.
-                // NOTE: unlike the reverted AgentPane-Loader experiment (a
-                // ~12-25ms component), this defers a ~430ms heavyweight — a
-                // different risk/reward. Re-verified no tree-mount regression on
-                // the bambin repo via bench/measure_mount.py.
-                Loader {
-                    id: browserSurfaceLoader
-                    anchors.fill: parent
-                    active: controller.browserEverOpened
-                    visible: controller.browserSurfaceVisible
-                        && !controller.fmVisible
-                        && !controller.agentVisible
-                    sourceComponent: BrowserSurface {
-                        anchors.fill: parent
-                    }
-                }
+                // NOTE: there is deliberately no browser surface here. The
+                // agentic browser used to be an embedded QtWebEngine pool
+                // (BrowserSurface.qml, gated behind a lazy Loader that saved
+                // ~430ms of cold start). It was retired for REAL Google
+                // Chrome: QtWebEngine could not serve the actual use case —
+                // Target.createTarget ("new_page") is unsupported, screenshots
+                // stall off-workspace, and there are no extensions or real
+                // logins. Chrome now runs as an external process whose windows
+                // Hyprland pins to this IDE's workspace (chrome_host.py +
+                // hyprland_ipc.py). Containment moved from "embedded item" to
+                // "pinned window"; the in-window form returns when the nested
+                // Wayland compositor backend lands, and it will slot in HERE as
+                // a ShellSurfaceItem pool. See CLAUDE.md "The browser panes".
 
                 // Git-history viewer — sibling central surface (read-only
                 // comprehension surface). Gated on the same XOR as the editor/

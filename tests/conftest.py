@@ -69,6 +69,55 @@ def _isolate_xdg_runtime(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("xdg_runtime")))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_xdg_data(monkeypatch, tmp_path_factory):
+    """Redirect ``XDG_DATA_HOME`` to a throwaway dir for every test.
+
+    ``chrome_host`` keeps the agentic browser's Chrome profiles under
+    ``$XDG_DATA_HOME/symmetria-ide/browser/``, including the ``_template``
+    profile the user logs their real dashboards into. A test that seeds or
+    opens a profile must never touch those: Chrome is a singleton per
+    ``--user-data-dir``, so writing into a profile a LIVE IDE currently has
+    open is not merely untidy, it reaches into a running browser's state.
+    Same override semantics as the sibling ``_isolate_xdg_*`` fixtures."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path_factory.mktemp("xdg_data")))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_browser_host(monkeypatch, _chrome_bin_dir):
+    """Make it impossible for a test to spawn Chrome or touch the compositor.
+
+    Two live resources are one function call away from any test that reaches
+    ``AppController.open_browser``:
+
+    - **The developer's Chrome.** ``chrome_executable()`` finds the real binary
+      on PATH, and Chrome is a singleton per ``--user-data-dir`` — a spawn
+      inside the suite would either open windows on the developer's screen or
+      hand the request to a browser a running IDE already owns.
+    - **The developer's compositor.** ``hyprland_ipc.apply_keyword`` shells out
+      to ``hyprctl`` for real, and window rules are GLOBAL, runtime state of the
+      live Hyprland session. A test could install a rule pinning some class to
+      a workspace and it would outlive the test run.
+
+    Both are neutralised at the environment level rather than by patching call
+    sites, per ``.claude/rules/test_env_isolation.md``: monkeypatched functions
+    only cover the test window, while these paths can be reached from teardown
+    and deferred callbacks too. Tests that want either behaviour opt in with
+    their own ``setenv`` (last writer wins) — see ``test_hyprland_ipc.py``."""
+    monkeypatch.setenv("SYMMETRIA_IDE_CHROME_BIN", str(_chrome_bin_dir / "no-chrome"))
+    monkeypatch.delenv("HYPRLAND_INSTANCE_SIGNATURE", raising=False)
+
+
+@pytest.fixture(scope="session")
+def _chrome_bin_dir(tmp_path_factory):
+    """One throwaway dir for the whole run holding the nonexistent Chrome path.
+
+    Session-scoped for the same reason as ``_tmux_sock_dir``: nothing is ever
+    created there, and a per-test ``mktemp`` would leave ~1500 empty dirs
+    behind for a value that is only ever read."""
+    return tmp_path_factory.mktemp("chrome_bin")
+
+
 @pytest.fixture(scope="session")
 def _tmux_sock_dir(tmp_path_factory):
     """One throwaway directory for the whole run to hold the fake tmux socket
@@ -237,6 +286,56 @@ class FakeSshfsMount(QObject):
         self.unmount_calls += 1
         self._state = "unmounted"
         self.stateChanged.emit()
+
+
+class FakeChromeHost(QObject):
+    """Stand-in for chrome_host.ChromeHost — no browser, no compositor.
+
+    `open_window` records the request and reports success WITHOUT calling the
+    callback: the real host answers asynchronously (a CDP round-trip), and the
+    controller's contract is that the slot is reserved synchronously while the
+    target id binds later. Tests that care about the late binding drive it
+    explicitly via `complete_open`.
+
+    Fixtures swapping this in must patch `symmetria_ide.app.ChromeHost` BEFORE
+    the first browser call, since the controller builds its host lazily.
+    """
+
+    windowUpdated = Signal(str, str, str)
+    windowGone = Signal(str)
+    startFailed = Signal(str)
+
+    def __init__(self, project_root: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self.project_root = project_root
+        self.opened: list[str] = []
+        self.closed: list[str] = []
+        self.stop_calls = 0
+        self.workspace = "6"
+        #: Set to an error code to make the next open fail (pool/degradation
+        #: paths: "chrome-not-installed", "chrome-spawn-failed", …).
+        self.open_error = ""
+        self._callbacks: list = []
+
+    def open_window(self, url: str, callback) -> str:
+        if self.open_error:
+            return self.open_error
+        self.opened.append(url)
+        self._callbacks.append(callback)
+        return ""
+
+    def complete_open(self, target_id: str, index: int = -1) -> None:
+        """Deliver the CDP result for a pending open (binds the target id)."""
+        self._callbacks[index]({"targetId": target_id})
+
+    def close_window(self, target_id: str) -> None:
+        self.closed.append(target_id)
+
+    def workspace_label(self) -> str:
+        return self.workspace
+
+    def stop(self) -> None:
+        self.stop_calls += 1
 
 
 class FakeSessionHost:

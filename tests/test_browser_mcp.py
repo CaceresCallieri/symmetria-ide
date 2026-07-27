@@ -140,14 +140,14 @@ def test_agent_config_path_writes_identity_header(tmp_path, monkeypatch):
 def test_agent_config_path_injects_chrome_devtools_when_cdp_enabled(
     tmp_path, monkeypatch
 ):
-    """When CDP is enabled (QTWEBENGINE_REMOTE_DEBUGGING set in run()), the
+    """When CDP is enabled (SYMMETRIA_IDE_CDP_PORT set in run()), the
     per-agent config ALSO carries an off-the-shelf chrome-devtools-mcp stdio
     entry pointed at the embedded view's CDP port — the agent's full
     browser-automation surface alongside our two window tools."""
     from symmetria_ide.browser_mcp import _CHROME_DEVTOOLS_MCP_VERSION
 
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
-    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
+    monkeypatch.setenv("SYMMETRIA_IDE_CDP_PORT", "9911")
     # Force npx "present" so the test is deterministic regardless of the host.
     monkeypatch.setattr(
         "symmetria_ide.browser_mcp.shutil.which", lambda _: "/usr/bin/npx"
@@ -168,7 +168,7 @@ def test_agent_config_path_omits_chrome_devtools_without_cdp(tmp_path, monkeypat
     """No CDP port (remote debugging off) → no chrome-devtools entry; the
     agent still gets our window tools."""
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
-    monkeypatch.delenv("QTWEBENGINE_REMOTE_DEBUGGING", raising=False)
+    monkeypatch.delenv("SYMMETRIA_IDE_CDP_PORT", raising=False)
     server = _server()
     server._port = 23456
     with open(server.agent_config_path("1234_2", browser_enabled=True)) as handle:
@@ -182,7 +182,7 @@ def test_agent_config_path_omits_chrome_devtools_without_npx(tmp_path, monkeypat
     the agent cleanly falls back to the two window tools (a broken stdio server
     would otherwise just fail at the agent's MCP client)."""
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
-    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
+    monkeypatch.setenv("SYMMETRIA_IDE_CDP_PORT", "9911")
     monkeypatch.setattr("symmetria_ide.browser_mcp.shutil.which", lambda _: None)
     server = _server()
     server._port = 23456
@@ -212,7 +212,7 @@ def test_agent_config_path_gated_off_keeps_server_drops_chrome_devtools(
     browser tools are call-time gated server-side instead), but omits the
     chrome-devtools entry, so no per-agent Node process spawns."""
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
-    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
+    monkeypatch.setenv("SYMMETRIA_IDE_CDP_PORT", "9911")
     monkeypatch.setattr(
         "symmetria_ide.browser_mcp.shutil.which", lambda _: "/usr/bin/npx"
     )
@@ -274,7 +274,7 @@ def test_agent_config_content_opencode_schema(monkeypatch):
     identity header — returned as a JSON string for OPENCODE_CONFIG_CONTENT."""
     from symmetria_ide.browser_mcp import _AGENT_HEADER
 
-    monkeypatch.delenv("QTWEBENGINE_REMOTE_DEBUGGING", raising=False)
+    monkeypatch.delenv("SYMMETRIA_IDE_CDP_PORT", raising=False)
     server = _server()
     server._port = 34567  # pretend bound
     config = json.loads(server.agent_config_content("1234_2", browser_enabled=True))
@@ -291,7 +291,7 @@ def test_agent_config_content_injects_chrome_devtools_local(monkeypatch):
     command+args split)."""
     from symmetria_ide.browser_mcp import _CHROME_DEVTOOLS_MCP_VERSION
 
-    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
+    monkeypatch.setenv("SYMMETRIA_IDE_CDP_PORT", "9911")
     monkeypatch.setattr(
         "symmetria_ide.browser_mcp.shutil.which", lambda _: "/usr/bin/npx"
     )
@@ -310,7 +310,7 @@ def test_agent_config_content_injects_chrome_devtools_local(monkeypatch):
 def test_agent_config_content_omits_chrome_devtools_without_cdp(monkeypatch):
     """No CDP port → no chrome-devtools entry; the agent still gets our window
     tools (matches agent_config_path's behaviour)."""
-    monkeypatch.delenv("QTWEBENGINE_REMOTE_DEBUGGING", raising=False)
+    monkeypatch.delenv("SYMMETRIA_IDE_CDP_PORT", raising=False)
     server = _server()
     server._port = 34567
     config = json.loads(server.agent_config_content("1234_2", browser_enabled=True))
@@ -324,7 +324,7 @@ def test_agent_config_content_gated_off_keeps_server_drops_chrome_devtools(
     """Same relaxed gate as agent_config_path: not opted in → the opencode
     inline config still carries OUR server entry (coordination) but omits
     chrome-devtools, even with CDP live."""
-    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
+    monkeypatch.setenv("SYMMETRIA_IDE_CDP_PORT", "9911")
     monkeypatch.setattr(
         "symmetria_ide.browser_mcp.shutil.which", lambda _: "/usr/bin/npx"
     )

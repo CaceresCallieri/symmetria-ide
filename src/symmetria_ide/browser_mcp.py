@@ -8,7 +8,7 @@ globe so the user knows to come look).
 Page DRIVING (navigate, eval, screenshot, network, console, performance) is
 delegated to the off-the-shelf chrome-devtools-mcp, injected per-agent and
 pointed at the embedded view's CDP endpoint (see agent_config_path +
-QTWEBENGINE_REMOTE_DEBUGGING in app.run()). Either way an agent drives the
+SYMMETRIA_IDE_CDP_PORT in app.run()). Either way an agent drives the
 IDE's OWN browser window instead of launching its own Chromium — the
 containment win (no escaped Hyprland window). Agents discover this server via
 per-harness `--mcp-config` injection (Stage 2c, agent_harness.py).
@@ -536,7 +536,7 @@ class BrowserMcpServer:
         gate live — shared by BOTH per-agent config builders (claude's
         agent_config_path splits it into command+args; opencode's
         agent_config_content uses the full argv as `command`). CDP is enabled in
-        app.run() via QTWEBENGINE_REMOTE_DEBUGGING (the single source of truth
+        app.run() via SYMMETRIA_IDE_CDP_PORT (the single source of truth
         for the port, read back here). chrome-devtools-mcp supersedes our old
         navigate/eval/perf/snapshot/click/fill tools with Google's suite while
         driving the SAME contained view; the agent still allocates visible
@@ -544,7 +544,7 @@ class BrowserMcpServer:
         WebEngineView) then drives them by select_page. See CLAUDE.md "The
         browser panes".
         """
-        cdp_port = os.environ.get("QTWEBENGINE_REMOTE_DEBUGGING", "")
+        cdp_port = os.environ.get("SYMMETRIA_IDE_CDP_PORT", "")
         if not cdp_port:
             return None  # remote debugging off → agent gets only our window tools
         if not shutil.which("npx"):

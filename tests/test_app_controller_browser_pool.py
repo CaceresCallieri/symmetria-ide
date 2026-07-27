@@ -1,17 +1,15 @@
-"""Tests for the embedded-browser pool on AppController (Stage 1).
+"""Tests for the browser window registry on AppController.
 
-The browser pool mirrors the terminal-agent pool, minus the
-subprocess/argv/bridge machinery — a "window" is a QtWebEngine
-WebEngineView the QML Loader owns; Python only tracks bookkeeping
-(occupancy / dense display order / current title+url) and drives
-open/focus/close as state flips the Loaders react to.
+The agentic browser is real Google Chrome running as its own process
+(`chrome_host.py`), so a "window" here is a Chrome window pinned by a Hyprland
+rule to the IDE's workspace — not an embedded view. What AppController still
+owns is the REGISTRY: slot allocation, dense display numbering, agent
+ownership, and the attention badge. That registry is what the MCP tools number
+and what the session manifest persists, which is why it survived the migration
+intact while the surface around it did not.
 
-These are pure-Python tests: no QtWebEngine, no display. They pin the
-pool's state machine + the central-surface integration. The actual
-QtWebEngine-on-Wayland render check is a manual/subprocess smoke (the
-session-scoped QCoreApplication fixture in conftest cannot coexist with
-the QGuiApplication QtWebEngine requires), documented in the plan's
-verification section.
+Pure-Python: no browser, no compositor. `conftest._isolate_browser_host` makes
+spawning impossible even by accident, and these tests inject a FakeChromeHost.
 """
 
 from __future__ import annotations
@@ -19,749 +17,403 @@ from __future__ import annotations
 import os
 
 import pytest
+from conftest import FakeChromeHost
 
 from symmetria_ide.app import AppController
 
 
 @pytest.fixture
-def controller():
-    """Bare controller; shutdown on teardown (mirrors the central-surface fixture)."""
+def controller(monkeypatch):
+    """Controller whose browser is a FakeChromeHost.
+
+    Patched at the module symbol because the controller builds its host
+    lazily, on first browser use.
+    """
+    monkeypatch.setattr("symmetria_ide.app.ChromeHost", FakeChromeHost)
     ctrl = AppController()
     yield ctrl
     ctrl.shutdown()
 
 
+def chrome(controller) -> FakeChromeHost:
+    """The controller's (lazily built) fake host."""
+    return controller._ensure_chrome_host()
+
+
 def _capture(signal) -> list[None]:
-    """Capture emission count for a parameterless signal."""
     emissions: list[None] = []
     signal.connect(lambda: emissions.append(None))
     return emissions
 
 
-def _capture_int(signal) -> list[int]:
-    """Capture the int argument of each emission of a 1-arg signal."""
-    args: list[int] = []
-    signal.connect(lambda v: args.append(v))
-    return args
+def _agent_id(slot: int) -> str:
+    return f"{os.getpid()}_{slot}"
 
 
 # ---------------------------------------------------------------------------
-# Central-surface integration — "browser" is a valid surface, derived XOR.
+# The browser is no longer a central surface
 # ---------------------------------------------------------------------------
 
 
-def test_browser_is_a_valid_central_surface(controller):
-    """set_central_surface accepts "browser" and the derived flag follows."""
+def test_browser_is_not_a_central_surface(controller):
+    """ "browser" was a valid surface while the pool was embedded. With Chrome
+    external there is nothing to show in-window, so it must be rejected like
+    any other bogus value — not silently accepted into a blank pane."""
     emissions = _capture(controller.centralSurfaceChanged)
     controller.set_central_surface("browser")
-    assert controller.centralSurface == "browser"
-    assert controller.browserSurfaceVisible is True
-    assert controller.terminalVisible is False
-    assert controller.editorVisible is False
-    assert controller.gitVisible is False
-    assert len(emissions) == 1
-
-
-def test_browser_surface_visible_is_xor_with_terminal(controller):
-    """browserSurfaceVisible derives from the same notify as the others —
-    it can never be true at the same time as terminalVisible."""
-    controller.set_central_surface("browser")
-    assert controller.browserSurfaceVisible is not controller.terminalVisible
-
-
-def test_unknown_surface_still_rejected(controller):
-    """Adding "browser" to the validation tuple must not loosen it —
-    a bogus value is still a no-op with no signal."""
-    emissions = _capture(controller.centralSurfaceChanged)
-    controller.set_central_surface("bogus")
     assert emissions == []
     assert controller.centralSurface == "terminal"
 
 
-# ---------------------------------------------------------------------------
-# jump_to_focused_agent_browser — Ctrl+Shift+B, the keyboard twin of the chip
-# globe now that the standalone browser tab is gone (agent-only reachability).
-# ---------------------------------------------------------------------------
-
-
-def test_jump_to_agent_browser_jumps_when_focused_agent_owns_window(controller):
-    """With the focused agent owning a window, the chord jumps to it (and
-    switches the surface, via focus_agent_browser → focus_browser)."""
-    aid = f"{os.getpid()}_1"  # agent slot 1
-    controller._open_browser_for_mcp("https://x.com", aid)  # agent 1 owns window 1
-    controller._focused_term_agent = 1
-    controller.set_central_surface("editor")
-
-    controller.jump_to_focused_agent_browser()
-
-    assert controller.centralSurface == "browser"
-    assert controller.focusedBrowser == 1
-
-
-def test_jump_to_agent_browser_noop_when_focused_agent_owns_nothing(controller):
-    """Agent-only reachability: with no owned window there is nowhere to jump,
-    so the chord is a silent no-op (no surface change)."""
-    controller._focused_term_agent = 1  # focused but owns no window
-    controller.set_central_surface("editor")
-    emissions = _capture(controller.centralSurfaceChanged)
-
-    controller.jump_to_focused_agent_browser()
-
-    assert controller.centralSurface == "editor"
-    assert emissions == []
-
-
-def test_jump_to_agent_browser_noop_when_no_agent_focused(controller):
-    """No focused agent (empty pool) → no-op, same agent-only rationale."""
-    assert controller._focused_term_agent == 0
-    controller.set_central_surface("editor")
-    controller.jump_to_focused_agent_browser()
-    assert controller.centralSurface == "editor"
-
-
-def test_jump_to_agent_browser_returns_to_previous_when_on_browser(controller):
-    """Already on the browser surface → BACK to the surface you came from
-    (_surface_back_target), not hard-coded terminal. Here we arrive at the
-    browser FROM the agent surface, so the chord returns to "agent" — the
-    swap-last-two shape shared by every surface chord.
-
-    The focused agent ALSO owns a window here, so this pins the branch ORDER:
-    the early-return on "already on browser" must win over the "owns a window →
-    jump" branch (a reordering of the checks would otherwise re-jump and never
-    leave the surface)."""
-    aid = f"{os.getpid()}_1"
-    controller._open_browser_for_mcp("https://x.com", aid)  # agent 1 owns a window
-    controller._focused_term_agent = 1
-    controller._agent_order.append(1)  # agent 1 is live → agent surface navigable
-    controller.set_central_surface("agent")  # came from the agent surface...
-    controller.set_central_surface("browser")  # ...then onto the browser
-    controller.jump_to_focused_agent_browser()
-    assert controller.centralSurface == "agent"
+def test_real_surfaces_still_work(controller):
+    controller.set_central_surface("git")
+    assert controller.gitVisible is True
 
 
 # ---------------------------------------------------------------------------
-# Per-project agent-browser gate (the committable .symmetria/ide.json marker).
+# Slot allocation
 # ---------------------------------------------------------------------------
 
 
-def test_project_browser_default_off(controller, tmp_path):
-    """A project with no marker reads as disabled after anchoring to it."""
-    (tmp_path / ".git").mkdir()  # make tmp_path a deterministic project root
-    controller.anchor_to_path(str(tmp_path))
-    assert controller.projectBrowserEnabled is False
-
-
-def test_toggle_project_browser_flips_and_persists(controller, tmp_path):
-    """The MCP-popup toggle flips the flag, emits its notify, and writes the
-    committable marker; toggling again disables it."""
-    from symmetria_ide import project_browser_marker as pbm
-
-    # Plant a `.git` so resolve_project_root anchors the marker AT tmp_path —
-    # never walking up into the real repo (which would write a committable
-    # marker into this project's tree). Bulletproofs isolation regardless of
-    # where pytest roots its tmp dir.
-    (tmp_path / ".git").mkdir()
-    controller.anchor_to_path(str(tmp_path))
-    emissions = _capture(controller.projectBrowserEnabledChanged)
-
-    controller.toggle_project_browser()
-    assert controller.projectBrowserEnabled is True
-    assert len(emissions) == 1
-    assert pbm.browser_agents_enabled(str(tmp_path)) is True
-    assert (tmp_path / ".symmetria" / "ide.json").exists()
-
-    controller.toggle_project_browser()
-    assert controller.projectBrowserEnabled is False
-    assert len(emissions) == 2
-    assert pbm.browser_agents_enabled(str(tmp_path)) is False
-
-
-def test_spawn_argv_gates_chrome_devtools_not_server(controller, tmp_path, monkeypatch):
-    """agent_spawn_argv always injects --mcp-config (coordination's
-    wait_for_agent must work in every project) — the per-project gate now
-    controls only whether the written config carries the chrome-devtools
-    entry (the per-agent Node process). Config writes are routed to tmp via
-    gettempdir so the test leaves no temp-dir litter."""
-    import json
-
-    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
-    # Deterministic chrome-devtools availability (CDP port + npx present).
-    monkeypatch.setenv("QTWEBENGINE_REMOTE_DEBUGGING", "9911")
-    monkeypatch.setattr(
-        "symmetria_ide.browser_mcp.shutil.which", lambda _: "/usr/bin/npx"
-    )
-    (tmp_path / ".git").mkdir()  # anchor the marker at tmp_path, never the repo
-    controller.anchor_to_path(str(tmp_path))
-    # Pretend the browser MCP server bound a port so agent_config_path can
-    # write a config.
-    controller._browser_mcp_server._port = 54321
-    controller.spawn_agent("fresh", True, "claude")
-    slot = controller.agentOrder[0]
-
-    def _written_config(argv):
-        assert "--mcp-config" in argv
-        with open(argv[argv.index("--mcp-config") + 1]) as handle:
-            return json.load(handle)
-
-    # OFF (default): server entry present, chrome-devtools omitted.
-    config = _written_config(controller.agent_spawn_argv(slot))
-    assert "chrome-devtools" not in config["mcpServers"]
-
-    # ON: the spawn-time re-read picks it up → chrome-devtools injected.
-    controller.toggle_project_browser()
-    config = _written_config(controller.agent_spawn_argv(slot))
-    assert "chrome-devtools" in config["mcpServers"]
-
-
-# ---------------------------------------------------------------------------
-# Pool list-shape invariants — fixed-length, indexed slot-1.
-# ---------------------------------------------------------------------------
-
-
-def test_pool_list_lengths_match_max_slots(controller):
-    """browserSlotActive / browserTitles / browserUrls are stable-length
-    (== maxBrowserSlots) so the fixed QML Repeater never churns delegates."""
-    n = controller.maxBrowserSlots
-    assert n == controller.maxAgentSlots  # both pools share _MAX_INSTANCES
-    assert len(controller.browserSlotActive) == n
-    assert len(controller.browserTitles) == n
-    assert len(controller.browserUrls) == n
-    assert controller.browserSlotActive == [False] * n
-    assert controller.focusedBrowser == 0
-    assert list(controller.browserOrder) == []
-
-
-# ---------------------------------------------------------------------------
-# open_browser — allocate, focus, switch surface.
-# ---------------------------------------------------------------------------
-
-
-def test_open_browser_allocates_focuses_and_switches_surface(controller):
-    focus_args = _capture_int(controller.focusBrowserRequested)
-    controller.open_browser()
-
-    assert list(controller.browserOrder) == [1]
-    assert controller.browserSlotActive[0] is True
-    assert controller.browserUrls[0] == "about:blank"
-    assert controller.focusedBrowser == 1
-    # focus_browser auto-switches the central surface (chip/chord double
-    # as a surface switcher — mirrors focus_agent).
-    assert controller.centralSurface == "browser"
-    assert focus_args == [1]
-
-
-def test_open_browser_stores_explicit_url(controller):
-    controller.open_browser("https://example.com")
-    assert controller.browserUrls[0] == "https://example.com"
+def test_open_browser_asks_chrome_and_registers_a_slot(controller):
+    assert controller.open_browser("https://example.com") == ""
+    assert chrome(controller).opened == ["https://example.com"]
+    assert controller._browser_order == [1]
+    assert controller._browser_tabs[1]["url"] == "https://example.com"
 
 
 def test_open_browser_fills_from_bottom_and_appends_display_order(controller):
-    controller.open_browser()  # slot 1
-    controller.open_browser()  # slot 2
-    controller.open_browser()  # slot 3
-    assert list(controller.browserOrder) == [1, 2, 3]
-    assert controller.browserSlotActive == [True, True, True, False, False]
-
-
-def test_open_browser_pool_full_is_noop(controller):
-    for _ in range(controller.maxBrowserSlots):
+    for _ in range(3):
         controller.open_browser()
-    assert len(controller.browserOrder) == controller.maxBrowserSlots
-    emissions = _capture(controller.browserTabsChanged)
-    controller.open_browser()  # one past full
-    assert emissions == []
-    assert len(controller.browserOrder) == controller.maxBrowserSlots
+    assert controller._browser_order == [1, 2, 3]
 
 
-# ---------------------------------------------------------------------------
-# focus_browser / cycle_browser_focus.
-# ---------------------------------------------------------------------------
-
-
-def test_focus_browser_empty_slot_is_noop(controller):
-    controller.set_central_surface("editor")
-    emissions = _capture(controller.focusedBrowserChanged)
-    controller.focus_browser(3)  # nothing in slot 3
-    assert emissions == []
-    assert controller.focusedBrowser == 0
-    # No spurious surface switch on an empty-slot focus.
-    assert controller.centralSurface == "editor"
-
-
-def test_cycle_browser_focus_wraps_in_display_order(controller):
-    controller.open_browser()  # slot 1
-    controller.open_browser()  # slot 2
-    controller.open_browser()  # slot 3 (focused, newest)
-    assert controller.focusedBrowser == 3
-
-    controller.cycle_browser_focus(+1)  # wraps 3 → 1
-    assert controller.focusedBrowser == 1
-    controller.cycle_browser_focus(-1)  # 1 → 3
-    assert controller.focusedBrowser == 3
-    controller.cycle_browser_focus(-1)  # 3 → 2
-    assert controller.focusedBrowser == 2
-
-
-# ---------------------------------------------------------------------------
-# close_browser — compaction, refocus, last-close fallback to terminal.
-# ---------------------------------------------------------------------------
-
-
-def test_close_browser_compacts_order_and_refocuses_previous(controller):
-    controller.open_browser()  # slot 1
-    controller.open_browser()  # slot 2
-    controller.open_browser()  # slot 3 (focused)
-    controller.focus_browser(2)  # focus the middle window
-
+def test_reopen_after_close_fills_the_freed_slot(controller):
+    for _ in range(3):
+        controller.open_browser()
     controller.close_browser(2)
-
-    # Internal slot 2 frees; display order compacts to [1, 3].
-    assert list(controller.browserOrder) == [1, 3]
-    assert controller.browserSlotActive == [True, False, True, False, False]
-    # Refocus walks to the PREVIOUS display position (slot 1).
-    assert controller.focusedBrowser == 1
-
-
-def test_close_last_browser_falls_back_to_terminal(controller):
-    controller.open_browser()  # slot 1, surface == browser
-    assert controller.centralSurface == "browser"
-
-    controller.close_browser(1)
-
-    assert list(controller.browserOrder) == []
-    assert controller.focusedBrowser == 0
-    # Closing the last window returns to the home surface.
-    assert controller.centralSurface == "terminal"
-
-
-def test_close_focused_browser_targets_focused_slot(controller):
-    controller.open_browser()  # slot 1
-    controller.open_browser()  # slot 2 (focused)
-    controller.close_focused_browser()
-    assert list(controller.browserOrder) == [1]
-
-
-def test_reopen_after_close_fills_freed_slot(controller):
-    controller.open_browser()  # 1
-    controller.open_browser()  # 2
-    controller.close_browser(1)  # frees internal slot 1
-    controller.open_browser()  # should reuse slot 1 (lowest free)
-    # Internal slot reused (fill-from-bottom), but APPENDED in display order.
-    assert sorted(controller.browserOrder) == [1, 2]
-    assert list(controller.browserOrder) == [2, 1]
-
-
-# ---------------------------------------------------------------------------
-# Defensive branches — mirror the agent pool's recovery paths (silent rot
-# risk: these only fire on a desync/double-close race, so they need a test).
-# ---------------------------------------------------------------------------
-
-
-def test_close_browser_desync_removes_from_tabs_without_raising(controller):
-    """A slot present in _browser_tabs but missing from _browser_order
-    (a double-close race) must NOT raise on order.index() — close_browser
-    drops it from tabs and emits once, mirroring close_agent's guard."""
-    controller.open_browser()  # slot 1, properly tracked
-    # Force a desync: add slot 2 to tabs only (not to the order list).
-    controller._browser_tabs[2] = {"url": "about:blank", "title": ""}
-    emissions = _capture(controller.browserTabsChanged)
-    controller.close_browser(2)  # must not raise
-    assert 2 not in controller._browser_tabs
-    assert len(emissions) == 1
-    # The properly-tracked slot 1 is untouched.
-    assert list(controller.browserOrder) == [1]
-
-
-def test_cycle_browser_focus_recovers_from_stale_focus(controller):
-    """If _focused_browser points at a slot no longer in display order
-    (stale state), cycle_browser_focus recovers to the first window via the
-    `order[0]` path rather than raising on order.index()."""
-    controller.open_browser()  # slot 1
-    controller.open_browser()  # slot 2
-    controller._focused_browser = 99  # stale — not in _browser_order
-    controller.cycle_browser_focus(1)
-    assert controller.focusedBrowser == controller.browserOrder[0]
-
-
-# ---------------------------------------------------------------------------
-# Title / URL bookkeeping — dedup, no spurious emits.
-# ---------------------------------------------------------------------------
-
-
-def test_on_browser_title_updates_and_dedups(controller):
     controller.open_browser()
+    # Slot 2 is reused, but it APPENDS in display order — display numbering is
+    # positional, internal slots are not.
+    assert controller._browser_order == [1, 3, 2]
+
+
+def test_pool_full_is_reported_not_silently_dropped(controller):
+    for _ in range(controller._MAX_INSTANCES):
+        controller.open_browser()
+    assert controller.open_browser() == "pool-full"
+    assert len(controller._browser_order) == controller._MAX_INSTANCES
+
+
+def test_chrome_failure_does_not_register_a_phantom_slot(controller):
+    """A slot registered for a window that was never created would show up in
+    browser_list_windows and be attributed to an agent — a lie the agent then
+    acts on."""
+    chrome(controller).open_error = "chrome-not-installed"
+    assert controller.open_browser() == "chrome-not-installed"
+    assert controller._browser_order == []
+
+
+def test_open_emits_one_registry_notify(controller):
     emissions = _capture(controller.browserTabsChanged)
-    controller.on_browser_title(1, "Example Domain")
-    assert controller.browserTitles[0] == "Example Domain"
+    controller.open_browser()
     assert len(emissions) == 1
-    controller.on_browser_title(1, "Example Domain")  # identical → no emit
-    assert len(emissions) == 1
-
-
-def test_on_browser_url_updates_and_dedups(controller):
-    controller.open_browser("about:blank")
-    emissions = _capture(controller.browserTabsChanged)
-    controller.on_browser_url(1, "https://example.com/")
-    assert controller.browserUrls[0] == "https://example.com/"
-    assert len(emissions) == 1
-    controller.on_browser_url(1, "https://example.com/")  # identical → no emit
-    assert len(emissions) == 1
-
-
-def test_title_and_url_callbacks_ignore_empty_slots(controller):
-    """Callbacks for a slot with no window are silent no-ops (the QML
-    delegate and Python bookkeeping can briefly disagree around teardown)."""
-    controller.on_browser_title(4, "ghost")  # no window in slot 4
-    controller.on_browser_url(4, "https://ghost")
-    assert controller.browserTitles[3] == ""
-    assert controller.browserUrls[3] == ""
 
 
 # ---------------------------------------------------------------------------
-# MCP window addressing (Stage 2b) — display position ↔ internal slot.
+# CDP target binding + live title/url
+# ---------------------------------------------------------------------------
+
+
+def test_target_id_binds_when_chrome_answers(controller):
+    controller.open_browser("https://a.test")
+    chrome(controller).complete_open("T-1")
+    assert controller._browser_tabs[1]["target"] == "T-1"
+
+
+def test_target_updates_refresh_title_and_url(controller):
+    controller.open_browser("https://a.test")
+    chrome(controller).complete_open("T-1")
+    controller._on_chrome_window_updated("T-1", "https://a.test/page", "A Page")
+    assert controller._browser_tabs[1]["title"] == "A Page"
+    assert controller._browser_tabs[1]["url"] == "https://a.test/page"
+
+
+def test_duplicate_target_update_does_not_re_emit(controller):
+    controller.open_browser("https://a.test")
+    chrome(controller).complete_open("T-1")
+    controller._on_chrome_window_updated("T-1", "u", "t")
+    emissions = _capture(controller.browserTabsChanged)
+    controller._on_chrome_window_updated("T-1", "u", "t")
+    assert emissions == []
+
+
+def test_unbound_slot_adopts_a_discovered_target(controller):
+    """The `--new-window` fallback (CDP not attached yet) creates a window we
+    never get a targetId for. Discovery is how we learn it — without adoption
+    that window would never update its title and could never be closed."""
+    controller.open_browser("https://a.test")
+    assert controller._browser_tabs[1]["target"] == ""
+    controller._on_chrome_window_updated("T-9", "https://a.test", "A")
+    assert controller._browser_tabs[1]["target"] == "T-9"
+
+
+def test_chrome_internal_pages_are_never_adopted(controller):
+    """Chrome opens a new-tab page in situations we don't control. Adopting
+    one would point the slot at a window the agent never asked for, leaving
+    the real window unattributed and un-closable. Observed live: on a cold
+    start the newtab target was discovered FIRST, ahead of the real page."""
+    controller.open_browser("https://a.test")
+    controller._on_chrome_window_updated("T-NEWTAB", "chrome://newtab/", "New Tab")
+    assert controller._browser_tabs[1]["target"] == ""
+    controller._on_chrome_window_updated("T-REAL", "https://a.test", "A")
+    assert controller._browser_tabs[1]["target"] == "T-REAL"
+
+
+def test_targets_with_no_waiting_slot_are_ignored(controller):
+    """The user's own windows/tabs are not ours to pool."""
+    controller.open_browser()
+    chrome(controller).complete_open("T-1")
+    controller._on_chrome_window_updated("USER-TAB", "https://x.test", "X")
+    assert list(controller._browser_tabs) == [1]
+    assert controller._browser_tabs[1]["target"] == "T-1"
+
+
+def test_user_closing_a_window_drops_its_slot(controller):
+    controller.open_browser()
+    chrome(controller).complete_open("T-1")
+    controller._on_chrome_window_gone("T-1")
+    assert controller._browser_order == []
+
+
+def test_unknown_target_gone_is_inert(controller):
+    controller.open_browser()
+    chrome(controller).complete_open("T-1")
+    controller._on_chrome_window_gone("SOMEONE-ELSE")
+    assert controller._browser_order == [1]
+
+
+# ---------------------------------------------------------------------------
+# MCP tool bodies
 # ---------------------------------------------------------------------------
 
 
 def test_read_browser_windows_reports_display_positions(controller):
-    controller.open_browser("https://a.com")  # slot 1, display 1
-    controller.on_browser_title(1, "A")
-    controller.open_browser("https://b.com")  # slot 2, display 2 (focused)
-    info = controller._read_browser_windows()
-    assert info["ok"] is True
-    assert info["focused"] == 2  # display position, not internal slot
-    assert info["windows"][0] == {"window": 1, "title": "A", "url": "https://a.com"}
-    assert info["windows"][1] == {"window": 2, "title": "", "url": "https://b.com"}
-
-
-def test_open_browser_for_mcp_returns_display_number(controller):
-    # Returns the display number plus url/title — the correlator an agent hands
-    # to chrome-devtools-mcp's select_page (the committed url settles later).
-    assert controller._open_browser_for_mcp("https://x.com") == {
-        "ok": True,
-        "window": 1,
-        "url": "https://x.com",
-        "title": "",
-    }
-    assert controller.browserUrls[0] == "https://x.com"
-    # Second open appends as display position 2.
-    assert controller._open_browser_for_mcp("about:blank") == {
-        "ok": True,
-        "window": 2,
-        "url": "about:blank",
-        "title": "",
-    }
-
-
-def test_open_browser_for_mcp_pool_full(controller):
-    for _ in range(controller.maxBrowserSlots):
-        controller._open_browser_for_mcp("about:blank")
-    result = controller._open_browser_for_mcp("about:blank")
-    assert result["ok"] is False
-    assert result["error"] == "pool-full"
-
-
-# ---------------------------------------------------------------------------
-# Agent ↔ browser attribution (Stage 3) — the chip browser glyph's data.
-# `<our_pid>_<slot>` ids map to a chip slot; the count/active lists are
-# indexed slot-1 (agent slot 2 → index 1), mirroring agentTitles.
-#
-# NB: these call _record_browser_attribution DIRECTLY. Since the Stage-4
-# chrome-devtools-mcp migration nothing in production calls it (page driving
-# bypasses our bridge), so the PULSE path exercised here is a deliberately
-# DORMANT hook — kept (and tested) for the future CDP monitor that re-activates
-# it. The OWNERSHIP path (glyph visibility, click-jump) IS live via
-# _open_browser_for_mcp → _claim_browser_window.
-# ---------------------------------------------------------------------------
-
-
-def test_attribution_records_ownership_and_pulse(controller):
-    aid = f"{os.getpid()}_2"  # agent slot 2 → index 1
-    controller.open_browser()  # browser slot 1
-    emissions = _capture(controller.agentBrowserChanged)
-
-    controller._record_browser_attribution(aid, 1, "start")
-    assert controller.agentBrowserCount[1] == 1
-    assert controller.agentBrowserActive[1] is True  # in-flight → pulse
-
-    controller._record_browser_attribution(aid, 1, "end")
-    assert controller.agentBrowserActive[1] is False  # op done → no pulse
-    assert controller.agentBrowserCount[1] == 1  # ownership persists
-    assert len(emissions) == 2
-
-
-def test_attribution_ignores_foreign_and_malformed_ids(controller):
-    controller.open_browser()
-    controller._record_browser_attribution("", 1, "start")  # untagged
-    controller._record_browser_attribution(
-        f"{os.getpid() + 1}_2", 1, "start"
-    )  # foreign pid
-    controller._record_browser_attribution("garbage", 1, "start")  # malformed
-    assert controller.agentBrowserCount == [0] * controller.maxAgentSlots
-    assert controller.agentBrowserActive == [False] * controller.maxAgentSlots
-
-
-def test_focus_agent_browser_jumps_to_newest_owned_window(controller):
-    aid = f"{os.getpid()}_1"  # agent slot 1
-    controller.open_browser()  # browser slot 1
-    controller.open_browser()  # browser slot 2
-    controller._record_browser_attribution(aid, 1, "start")
-    controller._record_browser_attribution(aid, 2, "start")  # newest-driven = 2
-    controller.set_central_surface("editor")
-    focus_args = _capture_int(controller.focusBrowserRequested)
-
-    controller.focus_agent_browser(1)
-
-    assert controller.focusedBrowser == 2  # newest owned window
-    assert controller.centralSurface == "browser"  # focus_browser switches surface
-    assert focus_args == [2]
-
-
-def test_redriving_a_window_makes_it_the_newest_jump_target(controller):
-    aid = f"{os.getpid()}_1"
-    controller.open_browser()  # slot 1
-    controller.open_browser()  # slot 2
-    controller._record_browser_attribution(aid, 1, "start")
-    controller._record_browser_attribution(aid, 2, "start")
-    controller._record_browser_attribution(aid, 1, "start")  # re-drive 1 → newest
-
-    controller.focus_agent_browser(1)
-    assert controller.focusedBrowser == 1
-    assert controller.agentBrowserCount[0] == 2  # owns both, no duplicate entry
-
-
-def test_focus_agent_browser_noop_without_owned_window(controller):
-    controller.set_central_surface("editor")
-    emissions = _capture_int(controller.focusBrowserRequested)
-    controller.focus_agent_browser(3)  # agent 3 owns nothing
-    assert emissions == []
-    assert controller.centralSurface == "editor"  # no spurious surface switch
-
-
-def test_close_browser_prunes_agent_ownership(controller):
-    aid = f"{os.getpid()}_1"
-    controller.open_browser()  # browser slot 1
-    controller._record_browser_attribution(aid, 1, "start")
-    assert controller.agentBrowserCount[0] == 1
-
+    for url in ("https://a.test", "https://b.test"):
+        controller.open_browser(url)
     controller.close_browser(1)
-    assert controller.agentBrowserCount[0] == 0  # closed window → link gone
-
-
-def test_open_browser_for_mcp_attributes_window_to_caller(controller):
-    aid = f"{os.getpid()}_3"  # agent slot 3 → index 2
-    result = controller._open_browser_for_mcp("https://x.com", aid)
-    assert result == {"ok": True, "window": 1, "url": "https://x.com", "title": ""}
-    assert controller.agentBrowserCount[2] == 1  # caller owns the opened window
-    assert controller.agentBrowserActive[2] is False  # open's start/end nets to idle
-
-    controller.set_central_surface("editor")
-    controller.focus_agent_browser(3)
-    assert controller.focusedBrowser == 1  # the opened window is the jump target
-
-
-def test_close_agent_prunes_browser_links(controller):
-    """Closing an agent drops its browser ownership/activity so a freed slot
-    doesn't carry a stale link into a future agent reusing the slot."""
-    aid = f"{os.getpid()}_2"
-    controller.open_browser()  # browser slot 1
-    controller._record_browser_attribution(aid, 1, "start")
-    assert controller.agentBrowserCount[1] == 1
-    # Minimal agent state so close_agent's normal (non-desync) path runs.
-    controller._term_agents[2] = {"harness": "claude", "title": ""}
-    controller._agent_order = [2]
-
-    controller.close_agent(2)
-    assert controller.agentBrowserCount[1] == 0  # links pruned on agent close
-
-
-def test_close_agent_desync_branch_also_prunes_browser_links(controller):
-    """close_agent's defensive desync branch (slot in _term_agents but not
-    _agent_order) must prune browser links too — it calls the same helper."""
-    aid = f"{os.getpid()}_2"
-    controller.open_browser()  # browser slot 1
-    controller._record_browser_attribution(aid, 1, "start")
-    assert controller.agentBrowserCount[1] == 1
-    # Force the desync: agent present in _term_agents but absent from _agent_order.
-    controller._term_agents[2] = {"harness": "claude", "title": ""}
-    # _agent_order intentionally left without slot 2 → desync recovery path.
-
-    controller.close_agent(2)  # must not raise, and must prune
-    assert controller.agentBrowserCount[1] == 0
-
-
-def test_attribution_end_after_agent_close_does_not_resurrect_or_emit(controller):
-    """A late op 'end' arriving after the agent was closed (its counter
-    dropped) must not resurrect ownership nor fire a spurious change signal."""
-    aid = f"{os.getpid()}_2"
-    controller.open_browser()  # browser slot 1
-    controller._record_browser_attribution(aid, 1, "start")  # owns + pulsing
-    controller._drop_agent_browser_links(2)  # simulate the agent closing mid-op
-    assert controller.agentBrowserCount[1] == 0
-    assert controller.agentBrowserActive[1] is False
-
-    emissions = _capture(controller.agentBrowserChanged)
-    controller._record_browser_attribution(aid, 1, "end")  # the late op result
-    assert controller.agentBrowserCount[1] == 0  # no ownership resurrection
-    assert controller.agentBrowserActive[1] is False
-    assert emissions == []  # guarded emit — no spurious re-bind
-
-
-# ---------------------------------------------------------------------------
-# Agent-owned browser (notify, don't yank) — an agent opening a window lights
-# the chip globe but must NOT pull the user's surface; they jump on their own
-# terms. The user previously got yanked to the browser on every agent open.
-# ---------------------------------------------------------------------------
-
-
-def test_open_browser_for_mcp_does_not_switch_surface(controller):
-    aid = f"{os.getpid()}_1"
-    controller.set_central_surface("editor")
-    surf_emissions = _capture(controller.centralSurfaceChanged)
-
-    result = controller._open_browser_for_mcp("https://x.com", aid)
-
+    result = controller._read_browser_windows()
     assert result["ok"] is True
-    assert controller.centralSurface == "editor"  # NOT yanked to browser
-    assert controller.focusedBrowser == 0  # focus untouched (no focus_browser)
-    assert surf_emissions == []
-    # The window still exists + is owned → the globe lights; just not focused.
-    assert list(controller.browserOrder) == [1]
-    assert controller.agentBrowserCount[0] == 1
+    assert [w["window"] for w in result["windows"]] == [1]
+    assert result["windows"][0]["url"] == "https://b.test"
 
 
-def test_manual_open_browser_still_focuses_and_switches(controller):
-    """The manual path (Ctrl+T → open_browser, focus default True) is unchanged
-    — only the agent path opts out of the surface switch."""
+def test_read_browser_windows_has_no_focus_field(controller):
+    """ "Which window is focused" is a question about the user's compositor
+    now, not about IDE state — a constant 0 would be a lie dressed as data."""
+    controller.open_browser()
+    assert "focused" not in controller._read_browser_windows()
+
+
+def test_open_for_mcp_returns_display_number(controller):
+    result = controller._open_browser_for_mcp("https://a.test")
+    assert result["ok"] is True
+    assert result["window"] == 1
+    assert result["url"] == "https://a.test"
+
+
+def test_open_for_mcp_surfaces_chrome_failure_to_the_agent(controller):
+    chrome(controller).open_error = "chrome-not-installed"
+    result = controller._open_browser_for_mcp("https://a.test")
+    assert result == {"ok": False, "error": "chrome-not-installed"}
+
+
+def test_open_for_mcp_pool_full(controller):
+    for _ in range(controller._MAX_INSTANCES):
+        controller.open_browser()
+    assert controller._open_browser_for_mcp("https://a.test") == {
+        "ok": False,
+        "error": "pool-full",
+    }
+
+
+def test_open_for_mcp_never_switches_surface(controller):
+    """An agent browsing must not move the user. With Chrome external the
+    window maps silently on the IDE's workspace via the pin rule."""
     controller.set_central_surface("editor")
-    controller.open_browser("https://x.com")  # focus defaults True
-    assert controller.centralSurface == "browser"
-    assert controller.focusedBrowser == 1
+    controller._open_browser_for_mcp("https://a.test")
+    assert controller.centralSurface == "editor"
 
 
 # ---------------------------------------------------------------------------
-# Attention badge — browser_request_attention lights the dot on the agent's
-# globe; cleared on view (focus_agent_browser), window close, or agent death.
+# Agent ownership + attention
 # ---------------------------------------------------------------------------
 
 
-def test_request_attention_lights_dot_for_owning_agent(controller):
-    aid = f"{os.getpid()}_2"  # agent slot 2 → index 1
-    controller._open_browser_for_mcp("https://x.com", aid)  # agent owns a window
-    emissions = _capture(controller.agentBrowserChanged)
-
-    result = controller._set_browser_attention_for_mcp(aid, "look here")
-
-    assert result == {"ok": True}
-    assert controller.agentBrowserAttention[1] is True
-    assert len(emissions) == 1
-    assert controller._agent_browser_attention[2] == "look here"  # message stored
+def test_open_for_mcp_attributes_the_window_to_its_caller(controller):
+    controller._open_browser_for_mcp("https://a.test", _agent_id(2))
+    assert controller._agent_browser_windows[2] == [1]
+    assert controller.agentBrowserCount[1] == 1
 
 
-def test_request_attention_rejects_agent_without_window(controller):
-    """The dot rides the globe (only shown when the agent owns ≥1 window), so a
-    request with no window is rejected rather than stored-but-invisible."""
-    aid = f"{os.getpid()}_2"
-    result = controller._set_browser_attention_for_mcp(aid)
-    assert result == {"ok": False, "error": "no-window"}
-    assert controller.agentBrowserAttention[1] is False
+def test_foreign_and_malformed_ids_never_accrue_links(controller):
+    for bad in ("999999_1", "garbage", "", "abc_x"):
+        controller._open_browser_for_mcp("https://a.test", bad)
+    assert controller._agent_browser_windows == {}
 
 
-def test_request_attention_rejects_foreign_or_untagged(controller):
-    controller._open_browser_for_mcp("https://x.com", f"{os.getpid()}_2")
-    assert controller._set_browser_attention_for_mcp("") == {
-        "ok": False,
-        "error": "unknown-agent",
+def test_newest_window_is_last(controller):
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    controller._open_browser_for_mcp("https://b.test", _agent_id(1))
+    assert controller._agent_browser_windows[1] == [1, 2]
+
+
+def test_closing_a_window_prunes_ownership(controller):
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    controller.close_browser(1)
+    assert controller._agent_browser_windows[1] == []
+    assert controller.agentBrowserCount[0] == 0
+
+
+def test_request_attention_lights_the_dot(controller):
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    assert controller._set_browser_attention_for_mcp(_agent_id(1), "look") == {
+        "ok": True
     }
-    assert controller._set_browser_attention_for_mcp(f"{os.getpid() + 1}_2") == {
-        "ok": False,
-        "error": "unknown-agent",
-    }
-    assert controller.agentBrowserAttention == [False] * controller.maxAgentSlots
-
-
-def test_focus_agent_browser_clears_attention(controller):
-    aid = f"{os.getpid()}_1"
-    controller._open_browser_for_mcp("https://x.com", aid)
-    controller._set_browser_attention_for_mcp(aid, "look")
     assert controller.agentBrowserAttention[0] is True
 
-    controller.focus_agent_browser(1)  # viewing it is what clears the dot
+
+def test_request_attention_requires_an_owned_window(controller):
+    """The dot rides the globe, which only renders at count > 0 — storing an
+    attention the user can never see would be a silently dropped signal."""
+    assert controller._set_browser_attention_for_mcp(_agent_id(1)) == {
+        "ok": False,
+        "error": "no-window",
+    }
+
+
+def test_request_attention_rejects_foreign_callers(controller):
+    assert controller._set_browser_attention_for_mcp("999999_1") == {
+        "ok": False,
+        "error": "unknown-agent",
+    }
+
+
+def test_checking_in_clears_the_attention_dot(controller):
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    controller._set_browser_attention_for_mcp(_agent_id(1), "look")
+    controller.focus_agent_browser(1)
     assert controller.agentBrowserAttention[0] is False
 
 
-def test_closing_last_window_clears_attention(controller):
-    """When an agent's last window closes, its attention is dropped so a fresh
-    window later doesn't re-light a stale dot."""
-    aid = f"{os.getpid()}_1"
-    controller._open_browser_for_mcp("https://x.com", aid)  # window slot 1
-    controller._set_browser_attention_for_mcp(aid, "look")
-    assert controller.agentBrowserAttention[0] is True
-
+def test_closing_the_last_window_clears_attention(controller):
+    """A lingering entry would wrongly re-light the dot if the agent later
+    opens a fresh window."""
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    controller._set_browser_attention_for_mcp(_agent_id(1), "look")
     controller.close_browser(1)
     assert controller.agentBrowserAttention[0] is False
 
 
-def test_attention_persists_until_agents_last_window_closes(controller):
-    """With an agent owning TWO windows, closing the first KEEPS attention (the
-    `not owned` guard in _drop_browser_window_links only clears on the agent's
-    LAST window); closing the second finally clears it."""
-    aid = f"{os.getpid()}_1"
-    controller._open_browser_for_mcp("https://a.com", aid)  # window slot 1
-    controller._open_browser_for_mcp("https://b.com", aid)  # window slot 2
-    controller._set_browser_attention_for_mcp(aid, "look")
-    assert controller.agentBrowserCount[0] == 2
+def test_attention_survives_while_any_window_remains(controller):
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    controller._open_browser_for_mcp("https://b.test", _agent_id(1))
+    controller._set_browser_attention_for_mcp(_agent_id(1), "look")
+    controller.close_browser(1)
     assert controller.agentBrowserAttention[0] is True
 
-    controller.close_browser(1)  # still owns window 2 → attention stays
-    assert controller.agentBrowserAttention[0] is True
 
-    controller.close_browser(2)  # last window gone → attention cleared
+# ---------------------------------------------------------------------------
+# Notify-don't-yank (Ctrl+Shift+B / chip globe)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def notifications(monkeypatch) -> list[tuple[str, str]]:
+    captured: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        AppController,
+        "_notify_desktop",
+        lambda self, title, body: captured.append((title, body)),
+    )
+    return captured
+
+
+def test_notify_reports_instead_of_navigating(controller, notifications):
+    """The chord used to JUMP. With Chrome external, jumping means dragging
+    the user to another Hyprland workspace mid-task."""
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    controller._focused_term_agent = 1
+    surface_before = controller.centralSurface
+
+    controller.notify_focused_agent_browser()
+
+    assert controller.centralSurface == surface_before
+    title, body = notifications[0]
+    assert "browser" in title
+    assert "workspace 6" in body and "1 window" in body
+
+
+def test_notify_includes_the_agents_message(controller, notifications):
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    controller._set_browser_attention_for_mcp(_agent_id(1), "the deploy failed")
+    controller._focused_term_agent = 1
+    controller.notify_focused_agent_browser()
+    assert "the deploy failed" in notifications[0][1]
+
+
+def test_notify_without_an_owned_window_is_a_no_op(controller, notifications):
+    controller._focused_term_agent = 1
+    controller.notify_focused_agent_browser()
+    assert notifications == []
+
+
+# ---------------------------------------------------------------------------
+# Agent death
+# ---------------------------------------------------------------------------
+
+
+def test_dead_agents_solely_owned_window_is_closed_in_chrome(controller):
+    """Not just unlinked: an orphan Chrome window would sit on the workspace
+    with nothing in the IDE referring to it."""
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    chrome(controller).complete_open("T-1")
+    controller._release_agent_browser_windows(1)
+    assert chrome(controller).closed == ["T-1"]
+    assert controller._browser_order == []
+
+
+def test_window_co_owned_by_a_living_agent_survives(controller):
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    chrome(controller).complete_open("T-1")
+    controller._claim_browser_window(2, 1)
+    controller._release_agent_browser_windows(1)
+    assert chrome(controller).closed == []
+    assert controller._browser_order == [1]
+    assert controller._agent_browser_windows[2] == [1]
+
+
+def test_agent_death_drops_its_links_and_attention(controller):
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    controller._set_browser_attention_for_mcp(_agent_id(1), "look")
+    controller._release_agent_browser_windows(1)
+    assert 1 not in controller._agent_browser_windows
     assert controller.agentBrowserAttention[0] is False
 
 
 # ---------------------------------------------------------------------------
-# Leak safety — closing an agent must close the windows it SOLELY owns (free
-# the WebEngineView + avoid an unreachable orphan now the tab is gone), while
-# a window co-owned by another living agent is kept.
+# Shape guards
 # ---------------------------------------------------------------------------
 
 
-def test_close_agent_closes_its_solely_owned_window(controller):
-    aid = f"{os.getpid()}_2"
-    controller._open_browser_for_mcp("https://x.com", aid)  # agent 2 owns window 1
-    assert list(controller.browserOrder) == [1]
-    controller._term_agents[2] = {"harness": "claude", "title": ""}
-    controller._agent_order = [2]
-
-    controller.close_agent(2)
-
-    # The orphaned window is closed (RAM freed), not left dangling.
-    assert list(controller.browserOrder) == []
-    assert controller.browserSlotActive == [False] * controller.maxBrowserSlots
-    assert controller.agentBrowserCount[1] == 0
+def test_agent_browser_lists_match_slot_count(controller):
+    assert len(controller.agentBrowserCount) == controller._MAX_INSTANCES
+    assert len(controller.agentBrowserAttention) == controller._MAX_INSTANCES
 
 
-def test_close_agent_keeps_window_co_owned_by_a_living_agent(controller):
-    """Two agents drive the same window; closing one keeps it for the other,
-    then closing the second finally frees it."""
-    aid_a = f"{os.getpid()}_2"  # index 1
-    aid_b = f"{os.getpid()}_3"  # index 2
-    controller._open_browser_for_mcp("https://x.com", aid_a)  # window 1, owned by A
-    controller._record_browser_attribution(aid_b, 1, "start")  # B co-drives window 1
-    assert controller.agentBrowserCount[1] == 1
-    assert controller.agentBrowserCount[2] == 1
-
-    # Close agent A — window 1 is still owned by living agent B, so it stays.
-    controller._term_agents[2] = {"harness": "claude", "title": ""}
-    controller._agent_order = [2]
-    controller.close_agent(2)
-    assert list(controller.browserOrder) == [1]  # window kept
-    assert controller.agentBrowserCount[1] == 0  # A's link gone
-    assert controller.agentBrowserCount[2] == 1  # B still owns it
-
-    # Close agent B — now solely owned → finally freed.
-    controller._term_agents[3] = {"harness": "claude", "title": ""}
-    controller._agent_order = [3]
-    controller.close_agent(3)
-    assert list(controller.browserOrder) == []
-    assert controller.agentBrowserCount[2] == 0
+def test_shutdown_stops_chrome(controller):
+    """The pin rule lives in the running compositor — an IDE that exits
+    without releasing its class leaves a rule behind forever."""
+    host = chrome(controller)
+    controller.shutdown()
+    assert host.stop_calls == 1
