@@ -22,15 +22,19 @@ from symmetria_ide import chrome_host
 
 
 class FakeProc:
-    def __init__(self, argv):
+    def __init__(self, argv, stderr_lines=()):
         self.argv = argv
         self.terminated = False
+        self.waited = False
         self._alive = True
+        # Bytes, like the real pipe yields.
+        self.stderr = iter(list(stderr_lines))
 
     def poll(self):
         return None if self._alive else 0
 
     def wait(self):
+        self.waited = True
         return 0
 
     def terminate(self):
@@ -165,6 +169,37 @@ class TestIdentity:
         host.open_window("https://a.test", lambda _r: None)
         assert host.wayland_socket == host.window_class
         assert f"--class={host.window_class}" in host.test_spawns[0]["argv"]
+
+
+class TestCrashForensics:
+    """Chrome dies by printing a reason to stderr and raising SIGTRAP. The core
+    it leaves is a stripped binary, so that line is the ONLY readable account —
+    discard it and a crash reads as "the browser silently vanished"."""
+
+    def test_stderr_is_piped_not_discarded(self, host):
+        host.open_window("https://a.test", lambda _r: None)
+        assert host.test_spawns[0]["proc"].stderr is not None
+
+    def test_fatal_lines_are_logged_at_error(self, host, caplog):
+        host.open_window("https://a.test", lambda _r: None)
+        host._proc = FakeProc(
+            [],
+            [
+                b"[123:456] some routine warning\n",
+                b"[123:456] Wayland protocol error: wl_pointer@17\n",
+            ],
+        )
+        with caplog.at_level("ERROR"):
+            host._drain_chrome_stderr()
+        assert any("protocol error" in r.getMessage() for r in caplog.records)
+
+    def test_draining_also_reaps(self, host):
+        """The drain replaces the reaper thread's wait(), so it has to do that
+        job too — and an unread PIPE would block Chrome once it fills."""
+        proc = FakeProc([], [b"noise\n"])
+        host._proc = proc
+        host._drain_chrome_stderr()
+        assert proc.waited
 
 
 class TestTeardown:

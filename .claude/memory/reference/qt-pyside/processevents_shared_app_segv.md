@@ -5,6 +5,7 @@ metadata:
   node_type: memory
   type: reference
   originSessionId: 6e18d2b3-fa99-4df3-ae3c-7e2a050321cf
+  modified: 2026-07-27T20:01:37.876Z
 ---
 
 **Never call `QCoreApplication.processEvents()` (or otherwise pump the event
@@ -31,3 +32,27 @@ exits 139 with a faulthandler dump whose Current-thread C stack sits in
 The production code's queued connections are correct and necessary
 (worker→GUI marshaling per project-standards §4 P2) — this rule is about
 TEST harnesses only, not the runtime wiring.
+
+## Live violation: `tests/test_agent_events.py::_pump_events` (open, 2026-07-27)
+
+That helper still calls `processEvents()`, from nine call sites, and it is the
+suite's main source of intermittent failure. Measured that day: the full suite
+died inside that file in **4 of 9** runs — as a HANG, as exit 139 (SEGV) and as
+exit 134 (glibc aborting on a corrupted heap), i.e. the same race surfacing
+three different ways. The file passes in ISOLATION every time (17 passed,
+~7s), which is the signature described above.
+
+Two things worth knowing before attempting this again:
+
+- **It is load-sensitive.** The failure rate rose sharply while an unrelated
+  agent's Playwright run held the machine at load 11–16. Do not read a clean
+  run on an idle machine as a fix.
+- **Narrowing the pump to `sendPostedEvents(None, QEvent.Type.MetaCall)` does
+  NOT fix it** — tried, still 3/3 failures. So `DeferredDelete` is not the
+  whole story, and the real fix is the one prescribed above: drop the pump and
+  spy with a `Qt.DirectConnection`, so the assertion never needs the loop. That
+  is a rewrite of all nine call sites, not a one-line change.
+
+Do not attribute a failure in this file to whatever you just changed without
+first re-running with your change stashed — an interleaved A/B is what proved
+the browser work innocent, after two smaller samples had wrongly implicated it.

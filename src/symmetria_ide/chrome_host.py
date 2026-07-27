@@ -354,7 +354,15 @@ class ChromeHost(QObject):
                 argv,
                 env=self.chrome_env(),
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                # NOT DEVNULL: this is the ONLY channel that explains a Chrome
+                # crash. Chrome dies on a Wayland protocol error or a failed
+                # CHECK by printing the reason here and then raising SIGTRAP —
+                # and the core it leaves is a stripped binary, so the backtrace
+                # is bare addresses. Discarding this makes a crash look like
+                # "the browser silently vanished", which is exactly what it
+                # looked like the first time (chased through coredumpctl for
+                # nothing). Cheap: Chrome is quiet in normal operation.
+                stderr=subprocess.PIPE,
             )
         except OSError:
             log.exception("failed to spawn Chrome")
@@ -365,9 +373,11 @@ class ChromeHost(QObject):
             self._profile,
         )
         # Reap in the background so a user-closed Chrome doesn't linger as a
-        # zombie for the life of the IDE.
+        # zombie for the life of the IDE. Draining stderr is part of reaping,
+        # not a separate nicety: a PIPE nobody reads fills its buffer and
+        # BLOCKS Chrome the moment it becomes chatty.
         threading.Thread(
-            target=self._proc.wait, daemon=True, name="chrome-reap"
+            target=self._drain_chrome_stderr, daemon=True, name="chrome-reap"
         ).start()
         self._cdp.connect_to(self.cdp_port())
         return ""
@@ -394,6 +404,47 @@ class ChromeHost(QObject):
         # setting WAYLAND_DISPLAY does not close.
         env.pop("WAYLAND_SOCKET", None)
         return env
+
+    def _drain_chrome_stderr(self) -> None:
+        """Forward Chrome's stderr into the app log, then reap the process.
+
+        Runs on a daemon thread and only ever logs — no Qt signal crosses out
+        of here, so it is outside gotcha #10's blast radius.
+
+        Chrome is noisy about things that do not matter (font, GPU and dbus
+        warnings on every launch), so the routine lines go to debug. The lines
+        that matter announce themselves loudly enough to grep for, and those
+        are re-logged at error: a Wayland protocol error or a failed CHECK is
+        the last thing Chrome says before SIGTRAP, and it is the only readable
+        account of why — the core is a stripped binary.
+        """
+        proc = self._proc
+        if proc is None:
+            return
+        # getattr, not attribute access: `Popen.stderr` is None whenever the
+        # pipe was not requested, and this must degrade to "just reap" rather
+        # than take the reaper down with it.
+        stream = getattr(proc, "stderr", None)
+        try:
+            if stream is not None:
+                for raw in stream:
+                    line = raw.decode("utf-8", "replace").rstrip()
+                    if not line:
+                        continue
+                    lowered = line.lower()
+                    if (
+                        "protocol error" in lowered
+                        or "check failed" in lowered
+                        or "fatal" in lowered
+                    ):
+                        log.error("chrome: %s", line)
+                    else:
+                        log.debug("chrome: %s", line)
+        except (OSError, ValueError):
+            # The pipe went away with the process — nothing left to report.
+            pass
+        finally:
+            proc.wait()
 
     @Slot()
     def _on_cdp_disconnected(self) -> None:
