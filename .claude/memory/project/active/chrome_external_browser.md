@@ -51,6 +51,18 @@ Open items for it, in order of how much they'd cost:
 4. **Chord precedence** — unverified that `Qt.ApplicationShortcut` still beats a
    focused `ShellSurfaceItem` the way it beats QMLTermWidget.
 
+**E2E verified 2026-07-27** (live IDE on ws 6, agent-shaped MCP client with the
+attribution header, then chrome-devtools-mcp against the same Chrome): windows
+born on the IDE's workspace without touching the user's; registry carrying live
+titles/urls from CDP discovery; `browser_request_attention` accepted; `new_page`
+working (it returned "Not supported" on QtWebEngine) and `take_screenshot`
+succeeding **while Chrome sat on a non-composited workspace** — the exact case
+that used to stall. Killing the IDE closed Chrome and released the window rule.
+
+One thing the E2E taught that unit tests could not: a registry "window" is a CDP
+**page target**, and `new_page` opens a TAB (it doesn't pass `newWindow`), so
+target count and window count diverge.
+
 **v1 gaps of the shipped pinned version:** windows created directly by an agent
 through chrome-devtools-mcp (`new_page`) are unattributed (needs a
 `Target.targetCreated` monitor); already-open windows don't follow the IDE
