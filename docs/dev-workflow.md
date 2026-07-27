@@ -264,6 +264,15 @@ See CLAUDE.md "The browser panes" for the model; this section is how to exercise
   MATCH BY DESIGN — `new_page` opens a tab, so targets outnumber toplevels. A
   target absent from the registry means adoption did not happen (check for a
   `chrome://` url — those are deliberately never adopted).
+- **⚠ A stale `SingletonLock` looks exactly like a code regression.** Chrome is a
+  singleton per `--user-data-dir`, and killing the IDE with `kill` does not always
+  run the Qt teardown that terminates it — so the profile can be left holding a
+  `SingletonLock` symlink pointing at a dead pid. The NEXT launch then spawns
+  Chrome, serves CDP for a second or two, and exits, which reads in the log as
+  `cdp: attached` immediately followed by `Chrome disconnected`. Cost real time
+  once: the symptom appeared in the same run as a QML change and was assumed to
+  be it. Check `<profile>/SingletonLock` before suspecting your diff; clearing
+  `SingletonLock`/`SingletonSocket`/`SingletonCookie` fixes it.
 - **⚠ Never `pkill -f` anything in this area.** The pattern matches the shell
   running it (observed: exit 144, the command killing itself), and browser/IDE
   processes share command lines with the daily driver. Resolve PIDs first, then
