@@ -3,6 +3,8 @@
 
 #include "symmetriashellsurfaceitem.h"
 
+#include "symmetriatrace.h"
+
 #include <QtGui/QWheelEvent>
 
 namespace {
@@ -30,6 +32,16 @@ SymmetriaShellSurfaceItem::SymmetriaShellSurfaceItem(QQuickItem *parent)
 void SymmetriaShellSurfaceItem::wheelEvent(QWheelEvent *event)
 {
     m_carry += event->angleDelta();
+
+    // The one place that can distinguish "the wheel never arrived" from "it
+    // arrived and was thrown away", which every other symptom of this confuses.
+    // Enable with SYMMETRIA_COMPOSITOR_DEBUG=1; see symmetriatrace.h for why
+    // this does not go through Qt logging.
+    symmetria::trace(
+        "wheel angle=(%d,%d) pixel=(%d,%d) phase=%d carry=(%d,%d) surface=%s",
+        event->angleDelta().x(), event->angleDelta().y(),
+        event->pixelDelta().x(), event->pixelDelta().y(), int(event->phase()),
+        m_carry.x(), m_carry.y(), surface() != nullptr ? "yes" : "NONE");
 
     const QPoint step(quantise(m_carry.x()), quantise(m_carry.y()));
     if (step.isNull()) {

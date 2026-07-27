@@ -4,29 +4,17 @@
 
 #include "symmetriacompositor.h"
 
+#include "symmetriatrace.h"
+
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QMimeData>
 #include <QtCore/QStringList>
 #include <QtGui/QClipboard>
 #include <QtGui/QGuiApplication>
 
-#include <cstdio>
-#include <cstdlib>
-
 namespace {
 
-// Traced on stderr rather than through Qt's logging so it does not depend on
-// the HOST application's message handler at all. The IDE installs one that
-// routes qDebug (and QML console.log) to a level it does not print — and a
-// clipboard bridge that silently does nothing is exactly the failure this
-// needs to be able to explain. Off unless SYMMETRIA_COMPOSITOR_DEBUG is set.
-void trace(const char *what, int formatCount)
-{
-    static const bool enabled = std::getenv("SYMMETRIA_COMPOSITOR_DEBUG") != nullptr;
-    if (enabled)
-        std::fprintf(stderr, "[symmetria-compositor] %s (%d formats)\n", what,
-                     formatCount);
-}
+using symmetria::trace;
 
 // Both directions hand us a QMimeData we do not own, with different lifetimes:
 // the one from a nested client belongs to the compositor's data device, and
@@ -91,7 +79,7 @@ void SymmetriaCompositor::pushSelectionText(const QString &text)
 {
     QMimeData payload;
     payload.setText(text);
-    trace("pushSelectionText", int(payload.formats().size()));
+    trace("pushSelectionText (%d formats)", int(payload.formats().size()));
     overrideSelection(&payload);
 }
 
@@ -113,8 +101,8 @@ void SymmetriaCompositor::retainedSelectionReceived(QMimeData *mimeData)
         return; // our own push, arriving back — see m_lastBridged
     m_lastBridged = incoming;
 
-    trace("client took the selection",
-          mimeData != nullptr ? int(mimeData->formats().size()) : -1);
+    trace("client took the selection (%d formats)",
+          int(mimeData->formats().size()));
     // QClipboard takes ownership of the QMimeData passed to setMimeData.
     clipboard->setMimeData(cloneMimeData(mimeData));
 }
@@ -141,8 +129,8 @@ void SymmetriaCompositor::pushHostSelectionToClients()
         return; // already on both sides — see m_lastBridged
     m_lastBridged = outgoing;
 
-    trace("host selection changed",
-          hostData != nullptr ? int(hostData->formats().size()) : -1);
+    trace("host selection changed (%d formats)",
+          int(hostData->formats().size()));
 
     // `overrideSelection` takes a `const QMimeData *` and transfers no
     // ownership: it reads the object synchronously to build a data source for

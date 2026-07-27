@@ -16,6 +16,7 @@ qt_add_qml_module(symmetriacompositor
     PLUGIN_TARGET symmetriacompositor
     OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/qml/Symmetria/Compositor
     SOURCES
+        symmetriatrace.h
         symmetriacompositor.h
         symmetriacompositor.cpp
         symmetriaoutput.h
