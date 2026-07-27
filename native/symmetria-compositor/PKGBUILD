@@ -27,7 +27,7 @@
 # near-identical compositor declarations.
 
 pkgname=symmetria-compositor
-pkgver=r480.4e0d77c
+pkgver=r483.9fcf45f
 pkgrel=1
 pkgdesc="Symmetria nested Wayland compositor with a host clipboard bridge (QML module)"
 arch=('x86_64')
