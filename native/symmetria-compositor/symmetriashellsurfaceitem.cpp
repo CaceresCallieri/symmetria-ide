@@ -6,6 +6,15 @@
 #include "symmetriatrace.h"
 
 #include <QtGui/QWheelEvent>
+#include <QtWaylandCompositor/QWaylandCompositor>
+#include <QtWaylandCompositor/QWaylandPointer>
+#include <QtWaylandCompositor/QWaylandSeat>
+#include <QtWaylandCompositor/QWaylandSurface>
+#include <QtWaylandCompositor/QWaylandView>
+
+// Private, deliberately — `send_frame` exists nowhere else. See sendPointerFrame.
+#include <QtCore/private/qobject_p.h>
+#include <QtWaylandCompositor/private/qwaylandpointer_p.h>
 
 namespace {
 
@@ -20,6 +29,60 @@ constexpr int kWaylandAngleStep = 12;
 int quantise(int value)
 {
     return (value / kWaylandAngleStep) * kWaylandAngleStep;
+}
+
+// Sends `wl_pointer.frame` to the client currently under the pointer.
+//
+// WHY THIS IS NEEDED AT ALL. Chromium never acts on a scroll when the axis
+// event arrives — `WaylandEventSource::OnPointerAxisEvent` only ACCUMULATES
+// into `pointer_scroll_data_`, and the single call site that dispatches it,
+// `ProcessPointerScrollData()`, lives inside `OnPointerFrameEvent()`. There is
+// no timeout and no other trigger. Qt's compositor never sends a frame, so
+// every scroll piled into a buffer that was never flushed: the events arrived,
+// were forwarded correctly, and did nothing. Buttons and motion are unaffected
+// because Chromium dispatches those immediately unless a feature flag says
+// otherwise, which is why clicking and dragging a scrollbar always worked.
+//
+// ⚠ THIS IS A DELIBERATE PROTOCOL DEVIATION. `frame` is a wl_pointer VERSION 5
+// event and Qt hardcodes its seat global at version 4
+// (`QWaylandSeat::initialize`: `d->init(d->compositor->display(), 4)`), so we
+// are sending an event newer than the version negotiated with the client. It
+// is received regardless: Chromium registers `.frame = &OnFrame` in its
+// listener unconditionally, and libwayland-client demarshals by opcode against
+// the full interface table without consulting the bound version. Verified in
+// both sources, and the negotiated version was read off a live WAYLAND_DEBUG
+// trace.
+//
+// What makes it defensible rather than reckless is that this compositor has
+// exactly ONE client: the Chrome process the IDE spawns itself, on a socket
+// named after the IDE's pid. A client with a listener struct predating
+// `frame` (libwayland < 1.10) would read past the end of it — but no such
+// client can reach this socket.
+//
+// The protocol-correct alternative is worse, not better: advertising version 5
+// makes frames MANDATORY for every pointer event group, so motion, buttons,
+// enter and leave would all have to emit them too, and the version bump itself
+// means reimplementing `QWaylandSeat::initialize()` against private internals.
+// That is strictly more private API and strictly more to break. Remove this
+// the day Qt's compositor advertises 5 and sends its own frames — that is the
+// real upstream fix.
+void sendPointerFrame(QWaylandSeat *seat)
+{
+    QWaylandPointer *pointer = seat != nullptr ? seat->pointer() : nullptr;
+    if (pointer == nullptr)
+        return;
+    const QWaylandView *focus = pointer->mouseFocus();
+    QWaylandSurface *surface = focus != nullptr ? focus->surface() : nullptr;
+    if (surface == nullptr)
+        return;
+
+    auto *priv = static_cast<QWaylandPointerPrivate *>(QObjectPrivate::get(pointer));
+    // Scoped to the focused client rather than broadcast, mirroring what
+    // Qt's own axis send does — a frame is a statement about one client's
+    // event sequence, not a global tick.
+    const auto resources = priv->resourceMap().values(surface->waylandClient());
+    for (auto *resource : resources)
+        priv->send_frame(resource->handle);
 }
 
 } // namespace
@@ -62,5 +125,13 @@ void SymmetriaShellSurfaceItem::wheelEvent(QWheelEvent *event)
                           Qt::MouseEventSynthesizedByApplication,
                           event->pointingDevice());
     QWaylandQuickShellSurfaceItem::wheelEvent(&forwarded);
+
+    // The base call above sent the axis. Without the frame that follows it,
+    // Chromium buffers the scroll and never dispatches it — see
+    // sendPointerFrame. Sent only when an axis actually went out, so an
+    // under-threshold event does not emit an empty sequence.
+    if (QWaylandCompositor *comp = compositor())
+        sendPointerFrame(comp->seatFor(event));
+
     event->accept();
 }

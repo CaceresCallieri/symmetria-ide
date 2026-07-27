@@ -2,7 +2,13 @@ cmake_minimum_required(VERSION 3.21)
 
 project(symmetria-compositor VERSION 1.0 LANGUAGES CXX)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick WaylandCompositor)
+find_package(Qt6 6.5 REQUIRED COMPONENTS
+    Core Gui Quick WaylandCompositor
+    # Requested as COMPONENTS, not just linked: the `Private` targets do not
+    # come along with their public counterparts. See target_link_libraries for
+    # the one call that needs them.
+    CorePrivate WaylandCompositorPrivate
+)
 
 qt_standard_project_setup(REQUIRES 6.5)
 
@@ -30,6 +36,19 @@ target_link_libraries(symmetriacompositor PRIVATE
     Qt6::Gui
     Qt6::Quick
     Qt6::WaylandCompositor
+    # The `Private` targets are what put Qt's private headers on the include
+    # path. Needed for exactly one thing — `wl_pointer.send_frame`, which has
+    # no public equivalent and which Chromium requires before it will dispatch
+    # a scroll. The reasoning, and what would let us drop this, is in
+    # symmetriashellsurfaceitem.cpp::sendPointerFrame.
+    #
+    # ⚠ Private headers carry no source or binary compatibility promise, so a
+    # Qt patch release can break this build. That is the intended failure mode:
+    # the PKGBUILD declares the Qt deps, so a Qt update flags this package for
+    # rebuild and any breakage is a LOUD compile error rather than a browser
+    # that silently stops scrolling.
+    Qt6::CorePrivate
+    Qt6::WaylandCompositorPrivate
 )
 
 # Where Qt itself keeps QML modules (/usr/lib/qt6/qml on Arch). Queried rather
