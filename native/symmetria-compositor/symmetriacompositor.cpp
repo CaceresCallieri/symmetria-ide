@@ -15,11 +15,11 @@
 
 namespace {
 
-// Traced on stderr rather than through qWarning: the IDE's environment
-// installs a Qt message handler that swallows qDebug/qWarning (it eats QML
-// console.log too), and a clipboard bridge that silently does nothing is
-// exactly the failure this needs to be able to explain. Off unless
-// SYMMETRIA_COMPOSITOR_DEBUG is set.
+// Traced on stderr rather than through Qt's logging so it does not depend on
+// the HOST application's message handler at all. The IDE installs one that
+// routes qDebug (and QML console.log) to a level it does not print — and a
+// clipboard bridge that silently does nothing is exactly the failure this
+// needs to be able to explain. Off unless SYMMETRIA_COMPOSITOR_DEBUG is set.
 void trace(const char *what, int formatCount)
 {
     static const bool enabled = std::getenv("SYMMETRIA_COMPOSITOR_DEBUG") != nullptr;
@@ -32,6 +32,14 @@ void trace(const char *what, int formatCount)
 // the one from a nested client belongs to the compositor's data device, and
 // QClipboard::mimeData() belongs to the clipboard and is invalidated on the
 // next selection change. Copying is the only way to hold one safely.
+// Only this much of each format is hashed. On Wayland `QClipboard::mimeData()`
+// is LAZY: every `data(format)` call is a blocking pipe transfer with the
+// owning application, on the GUI thread. Hashing a whole clipboard would mean
+// the IDE stalls for as long as it takes some other app to hand over a large
+// image — to compute a value we only compare. The size is folded in alongside
+// the prefix so two payloads sharing a first chunk still differ.
+constexpr qsizetype kFingerprintPrefixBytes = 64 * 1024;
+
 // Identity of a selection's CONTENT, used to recognise our own data coming
 // back around the bridge. Hashing every format (not just text) is what keeps
 // it honest for images and rich HTML, where `text()` is empty or identical
@@ -44,7 +52,9 @@ QByteArray fingerprint(const QMimeData *data)
     const QStringList formats = data->formats();
     for (const QString &format : formats) {
         hash.addData(format.toUtf8());
-        hash.addData(data->data(format));
+        const QByteArray payload = data->data(format);
+        hash.addData(QByteArray::number(payload.size()));
+        hash.addData(payload.left(kFingerprintPrefixBytes));
     }
     return hash.result();
 }
@@ -91,6 +101,13 @@ void SymmetriaCompositor::retainedSelectionReceived(QMimeData *mimeData)
     if (clipboard == nullptr)
         return;
 
+    // A client releasing or clearing its selection hands us nothing. Cloning
+    // that into the host clipboard would WIPE whatever the user had copied
+    // elsewhere — a nested browser destroying the desktop's clipboard. Checked
+    // before the fingerprint so an empty push cannot poison it either.
+    if (mimeData == nullptr || mimeData->formats().isEmpty())
+        return;
+
     const QByteArray incoming = fingerprint(mimeData);
     if (incoming == m_lastBridged)
         return; // our own push, arriving back — see m_lastBridged
@@ -109,6 +126,16 @@ void SymmetriaCompositor::pushHostSelectionToClients()
         return;
 
     const QMimeData *hostData = clipboard->mimeData();
+    // `overrideSelection` DEREFERENCES its argument, and QClipboard::mimeData()
+    // legitimately returns nullptr on an empty or unavailable clipboard — so
+    // this is a segfault, not a no-op. Reachable in ordinary use: clear the
+    // clipboard after a bridge has run and the fingerprint guard below does
+    // not save us, since an empty fingerprint differs from the last one.
+    if (hostData == nullptr || hostData->formats().isEmpty()) {
+        m_lastBridged.clear();
+        return;
+    }
+
     const QByteArray outgoing = fingerprint(hostData);
     if (outgoing == m_lastBridged)
         return; // already on both sides — see m_lastBridged

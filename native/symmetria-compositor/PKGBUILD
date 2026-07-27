@@ -17,8 +17,14 @@
 #     cd /home/jc/projects/symmetria-ide/native/symmetria-compositor && makepkg -si
 #   (commit changes first — the source is the committed git tree.)
 #
-# The module is OPTIONAL by design: without it the browser pane falls back to
-# the stock WaylandCompositor and the only loss is a shared clipboard.
+# WITHOUT THIS PACKAGE THERE IS NO BROWSER PANE. BrowserPane.qml imports
+# `Symmetria.Compositor` unconditionally (QML has no conditional imports), so a
+# missing module fails that file. Main.qml mounts it through a Loader, which
+# keeps the failure from taking the whole IDE down — but the browser surface is
+# gone, and every `browser_open` returns `compositor-not-ready`. An earlier
+# draft of this comment promised a fallback to the stock WaylandCompositor;
+# that was never implemented, and implementing it would mean maintaining two
+# near-identical compositor declarations.
 
 pkgname=symmetria-compositor
 pkgver=r469.cb5a14f
@@ -29,7 +35,12 @@ url="https://github.com/CaceresCallieri/symmetria-ide"
 license=('GPL-3.0-or-later')
 depends=('qt6-base' 'qt6-declarative' 'qt6-wayland')
 makedepends=('git' 'cmake')
-_repo="/home/jc/projects/symmetria-ide"
+# Derived, NOT hardcoded: a fixed path would make `makepkg` run from the
+# stable worktree silently package DEV's tree — precisely the cross-worktree
+# contamination docs/branch-workflow.md exists to prevent. `$startdir` is this
+# PKGBUILD's own directory, so the package always builds the checkout it lives
+# in.
+_repo="$(git -C "$startdir" rev-parse --show-toplevel)"
 _subdir="native/symmetria-compositor"
 source=("git+file://${_repo}")
 sha256sums=('SKIP')

@@ -3148,6 +3148,14 @@ Window {
             gitHistoryView.focusContent();
         else if (controller.terminalVisible)
             root._focusTerminalPane();
+        else if (controller.browserVisible && browserPaneLoader.item)
+            // Ordered AFTER terminal deliberately: the two conditions are
+            // mutually exclusive, so the order is semantically free, and
+            // keeping terminal early holds it inside the fixed grep window
+            // `test_main_qml_terminal_wiring` reads from this block.
+            // Without this branch focus falls to the hidden editor and every
+            // keystroke vanishes while Chrome is on screen.
+            browserPaneLoader.item.activateCurrent();
         else
             editor.forceActiveFocus();
     }
@@ -3271,6 +3279,14 @@ Window {
             fmPaneLoader.item.forceActiveFocus();
         else if (controller.terminalVisible)
             root._focusTerminalPane();
+        else if (controller.browserVisible && browserPaneLoader.item)
+            // Ordered AFTER terminal deliberately: the two conditions are
+            // mutually exclusive, so the order is semantically free, and
+            // keeping terminal early holds it inside the fixed grep window
+            // `test_main_qml_terminal_wiring` reads from this block.
+            // Without this branch focus falls to the hidden editor and every
+            // keystroke vanishes while Chrome is on screen.
+            browserPaneLoader.item.activateCurrent();
         else
             editor.forceActiveFocus();
 

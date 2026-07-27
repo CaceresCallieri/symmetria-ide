@@ -87,25 +87,25 @@ def _isolate_xdg_data(monkeypatch, tmp_path_factory):
 def _isolate_browser_host(monkeypatch, _chrome_bin_dir):
     """Make it impossible for a test to spawn Chrome or touch the compositor.
 
-    Two live resources are one function call away from any test that reaches
-    ``AppController.open_browser``:
+    The live resource one function call away from any test that reaches
+    ``AppController.open_browser`` is **the developer's Chrome**:
+    ``chrome_executable()`` finds the real binary on PATH, and Chrome is a
+    singleton per ``--user-data-dir`` — a spawn inside the suite would either
+    open windows on the developer's screen or hand the request to a browser a
+    running IDE already owns.
 
-    - **The developer's Chrome.** ``chrome_executable()`` finds the real binary
-      on PATH, and Chrome is a singleton per ``--user-data-dir`` — a spawn
-      inside the suite would either open windows on the developer's screen or
-      hand the request to a browser a running IDE already owns.
-    - **The developer's compositor.** ``hyprland_ipc.apply_keyword`` shells out
-      to ``hyprctl`` for real, and window rules are GLOBAL, runtime state of the
-      live Hyprland session. A test could install a rule pinning some class to
-      a workspace and it would outlive the test run.
+    Neutralised at the environment level rather than by patching call sites,
+    per ``.claude/rules/test_env_isolation.md``: monkeypatched functions only
+    cover the test window, while this path can be reached from teardown and
+    deferred callbacks too. A test that wants a real binary opts in with its
+    own ``setenv`` (last writer wins).
 
-    Both are neutralised at the environment level rather than by patching call
-    sites, per ``.claude/rules/test_env_isolation.md``: monkeypatched functions
-    only cover the test window, while these paths can be reached from teardown
-    and deferred callbacks too. Tests that want either behaviour opt in with
-    their own ``setenv`` (last writer wins) — see ``test_hyprland_ipc.py``."""
+    (This fixture also used to neutralise ``HYPRLAND_INSTANCE_SIGNATURE``,
+    because the retired pinned-window backend installed GLOBAL Hyprland window
+    rules that would have outlived the run. The nested compositor needs no
+    window rules, nothing under ``src/`` reads that variable any more, and the
+    module that did is deleted.)"""
     monkeypatch.setenv("SYMMETRIA_IDE_CHROME_BIN", str(_chrome_bin_dir / "no-chrome"))
-    monkeypatch.delenv("HYPRLAND_INSTANCE_SIGNATURE", raising=False)
 
 
 @pytest.fixture(scope="session")
@@ -311,7 +311,6 @@ class FakeChromeHost(QObject):
         self.opened: list[str] = []
         self.closed: list[str] = []
         self.stop_calls = 0
-        self.workspace = "6"
         #: Set to an error code to make the next open fail (pool/degradation
         #: paths: "chrome-not-installed", "chrome-spawn-failed", …).
         self.open_error = ""
@@ -330,9 +329,6 @@ class FakeChromeHost(QObject):
 
     def close_window(self, target_id: str) -> None:
         self.closed.append(target_id)
-
-    def workspace_label(self) -> str:
-        return self.workspace
 
     def stop(self) -> None:
         self.stop_calls += 1

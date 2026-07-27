@@ -147,11 +147,13 @@ Rectangle {
                 // and it opens on changes — labelling it "history" would
                 // mis-name where the chip lands.
                 { surface: "git", label: "git" },
-                // NB: no "browser" segment, and there cannot be one — the browser
-                // is real Chrome in its own Hyprland window, not a surface this
-                // switcher could show. It is agent-owned: click the globe on the
-                // owning agent's chip (below) or press Ctrl+Shift+B with that
-                // agent focused to be told where it is.
+                // NB: no "browser" segment, though there COULD be one now — the
+                // browser became a real central surface again when Chrome moved
+                // into the IDE's nested compositor. It is left out because the
+                // browser is agent-owned: you reach it through the agent that
+                // opened it (the globe on that agent's chip, below) or with
+                // Ctrl+Shift+B. Adding a segment here is a product call, not an
+                // impossibility — which is what this note used to claim.
             ]
 
             delegate: Item {
@@ -396,11 +398,13 @@ Rectangle {
                         // Browser-link indicator — how you learn that an agent has
                         // a browser and that it wants your eyes on it. Shown when
                         // this agent owns ≥1 OPEN browser window (it opened one
-                        // via browser_open). Clicking REPORTS where that browser
-                        // is (a toast naming the workspace + window count); it
-                        // does NOT jump. The windows are real Chrome windows on
-                        // the IDE's Hyprland workspace, so raising one would drag
-                        // the user off what they are doing — notify-don't-yank.
+                        // via browser_open). Clicking GOES to the browser
+                        // surface — one-way, unlike the Ctrl+Shift+B toggle,
+                        // since "show me that agent's browser" has no return
+                        // direction. (It only REPORTED via a toast while Chrome
+                        // was an external Hyprland window and going there meant
+                        // a workspace switch the user never asked for; the
+                        // nested compositor removed that cost.)
                         // The mouse twin of Ctrl+Shift+B. Two layers ride it:
                         //   - the GLOBE = presence ("this agent has a browser");
                         //   - the DOT   = attention ("…and it wants you to look"),

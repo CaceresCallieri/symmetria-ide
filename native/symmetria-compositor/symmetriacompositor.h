@@ -36,11 +36,14 @@
 // deliberately a faithful copy of Qt's — if a future Qt fixes the macro, this
 // can collapse back onto it.
 //
-// DEGRADATION CONTRACT. This plugin is OPTIONAL. The browser pane falls back to
-// the stock `WaylandCompositor` when `Symmetria.Compositor` fails to import, so
-// a machine without the package gets a browser with an isolated clipboard —
-// never no browser at all. Do not add anything here that the pane depends on
-// for rendering, or that contract breaks.
+// FAILURE MODE. This module is REQUIRED for the browser pane, not optional:
+// `BrowserPane.qml` imports it unconditionally (QML has no conditional
+// imports), so a missing package fails that file and the browser surface is
+// gone. Main.qml's Loader keeps the failure from taking the whole IDE with it,
+// which is the only degradation there is. An earlier draft of this comment
+// promised a fallback to the stock `WaylandCompositor`; it was never
+// implemented, and implementing it would mean maintaining two near-identical
+// compositor declarations for one optional feature.
 
 #pragma once
 
@@ -66,11 +69,13 @@ class SymmetriaCompositor : public QWaylandQuickCompositor
 public:
     explicit SymmetriaCompositor(QObject *parent = nullptr);
 
-    // Pushes `text` into the nested clients' selection directly. Exists to
-    // test the host→client half in isolation: the ordinary path depends on the
-    // host clipboard, which an UNFOCUSED Wayland app cannot read at all, so
-    // without this there is no way to tell a broken bridge apart from a
-    // clipboard the compositor was never allowed to see.
+    // Pushes `text` into the nested clients' selection directly. A DIAGNOSTIC
+    // with no production caller — it exists to test the host→client half in
+    // isolation, because the ordinary path depends on the host clipboard,
+    // which an UNFOCUSED Wayland app cannot read at all; without it there is
+    // no way to tell a broken bridge apart from a clipboard the compositor was
+    // never allowed to see. Invoke it from a scratch QML binding when
+    // diagnosing, alongside SYMMETRIA_COMPOSITOR_DEBUG=1.
     Q_INVOKABLE void pushSelectionText(const QString &text);
 
     // -- container plumbing (see the header comment) ----------------------

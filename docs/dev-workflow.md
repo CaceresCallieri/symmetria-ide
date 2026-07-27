@@ -228,30 +228,46 @@ The embedded QtWebEngine surface was retired 2026-07-27 — the browser is now a
 Chrome process the IDE spawns, pinned to the IDE's workspace by a Hyprland rule.
 See CLAUDE.md "The browser panes" for the model; this section is how to exercise it.
 
-- **The suite can never spawn Chrome or touch your compositor.** `tests/conftest.py`
-  sets `SYMMETRIA_IDE_CHROME_BIN` to a nonexistent path and deletes
-  `HYPRLAND_INSTANCE_SIGNATURE` (`_isolate_browser_host`), so `chrome_executable()`
-  returns `""` and `hyprctl` is never shelled out to. Tests that need browser
-  behaviour inject `conftest.FakeChromeHost`. Do not "fix" a test by re-enabling
-  the real binary — the risk is a suite run opening windows on your screen, or
-  installing a window rule that outlives it.
-- **Live check without launching the IDE** — instantiate `ChromeHost` directly under
-  a `QCoreApplication`, point `XDG_DATA_HOME` at a scratch dir so your real browser
-  profiles are untouched, apply the pin rule by hand (a bare script has no Hyprland
-  window for `ChromeHost` to resolve), then `open_window(...)` and read back
-  `hyprctl clients -j`. Assert: the windows carry class `symmetria-browser-<pid>`,
-  they land on the target workspace, and `hyprctl activeworkspace` is UNCHANGED —
-  `silent` placement is the whole point.
+- **The suite can never spawn Chrome.** `tests/conftest.py` sets
+  `SYMMETRIA_IDE_CHROME_BIN` to a nonexistent path (`_isolate_browser_host`), so
+  `chrome_executable()` returns `""`. Tests that need browser behaviour inject
+  `conftest.FakeChromeHost`. Do not "fix" a test by re-enabling the real binary —
+  the risk is a suite run opening windows on your screen, or handing the request
+  to a browser a running IDE already owns (Chrome is a singleton per profile).
+- **⚠ `hyprctl clients` is NOT how you inspect the browser any more.** Under the
+  nested compositor Hyprland does not see the browser at all — the only window is
+  the IDE's. An empty `hyprctl clients` filter means containment is working, not
+  that the browser failed to open. (This section previously told you to assert on
+  window class and workspace; that was the retired pinned-window backend.)
+- **Live check** — launch a dev IDE, read its MCP port from the log
+  (`browser MCP server on http://127.0.0.1:<port>/mcp`), and call `browser_open`
+  as an agent would (an MCP client with an `X-Symmetria-Agent: <ide_pid>_<slot>`
+  header). Then assert: `browser_list_windows` reports the window with a live
+  title from CDP discovery; `hyprctl clients` lists NO browser window; and the
+  compositor socket exists at `$XDG_RUNTIME_DIR/symmetria-browser-<ide_pid>`.
+  Note the per-project gate — without `browser_agents: true` in
+  `.symmetria/ide.json` every call returns "browser tools disabled", and the
+  marker is read at STARTUP, so flipping it needs an IDE restart.
+- **Rendering can be probed without eyes**, which is how the frame-callback
+  question was settled: attach to the CDP port and run `Page.captureScreenshot`
+  plus a `requestAnimationFrame` tick count. Both stay healthy with the pane
+  hidden and the IDE off-workspace. ⚠ A COLD page reports a stalled rAF — let it
+  warm before believing that number.
 - **Two behaviours are only observable live, and both were found that way:**
   Chrome always opens a window at launch, so a cold start must be pointed AT the
   requested url or you get a stray `chrome://newtab/` that CDP discovers FIRST; and
   the CDP attach always loses the race against a cold Chrome, so the client retries
   on a timer and the first window binds its target through discovery, not the
   `Target.createTarget` reply.
-- **Reading the window state:** `hyprctl clients -j` filtered by class is the ground
-  truth for placement; the IDE's own view is `controller._browser_tabs`. A window
-  present in Hyprland but absent from the registry means adoption did not happen
-  (check for a `chrome://` url — those are deliberately never adopted).
+- **Reading the window state:** the IDE's view is `controller._browser_tabs` (CDP
+  page targets); the compositor's is `BrowserPane`'s toplevel list. THEY DO NOT
+  MATCH BY DESIGN — `new_page` opens a tab, so targets outnumber toplevels. A
+  target absent from the registry means adoption did not happen (check for a
+  `chrome://` url — those are deliberately never adopted).
+- **⚠ Never `pkill -f` anything in this area.** The pattern matches the shell
+  running it (observed: exit 144, the command killing itself), and browser/IDE
+  processes share command lines with the daily driver. Resolve PIDs first, then
+  `kill` them.
 
 ## Browser MCP server (Phase 4 Stage 2b/4 — agent control)
 

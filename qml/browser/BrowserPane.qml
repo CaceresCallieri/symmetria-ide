@@ -33,6 +33,7 @@ import QtQuick
 import QtWayland.Compositor
 import QtWayland.Compositor.XdgShell
 import Symmetria.Compositor
+import "../design"
 
 Item {
     id: pane
@@ -45,7 +46,6 @@ Item {
     // context property, which derives it from the IDE's pid.
     required property string socketName
 
-    readonly property int windowCount: surfaces.count
     property int currentIndex: 0
 
     // Cycling is by TOPLEVEL, not by the slot registry the agents see. The two
@@ -56,10 +56,10 @@ Item {
         if (surfaces.count === 0)
             return
         currentIndex = (currentIndex + step + surfaces.count) % surfaces.count
-        _activateCurrent()
+        activateCurrent()
     }
 
-    function _activateCurrent() {
+    function activateCurrent() {
         for (var i = 0; i < surfaces.count; i++) {
             var item = surfaces.get(i).item
             if (!item || !item.shellSurface)
@@ -72,8 +72,21 @@ Item {
                 // toplevel's ACTIVATED state is what makes Chrome consider its
                 // own document focused. Without ACTIVATED, Chrome refuses the
                 // whole async clipboard API with a bare NotAllowedError.
+                //
+                // ⚠ There is NO `sendActivated()` — verified against both the
+                // Qt 6.11 headers and XdgShell's qmltypes, which expose only
+                // sendConfigure/Close/Maximized/Unmaximized/Fullscreen/Resizing
+                // (`activated` is a READ-only property). Calling it threw a
+                // TypeError that aborted this loop mid-iteration, so every
+                // later window kept its old visibility and forceActiveFocus()
+                // below never ran at all — invisible in a one-window session.
+                // The state list must be passed through sendConfigure instead,
+                // and MaximizedState has to be repeated there or the configure
+                // silently un-maximizes the window.
                 browserCompositor.defaultSeat.keyboardFocus = item.shellSurface.surface
-                item.shellSurface.toplevel.sendActivated()
+                item.shellSurface.toplevel.sendConfigure(
+                    Qt.size(pane.width, pane.height),
+                    [XdgToplevel.ActivatedState, XdgToplevel.MaximizedState])
                 item.forceActiveFocus()
             }
         }
@@ -91,9 +104,12 @@ Item {
         }
     }
 
-    onWidthChanged: _configureAll()
-    onHeightChanged: _configureAll()
-    onVisibleChanged: if (visible) _activateCurrent()
+    // Qt.callLater coalesces to one configure per frame. Sending one per pixel
+    // of an interactive resize makes Chrome re-lay-out that many times, and
+    // with wl_shm (no dmabuf here) every one of those is a CPU buffer copy.
+    onWidthChanged: Qt.callLater(_configureAll)
+    onHeightChanged: Qt.callLater(_configureAll)
+    onVisibleChanged: if (visible) activateCurrent()
 
     // Bookkeeping only — the ShellSurfaceItems are parented to `surfaceHost`,
     // not to this model. It exists so cycling has a stable order.
@@ -110,8 +126,20 @@ Item {
 
         WaylandOutput {
             compositor: browserCompositor
-            sizeFollowsWindow: true
             window: pane.hostWindow
+
+            // ⚠ KNOWN LIMITATION: the output tracks the whole IDE WINDOW while
+            // toplevels are configured to the PANE rect. The output is the
+            // "screen" Chrome believes it is on, so `screen.availWidth/Height`
+            // are wrong and xdg-popups are constrained/flipped against the
+            // window's edges rather than the pane's — the reported symptom is
+            // the omnibox dropdown landing misplaced and clipped.
+            //
+            // NOT fixed by simply setting `geometry` to the pane rect: that
+            // property's unit convention against a non-1 `scaleFactor` is
+            // unverified here, and guessing it wrong renders the browser at
+            // half or double size. Needs a live check before changing.
+            sizeFollowsWindow: true
 
             // The single number that decides whether the browser looks sharp.
             //
@@ -136,12 +164,19 @@ Item {
                 var item = surfaceComponent.createObject(surfaceHost, {
                     "shellSurface": xdgSurface
                 })
-                if (!item)
+                if (!item) {
+                    // Otherwise a live toplevel is silently abandoned: mapped
+                    // by the client, never drawn, never cycled to — which the
+                    // user reads as "the browser didn't open".
+                    console.warn("BrowserPane: could not create a surface item"
+                                 + " for a Chrome toplevel")
+                    toplevel.sendClose()
                     return
+                }
                 surfaces.append({ "item": item })
                 pane.currentIndex = surfaces.count - 1
                 toplevel.sendMaximized(Qt.size(pane.width, pane.height))
-                pane._activateCurrent()
+                pane.activateCurrent()
             }
         }
     }
@@ -155,32 +190,48 @@ Item {
         id: surfaceComponent
 
         ShellSurfaceItem {
+            id: surfaceItem
             anchors.fill: surfaceHost
             // Chrome's menus, omnibox dropdown and tooltips are xdg_popups;
             // without this they never appear at all.
             autoCreatePopupItems: true
 
             onSurfaceDestroyed: {
+                // Compared against the delegate's own id rather than `this`:
+                // `this` resolves to the scope object in a handler, which is
+                // fragile the moment any of this moves into a helper.
+                var removed = -1
                 for (var i = 0; i < surfaces.count; i++) {
-                    if (surfaces.get(i).item === this) {
+                    if (surfaces.get(i).item === surfaceItem) {
+                        removed = i
                         surfaces.remove(i)
                         break
                     }
                 }
-                if (pane.currentIndex >= surfaces.count)
+                // Closing a window BELOW the current one shifts every later
+                // entry down, so holding the index still would silently move
+                // the user to a different window than the one they were on.
+                if (removed >= 0 && removed < pane.currentIndex)
+                    pane.currentIndex--
+                else if (pane.currentIndex >= surfaces.count)
                     pane.currentIndex = Math.max(0, surfaces.count - 1)
-                destroy()
-                pane._activateCurrent()
+                surfaceItem.destroy()
+                pane.activateCurrent()
             }
         }
     }
 
     // Shown until the first window arrives, so an empty browser surface reads
-    // as "nothing open yet" rather than as a rendering failure.
+    // as "nothing open yet" rather than as a rendering failure. This is the
+    // NORMAL state of a project that has not browsed — Chrome is lazy-spawned,
+    // and eager-spawning to fill this pane would charge every project for a
+    // browser it may never use.
     Text {
         anchors.centerIn: parent
         visible: surfaces.count === 0
-        color: "#8888aa"
+        color: Theme.color.text.dim
+        font.family: editorFontFamily
+        renderType: Text.NativeRendering
         text: "No browser windows.\nAn agent opens one with browser_open."
         horizontalAlignment: Text.AlignHCenter
     }

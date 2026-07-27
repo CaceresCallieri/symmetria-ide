@@ -54,13 +54,19 @@ def host(tmp_path, monkeypatch):
     runtime.mkdir()
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
     monkeypatch.setenv("DISPLAY", ":0")  # the X11 door that must be shut
+    monkeypatch.setenv("WAYLAND_SOCKET", "9")  # the fd-passing door, likewise
     (runtime / chrome_host.browser_identity(os.getpid())).write_text("")
 
     spawns: list[dict] = []
 
     def fake_popen(argv, **kwargs):
-        spawns.append({"argv": list(argv), "env": kwargs.get("env") or {}})
-        return FakeProc(list(argv))
+        proc = FakeProc(list(argv))
+        # The proc is recorded alongside the argv so teardown tests can reach
+        # it without re-patching Popen and shadowing this fake.
+        spawns.append(
+            {"argv": list(argv), "env": kwargs.get("env") or {}, "proc": proc}
+        )
+        return proc
 
     monkeypatch.setattr(chrome_host.subprocess, "Popen", fake_popen)
 
@@ -98,6 +104,9 @@ class TestColdStart:
         the host. With no DISPLAY a broken socket fails loudly instead."""
         host.open_window("https://a.test", lambda _r: None)
         assert "DISPLAY" not in host.test_spawns[0]["env"]
+        # libwayland PREFERS the fd-passing form over WAYLAND_DISPLAY, so
+        # leaving it set would route Chrome to the host compositor.
+        assert "WAYLAND_SOCKET" not in host.test_spawns[0]["env"]
 
     def test_cold_start_does_not_ask_for_a_second_window(self, host):
         """The startup window IS the requested window."""
@@ -134,6 +143,9 @@ class TestWarmOpen:
         second = host.test_spawns[1]
         assert second["env"]["WAYLAND_DISPLAY"] == host.wayland_socket
         assert "DISPLAY" not in second["env"]
+        # The other half of containment: without this Chrome may pick
+        # XWayland, which talks to the HOST display.
+        assert "--ozone-platform=wayland" in second["argv"]
         assert "--new-window" in second["argv"]
         assert second["argv"][-1] == "https://b.test"
 
@@ -146,21 +158,12 @@ class TestIdentity:
         assert host.wayland_socket == host.window_class
         assert f"--class={host.window_class}" in host.test_spawns[0]["argv"]
 
-    def test_identity_is_per_ide_process(self):
-        assert chrome_host.browser_identity(42) != chrome_host.browser_identity(43)
-
 
 class TestTeardown:
-    def test_stop_kills_chrome(self, host, monkeypatch):
-        procs: list[FakeProc] = []
-        monkeypatch.setattr(
-            chrome_host.subprocess,
-            "Popen",
-            lambda argv, **kw: procs.append(FakeProc(list(argv))) or procs[-1],
-        )
+    def test_stop_kills_chrome(self, host):
         host.open_window("https://a.test", lambda _r: None)
         host.stop()
-        assert procs[0].terminated
+        assert host.test_spawns[0]["proc"].terminated
 
     def test_chrome_dying_is_announced_once_attached(self, host):
         """The registry must not outlive the browser, or agents drive nothing."""

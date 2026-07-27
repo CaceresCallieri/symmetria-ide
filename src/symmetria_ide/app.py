@@ -3038,9 +3038,10 @@ class AppController(QObject):
     def browserVisible(self) -> bool:
         """True when the nested-compositor browser owns the central area.
 
-        The Chrome surfaces are always mapped in the compositor (which lives at
-        Main.qml's root, outside any Loader — destroying it would drop Chrome's
-        Wayland connection); this only decides whether they are on screen.
+        The Chrome surfaces are always mapped in the compositor (which lives
+        inside Main.qml's permanently-ACTIVE `browserPaneLoader` — the Loader is
+        never deactivated, because unloading it would drop Chrome's Wayland
+        connection); this only decides whether they are on screen.
         Hiding them costs nothing: measured, a hidden surface keeps its full
         frame rate and screenshot latency.
         """
@@ -3226,7 +3227,10 @@ class AppController(QObject):
 
     def _clear_browser_attention(self, agent_slot: int) -> None:
         """Drop `agent_slot`'s browser attention badge, if it has one."""
-        if agent_slot and self._agent_browser_attention.pop(agent_slot, None) is not None:
+        if (
+            agent_slot
+            and self._agent_browser_attention.pop(agent_slot, None) is not None
+        ):
             self.agentBrowserChanged.emit()  # clear-on-view: dot off
 
     @Slot()
@@ -4759,8 +4763,8 @@ class AppController(QObject):
     #
     # A "browser window" is a window of the ONE Chrome process this IDE owns
     # (chrome_host.py): its own --user-data-dir, and a Wayland connection to
-    # the nested compositor at Main.qml's root, so its surfaces render inside
-    # the IDE. Containment is categorical — Hyprland does not see the browser
+    # the nested compositor inside Main.qml's permanently-active
+    # `browserPaneLoader`, so its surfaces render inside the IDE. Containment is categorical — Hyprland does not see the browser
     # at all — rather than enforced by a rule.
     #
     # The SLOT REGISTRY (slot → window, 1..MAX_INSTANCES) has now survived two
@@ -7590,12 +7594,20 @@ class AppController(QObject):
             if not isinstance(entry, dict):
                 continue
             url = str(entry.get("url", "") or "")
-            if url:
-                self.open_browser(url)
-        # NOTE: manifests written before the external-Chrome migration also
-        # carry "focused_browser". It is ignored — there is no focused-window
-        # concept now (the windows are Hyprland's, and raising one would yank
-        # the user across workspaces). Old manifests stay loadable.
+            if not url:
+                continue
+            error = self.open_browser(url)
+            if error:
+                # Without this the restore fails SILENTLY: the user's saved
+                # browser windows simply do not come back, with nothing in the
+                # log to say why (no Chrome installed, compositor not up yet).
+                log.warning("restore_session: %s not reopened (%s)", url, error)
+                if error in ("chrome-not-installed", "compositor-not-ready"):
+                    break  # every remaining entry would fail identically
+        # NOTE: manifests written before the QtWebEngine-era migration also
+        # carry "focused_browser". It is ignored — which window the pane shows
+        # is `BrowserPane.currentIndex`, a compositor-side concept that does not
+        # map onto the registry's slots. Old manifests stay loadable.
 
         editor = manifest.get("editor") or {}
         if isinstance(editor, dict) and editor.get("files"):

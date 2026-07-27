@@ -140,10 +140,12 @@ def chrome_executable() -> str:
 def browser_identity(pid: int) -> str:
     """This IDE's browser identity, used for two things at once.
 
-    It is both the Wayland `app_id` Chrome's toplevels carry (so the pane can
-    tell OUR surfaces from anything else that connects) and the name of the
-    nested compositor's socket. One string because it is genuinely one
-    identity, expressed in two protocols.
+    It is both the Wayland `app_id` Chrome's toplevels carry and the name of
+    the nested compositor's socket. One string because it is genuinely one
+    identity, expressed in two protocols. (The pane does NOT currently filter
+    on the app_id — anything that can reach the socket gets a surface. That is
+    acceptable only because reaching it requires being the same user and
+    knowing a per-pid name; do not read the shared string as a guarantee.)
 
     Per-PID rather than per-project: it must address ONE running IDE, and two
     IDEs can legitimately have the same project open (dev and stable, or two
@@ -376,6 +378,13 @@ class ChromeHost(QObject):
         env["WAYLAND_DISPLAY"] = self.wayland_socket
         env["XDG_SESSION_TYPE"] = "wayland"
         env.pop("DISPLAY", None)
+        # `WAYLAND_SOCKET` is the fd-passing form of a Wayland connection and
+        # libwayland prefers it OVER `WAYLAND_DISPLAY`. If it is ever present
+        # in the IDE's own environment (inherited from a launcher), Chrome
+        # would connect to the HOST compositor while our socket sat unused —
+        # the same escape `DISPLAY` is popped to prevent, through a door that
+        # setting WAYLAND_DISPLAY does not close.
+        env.pop("WAYLAND_SOCKET", None)
         return env
 
     @Slot()
