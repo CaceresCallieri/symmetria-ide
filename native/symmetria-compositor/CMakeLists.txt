@@ -18,6 +18,8 @@ qt_add_qml_module(symmetriacompositor
     SOURCES
         symmetriacompositor.h
         symmetriacompositor.cpp
+        symmetriaoutput.h
+        symmetriaoutput.cpp
 )
 
 target_link_libraries(symmetriacompositor PRIVATE
@@ -30,7 +32,8 @@ target_link_libraries(symmetriacompositor PRIVATE
 # Where Qt itself keeps QML modules (/usr/lib/qt6/qml on Arch). Queried rather
 # than hardcoded so the module lands next to QtWayland.Compositor on any
 # prefix — a module installed anywhere else is invisible to the default import
-# path, and the pane's optional-import fallback would silently take over.
+# path, which fails BrowserPane.qml outright (QML has no conditional imports)
+# and leaves the IDE with no browser surface at all.
 if(NOT DEFINED QML_INSTALL_DIR)
     set(QML_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/lib/qt6/qml")
 endif()
