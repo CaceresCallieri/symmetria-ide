@@ -56,7 +56,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [grabWindow GIL deadlock](reference/qt-pyside/grabwindow_gil_deadlock.md) — sync grab + Python QQuickPaintedItem + threaded loop = ABBA hang; force basic loop
 - [Fork changes need makepkg](reference/qt-pyside/fork_changes_need_makepkg.md) — launchers load the pacman qmltermwidget pkg; commit + makepkg -sif after fork edits
 - [ApplicationShortcut masks terminal keys](reference/qt-pyside/applicationshortcut_masks_terminal_keys.md) — chrome Shortcut eats keys before QMLTermWidget; suspect it when a key fails in-IDE but works in Ghostty
-- [QtWebEngine CDP drives chrome-devtools-mcp](reference/qt-pyside/qtwebengine_cdp_devtools_mcp.md) — QTWEBENGINE_REMOTE_DEBUGGING + --browserUrl: all 29 tools work; Puppeteer attaches, Playwright fails #36961
+- [QtWebEngine CDP era (SUPERSEDED)](reference/qt-pyside/qtwebengine_cdp_devtools_mcp.md) — embedded-engine CDP notes; real Chrome replaced it 2026-07-27
 - [Startup performance](reference/qt-pyside/startup_perf.md) — SYMMETRIA_IDE_TRACE waterfall + interleaved A/B; fixed browser-MCP GUI-thread import (~1s) + eager WebEngine (~430ms)
 - [Nested-compositor clipboard](reference/qt-pyside/nested_compositor_clipboard.md) — isolated BOTH ways; bridging needs a ~30-line C++ QWaylandCompositor subclass
 - [processEvents() shared-app SEGV](reference/qt-pyside/processevents_shared_app_segv.md) — never pump the session app in tests; runs prior tests' deleteLater → gotcha #10 crash; hand-deliver queued slots

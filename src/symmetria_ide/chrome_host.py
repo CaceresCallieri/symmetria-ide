@@ -42,6 +42,7 @@ import threading
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 
 from . import hyprland_ipc
+from .agent_bridge import emit_gc_safe
 from .cdp_client import CdpClient
 
 log = logging.getLogger(__name__)
@@ -147,23 +148,32 @@ def seed_profile_from_template(profile: str, template: str) -> bool:
     if not os.path.isdir(template):
         log.info("no browser template at %s — starting with a blank profile", template)
         return False
+    # Seed into a staging dir and rename into place, so a failure mid-copy
+    # leaves NOTHING behind. Copying straight into `profile` would leave a
+    # half-populated directory that this function's own existence check then
+    # treats as "already seeded" forever — the user would be silently logged
+    # out of every dashboard, permanently, from one transient OSError.
+    staging = f"{profile}.seeding"
+    shutil.rmtree(staging, ignore_errors=True)
     try:
-        os.makedirs(os.path.join(profile, "Default"), exist_ok=True)
+        os.makedirs(os.path.join(staging, "Default"), exist_ok=True)
         for name in _TEMPLATE_ROOT_FILES:
-            _copy_if_present(os.path.join(template, name), os.path.join(profile, name))
+            _copy_if_present(os.path.join(template, name), os.path.join(staging, name))
         for name in _TEMPLATE_PROFILE_FILES:
             _copy_if_present(
                 os.path.join(template, "Default", name),
-                os.path.join(profile, "Default", name),
+                os.path.join(staging, "Default", name),
             )
         for name in _TEMPLATE_PROFILE_DIRS:
             source = os.path.join(template, "Default", name)
             if os.path.isdir(source):
                 shutil.copytree(
-                    source, os.path.join(profile, "Default", name), dirs_exist_ok=True
+                    source, os.path.join(staging, "Default", name), dirs_exist_ok=True
                 )
+        os.rename(staging, profile)
     except OSError:
         log.exception("browser profile seed from %s failed", template)
+        shutil.rmtree(staging, ignore_errors=True)
         return False
     log.info("seeded browser profile %s from template", profile)
     return True
@@ -212,8 +222,10 @@ class ChromeHost(QObject):
     windowUpdated = Signal(str, str, str)
     #: (target_id) — a window went away (user closed it, or we did).
     windowGone = Signal(str)
-    #: Emitted when Chrome could not be started; carries a reason for the UI.
-    startFailed = Signal(str)
+    #: Chrome itself is gone (quit, killed, crashed) — every window with it.
+    #: The owner must drop its whole registry: otherwise browser_list_windows
+    #: keeps reporting windows that no longer exist and agents act on the lie.
+    browserGone = Signal()
 
     # Emitted from the Hyprland reader thread; queued onto the GUI thread.
     _workspaceMoved = Signal(int, str)
@@ -224,9 +236,12 @@ class ChromeHost(QObject):
         self._window_class = window_class_for(os.getpid())
         self._profile = profile_dir_for(project_root)
         self._proc: subprocess.Popen | None = None
+        self._pinned = False
+        self._stopping = False
         self._cdp = CdpClient(self)
         self._cdp.targetUpdated.connect(self.windowUpdated)
         self._cdp.targetGone.connect(self.windowGone)
+        self._cdp.disconnected.connect(self._on_cdp_disconnected)
         self._watcher = hyprland_ipc.WorkspaceWatcher(self._on_workspace_moved_thread)
         # queued: hyprland event reader thread -> ChromeHost GUI thread
         self._workspaceMoved.connect(
@@ -270,6 +285,11 @@ class ChromeHost(QObject):
         for why the startup window must be the requested one.
         """
         if self.is_running:
+            # Re-attempt a pin that never took (the IDE window may not have
+            # been mapped yet at spawn time). Without this the deferral is
+            # permanent and every window of the session escapes the rule.
+            if not self._pinned:
+                self._apply_pin_rule()
             self._cdp.connect_to(self.cdp_port())
             return ""
         executable = chrome_executable()
@@ -309,8 +329,22 @@ class ChromeHost(QObject):
         self._cdp.connect_to(self.cdp_port())
         return ""
 
+    @Slot()
+    def _on_cdp_disconnected(self) -> None:
+        """An established CDP session dropped — Chrome is gone.
+
+        Only fires for a session that WAS attached (see `CdpClient`), so a
+        failed initial attach can't be mistaken for Chrome dying.
+        """
+        if self._stopping:
+            return  # our own teardown closed the socket; the owner knows
+        log.info("Chrome disconnected — dropping the window registry")
+        self._pinned = False
+        self.browserGone.emit()
+
     def stop(self) -> None:
         """Tear down at IDE shutdown: CDP, watcher, rule, process."""
+        self._stopping = True
         self._cdp.close()
         self._watcher.stop()
         if hyprland_ipc.hyprland_available():
@@ -366,11 +400,22 @@ class ChromeHost(QObject):
         the same --user-data-dir does not start a browser, it asks the running
         one to open a window, which is exactly what we want. That window
         inherits the running process's class, so the pin rule still applies.
+
+        ⚠ The argv MUST still carry `--class` and the debug port. This path runs
+        seconds after a cold spawn (session restore replays several saved URLs),
+        so it can lose the race and become the PRIMARY process instead of
+        handing off — and a primary process without `--class` puts its windows
+        under the default `google-chrome` class, which the pin rule does not
+        match. They would escape onto whatever workspace the user is looking at:
+        the exact failure this whole mechanism exists to prevent.
         """
         executable = chrome_executable()
         if not executable:
             return "chrome-not-installed"
-        argv = [executable, f"--user-data-dir={self._profile}", "--new-window", url]
+        argv = build_chrome_argv(
+            executable, self._window_class, self._profile, self.cdp_port()
+        )
+        argv += ["--new-window", url]
         try:
             proc = subprocess.Popen(
                 argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -389,7 +434,11 @@ class ChromeHost(QObject):
     # -- workspace follow -----------------------------------------------
 
     def _apply_pin_rule(self) -> None:
-        """(Re)install the rule pinning our Chrome class to our workspace."""
+        """(Re)install the rule pinning our Chrome class to our workspace.
+
+        Records whether it actually took, so `ensure_running` can retry a pin
+        that was deferred (IDE window not mapped yet) or rejected.
+        """
         if not hyprland_ipc.hyprland_available():
             return
         workspace_id, workspace_name = self._watcher.resolve_now()
@@ -397,15 +446,21 @@ class ChromeHost(QObject):
             log.info("own window not mapped yet — browser pin deferred")
             return
         target = hyprland_ipc.workspace_rule_target(workspace_id, workspace_name)
-        hyprland_ipc.apply_keyword(
+        self._pinned = hyprland_ipc.apply_keyword(
             hyprland_ipc.build_workspace_rule(target, self._window_class)
         )
 
     def _on_workspace_moved_thread(
         self, workspace_id: int, workspace_name: str
     ) -> None:
-        """Hyprland reader thread → GUI thread. Never touch state here."""
-        self._workspaceMoved.emit(workspace_id, workspace_name)
+        """Hyprland reader thread → GUI thread. Never touch state here.
+
+        GC is suspended across the emit per gotcha #10: queued-connection
+        payload marshalling allocates, and a collection racing the Qt render
+        thread mid-paint is the 3.14 SEGV. Same treatment every other
+        worker-thread emit in this codebase gets.
+        """
+        emit_gc_safe(self._workspaceMoved, workspace_id, workspace_name)
 
     @Slot(int, str)
     def _on_workspace_moved(self, workspace_id: int, workspace_name: str) -> None:
@@ -421,8 +476,15 @@ class ChromeHost(QObject):
         )
 
     def workspace_label(self) -> str:
-        """Human-readable workspace for the notification toast; "" if unknown."""
+        """Human-readable workspace for the notification toast; "" if unknown.
+
+        Reads the watcher's CACHE. This runs on the GUI thread on every
+        Ctrl+Shift+B / globe click, and `resolve_now` shells out to `hyprctl`
+        with a 2s timeout — a stall the user would feel as the whole IDE
+        freezing. The cache is kept current by the event watcher; only fall
+        back to a live resolve when nothing has been cached yet.
+        """
+        if self._watcher.workspace_id:
+            return self._watcher.workspace_name or str(self._watcher.workspace_id)
         workspace_id, workspace_name = self._watcher.resolve_now()
-        if not workspace_id:
-            return ""
-        return workspace_name or str(workspace_id)
+        return workspace_name or str(workspace_id) if workspace_id else ""

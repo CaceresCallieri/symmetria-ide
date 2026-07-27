@@ -147,11 +147,11 @@ Rectangle {
                 // and it opens on changes — labelling it "history" would
                 // mis-name where the chip lands.
                 { surface: "git", label: "git" },
-                // NB: no "browser" segment. The embedded browser is agent-owned
-                // and reached only through its owning agent — click the globe on
-                // that agent's chip (below) or press Ctrl+Shift+B with the agent
-                // focused. Giving it a standalone switcher tab would contradict
-                // that ownership model, so it was deliberately removed.
+                // NB: no "browser" segment, and there cannot be one — the browser
+                // is real Chrome in its own Hyprland window, not a surface this
+                // switcher could show. It is agent-owned: click the globe on the
+                // owning agent's chip (below) or press Ctrl+Shift+B with that
+                // agent focused to be told where it is.
             ]
 
             delegate: Item {
@@ -393,30 +393,33 @@ Rectangle {
                             elide: Text.ElideRight
                         }
 
-                        // Browser-link indicator — the PRIMARY way into the
-                        // agent-owned browser (the standalone browser tab is
-                        // gone). Shown when this agent owns ≥1 OPEN browser
-                        // window (it opened one via browser_open). Clicking jumps
-                        // to that window (newest-driven) — the mouse twin of the
-                        // Ctrl+Shift+B keyboard jump. Two layers ride the glyph:
+                        // Browser-link indicator — how you learn that an agent has
+                        // a browser and that it wants your eyes on it. Shown when
+                        // this agent owns ≥1 OPEN browser window (it opened one
+                        // via browser_open). Clicking REPORTS where that browser
+                        // is (a toast naming the workspace + window count); it
+                        // does NOT jump. The windows are real Chrome windows on
+                        // the IDE's Hyprland workspace, so raising one would drag
+                        // the user off what they are doing — notify-don't-yank.
+                        // The mouse twin of Ctrl+Shift+B. Two layers ride it:
                         //   - the GLOBE = presence ("this agent has a browser");
                         //   - the DOT   = attention ("…and it wants you to look"),
                         //     lit by the agent's browser_request_attention call,
-                        //     cleared when you view the window (focus_agent_browser).
-                        // The dormant `active` pulse (in-flight driving) stays as
-                        // the future-CDP-monitor hook but never fires today.
+                        //     cleared when you check in (focus_agent_browser,
+                        //     which keeps its old name because it IS this binding).
+                        // A third layer once existed — an `active` pulse bound to
+                        // `agentBrowserActive` — removed with the embedded engine:
+                        // page driving flows agent→chrome-devtools-mcp→CDP and
+                        // never reaches us, so it could never fire again.
                         // Rendered in editorFontFamily (a Nerd Font) because the
                         // chip's UI font may lack icon glyphs. `agentBrowserCount`/
-                        // `Active`/`Attention` are PySide QVariantLists — index
-                        // then guard, per qml_qvariantlist_array_check (no
-                        // Array.isArray).
+                        // `Attention` are PySide QVariantLists — index then guard,
+                        // per qml_qvariantlist_array_check (no Array.isArray).
                         Item {
                             id: browserIndicator
                             anchors.verticalCenter: parent.verticalCenter
                             readonly property bool owns:
                                 (controller.agentBrowserCount[chip.slot - 1] || 0) > 0
-                            readonly property bool active:
-                                !!(controller.agentBrowserActive[chip.slot - 1])
                             readonly property bool attention:
                                 !!(controller.agentBrowserAttention[chip.slot - 1])
                             visible: browserIndicator.owns
@@ -429,32 +432,10 @@ Rectangle {
                                 text: ""  // nf-fa-globe — universal browser/web mark
                                 font.family: editorFontFamily
                                 font.pixelSize: Theme.font.size.sm
-                                color: browserIndicator.active
+                                color: browserIndicator.attention
                                     ? Theme.color.text.strong
                                     : Theme.color.text.dim
                                 renderType: Text.NativeRendering
-
-                                // Attention pulse only while actively driving;
-                                // `alwaysRunToEnd` lets the loop finish on its
-                                // second leg (opacity → 1.0) when activity ends,
-                                // so the glyph never freezes mid-fade. Durations
-                                // from Theme.anim (no hand-rolled ms) per the
-                                // popup-animation convention.
-                                SequentialAnimation {
-                                    running: browserIndicator.active
-                                    loops: Animation.Infinite
-                                    alwaysRunToEnd: true
-                                    NumberAnimation {
-                                        target: browserGlyph; property: "opacity"
-                                        to: 0.4; duration: Theme.anim.duration
-                                        easing.type: Easing.InOutQuad
-                                    }
-                                    NumberAnimation {
-                                        target: browserGlyph; property: "opacity"
-                                        to: 1.0; duration: Theme.anim.duration
-                                        easing.type: Easing.InOutQuad
-                                    }
-                                }
                             }
 
                             // Attention dot — the notification badge the agent
@@ -465,7 +446,7 @@ Rectangle {
                             // pixel ratios (local, per the header convention).
                             // Drawn after the glyph so it paints on top; the
                             // shared MouseArea below still wins the click, so
-                            // tapping the badge jumps + clears it.
+                            // tapping the badge reports + clears it.
                             Rectangle {
                                 id: attentionDot
                                 visible: browserIndicator.attention

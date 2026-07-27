@@ -22,7 +22,7 @@ Runtime deps (on Arch): `sudo pacman -S --needed pyside6 python-pynvim`. The app
 | `cwd` | usually `$HOME` | usually `~/projects/symmetria-ide` | **NO** — a stable instance launched from a terminal sitting in the dev dir has `cwd=repo` too (observed) |
 | `SYMMETRIA_IDE_APP_ID` | `symmetria-ide-stable` | `symmetria-ide` *if set* | **NO** — leaks from the host stable IDE into every shell you spawn (`echo $SYMMETRIA_IDE_APP_ID` → `symmetria-ide-stable`), so dev launches inherit it unless you override |
 
-So a dev launch must set `SYMMETRIA_IDE_APP_ID=symmetria-ide` explicitly (to override the leak — needed for the `class:^(symmetria-ide)$` workspace-6 rule and correct labelling), and any kill must gate on `PYTHONPATH` not containing `symmetria-ide-stable`.
+So a dev launch must set `SYMMETRIA_IDE_APP_ID=symmetria-ide` explicitly (to override the leak — needed for the `match:class ^(symmetria-ide)$` workspace-6 rule and correct labelling), and any kill must gate on `PYTHONPATH` not containing `symmetria-ide-stable`.
 
 **The safe pattern — track the PID you launched, kill only that, gated on PYTHONPATH:**
 
@@ -152,8 +152,8 @@ Combined with `SYMMETRIA_IDE_SCREENSHOT` + a longer warmup, this doubles as a he
 The user's preference is that the IDE opens on workspace 6 during dev iteration, not the active workspace. `QGuiApplication.setDesktopFileName("symmetria-ide")` sets the Wayland `app_id` predictably so a window rule can match:
 
 ```
-hyprctl keyword windowrulev2 "workspace 6 silent,class:^(symmetria-ide)$"
-hyprctl keyword windowrulev2 "float,class:^(symmetria-ide)$"
+hyprctl keyword windowrule "workspace 6 silent,match:class ^(symmetria-ide)$"  # Hyprland 0.56+ syntax — see CLAUDE.md gotcha #4
+hyprctl keyword windowrule "float,match:class ^(symmetria-ide)$"  # Hyprland 0.56+ syntax — see CLAUDE.md gotcha #4
 ```
 
 Add to `~/.dotfiles/.config/hypr/` for persistence across sessions (symlinked to `~/.config/hypr/`; `~/.hyprdots` is no longer stowed — see global CLAUDE.md dotfiles section).

@@ -60,16 +60,15 @@ class TestClientParsing:
 
     def test_finds_our_window(self):
         window = hyprland_ipc.parse_own_window(self._clients(1234), 1234)
-        assert window == {
-            "address": "5581abcd",
-            "workspace_id": 6,
-            "workspace_name": "6",
-        }
+        assert window == {"workspace_id": 6, "workspace_name": "6"}
 
-    def test_address_is_normalized_for_event_comparison(self):
-        """clients -j reports `0x…`; the event socket emits bare hex."""
-        window = hyprland_ipc.parse_own_window(self._clients(1, address="0xABC"), 1)
-        assert window["address"] == hyprland_ipc.normalize_address("abc")
+    def test_non_numeric_workspace_id_degrades_to_none(self):
+        """Would otherwise raise out of the reader thread, or out of
+        resolve_now() on the GUI thread where nothing guards it."""
+        payload = json.dumps(
+            [{"pid": 1, "address": "0x1", "workspace": {"id": "six", "name": "6"}}]
+        )
+        assert hyprland_ipc.parse_own_window(payload, 1) is None
 
     def test_absent_pid_is_none_not_error(self):
         assert hyprland_ipc.parse_own_window(self._clients(1234), 4321) is None

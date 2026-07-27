@@ -1,17 +1,17 @@
 """IDE-hosted browser MCP server (Phase 4 Stage 2b / Stage 4).
 
-Exposes the embedded browser's WINDOW MANAGEMENT to spawned agents as MCP
-tools over local streamable-HTTP — `browser_open` (allocate a visible pooled
-WebEngineView), `browser_list_windows` (the url↔window correlation table), and
-`browser_request_attention` (light the notification dot on the agent's chip
-globe so the user knows to come look).
+Exposes the IDE-owned Chrome process's (see chrome_host.py) WINDOW MANAGEMENT
+to spawned agents as MCP tools over local streamable-HTTP — `browser_open`
+(allocate a visible pooled window), `browser_list_windows` (the url↔window
+correlation table), and `browser_request_attention` (light the notification
+dot on the agent's chip globe so the user knows to come look).
 Page DRIVING (navigate, eval, screenshot, network, console, performance) is
 delegated to the off-the-shelf chrome-devtools-mcp, injected per-agent and
-pointed at the embedded view's CDP endpoint (see agent_config_path +
-SYMMETRIA_IDE_CDP_PORT in app.run()). Either way an agent drives the
-IDE's OWN browser window instead of launching its own Chromium — the
-containment win (no escaped Hyprland window). Agents discover this server via
-per-harness `--mcp-config` injection (Stage 2c, agent_harness.py).
+pointed at the IDE-owned Chrome process's CDP endpoint (see chrome_host.py;
+agent_config_path + SYMMETRIA_IDE_CDP_PORT in app.run()). Either way an agent
+drives the IDE's OWN browser window instead of launching its own Chromium —
+the containment win (no escaped Hyprland window). Agents discover this server
+via per-harness `--mcp-config` injection (Stage 2c, agent_harness.py).
 
 Topology / threading:
 
@@ -33,7 +33,8 @@ IDE then runs Stage-1-only (manual browser) with a logged warning.
 
 The marshaling direction is the INVERSE of gotcha #1: there we push
 pynvim RPC OFF the GUI thread; here we push the tool call ONTO it (the
-WebEngineViews live there). `concurrent.futures.Future.set_result` is
+controller pool state — and the IDE-owned Chrome process, see chrome_host.py —
+live there). `concurrent.futures.Future.set_result` is
 thread-safe; `asyncio.wrap_future` bridges it back to the uvicorn loop.
 """
 
@@ -73,11 +74,12 @@ _CONFIG_PREFIX = "symmetria-browser-mcp-"
 _AGENT_HEADER = "X-Symmetria-Agent"
 
 # Off-the-shelf Chrome DevTools MCP, injected per-agent alongside our own
-# server (see agent_config_path). Pointed at the embedded QtWebEngine's CDP
-# endpoint, it gives agents Google's full browser-automation suite
-# (screenshots, network, console, performance, Lighthouse) driving the SAME
-# contained view — superseding our hand-written op-tools. Pinned for
-# reproducibility (mirrors the agent-SDK pin); bump manually after vetting.
+# server (see agent_config_path). Pointed at the IDE-owned Chrome process's
+# CDP endpoint (see chrome_host.py), it gives agents Google's full
+# browser-automation suite (screenshots, network, console, performance,
+# Lighthouse) driving that same process — superseding our hand-written
+# op-tools. Pinned for reproducibility (mirrors the agent-SDK pin); bump
+# manually after vetting.
 _CHROME_DEVTOOLS_MCP_VERSION = "1.3.0"
 
 
@@ -220,8 +222,9 @@ class BrowserMcpBridge(QObject):
     browser_open and browser_list_windows read pool state, while
     browser_request_attention WRITES it (sets the attention dot) — all three
     marshal through here identically. Page DRIVING (navigate, eval, screenshot,
-    …) is delegated to chrome-devtools-mcp over the embedded CDP endpoint, so
-    the former automation op-path (BrowserAutomation + runJavaScript) is gone.
+    …) is delegated to chrome-devtools-mcp over the IDE-owned Chrome process's
+    CDP endpoint (see chrome_host.py), so the former automation op-path
+    (BrowserAutomation + runJavaScript) is gone.
     """
 
     # fn(object), future(object) — queued to the GUI thread.
@@ -347,7 +350,7 @@ class BrowserMcpServer:
         # a user-initiated spawn (long after launch), and agent_config_path()
         # returns "" while _port is still 0, so the brief not-yet-ready window
         # degrades gracefully (no browser MCP for that one spawn). See CLAUDE.md
-        # "Browser MCP server" + "The browser panes" Stage 5 startup-perf note.
+        # "Browser MCP server" + "The agentic browser" startup-perf note.
         self._start_thread = threading.Thread(
             target=self._start_guarded, daemon=True, name="browser-mcp-start"
         )
@@ -436,8 +439,9 @@ class BrowserMcpServer:
 
         @server.tool()
         async def browser_list_windows() -> dict:
-            """List the open browser windows (number, title, url) and which is
-            focused. This is the correlation table for the chrome-devtools-mcp
+            """List the open browser windows (number, title, url). There is no
+            "focused" field — the windows are the compositor's, not the IDE's.
+            This is the correlation table for the chrome-devtools-mcp
             tools: match a window's url here to a chrome-devtools-mcp page
             (list_pages) and select_page it before driving."""
             return await bridge.read(_browser_gated(windows_reader))
@@ -470,8 +474,7 @@ class BrowserMcpServer:
 
                 `agent` is the other agent's DISPLAY number — the number shown
                 on its chip in the IDE top bar (what the user calls "agent 3").
-                It is strictly 1-based: unlike the browser tools' `window`
-                arg, there is NO 0 = "focused" shorthand here.
+                It is strictly 1-based — there is no 0 = "focused" shorthand.
                 `note` is an optional one-line description of what you are
                 waiting for (e.g. "the API refactor is merged"); it is shown to
                 the verification judge and echoed back in the go-ahead.
@@ -529,8 +532,9 @@ class BrowserMcpServer:
         self._config_path = path
 
     def _chrome_devtools_argv(self, agent_id: str) -> list[str] | None:
-        """The `npx chrome-devtools-mcp` invocation for the embedded view's CDP
-        endpoint, or None when CDP is off / npx is missing.
+        """The `npx chrome-devtools-mcp` invocation for the IDE-owned Chrome
+        process's CDP endpoint (see chrome_host.py), or None when CDP is off /
+        npx is missing.
 
         The ONE place the version pin, the CDP-port read, and the npx-presence
         gate live — shared by BOTH per-agent config builders (claude's
@@ -539,10 +543,10 @@ class BrowserMcpServer:
         app.run() via SYMMETRIA_IDE_CDP_PORT (the single source of truth
         for the port, read back here). chrome-devtools-mcp supersedes our old
         navigate/eval/perf/snapshot/click/fill tools with Google's suite while
-        driving the SAME contained view; the agent still allocates visible
-        windows via our browser_open (chrome-devtools-mcp can't pool a
-        WebEngineView) then drives them by select_page. See CLAUDE.md "The
-        browser panes".
+        driving the IDE-owned Chrome process (see chrome_host.py); the agent
+        still allocates visible windows via our browser_open (chrome-devtools-mcp
+        can't pool a window itself) then drives them by select_page. See
+        CLAUDE.md "The agentic browser".
         """
         cdp_port = os.environ.get("SYMMETRIA_IDE_CDP_PORT", "")
         if not cdp_port:
@@ -603,8 +607,8 @@ class BrowserMcpServer:
             }
         }
         # Add the off-the-shelf Chrome DevTools MCP (npx stdio) pointed at the
-        # embedded view's CDP endpoint — see _chrome_devtools_argv for the
-        # rationale + the CDP/npx gating. claude's schema splits the invocation
+        # IDE-owned Chrome process's CDP endpoint (see chrome_host.py) — see
+        # _chrome_devtools_argv for the rationale + the CDP/npx gating. claude's schema splits the invocation
         # into `command` (executable) + `args` (the rest). Per-project gated:
         # this is the entry that spawns a Node process per agent.
         argv = self._chrome_devtools_argv(agent_id) if browser_enabled else None

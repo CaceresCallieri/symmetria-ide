@@ -2104,12 +2104,57 @@ def test_qml_facing_slots_are_registered():
         "anchor_to_path",
         "release_anchor",
         "focus_agent_browser",
+        "notify_focused_agent_browser",
         "set_central_surface",
         "cycle_agent_focus",
         "respond_to_permission",
     }
     missing = qml_called - registered
     assert not missing, f"QML-facing methods missing from metaobject: {missing}"
+
+
+def test_every_controller_reference_in_qml_exists():
+    """Every `controller.<name>` written in QML must exist on AppController.
+
+    The hand-maintained set above only guards methods someone remembered to
+    list. This derives the set from the QML itself, so DELETING a Python
+    property or slot that QML still binds fails here instead of at runtime.
+
+    That is not hypothetical: `agentBrowserActive` was removed from
+    AppController while `qml/AgentTopBar.qml` still indexed it, and nothing
+    caught it — QML reports a missing property as `undefined`, so the binding
+    throws on evaluation while the Python suite stays green.
+    """
+    meta = AppController.staticMetaObject
+    known = {bytes(meta.method(i).name()).decode() for i in range(meta.methodCount())}
+    # QMetaProperty.name() already hands back a str, unlike QMetaMethod.name().
+    known |= {meta.property(i).name() for i in range(meta.propertyCount())}
+
+    qml_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "qml")
+    # Views under githistory/ declare their OWN `controller` property (the git
+    # log / PR controllers injected by their parent), so `controller.x` there
+    # says nothing about AppController. Skip any file that shadows the name.
+    shadowed = re.compile(r"^\s*(?:required\s+)?property\s+\w+\s+controller\b")
+    referenced: dict[str, str] = {}
+    for root, _dirs, files in os.walk(qml_dir):
+        for filename in files:
+            if not filename.endswith(".qml"):
+                continue
+            path = os.path.join(root, filename)
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+            if any(shadowed.match(line) for line in lines):
+                continue
+            for lineno, raw in enumerate(lines, start=1):
+                line = raw.split("//", 1)[0]  # drop line comments
+                for name in re.findall(r"\bcontroller\.([A-Za-z_]\w*)", line):
+                    referenced.setdefault(name, f"{filename}:{lineno}")
+
+    missing = {name: where for name, where in referenced.items() if name not in known}
+    assert not missing, (
+        "QML references controller members that AppController does not expose: "
+        f"{missing}"
+    )
 
 
 # ---------------------------------------------------------------------------

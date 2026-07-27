@@ -32,6 +32,7 @@ import os
 import socket
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 
 log = logging.getLogger(__name__)
@@ -45,6 +46,11 @@ _HYPRCTL_TIMEOUT_SEC = 2.0
 # own window on these rather than trying to interpret each payload shape, since
 # Hyprland's event field layouts differ per event and per version.
 _MOVE_EVENTS = ("movewindowv2", "movewindow", "openwindow")
+
+# Floor between two `hyprctl clients -j` resolves. Each is a subprocess; a
+# window drag emits move events continuously, and without a floor the reader
+# thread would spawn one per event.
+_RESOLVE_DEBOUNCE_SEC = 0.15
 
 
 def hyprland_available() -> bool:
@@ -120,34 +126,34 @@ def parse_own_window(clients_json: str, pid: int) -> dict | None:
         workspace = client.get("workspace") or {}
         if not isinstance(workspace, dict):
             return None
-        return {
-            "address": normalize_address(str(client.get("address", ""))),
-            "workspace_id": int(workspace.get("id", 0)),
-            "workspace_name": str(workspace.get("name", "")),
-        }
+        try:
+            return {
+                "workspace_id": int(workspace.get("id", 0)),
+                "workspace_name": str(workspace.get("name", "")),
+            }
+        except (TypeError, ValueError):
+            # A non-numeric id would otherwise raise out of the reader thread
+            # or out of resolve_now() on the GUI thread, against a docstring
+            # that promises None for anything unusable.
+            log.warning("hyprctl clients: unusable workspace payload %r", workspace)
+            return None
     return None
-
-
-def normalize_address(address: str) -> str:
-    """Canonicalise a window address for comparison.
-
-    `hyprctl clients -j` reports `0x5581...` while the event socket emits the
-    bare hex. Comparing the two raw strings never matches — a bug that would
-    look like "the workspace watcher just doesn't fire".
-    """
-    return address.strip().lower().removeprefix("0x")
 
 
 def parse_event_line(line: str) -> tuple[str, list[str]]:
     """Split a `.socket2` line (`EVENT>>arg,arg,arg`) into name + args.
 
     Returns `("", [])` for anything unrecognised, so callers can filter by name
-    without guarding shape.
+    without guarding shape. Only the NAME has a consumer today — the watcher
+    re-resolves our window by pid rather than parsing per-event field layouts,
+    which differ by event and by Hyprland version. The args are returned
+    anyway because filtering by them is the obvious optimisation if the
+    re-resolve ever becomes too costly.
     """
     name, sep, payload = line.partition(">>")
     if not sep:
         return "", []
-    return name.strip(), [part for part in payload.split(",")] if payload else []
+    return name.strip(), payload.split(",") if payload else []
 
 
 def event_socket_path() -> str:
@@ -240,6 +246,7 @@ class WorkspaceWatcher:
         self._sock: socket.socket | None = None
         self._workspace_id: int = 0
         self._workspace_name: str = ""
+        self._last_resolve: float = 0.0
 
     @property
     def workspace_id(self) -> int:
@@ -259,13 +266,27 @@ class WorkspaceWatcher:
         return self._workspace_id, self._workspace_name
 
     def start(self) -> None:
-        """Begin watching. No-op off Hyprland, or if already running."""
+        """Begin watching. No-op off Hyprland, or if already running.
+
+        The socket is created HERE, on the caller's thread, rather than inside
+        `_run`: otherwise a `stop()` arriving before the reader thread got
+        scheduled would find `_sock` still None, skip the shutdown, and leave
+        the reader parked on `recv` forever.
+        """
         if self._thread is not None or not hyprland_available():
             return
         path = event_socket_path()
         if not path:
             log.info("hyprland event socket unresolvable — workspace follow off")
             return
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(path)
+        except OSError as exc:
+            log.warning("hyprland event socket connect failed: %s", exc)
+            return
+        self._sock = sock
+        self._stop.clear()  # allow restart after a stop()
         self.resolve_now()
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="hypr-events"
@@ -273,7 +294,7 @@ class WorkspaceWatcher:
         self._thread.start()
 
     def stop(self) -> None:
-        """Signal the reader to exit and unblock its recv."""
+        """Signal the reader to exit, unblock its recv, and let it finish."""
         self._stop.set()
         # Shutting the socket down is what actually unblocks the blocking
         # recv; setting the event alone would leave the thread parked until
@@ -284,15 +305,13 @@ class WorkspaceWatcher:
                 self._sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
+        # Join and clear so start() can run again — leaving `_thread` set made
+        # any restart a silent no-op.
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
 
     def _run(self) -> None:
-        path = event_socket_path()
-        try:
-            self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self._sock.connect(path)
-        except OSError as exc:
-            log.warning("hyprland event socket connect failed: %s", exc)
-            return
         buffer = ""
         try:
             while not self._stop.is_set():
@@ -303,9 +322,17 @@ class WorkspaceWatcher:
                 if not chunk:
                     break
                 buffer += chunk.decode("utf-8", errors="replace")
+                # Drain the whole chunk before resolving: a window drag or a
+                # burst of app launches arrives as many move events at once,
+                # and resolving per line would fire a `hyprctl` subprocess for
+                # each. Only the final state matters.
+                interesting = False
                 while "\n" in buffer:
                     line, _, buffer = buffer.partition("\n")
-                    self._handle_line(line)
+                    name, _args = parse_event_line(line)
+                    interesting = interesting or name in _MOVE_EVENTS
+                if interesting:
+                    self._resolve_and_notify()
         finally:
             try:
                 self._sock.close()
@@ -313,10 +340,12 @@ class WorkspaceWatcher:
                 pass
             self._sock = None
 
-    def _handle_line(self, line: str) -> None:
-        name, _ = parse_event_line(line)
-        if name not in _MOVE_EVENTS:
+    def _resolve_and_notify(self) -> None:
+        """Re-resolve our window; call back only when the workspace changed."""
+        now = time.monotonic()
+        if now - self._last_resolve < _RESOLVE_DEBOUNCE_SEC:
             return
+        self._last_resolve = now
         window = own_window()
         if not window:
             return

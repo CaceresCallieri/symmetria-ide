@@ -533,8 +533,11 @@ class AppController(QObject):
     # Browser window registry (real Google Chrome, external process — see
     # chrome_host.py). No QML surface consumes these: the windows are Chrome's
     # own, pinned by Hyprland to this IDE's workspace. `browserTabsChanged`
-    # survives as the internal notify that keeps the agent-chip globe counts
-    # coherent when a window opens/closes/renames.
+    # has NO consumer today — the agent-chip globe rides `agentBrowserChanged`,
+    # not this. It is kept as the observable seam for registry mutation (the
+    # pool tests assert on it) and as the notify a future in-window surface
+    # would bind. If neither materialises, delete it rather than let it look
+    # load-bearing.
     browserTabsChanged = Signal()
     # Agent ↔ browser links — which agent owns which browser window. Drives the
     # browser glyph on the AgentTopBar chips: ownership counts (glyph visible)
@@ -874,8 +877,11 @@ class AppController(QObject):
         # _browser_order is the dense DISPLAY order (opens append, closes
         # compact). No focused-slot field: the windows are Hyprland's, and
         # focusing one would yank the user across workspaces.
-        self._browser_tabs: dict[int, dict[str, str]] = {}
+        self._browser_tabs: dict[int, dict] = {}
         self._browser_order: list[int] = []
+        # Monotonic open counter. Stamped into each slot so a late CDP reply
+        # can tell "my window" from "a window that reused my slot".
+        self._browser_open_seq: int = 0
         # The Chrome process itself, built on FIRST browser use (a project that
         # never opens a browser never pays for one) — see _ensure_chrome_host.
         self._chrome_host: ChromeHost | None = None
@@ -4784,16 +4790,25 @@ class AppController(QObject):
         """
         if self._chrome_host is None:
             self._chrome_host = ChromeHost(self.displayedRoot, parent=self)
-            # Both are same-thread (CDP lives on the GUI thread by design —
+            # All three are same-thread (CDP lives on the GUI thread by design —
             # see cdp_client), so a plain auto connection is correct here.
             self._chrome_host.windowUpdated.connect(self._on_chrome_window_updated)
             self._chrome_host.windowGone.connect(self._on_chrome_window_gone)
+            self._chrome_host.browserGone.connect(self._on_chrome_gone)
         return self._chrome_host
 
     @Slot()
-    @Slot(str)
-    @Slot(str, bool)
-    def open_browser(self, url: str = "about:blank", focus: bool = True) -> str:
+    def _on_chrome_gone(self) -> None:
+        """Chrome died — drop every window from the registry.
+
+        Without this the registry outlives the browser: `browser_list_windows`
+        would keep reporting windows that no longer exist and agent chips would
+        keep showing globes, so an agent would confidently drive nothing.
+        """
+        for slot in list(self._browser_order):
+            self.close_browser(slot)
+
+    def open_browser(self, url: str = "about:blank") -> str:
         """Allocate the lowest free slot and ask Chrome for a new window.
 
         Returns "" on success or an error code (`pool-full`,
@@ -4801,10 +4816,9 @@ class AppController(QObject):
         calling agent.
 
         New windows APPEND in display order (newest = highest number),
-        matching the agent pool. `focus` is accepted for call-site
-        compatibility but IGNORED: raising an external Chrome window means
-        pulling the user across workspaces, which is exactly what the
-        notify-don't-yank decision rules out.
+        matching the agent pool. Nothing is focused or raised: the window maps
+        on the IDE's workspace via the Hyprland pin rule, and pulling the user
+        there is exactly what the notify-don't-yank decision rules out.
 
         The slot is reserved BEFORE Chrome answers. Window creation is
         asynchronous (CDP round-trip, or a `--new-window` handoff to the
@@ -4817,28 +4831,69 @@ class AppController(QObject):
             log.warning("open_browser: pool full (%d slots)", self._MAX_INSTANCES)
             return "pool-full"
         target_url = url or "about:blank"
+        self._browser_open_seq += 1
+        open_id = self._browser_open_seq
         error = self._ensure_chrome_host().open_window(
-            target_url, lambda result, s=slot: self._bind_browser_target(s, result)
+            target_url,
+            lambda result, s=slot, o=open_id: self._bind_browser_target(s, o, result),
         )
         if error:
             log.warning("open_browser: %s", error)
             return error
-        self._browser_tabs[slot] = {"url": target_url, "title": "", "target": ""}
+        self._browser_tabs[slot] = {
+            "url": target_url,
+            "title": "",
+            "target": "",
+            "open_id": open_id,
+        }
         self._browser_order.append(slot)
         self.browserTabsChanged.emit()
         log.info("open_browser: slot %d → %s", slot, target_url)
         return ""
 
-    def _bind_browser_target(self, slot: int, result: dict) -> None:
-        """Attach the CDP target id to the slot that requested the window."""
+    def _bind_browser_target(self, slot: int, open_id: int, result: dict) -> None:
+        """Attach the CDP target id to the slot that requested the window.
+
+        `open_id` guards against a late reply: if the slot was closed and
+        re-allocated to a different window while the CDP round-trip was in
+        flight, binding the old window's target here would silently point the
+        registry at the wrong window — and a later close would shut the wrong
+        one.
+        """
         target_id = str((result or {}).get("targetId", ""))
-        if not target_id or slot not in self._browser_tabs:
+        tab = self._browser_tabs.get(slot)
+        if tab is None or tab.get("open_id") != open_id:
             return
-        self._browser_tabs[slot]["target"] = target_id
+        if not target_id:
+            log.warning("open_browser: Chrome returned no targetId for slot %d", slot)
+            return
+        tab["target"] = target_id
 
     def _slot_for_target(self, target_id: str) -> int | None:
         for slot, tab in self._browser_tabs.items():
             if tab.get("target") == target_id:
+                return slot
+        return None
+
+    def _adoptable_slot(self, url: str) -> int | None:
+        """The oldest target-less slot that ASKED for `url`, if any.
+
+        Chrome rewrites urls on commit (adds a trailing slash, follows a
+        redirect, prepends `www.`), so the match is prefix-based in either
+        direction rather than exact — while still being specific enough that an
+        unrelated page can't claim the slot. A slot opened for `about:blank`
+        matches anything, since that is the "give me a window, no destination"
+        request.
+        """
+        committed = (url or "").rstrip("/")
+        for slot in self._browser_order:
+            tab = self._browser_tabs[slot]
+            if tab.get("target"):
+                continue
+            requested = str(tab.get("url", "")).rstrip("/")
+            if requested in ("", "about:blank"):
+                return slot
+            if committed.startswith(requested) or requested.startswith(committed):
                 return slot
         return None
 
@@ -4853,19 +4908,17 @@ class AppController(QObject):
         waiting are the user's own tabs/windows — deliberately ignored rather
         than adopted, since the registry tracks windows the IDE handed out.
 
-        `chrome://` targets are never adopted. Chrome opens a new-tab page in
-        several situations we don't control, and adopting one would point a
-        slot at a window the agent never asked for — leaving the real window
-        unattributed and un-closable.
+        Adoption is URL-MATCHED, not first-come. Two kinds of page target we
+        never requested show up on this feed: Chrome's own new-tab pages (which
+        it opens in situations we don't control) and pages an agent creates
+        directly through chrome-devtools-mcp. Adopting either would point a
+        slot at a window nobody asked it to track, and leave the real window
+        unattributed and un-closable — so a waiting slot only takes a target
+        whose url is the one it asked for.
         """
         slot = self._slot_for_target(target_id)
         if slot is None:
-            if url.startswith("chrome://"):
-                return
-            slot = next(
-                (s for s in self._browser_order if not self._browser_tabs[s]["target"]),
-                None,
-            )
+            slot = self._adoptable_slot(url)
             if slot is None:
                 return
             self._browser_tabs[slot]["target"] = target_id
@@ -4893,6 +4946,15 @@ class AppController(QObject):
         target_id = self._browser_tabs.get(slot, {}).get("target", "")
         if target_id and self._chrome_host is not None:
             self._chrome_host.close_window(target_id)
+        elif not target_id:
+            # The window exists but we never learned its CDP id (opened before
+            # the attach, adoption not yet matched). Dropping the slot silently
+            # would leave exactly the orphan this method exists to prevent.
+            log.warning(
+                "close_browser_window: slot %d has no CDP target — its Chrome "
+                "window may outlive the registry entry",
+                slot,
+            )
         self.close_browser(slot)
 
     @Slot(int)

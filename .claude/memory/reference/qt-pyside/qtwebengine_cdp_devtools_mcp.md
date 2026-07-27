@@ -5,7 +5,10 @@ metadata:
   node_type: memory
   type: reference
   originSessionId: c1882ebc-4b92-4b54-9e54-6d592472bb6f
+  modified: 2026-07-27T05:16:33.859Z
 ---
+
+> **SUPERSEDED 2026-07-27.** The embedded QtWebEngine browser was replaced by real external Google Chrome (`chrome_host.py`), and the CDP port env var was renamed `QTWEBENGINE_REMOTE_DEBUGGING` → `SYMMETRIA_IDE_CDP_PORT`. Everything below describes the embedded era; keep it for the CDP/Puppeteer-vs-Playwright findings, which still hold, but do not configure anything from it.
 
 # QtWebEngine's CDP is complete enough to adopt chrome-devtools-mcp wholesale
 

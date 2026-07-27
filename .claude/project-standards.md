@@ -356,7 +356,7 @@ When working near any non-zero row, consider addressing the instance. Do not reg
 
 ### Environment / Deployment Notes
 
-- **Window `app_id` for Hyprland:** `QGuiApplication.setDesktopFileName("symmetria-ide")` sets the Wayland `app_id`, which becomes the Hyprland window class. Required for `windowrule = workspace 6 silent, class:^(symmetria-ide)$` to match. Without it the rule targets the process name, which may vary by Python invocation. Gotcha #4.
+- **Window `app_id` for Hyprland:** `QGuiApplication.setDesktopFileName("symmetria-ide")` sets the Wayland `app_id`, which becomes the Hyprland window class. Required for `windowrule = workspace 6 silent, match:class ^(symmetria-ide)$` to match (0.56+ syntax; the older `class:^(x)$` form is rejected and `windowrulev2` is silently ignored — see CLAUDE.md gotcha #4). Without it the rule targets the process name, which may vary by Python invocation.
 - **Notification daemon is Symmetria Shell (QuickShell), not swaync/mako.** `swaync-client` and `makoctl` are no-ops on this system. Any code or script that calls these tools will silently do nothing — test notifications via the QuickShell IPC path. Gotcha #6.
 
 ---

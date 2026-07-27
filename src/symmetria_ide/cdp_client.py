@@ -42,7 +42,6 @@ _RETRY_INTERVAL_MS = 750
 _MAX_ATTACH_ATTEMPTS = 10  # ~7.5s, comfortably past a cold Chrome start
 
 type CommandCallback = Callable[[dict], None]
-type EventCallback = Callable[[str, dict], None]
 
 
 class CdpClient(QObject):
@@ -52,9 +51,8 @@ class CdpClient(QObject):
     runs on the GUI thread.
     """
 
-    #: Emitted once the browser-level websocket is open and discovery is armed.
-    connected = Signal()
-    #: Emitted when the socket drops — Chrome exited, or was never reachable.
+    #: Emitted when an ESTABLISHED session drops — Chrome exited or was killed.
+    #: The owner treats it as "every window we knew about is gone".
     disconnected = Signal()
     #: (target_id, url, title) whenever a page target appears or changes.
     targetUpdated = Signal(str, str, str)
@@ -67,6 +65,11 @@ class CdpClient(QObject):
         self._socket.connected.connect(self._on_connected)
         self._socket.disconnected.connect(self._on_disconnected)
         self._socket.textMessageReceived.connect(self._on_message)
+        # Without this, a failed websocket handshake is SILENT: `disconnected`
+        # does not fire for a socket that never connected, so nothing would
+        # consume the retry budget and CDP would stay detached for the rest of
+        # the session with no log line explaining why.
+        self._socket.errorOccurred.connect(self._on_socket_error)
         self._network = QNetworkAccessManager(self)
         self._next_id = 1
         self._pending: dict[int, CommandCallback] = {}
@@ -74,6 +77,7 @@ class CdpClient(QObject):
         self._connecting = False
         self._connected = False
         self._attempts = 0
+        self._closed = False
 
     @property
     def is_connected(self) -> bool:
@@ -90,35 +94,53 @@ class CdpClient(QObject):
             return
         self._port = port
         self._attempts = 0
+        self._closed = False
         self._attempt_attach()
 
     def _attempt_attach(self) -> None:
+        if self._closed:
+            return
         self._connecting = True
         self._attempts += 1
         request = QNetworkRequest(QUrl(f"http://127.0.0.1:{self._port}/json/version"))
         reply = self._network.get(request)
+        # No context-object argument here: PySide6's `connect` does not accept
+        # the C++ `connect(sender, signal, context, functor)` form for a
+        # lambda ("Expected signal or callable"), so §4 P1's context-QObject
+        # advice is unavailable on this call. Lifetime is covered structurally
+        # instead — the QNetworkAccessManager is parented to `self`, so its
+        # replies are aborted when we die — and `_on_version_reply` bails on
+        # `_closed` for the ordinary teardown case.
         reply.finished.connect(lambda: self._on_version_reply(reply))
 
     def _retry_or_give_up(self, reason: str) -> None:
         self._connecting = False
+        if self._closed:
+            return
         if self._attempts >= _MAX_ATTACH_ATTEMPTS:
             log.warning("cdp: giving up attaching to Chrome (%s)", reason)
             return
-        QTimer.singleShot(_RETRY_INTERVAL_MS, self._attempt_attach)
+        QTimer.singleShot(_RETRY_INTERVAL_MS, self, self._attempt_attach)
 
     def close(self) -> None:
-        """Drop the session (IDE shutdown / Chrome kill)."""
+        """Drop the session (IDE shutdown / Chrome kill).
+
+        `_closed` is what actually makes this stick: a `/json/version` request
+        already in flight would otherwise still open a websocket from its
+        completion handler, reviving the session after teardown.
+        """
+        self._closed = True
         self._pending.clear()
         self._connecting = False
-        # Exhaust the retry budget so a pending timer can't resurrect the
-        # attach after shutdown and leave a socket open past teardown.
-        self._attempts = _MAX_ATTACH_ATTEMPTS
         self._socket.close()
 
     # -- commands -------------------------------------------------------
 
     def send(
-        self, method: str, params: dict | None = None, callback: CommandCallback = None
+        self,
+        method: str,
+        params: dict | None = None,
+        callback: CommandCallback | None = None,
     ) -> bool:
         """Send one CDP command. Returns False when not connected.
 
@@ -138,7 +160,7 @@ class CdpClient(QObject):
         self._socket.sendTextMessage(json.dumps(payload))
         return True
 
-    def create_window(self, url: str, callback: CommandCallback = None) -> bool:
+    def create_window(self, url: str, callback: CommandCallback | None = None) -> bool:
         """Open a NEW browser window (not a tab) at `url`.
 
         `newWindow` is the reason this client exists — see the module
@@ -151,7 +173,9 @@ class CdpClient(QObject):
             callback,
         )
 
-    def close_target(self, target_id: str, callback: CommandCallback = None) -> bool:
+    def close_target(
+        self, target_id: str, callback: CommandCallback | None = None
+    ) -> bool:
         """Close a target (our window) by id."""
         if not target_id:
             return False
@@ -179,6 +203,17 @@ class CdpClient(QObject):
         self._socket.open(QUrl(ws_url))
 
     @Slot()
+    def _on_socket_error(self) -> None:
+        """The websocket itself failed (handshake refused, Chrome mid-start).
+
+        Separate from `_on_disconnected`, which Qt does NOT emit for a socket
+        that never reached the connected state.
+        """
+        if self._connected:
+            return  # a live session dropping is _on_disconnected's business
+        self._retry_or_give_up(self._socket.errorString())
+
+    @Slot()
     def _on_connected(self) -> None:
         self._connecting = False
         self._connected = True
@@ -187,7 +222,6 @@ class CdpClient(QObject):
         # inventory: without it we would learn nothing about windows the user
         # opens or closes by hand, and the registry would drift immediately.
         self.send("Target.setDiscoverTargets", {"discover": True})
-        self.connected.emit()
 
     @Slot()
     def _on_disconnected(self) -> None:
@@ -208,6 +242,12 @@ class CdpClient(QObject):
             return
         message_id = payload.get("id")
         if message_id is not None:
+            error = payload.get("error")
+            if error is not None:
+                # Without this the failure is invisible: the callback sees a
+                # payload with no targetId, shrugs, and the agent is told its
+                # window opened fine.
+                log.warning("cdp: command %s failed: %s", message_id, error)
             callback = self._pending.pop(message_id, None)
             if callback is not None:
                 result = payload.get("result")

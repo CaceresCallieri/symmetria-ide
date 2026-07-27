@@ -303,7 +303,7 @@ class FakeChromeHost(QObject):
 
     windowUpdated = Signal(str, str, str)
     windowGone = Signal(str)
-    startFailed = Signal(str)
+    browserGone = Signal()
 
     def __init__(self, project_root: str = "", parent=None) -> None:
         super().__init__(parent)
