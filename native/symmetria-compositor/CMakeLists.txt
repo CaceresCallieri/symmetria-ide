@@ -20,6 +20,8 @@ qt_add_qml_module(symmetriacompositor
         symmetriacompositor.cpp
         symmetriaoutput.h
         symmetriaoutput.cpp
+        symmetriashellsurfaceitem.h
+        symmetriashellsurfaceitem.cpp
 )
 
 target_link_libraries(symmetriacompositor PRIVATE

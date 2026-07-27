@@ -286,7 +286,14 @@ Item {
     Component {
         id: surfaceComponent
 
-        ShellSurfaceItem {
+        // Ours, not Qt's stock `ShellSurfaceItem`: the only difference is that
+        // wheel events survive. Qt's send path truncates any `angleDelta`
+        // under 12 to a zero-valued axis event, which on a high-resolution
+        // wheel or a touchpad — neither of which emits the 120-unit steps that
+        // arithmetic assumes — is every event. Pages did not scroll at all,
+        // while dragging their scrollbars worked perfectly, because press and
+        // move never touch it. See symmetriashellsurfaceitem.h.
+        SymmetriaShellSurfaceItem {
             id: surfaceItem
             anchors.fill: surfaceHost
             // Chrome's menus, omnibox dropdown and tooltips are xdg_popups;

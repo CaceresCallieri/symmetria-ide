@@ -3,27 +3,37 @@
 Same pattern as the sibling browser-pane tests: the invariant lives in QML, so
 it is asserted by reading the file.
 
-WHAT IS BEING PROTECTED. `QWaylandQuickItem` implements `hoverEnterEvent` and
-`hoverMoveEvent` — the only two places that call `sendMouseMoveEvent`, which is
-what gives the seat's pointer a focused surface — but it never sets
-`acceptHoverEvents`. On a stock item neither handler ever fires, so the nested
-client receives no pointer motion at all.
+WHAT IS BEING PROTECTED. Pages in the nested browser did not scroll, and it
+took TWO independent defects in Qt's stock items to explain it. Both are
+guarded here because either one alone brings the symptom back.
 
-The loudest casualty is scrolling, and its symptom actively misleads:
-`wheelEvent` sends only the axis delta and no position, so with no pointer
-focus it lands nowhere and pages do not scroll — EXCEPT that
-`mousePressEvent` calls `sendMouseMoveEvent` itself, so scrolling appears to
-start working after a click. Anyone diagnosing that will chase the wheel path
-and find nothing wrong with it.
+1. **No pointer motion reaches the client.** `QWaylandQuickItem` implements
+   `hoverEnterEvent`/`hoverMoveEvent` — the only two callers of
+   `sendMouseMoveEvent`, which is what gives the seat's pointer a focused
+   surface — but never sets `acceptHoverEvents`, so on a stock item neither
+   fires. `wheelEvent` sends only an axis delta and no position, so with no
+   focused surface it lands nowhere. Link hover, hover-opened menus, cursor
+   shape and dropdown row highlighting die the same way.
 
-Popups need the same treatment and cannot get it declaratively: Qt creates them
-in C++ (`maybeCreateAutoPopup`) as items we never declare, so they are reached
-by walking children. Without that, hovering a row in the omnibox dropdown
-highlights nothing.
+2. **The wheel value is truncated to zero.** `sendMouseWheelEvent` ends in
+   `wl_fixed_from_int(-delta / 12)` — truncating integer division — so any
+   `angleDelta` under 12 becomes a zero-valued axis event. Only a classic
+   detented wheel (120 per notch) survives it.
+
+Both symptoms point away from themselves, which is the reason for the fuss.
+`mousePressEvent` calls `sendMouseMoveEvent` itself, so #1 looks like scrolling
+that "starts working after a click"; and dragging a scrollbar works under #2
+because press and move never touch that arithmetic. Either reads as a focus
+problem, and the wheel path looks innocent until you read the send.
+
+Popups get the hover treatment but NOT the wheel one, and neither can be given
+declaratively: Qt creates those items in C++ (`maybeCreateAutoPopup`), so hover
+is reached by walking children and the item class cannot be substituted at all.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -55,6 +65,25 @@ class TestPointerReachesTheSurface:
         is what identifies one."""
         block = pane_qml[pane_qml.index("function _enableHoverTree") :][:900]
         assert "child.shellSurface !== undefined" in block
+
+
+class TestWheelSurvivesTheTrip:
+    def test_surface_items_are_our_wheel_fixing_subclass(self, pane_qml: str):
+        """`QWaylandPointer::sendMouseWheelEvent` truncates any angleDelta
+        under 12 to a ZERO-valued axis event. A classic detented wheel reports
+        120 per notch and survives; a high-resolution wheel or a touchpad
+        reports the same notch as fragments, all of which vanish — measured on
+        hardware that advertises REL_WHEEL_HI_RES and NOT REL_WHEEL, so it
+        cannot emit a 120-unit step at all. Revert to the stock
+        `ShellSurfaceItem` and pages stop scrolling outright, while dragging
+        their scrollbars keeps working — which points at focus, not at
+        arithmetic."""
+        assert "SymmetriaShellSurfaceItem {" in pane_qml
+        # Word-anchored: a plain substring test matches inside our own type
+        # name, so it would pass no matter what the file says.
+        assert not re.search(r"(?<![A-Za-z])ShellSurfaceItem\s*\{", pane_qml), (
+            "a stock ShellSurfaceItem drops sub-threshold wheel events"
+        )
 
 
 class TestClientsCannotPaintOverTheIde:
