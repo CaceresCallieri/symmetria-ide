@@ -18,6 +18,7 @@ import Symmetria.Ide 1.0
 import Symmetria.FileManager.UI as FmUi
 import "design"
 import "githistory"
+import "browser"
 
 Window {
     id: root
@@ -180,22 +181,36 @@ Window {
             gitStatusPanel.scope === "agent" ? "all" : "agent"
     }
 
-    // Jump to the FOCUSED agent's browser — go watch what the agent is doing
-    // (or see the page it left once idle; the window lives as long as the
-    // agent does). The keyboard twin of clicking an agent chip's globe. The
-    // browser is agent-owned: you reach it only through the agent that owns
-    // it. Since the QtWebEngine surface was retired for real Google Chrome
-    // (an external process whose windows Hyprland pins to THIS IDE's
-    // workspace — see chrome_host.py), there is no in-window browser surface
-    // to swap to, so 'B' REPORTS instead of navigating: a toast naming the
-    // agent, its workspace and window count. Deliberate — the user chose
-    // notify-don't-yank, and a focus jump would drag them out of the
-    // workspace they are working in. Re-examine when the nested-compositor
-    // backend lands and the browser becomes an in-window surface again.
+    // Browser surface toggle — go watch what an agent is doing (or see the
+    // page it left once idle; the window lives as long as the agent does).
+    // The keyboard twin of clicking an agent chip's globe.
+    //
+    // A full member of the swap-last-two chord family (E/T/G), as it was in
+    // the QtWebEngine era. In between it was a notify-only chord, because the
+    // external-Chrome backend made the browser a Hyprland window and
+    // "navigating" to it meant dragging the user to another workspace. The
+    // nested compositor put it back in this window, so that exception is gone.
     Shortcut {
         sequences: ["Ctrl+Shift+B"]
         context: Qt.ApplicationShortcut
-        onActivated: controller.notify_focused_agent_browser()
+        onActivated: controller.toggle_browser()
+    }
+
+    // Cycle browser windows, mirroring Ctrl+Shift+H/L on the agent surface.
+    // Scoped to the browser surface so the same chords keep cycling agents
+    // everywhere else.
+    Shortcut {
+        sequences: ["Ctrl+Shift+L"]
+        context: Qt.ApplicationShortcut
+        enabled: controller.browserVisible
+        onActivated: browserPane.cycleWindow(1)
+    }
+
+    Shortcut {
+        sequences: ["Ctrl+Shift+H"]
+        context: Qt.ApplicationShortcut
+        enabled: controller.browserVisible
+        onActivated: browserPane.cycleWindow(-1)
     }
 
     // IDE-wide file-manager toggle. Promoted out of the nvim layer
@@ -407,8 +422,10 @@ Window {
     }
 
     // Cycle through occupied agent slots without reaching for the digit row.
-    // Formerly dispatched by visible surface (agent vs browser); the browser
-    // pool no longer lives in-window, so this is agent-only again.
+    // Dispatched by visible surface: the browser surface binds the SAME chords
+    // to cycling its windows (declared near the Ctrl+Shift+B toggle above).
+    // The two pairs are disjoint by `enabled`, so they never compete for the
+    // sequence — Qt only arbitrates between ENABLED shortcuts.
     Shortcut {
         sequences: ["Ctrl+Shift+H"]
         context: Qt.ApplicationShortcut
@@ -1310,19 +1327,28 @@ Window {
                     }
                 }
 
-                // NOTE: there is deliberately no browser surface here. The
-                // agentic browser used to be an embedded QtWebEngine pool
-                // (BrowserSurface.qml, gated behind a lazy Loader that saved
-                // ~430ms of cold start). It was retired for REAL Google
-                // Chrome: QtWebEngine could not serve the actual use case —
-                // Target.createTarget ("new_page") is unsupported, screenshots
-                // stall off-workspace, and there are no extensions or real
-                // logins. Chrome now runs as an external process whose windows
-                // Hyprland pins to this IDE's workspace (chrome_host.py +
-                // hyprland_ipc.py). Containment moved from "embedded item" to
-                // "pinned window"; the in-window form returns when the nested
-                // Wayland compositor backend lands, and it will slot in HERE as
-                // a ShellSurfaceItem pool. See CLAUDE.md "The browser panes".
+                // Agentic browser — REAL Google Chrome, rendering here as a
+                // client of a nested Wayland compositor (qml/browser/). The
+                // predecessors: an embedded QtWebEngine pool (retired — no
+                // Target.createTarget, screenshots stalling off-workspace, no
+                // extensions, no real logins), then an external Chrome window
+                // pinned to this IDE's workspace by a Hyprland rule (retired —
+                // it worked, but the browser was not in-window).
+                //
+                // ⚠ NOT in a Loader, unlike every other optional surface here.
+                // The compositor owns Chrome's Wayland connection, so unloading
+                // it would kill the browser process's display. `visible` is the
+                // only gate, and hiding is genuinely free (measured: full 60Hz
+                // and ~60ms screenshots while hidden AND off-workspace).
+                BrowserPane {
+                    id: browserPane
+                    anchors.fill: parent
+                    visible: !controller.agentVisible && !controller.fmVisible
+                             && controller.browserVisible
+                    focus: visible
+                    hostWindow: root
+                    socketName: browserWaylandSocket
+                }
 
                 // Git-history viewer — sibling central surface (read-only
                 // comprehension surface). Gated on the same XOR as the editor/

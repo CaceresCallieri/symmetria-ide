@@ -2104,7 +2104,7 @@ def test_qml_facing_slots_are_registered():
         "anchor_to_path",
         "release_anchor",
         "focus_agent_browser",
-        "notify_focused_agent_browser",
+        "toggle_browser",
         "set_central_surface",
         "cycle_agent_focus",
         "respond_to_permission",

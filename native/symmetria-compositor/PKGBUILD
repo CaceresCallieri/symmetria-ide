@@ -1,0 +1,54 @@
+# Maintainer: Juan Caceres Callieri <cacerescallieri@gmail.com>
+#
+# The `Symmetria.Compositor` QML module — a QWaylandCompositor subclass that
+# bridges the nested compositor's clipboard to the host session. See
+# symmetriacompositor.h for why it has to be C++ at all.
+#
+# WHY PACKAGE INSTEAD OF POINTING AT A BUILD DIR: same reasoning as the
+# symmetria-qmltermwidget PKGBUILD. A `cmake --build` artifact referenced by an
+# absolute path rots silently when pacman bumps Qt (ABI break → the module stops
+# loading, with no rebuild trigger). As a pacman package it declares its Qt
+# deps, so a Qt update flags it for rebuild — and this module leans on Qt
+# internals harder than most (it hand-writes the extension container Qt's own
+# public macro can no longer generate), so a LOUD compile break on a Qt bump is
+# exactly the failure mode we want.
+#
+# Build + install (run from THIS directory):
+#     cd /home/jc/projects/symmetria-ide/native/symmetria-compositor && makepkg -si
+#   (commit changes first — the source is the committed git tree.)
+#
+# The module is OPTIONAL by design: without it the browser pane falls back to
+# the stock WaylandCompositor and the only loss is a shared clipboard.
+
+pkgname=symmetria-compositor
+pkgver=r1
+pkgrel=1
+pkgdesc="Symmetria nested Wayland compositor with a host clipboard bridge (QML module)"
+arch=('x86_64')
+url="https://github.com/CaceresCallieri/symmetria-ide"
+license=('GPL-3.0-or-later')
+depends=('qt6-base' 'qt6-declarative' 'qt6-wayland')
+makedepends=('git' 'cmake')
+_repo="/home/jc/projects/symmetria-ide"
+_subdir="native/symmetria-compositor"
+source=("git+file://${_repo}")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/symmetria-ide"
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+    cd "$srcdir/symmetria-ide/$_subdir"
+    cmake -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DQML_INSTALL_DIR=/usr/lib/qt6/qml
+    cmake --build build -j"$(nproc)"
+}
+
+package() {
+    cd "$srcdir/symmetria-ide/$_subdir"
+    DESTDIR="$pkgdir" cmake --install build
+}

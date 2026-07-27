@@ -55,12 +55,19 @@ def _agent_id(slot: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_browser_is_not_a_central_surface(controller):
-    """ "browser" was a valid surface while the pool was embedded. With Chrome
-    external there is nothing to show in-window, so it must be rejected like
-    any other bogus value — not silently accepted into a blank pane."""
+def test_browser_is_a_central_surface_again(controller):
+    """ "browser" was valid under the embedded QtWebEngine pool, rejected while
+    Chrome was an external Hyprland window (nothing to show in-window), and is
+    valid again now that Chrome renders in our nested compositor."""
     emissions = _capture(controller.centralSurfaceChanged)
     controller.set_central_surface("browser")
+    assert emissions
+    assert controller.centralSurface == "browser"
+
+
+def test_bogus_surfaces_are_still_rejected(controller):
+    emissions = _capture(controller.centralSurfaceChanged)
+    controller.set_central_surface("nonsense")
     assert emissions == []
     assert controller.centralSurface == "terminal"
 
@@ -324,48 +331,64 @@ def test_attention_survives_while_any_window_remains(controller):
 
 
 # ---------------------------------------------------------------------------
-# Notify-don't-yank (Ctrl+Shift+B / chip globe)
+# Browser surface navigation (Ctrl+Shift+B / chip globe)
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def notifications(monkeypatch) -> list[tuple[str, str]]:
-    captured: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        AppController,
-        "_notify_desktop",
-        lambda self, title, body: captured.append((title, body)),
-    )
-    return captured
-
-
-def test_notify_reports_instead_of_navigating(controller, notifications):
-    """The chord used to JUMP. With Chrome external, jumping means dragging
-    the user to another Hyprland workspace mid-task."""
+def test_chord_navigates_to_the_browser(controller):
+    """Navigation again, after a spell as a notify-only chord. That exception
+    existed only because the external-Chrome backend made the browser a
+    Hyprland window, so "going there" meant a workspace switch the user never
+    asked for. In-window, it is an ordinary surface swap."""
     controller._open_browser_for_mcp("https://a.test", _agent_id(1))
-    controller._focused_term_agent = 1
-    surface_before = controller.centralSurface
-
-    controller.notify_focused_agent_browser()
-
-    assert controller.centralSurface == surface_before
-    title, body = notifications[0]
-    assert "browser" in title
-    assert "workspace 6" in body and "1 window" in body
+    controller.toggle_browser()
+    assert controller.centralSurface == "browser"
+    assert controller.browserVisible is True
 
 
-def test_notify_includes_the_agents_message(controller, notifications):
+def test_chord_swaps_back_to_where_you_came_from(controller):
+    """Swap-last-two, like Ctrl+Shift+E/T/G — not a hard-coded return to the
+    terminal."""
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    controller.set_central_surface("editor")
+    controller.toggle_browser()
+    controller.toggle_browser()
+    assert controller.centralSurface == "editor"
+
+
+def test_arriving_clears_the_agents_attention_dot(controller):
+    """The agent asked to be looked at; the user has now looked."""
     controller._open_browser_for_mcp("https://a.test", _agent_id(1))
     controller._set_browser_attention_for_mcp(_agent_id(1), "the deploy failed")
     controller._focused_term_agent = 1
-    controller.notify_focused_agent_browser()
-    assert "the deploy failed" in notifications[0][1]
+    assert controller.agentBrowserAttention[0] is True
+
+    controller.toggle_browser()
+
+    assert controller.agentBrowserAttention[0] is False
 
 
-def test_notify_without_an_owned_window_is_a_no_op(controller, notifications):
-    controller._focused_term_agent = 1
-    controller.notify_focused_agent_browser()
-    assert notifications == []
+def test_globe_click_is_one_way(controller):
+    """Clicking a SPECIFIC agent's globe means "show me that", so unlike the
+    chord it never swaps back."""
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    controller.focus_agent_browser(1)
+    controller.focus_agent_browser(1)
+    assert controller.centralSurface == "browser"
+
+
+def test_globe_click_without_a_window_is_a_no_op(controller):
+    surface_before = controller.centralSurface
+    controller.focus_agent_browser(1)
+    assert controller.centralSurface == surface_before
+
+
+def test_an_unused_browser_is_not_a_back_target(controller):
+    """Returning "back" to a browser that never opened a window is a dead end
+    — a blank pane — so the back-target falls through to the terminal."""
+    assert controller._surface_is_navigable("browser") is False
+    controller._open_browser_for_mcp("https://a.test", _agent_id(1))
+    assert controller._surface_is_navigable("browser") is True
 
 
 # ---------------------------------------------------------------------------

@@ -14,10 +14,11 @@ from symmetria_ide import chrome_host
 
 
 class TestIdentity:
-    def test_window_class_is_per_process(self):
-        """Two IDEs must never share a class — the rule addresses ONE IDE."""
-        assert chrome_host.window_class_for(10) != chrome_host.window_class_for(11)
-        assert chrome_host.window_class_for(42) == "symmetria-browser-42"
+    def test_identity_is_per_process(self):
+        """Two IDEs must never collide: the identity names one compositor
+        socket, and two compositors cannot share a socket name."""
+        assert chrome_host.browser_identity(10) != chrome_host.browser_identity(11)
+        assert chrome_host.browser_identity(42) == "symmetria-browser-42"
 
     def test_slug_keeps_the_basename_legible(self):
         assert chrome_host.project_slug("/home/jc/projects/bambin").startswith(

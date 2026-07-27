@@ -1,22 +1,37 @@
-"""The IDE-owned Google Chrome process: profile, window pinning, CDP.
+"""The IDE-owned Google Chrome process: profile, Wayland display, CDP.
 
-This replaces the embedded QtWebEngine pool. The trade it makes: we give up
+This replaces the embedded QtWebEngine pool. The trade it made: we gave up
 rendering the browser inside our own window, and in exchange the agentic
-browser becomes a browser that actually works — `Target.createTarget` (the
+browser became a browser that actually works — `Target.createTarget` (the
 `new_page` every chrome-devtools-mcp workflow starts from) is unsupported on
 QtWebEngine, screenshots stall when the IDE is off-workspace, and there are no
-extensions and no real logins. Containment moves from "embedded item" to
-"window pinned by a Hyprland rule" (hyprland_ipc.py).
+extensions and no real logins.
+
+**Chrome renders INSIDE the IDE again, without giving any of that up.** The IDE
+hosts a nested Wayland compositor (qml/browser/), and Chrome connects to it as
+an ordinary Wayland client — a real, unmodified browser whose surfaces happen
+to land in our scene graph. Containment is now categorical rather than
+enforced: `hyprctl clients` does not list the browser AT ALL, so there is no
+window to escape, no map-time race to lose, and no workspace rule to maintain
+(the whole `hyprland_ipc` module went away with it).
+
+Measured before committing to it: with the IDE on an INACTIVE workspace and the
+browser surface hidden four different ways, `Page.captureScreenshot` stayed at
+~60ms and the page kept a full 60Hz of requestAnimationFrame. The obvious fear —
+that an unrendered surface stops getting frame callbacks and reintroduces the
+QtWebEngine stall by another door — did not materialise.
 
 Three constraints shape everything here, and all three trace back to one fact:
 **Chrome is a singleton per `--user-data-dir`.**
 
 1. **One Chrome process per IDE instance.** A second IDE pointed at the same
    profile would not start its own process — it would hand the request to the
-   first one over IPC, and the resulting window would inherit the FIRST IDE's
-   `--class`, landing on the wrong workspace. Verified live.
+   first one over IPC, and the resulting window would render in the FIRST
+   IDE's compositor. Verified live under the pinned backend, where the same
+   handoff put windows on the wrong workspace; a Chrome process also connects
+   to exactly ONE Wayland display, so nesting only sharpens the constraint.
 2. **Therefore one profile per project.** Not a preference; the process
-   identity chain is `profile → process → class → workspace`.
+   identity chain is `profile → process → Wayland display → our window`.
 3. **Therefore logins are seeded, not shared.** A template profile
    (`<data>/browser/_template`) is where the user logs into the dashboards
    once; each project profile is cloned from it on first use. Cookies survive
@@ -24,9 +39,8 @@ Three constraints shape everything here, and all three trace back to one fact:
    across profiles of the same user — but `Local State` must come along, since
    it carries the wrapped key reference.
 
-The same singleton fact will hold for the nested-compositor backend: a Chrome
-process connects to exactly one Wayland display. So this profile model is not
-a stopgap for the pinned approach — it is the model either way.
+This profile model was designed under the pinned backend and carried over
+unchanged, exactly as its original note predicted it would.
 """
 
 from __future__ import annotations
@@ -39,10 +53,8 @@ import shutil
 import subprocess
 import threading
 
-from PySide6.QtCore import QObject, Qt, Signal, Slot
+from PySide6.QtCore import QObject, Signal, Slot
 
-from . import hyprland_ipc
-from .agent_bridge import emit_gc_safe
 from .cdp_client import CdpClient
 
 log = logging.getLogger(__name__)
@@ -125,14 +137,25 @@ def chrome_executable() -> str:
     return ""
 
 
-def window_class_for(pid: int) -> str:
-    """The unique Wayland `app_id` this IDE's Chrome windows carry.
+def browser_identity(pid: int) -> str:
+    """This IDE's browser identity, used for two things at once.
 
-    Per-PID rather than per-project: the window rule must address ONE running
-    IDE, and two IDEs can legitimately have the same project open (dev and
-    stable, or two worktrees).
+    It is both the Wayland `app_id` Chrome's toplevels carry (so the pane can
+    tell OUR surfaces from anything else that connects) and the name of the
+    nested compositor's socket. One string because it is genuinely one
+    identity, expressed in two protocols.
+
+    Per-PID rather than per-project: it must address ONE running IDE, and two
+    IDEs can legitimately have the same project open (dev and stable, or two
+    worktrees) — and two compositors cannot share a socket name.
     """
     return f"symmetria-browser-{pid}"
+
+
+def wayland_socket_path(socket_name: str) -> str:
+    """Where the nested compositor's socket lives, per the Wayland spec."""
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return os.path.join(runtime_dir, socket_name)
 
 
 def seed_profile_from_template(profile: str, template: str) -> bool:
@@ -193,6 +216,14 @@ def build_chrome_argv(
     omnibox, extensions — because this browser doubles as something they show
     to other people, not just an agent's viewport.
 
+    `--ozone-platform=wayland` is not an optimisation, it is the containment.
+    It forces Chrome onto the Wayland socket we hand it in the environment;
+    without it Chrome may pick the X11/XWayland backend, which talks to the
+    HOST display — the browser would then open a loose window on whatever
+    workspace the user is looking at, which is the one thing this must never
+    do. The caller additionally strips `DISPLAY`, so there is no X11 path to
+    fall back to even if the flag were dropped.
+
     `url` is load-bearing on a COLD start. Chrome always opens a window when it
     launches, so starting it bare and then asking for a window yields TWO: a
     stray `chrome://newtab/` plus the one that was wanted. The registry adopts
@@ -203,6 +234,7 @@ def build_chrome_argv(
     """
     argv = [
         executable,
+        "--ozone-platform=wayland",
         f"--class={window_class}",
         f"--user-data-dir={profile}",
         "--no-first-run",
@@ -227,29 +259,25 @@ class ChromeHost(QObject):
     #: keeps reporting windows that no longer exist and agents act on the lie.
     browserGone = Signal()
 
-    # Emitted from the Hyprland reader thread; queued onto the GUI thread.
-    _workspaceMoved = Signal(int, str)
-
     def __init__(self, project_root: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._project_root = project_root
-        self._window_class = window_class_for(os.getpid())
+        self._window_class = browser_identity(os.getpid())
         self._profile = profile_dir_for(project_root)
         self._proc: subprocess.Popen | None = None
-        self._pinned = False
         self._stopping = False
         self._cdp = CdpClient(self)
         self._cdp.targetUpdated.connect(self.windowUpdated)
         self._cdp.targetGone.connect(self.windowGone)
         self._cdp.disconnected.connect(self._on_cdp_disconnected)
-        self._watcher = hyprland_ipc.WorkspaceWatcher(self._on_workspace_moved_thread)
-        # queued: hyprland event reader thread -> ChromeHost GUI thread
-        self._workspaceMoved.connect(
-            self._on_workspace_moved, Qt.ConnectionType.QueuedConnection
-        )
 
     @property
     def window_class(self) -> str:
+        return self._window_class
+
+    @property
+    def wayland_socket(self) -> str:
+        """The nested compositor's socket name — same string as the app_id."""
         return self._window_class
 
     @property
@@ -285,49 +313,70 @@ class ChromeHost(QObject):
         for why the startup window must be the requested one.
         """
         if self.is_running:
-            # Re-attempt a pin that never took (the IDE window may not have
-            # been mapped yet at spawn time). Without this the deferral is
-            # permanent and every window of the session escapes the rule.
-            if not self._pinned:
-                self._apply_pin_rule()
             self._cdp.connect_to(self.cdp_port())
             return ""
         executable = chrome_executable()
         if not executable:
             log.warning("no Chrome on PATH — agent browser tools unavailable")
             return "chrome-not-installed"
+        # The nested compositor is created with the QML engine, long before any
+        # browser request, so this normally passes. It is checked anyway rather
+        # than assumed because the failure is otherwise silent AND harmful:
+        # Chrome given a socket that does not exist falls back to whatever
+        # display it can find, which means a loose window on the user's
+        # workspace — the precise outcome the nested backend exists to make
+        # impossible.
+        socket_path = wayland_socket_path(self.wayland_socket)
+        if not os.path.exists(socket_path):
+            log.warning("nested compositor socket missing at %s", socket_path)
+            return "compositor-not-ready"
         seed_profile_from_template(self._profile, template_profile_dir())
         try:
             os.makedirs(self._profile, exist_ok=True)
         except OSError:
             log.exception("could not create browser profile dir %s", self._profile)
             return "profile-unavailable"
-        # Pin BEFORE spawning: the rule is evaluated when a window maps, so
-        # installing it afterwards would let the very first window land on
-        # whatever workspace the user is looking at — the interruption this
-        # whole mechanism exists to prevent.
-        self._apply_pin_rule()
         argv = build_chrome_argv(
             executable, self._window_class, self._profile, self.cdp_port(), initial_url
         )
         try:
             self._proc = subprocess.Popen(
-                argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                argv,
+                env=self.chrome_env(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
         except OSError:
             log.exception("failed to spawn Chrome")
             return "chrome-spawn-failed"
         log.info(
-            "Chrome spawned (class=%s, profile=%s)", self._window_class, self._profile
+            "Chrome spawned (display=%s, profile=%s)",
+            self.wayland_socket,
+            self._profile,
         )
         # Reap in the background so a user-closed Chrome doesn't linger as a
         # zombie for the life of the IDE.
         threading.Thread(
             target=self._proc.wait, daemon=True, name="chrome-reap"
         ).start()
-        self._watcher.start()
         self._cdp.connect_to(self.cdp_port())
         return ""
+
+    def chrome_env(self) -> dict[str, str]:
+        """The environment that binds Chrome to OUR compositor.
+
+        `DISPLAY` is REMOVED, not just overridden. Chrome's Ozone layer will
+        happily use XWayland when a Wayland connection is unavailable, and an
+        X11 Chrome talks to the host — producing exactly the loose window on
+        the user's workspace that the nested backend exists to prevent. With no
+        `DISPLAY` there is nothing to fall back to, so a broken nested socket
+        fails LOUDLY (Chrome exits) instead of quietly escaping.
+        """
+        env = dict(os.environ)
+        env["WAYLAND_DISPLAY"] = self.wayland_socket
+        env["XDG_SESSION_TYPE"] = "wayland"
+        env.pop("DISPLAY", None)
+        return env
 
     @Slot()
     def _on_cdp_disconnected(self) -> None:
@@ -339,18 +388,19 @@ class ChromeHost(QObject):
         if self._stopping:
             return  # our own teardown closed the socket; the owner knows
         log.info("Chrome disconnected — dropping the window registry")
-        self._pinned = False
         self.browserGone.emit()
 
     def stop(self) -> None:
-        """Tear down at IDE shutdown: CDP, watcher, rule, process."""
+        """Tear down at IDE shutdown: CDP, then the process.
+
+        Nothing compositor-side to undo: the nested compositor dies with the
+        QML engine, and its surfaces with it. (The pinned backend had to
+        release a Hyprland window rule here — a rule lives in the RUNNING
+        compositor, so an IDE that exited without releasing its class left one
+        behind forever. Nesting removed that whole class of leak.)
+        """
         self._stopping = True
         self._cdp.close()
-        self._watcher.stop()
-        if hyprland_ipc.hyprland_available():
-            hyprland_ipc.apply_keyword(
-                hyprland_ipc.build_unset_rule(self._window_class)
-            )
         proc = self._proc
         self._proc = None
         if proc is not None and proc.poll() is None:
@@ -372,9 +422,9 @@ class ChromeHost(QObject):
         which hides the failure and makes the agent wait on nothing — we let
         Chrome itself open the url: as its startup window when cold, or via a
         `--new-window` handoff when warm-but-unattached. Either way the window
-        lands correctly (the pin rule is a compositor-side match on class, not
-        something we drive) and joins the registry through target discovery
-        once CDP attaches.
+        lands in our compositor — it is the running process's Wayland
+        connection that decides that, not anything we pass per-window — and
+        joins the registry through target discovery once CDP attaches.
         """
         target_url = url or "about:blank"
         cold_start = not self.is_running
@@ -398,16 +448,17 @@ class ChromeHost(QObject):
 
         This is the Chrome singleton working FOR us — a second invocation with
         the same --user-data-dir does not start a browser, it asks the running
-        one to open a window, which is exactly what we want. That window
-        inherits the running process's class, so the pin rule still applies.
+        one to open a window, which is exactly what we want. That window is
+        drawn by the running process, so it lands in our compositor.
 
-        ⚠ The argv MUST still carry `--class` and the debug port. This path runs
-        seconds after a cold spawn (session restore replays several saved URLs),
-        so it can lose the race and become the PRIMARY process instead of
-        handing off — and a primary process without `--class` puts its windows
-        under the default `google-chrome` class, which the pin rule does not
-        match. They would escape onto whatever workspace the user is looking at:
-        the exact failure this whole mechanism exists to prevent.
+        ⚠ The argv and the ENVIRONMENT must both be the full ones. This path
+        runs seconds after a cold spawn (session restore replays several saved
+        URLs), so it can lose the race and become the PRIMARY process instead
+        of handing off — and a primary process without our `WAYLAND_DISPLAY`
+        would connect to the HOST compositor, putting a loose browser window on
+        whatever workspace the user is looking at. That is the exact failure
+        this whole mechanism exists to prevent, and it only shows up under a
+        race, so it will not appear in casual testing.
         """
         executable = chrome_executable()
         if not executable:
@@ -418,7 +469,10 @@ class ChromeHost(QObject):
         argv += ["--new-window", url]
         try:
             proc = subprocess.Popen(
-                argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                argv,
+                env=self.chrome_env(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
         except OSError:
             log.exception("chrome --new-window failed")
@@ -430,61 +484,3 @@ class ChromeHost(QObject):
         """Close one of our windows by CDP target id."""
         if target_id:
             self._cdp.close_target(target_id)
-
-    # -- workspace follow -----------------------------------------------
-
-    def _apply_pin_rule(self) -> None:
-        """(Re)install the rule pinning our Chrome class to our workspace.
-
-        Records whether it actually took, so `ensure_running` can retry a pin
-        that was deferred (IDE window not mapped yet) or rejected.
-        """
-        if not hyprland_ipc.hyprland_available():
-            return
-        workspace_id, workspace_name = self._watcher.resolve_now()
-        if not workspace_id:
-            log.info("own window not mapped yet — browser pin deferred")
-            return
-        target = hyprland_ipc.workspace_rule_target(workspace_id, workspace_name)
-        self._pinned = hyprland_ipc.apply_keyword(
-            hyprland_ipc.build_workspace_rule(target, self._window_class)
-        )
-
-    def _on_workspace_moved_thread(
-        self, workspace_id: int, workspace_name: str
-    ) -> None:
-        """Hyprland reader thread → GUI thread. Never touch state here.
-
-        GC is suspended across the emit per gotcha #10: queued-connection
-        payload marshalling allocates, and a collection racing the Qt render
-        thread mid-paint is the 3.14 SEGV. Same treatment every other
-        worker-thread emit in this codebase gets.
-        """
-        emit_gc_safe(self._workspaceMoved, workspace_id, workspace_name)
-
-    @Slot(int, str)
-    def _on_workspace_moved(self, workspace_id: int, workspace_name: str) -> None:
-        """The IDE moved workspace — re-pin so the NEXT window follows it.
-
-        Later rules win in Hyprland, so re-issuing is enough; there is no
-        remove step. Windows already open stay where they are (a rule only
-        acts at map time), which is the accepted v1 behaviour.
-        """
-        target = hyprland_ipc.workspace_rule_target(workspace_id, workspace_name)
-        hyprland_ipc.apply_keyword(
-            hyprland_ipc.build_workspace_rule(target, self._window_class)
-        )
-
-    def workspace_label(self) -> str:
-        """Human-readable workspace for the notification toast; "" if unknown.
-
-        Reads the watcher's CACHE. This runs on the GUI thread on every
-        Ctrl+Shift+B / globe click, and `resolve_now` shells out to `hyprctl`
-        with a 2s timeout — a stall the user would feel as the whole IDE
-        freezing. The cache is kept current by the event watcher; only fall
-        back to a live resolve when nothing has been cached yet.
-        """
-        if self._watcher.workspace_id:
-            return self._watcher.workspace_name or str(self._watcher.workspace_id)
-        workspace_id, workspace_name = self._watcher.resolve_now()
-        return workspace_name or str(workspace_id) if workspace_id else ""

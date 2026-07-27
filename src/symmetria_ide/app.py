@@ -67,7 +67,7 @@ from .agent_interrupt import (
     should_arm_interrupt_clear,
 )
 from .browser_mcp import BrowserMcpBridge, BrowserMcpServer
-from .chrome_host import ChromeHost
+from .chrome_host import ChromeHost, browser_identity
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .trace import trace
 from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registration
@@ -893,8 +893,8 @@ class AppController(QObject):
         # key = the attention dot is lit on that agent's browser globe; the
         # value carries the agent's optional reason (browser_request_attention)
         # for the desktop notification. Set by the agent's explicit MCP call,
-        # cleared when the user checks in on it (notify_focused_agent_browser),
-        # the window closes, or the agent dies.
+        # cleared when the user checks in on it (`toggle_browser` /
+        # `focus_agent_browser`), the window closes, or the agent dies.
         self._agent_browser_attention: dict[int, str] = {}
         # The IDE-hosted browser MCP server. The bridge marshals agents' MCP
         # tool calls (uvicorn thread) ONTO the GUI thread; the server runs
@@ -3034,18 +3034,31 @@ class AppController(QObject):
         """
         return self._central_surface == "git"
 
+    @Property(bool, notify=centralSurfaceChanged)
+    def browserVisible(self) -> bool:
+        """True when the nested-compositor browser owns the central area.
+
+        The Chrome surfaces are always mapped in the compositor (which lives at
+        Main.qml's root, outside any Loader — destroying it would drop Chrome's
+        Wayland connection); this only decides whether they are on screen.
+        Hiding them costs nothing: measured, a hidden surface keeps its full
+        frame rate and screenshot latency.
+        """
+        return self._central_surface == "browser"
+
     @Slot(str)
     def set_central_surface(self, surface: str) -> None:
-        """Make `surface` ("terminal"|"editor"|"agent"|"git") central.
+        """Make `surface` ("terminal"|"editor"|"agent"|"git"|"browser") central.
 
         Idempotent (no signal on no-op) and validating — the generic
         primitive behind the StatusBar switcher segments and `focus_agent`'s
         auto-switch. The dedicated `swap_to_*` slots remain as chord-facing
-        wrappers. "browser" was a valid surface until the embedded
-        QtWebEngine pool was retired for external Chrome; it is rejected now,
-        and returns only if the nested-compositor backend lands.
+        wrappers. "browser" was valid under the embedded QtWebEngine pool, was
+        rejected for the interim external-Chrome backend (the browser was a
+        Hyprland window then, not a surface of ours), and is valid again now
+        that Chrome renders in our own nested compositor.
         """
-        if surface not in ("terminal", "editor", "agent", "git"):
+        if surface not in ("terminal", "editor", "agent", "git", "browser"):
             log.warning("set_central_surface: unknown surface %r — no-op", surface)
             return
         if self._central_surface == surface:
@@ -3098,6 +3111,14 @@ class AppController(QObject):
             # pool; agents parked in the other location don't make it
             # navigable (they're reached by toggling location first).
             return bool(self._ordered_slots_for_location())
+        if surface == "browser":
+            # A browser surface with no window is a blank pane. Approximated
+            # from the registry rather than from the compositor's live toplevel
+            # count: the two deliberately do not map 1:1 (a CDP `new_page`
+            # opens a TAB inside an existing window), and for a back-navigation
+            # heuristic "has the browser been used at all" is the right
+            # question.
+            return bool(self._browser_order)
         return True
 
     @Slot()
@@ -3183,56 +3204,30 @@ class AppController(QObject):
             self.swap_to_git()
 
     @Slot()
-    def notify_focused_agent_browser(self) -> None:
-        """Report where the FOCUSED agent's browser is (bound to `Ctrl+Shift+B`).
+    def toggle_browser(self) -> None:
+        """Show the browser surface, or go back from it (`Ctrl+Shift+B`).
 
-        This used to JUMP: the browser was an embedded surface, so going to look
-        at it was a surface swap costing nothing. With real Chrome the windows
-        are Hyprland's, and "jumping" would mean dragging the user to another
-        workspace mid-task. The user chose notify-don't-yank, so the chord
-        answers the question ("where is it, how many windows?") and leaves the
-        going to them.
+        A full member of the swap-last-two family again. Its short career as a
+        notify-only chord was forced by the interim external-Chrome backend:
+        the browser was a Hyprland window then, so "going to look at it" meant
+        dragging the user to another workspace mid-task. Now that Chrome
+        renders in our own compositor, going there is an ordinary surface swap
+        that costs nothing — so the reason for the exception is gone, and B
+        behaves like E, T and G.
 
-        No-op with a log when the focused agent owns no window — the browser is
-        reachable only through the agent that owns it, so there is nothing to
-        report otherwise.
+        Arriving at the browser also clears the focused agent's attention dot:
+        the agent asked to be looked at, and the user has now looked.
         """
-        slot = self._focused_term_agent
-        owned = self._agent_browser_windows.get(slot) if slot else None
-        if not owned:
-            log.info(
-                "notify_focused_agent_browser: focused agent (%s) owns no "
-                "browser window — no-op",
-                slot or "none",
-            )
+        if self._central_surface == "browser":
+            self.set_central_surface(self._surface_back_target())
             return
-        self._announce_agent_browser(slot, owned)
+        self._clear_browser_attention(self._focused_term_agent)
+        self.set_central_surface("browser")
 
-    def _announce_agent_browser(self, agent_slot: int, owned: list[int]) -> None:
-        """Toast naming the agent, its workspace, and its window count.
-
-        Checking in on the agent's browser is also what clears its attention
-        dot: the user has now been told what the agent flagged, so the badge
-        has served its purpose.
-        """
-        message = self._agent_browser_attention.pop(agent_slot, None)
-        if message is not None:
+    def _clear_browser_attention(self, agent_slot: int) -> None:
+        """Drop `agent_slot`'s browser attention badge, if it has one."""
+        if agent_slot and self._agent_browser_attention.pop(agent_slot, None) is not None:
             self.agentBrowserChanged.emit()  # clear-on-view: dot off
-        workspace = (
-            self._chrome_host.workspace_label() if self._chrome_host is not None else ""
-        )
-        display_number = self._display_number_for_agent(agent_slot)
-        where = f"workspace {workspace}" if workspace else "this workspace"
-        count = len(owned)
-        body = f"{count} window{'s' if count != 1 else ''} on {where}"
-        if message:
-            body = f"{body}\n{message}"
-        self._notify_desktop(f"Agent {display_number} · browser", body)
-
-    def _display_number_for_agent(self, agent_slot: int) -> int:
-        """The chip number the user sees, not the frozen internal slot."""
-        order = self._ordered_slots_for_location()
-        return order.index(agent_slot) + 1 if agent_slot in order else agent_slot
 
     @Slot()
     def focus_terminal(self) -> None:
@@ -3807,7 +3802,7 @@ class AppController(QObject):
         """Per-slot 'this agent wants you to look at its browser' flag, indexed
         `slot - 1` → drives the attention dot on the chip's browser glyph. Set
         by the agent's explicit browser_request_attention MCP call; cleared
-        when the user checks in (notify_focused_agent_browser), on window
+        when the user checks in (arriving at the browser surface), on window
         close, or on agent death."""
         return [
             slot in self._agent_browser_attention
@@ -4361,18 +4356,18 @@ class AppController(QObject):
 
     @Slot(int)
     def focus_agent_browser(self, agent_slot: int) -> None:
-        """Report on the agent's browser (chip glyph click).
+        """Go to the agent's browser (chip glyph click) — the mouse twin of
+        `toggle_browser`, and focusing again for real now that the browser is
+        an in-window surface rather than a Hyprland window.
 
-        The mouse twin of `notify_focused_agent_browser`. Kept under the old
-        name because it is the AgentTopBar binding, but it no longer focuses
-        anything: the windows are Chrome's, and raising one means a workspace
-        switch the user did not ask for.
+        One-way on purpose: clicking a specific agent's globe expresses "show
+        me that", so unlike the chord it never swaps back.
         """
-        owned = self._agent_browser_windows.get(agent_slot)
-        if not owned:
+        if not self._agent_browser_windows.get(agent_slot):
             log.info("focus_agent_browser: agent %d owns no window — no-op", agent_slot)
             return
-        self._announce_agent_browser(agent_slot, owned)
+        self._clear_browser_attention(agent_slot)
+        self.set_central_surface("browser")
 
     def _agent_slot_from_id(self, agent_id: str) -> int | None:
         """Map a browser-MCP `<ide_pid>_<slot>` agent id to our chip slot.
@@ -4763,21 +4758,23 @@ class AppController(QObject):
     # ------------------------------------------------------------------
     #
     # A "browser window" is a window of the ONE Chrome process this IDE owns
-    # (chrome_host.py): its own --user-data-dir, its own --class, and a
-    # Hyprland rule pinning every window it maps to THIS IDE's workspace
-    # (hyprland_ipc.py). Containment is by window rule, not by embedding —
-    # the QtWebEngine pool that used to render these in-window was retired
-    # because it could not do the job (no Target.createTarget, screenshots
-    # stalling off-workspace, no extensions, no real logins).
+    # (chrome_host.py): its own --user-data-dir, and a Wayland connection to
+    # the nested compositor at Main.qml's root, so its surfaces render inside
+    # the IDE. Containment is categorical — Hyprland does not see the browser
+    # at all — rather than enforced by a rule.
     #
-    # What survives from the embedded era is the SLOT REGISTRY: slot → window,
-    # 1..MAX_INSTANCES. It is what `browser_list_windows` numbers, what
+    # The SLOT REGISTRY (slot → window, 1..MAX_INSTANCES) has now survived two
+    # backend swaps unchanged: it is what `browser_list_windows` numbers, what
     # `_agent_browser_windows` attributes to agents, and what the session
-    # manifest persists — so keeping it means the MCP contract and the chip
-    # globe did not have to change shape. There is deliberately no focus
-    # concept anymore: focusing a Chrome window would mean yanking the user
-    # to another Hyprland workspace, and the user chose notify-don't-yank
-    # (see `notify_focused_agent_browser`).
+    # manifest persists.
+    #
+    # ⚠ THE REGISTRY AND THE PANE COUNT DIFFERENT THINGS, DELIBERATELY. A
+    # registry entry is a CDP *page target*; the pane multiplexes Wayland
+    # *toplevels*. They do not map 1:1 and cannot be joined by any shared id:
+    # chrome-devtools-mcp's `new_page` does not pass `newWindow`, so it opens a
+    # TAB inside an existing toplevel. Measured live: 3 page targets over 2
+    # toplevels. Do not "fix" this by pairing them — the only available link is
+    # the window title, which is neither stable nor unique.
 
     def _ensure_chrome_host(self) -> ChromeHost:
         """Build the ChromeHost on first use, rooted at the current project.
@@ -8054,6 +8051,13 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
         or bool(os.environ.get("SYMMETRIA_IDE_AGENT_PROMPT"))
         or os.environ.get("SYMMETRIA_IDE_AGENT_VIEW") == "1",
     )
+
+    # The nested compositor's socket name, which Chrome is later pointed at via
+    # WAYLAND_DISPLAY. Derived from the pid here rather than read off the
+    # ChromeHost because that host is built LAZILY on the first browser request
+    # — the compositor has to be listening long before then, since Chrome
+    # cannot connect to a socket that does not exist yet.
+    ctx.setContextProperty("browserWaylandSocket", browser_identity(os.getpid()))
     trace("engine_ctx_ready")
 
     qml_root = QML_DIR / "Main.qml"
