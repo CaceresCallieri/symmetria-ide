@@ -28,6 +28,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Startup optimization outcomes](project/active/startup_optimization_followups.md) — gc.collect drop SHIPPED (51bf26c, ~20ms); WebEngine import deferral spiked+works but HELD (Qt-deprecated late init)
 - [Agent ownership inversion (P1-4 SHIPPED; P5 IDE-decoupled)](project/active/agent_ownership_inversion.md) — claude agents IDE-owned; STT now pure-direct shell→IDE (bridge STT/inject removed); orchestrator.nvim KEPT (IDE just decoupled). Live dictation verify owed. See docs/agent-ownership-inversion.md
 - [VPS location toggle (SHIPPED 2026-07-12)](project/active/vps_location_toggle.md) — Local↔VPS per-project context; invariants in CLAUDE.md; deferrals: reconnect chip, vps coordination, mosh
+- [Agentic browser = external Chrome (SHIPPED 2026-07-27)](project/active/chrome_external_browser.md) — QtWebEngine retired; in-window form next via nested Wayland compositor
 
 ## Project — shipped — `project/shipped/` (past-tense systems; one consolidated bullet)
 
@@ -57,6 +58,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [ApplicationShortcut masks terminal keys](reference/qt-pyside/applicationshortcut_masks_terminal_keys.md) — chrome Shortcut eats keys before QMLTermWidget; suspect it when a key fails in-IDE but works in Ghostty
 - [QtWebEngine CDP drives chrome-devtools-mcp](reference/qt-pyside/qtwebengine_cdp_devtools_mcp.md) — QTWEBENGINE_REMOTE_DEBUGGING + --browserUrl: all 29 tools work; Puppeteer attaches, Playwright fails #36961
 - [Startup performance](reference/qt-pyside/startup_perf.md) — SYMMETRIA_IDE_TRACE waterfall + interleaved A/B; fixed browser-MCP GUI-thread import (~1s) + eager WebEngine (~430ms)
+- [Nested-compositor clipboard](reference/qt-pyside/nested_compositor_clipboard.md) — isolated BOTH ways; bridging needs a ~30-line C++ QWaylandCompositor subclass
 - [processEvents() shared-app SEGV](reference/qt-pyside/processevents_shared_app_segv.md) — never pump the session app in tests; runs prior tests' deleteLater → gotcha #10 crash; hand-deliver queued slots
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
