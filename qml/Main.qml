@@ -203,14 +203,14 @@ Window {
         sequences: ["Ctrl+Shift+L"]
         context: Qt.ApplicationShortcut
         enabled: controller.browserVisible
-        onActivated: browserPane.cycleWindow(1)
+        onActivated: if (browserPaneLoader.item) browserPaneLoader.item.cycleWindow(1)
     }
 
     Shortcut {
         sequences: ["Ctrl+Shift+H"]
         context: Qt.ApplicationShortcut
         enabled: controller.browserVisible
-        onActivated: browserPane.cycleWindow(-1)
+        onActivated: if (browserPaneLoader.item) browserPaneLoader.item.cycleWindow(-1)
     }
 
     // IDE-wide file-manager toggle. Promoted out of the nvim layer
@@ -1335,19 +1335,34 @@ Window {
                 // pinned to this IDE's workspace by a Hyprland rule (retired —
                 // it worked, but the browser was not in-window).
                 //
-                // ⚠ NOT in a Loader, unlike every other optional surface here.
-                // The compositor owns Chrome's Wayland connection, so unloading
-                // it would kill the browser process's display. `visible` is the
-                // only gate, and hiding is genuinely free (measured: full 60Hz
-                // and ~60ms screenshots while hidden AND off-workspace).
-                BrowserPane {
-                    id: browserPane
+                // ⚠ `active` is TRUE FOREVER — never bind it to visibility.
+                // The compositor owns Chrome's Wayland connection, so
+                // deactivating this Loader would kill the browser process's
+                // display. `visible` is the only gate, and hiding is genuinely
+                // free (measured: full 60Hz and ~60ms screenshots while hidden
+                // AND off-workspace). The Loader exists solely to CONTAIN a
+                // load failure: BrowserPane imports the Symmetria.Compositor
+                // package, and QML has no conditional imports, so without the
+                // Loader a machine missing that package would fail Main.qml
+                // itself — losing the whole IDE over an optional clipboard
+                // bridge instead of just the browser.
+                Loader {
+                    id: browserPaneLoader
                     anchors.fill: parent
+                    active: true
                     visible: !controller.agentVisible && !controller.fmVisible
                              && controller.browserVisible
                     focus: visible
-                    hostWindow: root
-                    socketName: browserWaylandSocket
+                    // setSource rather than `source:` because BrowserPane's
+                    // hostWindow/socketName are REQUIRED properties, and those
+                    // can only be supplied at construction — assigning them in
+                    // onLoaded is already too late and fails the load.
+                    Component.onCompleted: setSource(
+                        "browser/BrowserPane.qml",
+                        { "hostWindow": root, "socketName": browserWaylandSocket })
+                    onStatusChanged: if (status === Loader.Error)
+                        console.warn("browser pane unavailable — is the "
+                                     + "symmetria-compositor package installed?")
                 }
 
                 // Git-history viewer — sibling central surface (read-only

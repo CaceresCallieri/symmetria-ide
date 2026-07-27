@@ -1,0 +1,8 @@
+# makepkg build output. Two of these are traps rather than mere noise:
+# `src/` and `symmetria-ide/` are clones of THIS repo (makepkg builds from the
+# committed tree), so tracking them embeds a git repository inside itself.
+src/
+pkg/
+build/
+symmetria-ide/
+*.pkg.tar.zst

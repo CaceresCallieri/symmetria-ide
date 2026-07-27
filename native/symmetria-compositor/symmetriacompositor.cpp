@@ -4,6 +4,7 @@
 
 #include "symmetriacompositor.h"
 
+#include <QtCore/QCryptographicHash>
 #include <QtCore/QMimeData>
 #include <QtCore/QStringList>
 #include <QtGui/QClipboard>
@@ -31,6 +32,23 @@ void trace(const char *what, int formatCount)
 // the one from a nested client belongs to the compositor's data device, and
 // QClipboard::mimeData() belongs to the clipboard and is invalidated on the
 // next selection change. Copying is the only way to hold one safely.
+// Identity of a selection's CONTENT, used to recognise our own data coming
+// back around the bridge. Hashing every format (not just text) is what keeps
+// it honest for images and rich HTML, where `text()` is empty or identical
+// across genuinely different payloads.
+QByteArray fingerprint(const QMimeData *data)
+{
+    if (data == nullptr)
+        return {};
+    QCryptographicHash hash(QCryptographicHash::Sha1);
+    const QStringList formats = data->formats();
+    for (const QString &format : formats) {
+        hash.addData(format.toUtf8());
+        hash.addData(data->data(format));
+    }
+    return hash.result();
+}
+
 QMimeData *cloneMimeData(const QMimeData *source)
 {
     auto *copy = new QMimeData;
@@ -69,29 +87,33 @@ void SymmetriaCompositor::pushSelectionText(const QString &text)
 
 void SymmetriaCompositor::retainedSelectionReceived(QMimeData *mimeData)
 {
-    trace("client took the selection",
-          mimeData != nullptr ? int(mimeData->formats().size()) : -1);
-
     QClipboard *clipboard = QGuiApplication::clipboard();
     if (clipboard == nullptr)
         return;
 
+    const QByteArray incoming = fingerprint(mimeData);
+    if (incoming == m_lastBridged)
+        return; // our own push, arriving back — see m_lastBridged
+    m_lastBridged = incoming;
+
+    trace("client took the selection",
+          mimeData != nullptr ? int(mimeData->formats().size()) : -1);
     // QClipboard takes ownership of the QMimeData passed to setMimeData.
-    m_applyingClientSelection = true;
     clipboard->setMimeData(cloneMimeData(mimeData));
-    m_applyingClientSelection = false;
 }
 
 void SymmetriaCompositor::pushHostSelectionToClients()
 {
-    if (m_applyingClientSelection)
-        return; // our own write, echoing back — see the member's comment
-
     const QClipboard *clipboard = QGuiApplication::clipboard();
     if (clipboard == nullptr)
         return;
 
     const QMimeData *hostData = clipboard->mimeData();
+    const QByteArray outgoing = fingerprint(hostData);
+    if (outgoing == m_lastBridged)
+        return; // already on both sides — see m_lastBridged
+    m_lastBridged = outgoing;
+
     trace("host selection changed",
           hostData != nullptr ? int(hostData->formats().size()) : -1);
 

@@ -21,7 +21,7 @@
 # the stock WaylandCompositor and the only loss is a shared clipboard.
 
 pkgname=symmetria-compositor
-pkgver=r1
+pkgver=r469.cb5a14f
 pkgrel=1
 pkgdesc="Symmetria nested Wayland compositor with a host clipboard bridge (QML module)"
 arch=('x86_64')

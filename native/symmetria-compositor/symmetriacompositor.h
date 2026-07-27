@@ -44,6 +44,7 @@
 
 #pragma once
 
+#include <QtCore/QByteArray>
 #include <QtCore/QList>
 #include <QtQml/QQmlListProperty>
 #include <QtQml/qqmlregistration.h>
@@ -95,6 +96,15 @@ private Q_SLOTS:
     void pushHostSelectionToClients();
 
 private:
+    // Fingerprint of the last selection that crossed the bridge, in either
+    // direction. This is what stops a feedback loop, and it has to be
+    // CONTENT-based rather than a "we are currently applying" flag: our own
+    // `overrideSelection` comes back to us as `retainedSelectionReceived`, and
+    // it arrives through an ASYNCHRONOUS pipe read — long after any synchronous
+    // guard would have been cleared. Observed live before this existed: one
+    // copy produced 49 full round trips of a 5-format payload.
+    QByteArray m_lastBridged;
+
     static qsizetype extensionCount(
         QQmlListProperty<QWaylandCompositorExtension> *list);
     static QWaylandCompositorExtension *extensionAt(
@@ -106,9 +116,4 @@ private:
         QQmlListProperty<QWaylandCompositorExtension> *list);
 
     QList<QObject *> m_objects;
-
-    // Set while we are the ones writing to the host clipboard, so the
-    // dataChanged that write emits does not bounce straight back into the
-    // clients that produced the selection.
-    bool m_applyingClientSelection = false;
 };

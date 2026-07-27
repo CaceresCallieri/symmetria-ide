@@ -14,17 +14,25 @@
 // than weaker: `hyprctl clients` does not list the browser at all, so there is
 // no window to escape and no map-time race to lose.
 //
-// ⚠ THIS FILE MUST NEVER BE PUT IN A LOADER. The compositor owns Chrome's
+// ⚠ THIS FILE'S LOADER MUST NEVER BE DEACTIVATED. The compositor owns Chrome's
 // Wayland connection; unloading it kills every surface and takes the browser
 // process's display with it. Same rule, and the same reason, as the fixed-index
 // Repeater behind the agent terminal panes: a live client is not a view you can
 // recreate. Hiding is free instead — measured with the IDE on an INACTIVE
 // workspace and the surface hidden four different ways, Chrome held a full 60Hz
 // of requestAnimationFrame and screenshots stayed at ~60ms.
+//
+// It IS mounted through a permanently-active Loader, for a different reason:
+// QML has no conditional imports, so a missing `Symmetria.Compositor` package
+// would fail this whole file — and as a direct child of Main.qml that would
+// take the entire IDE down over an optional clipboard feature. The Loader
+// contains the failure without ever deactivating. Same class of dependency as
+// the qmltermwidget fork, which likewise breaks its panes when unpackaged.
 
 import QtQuick
 import QtWayland.Compositor
 import QtWayland.Compositor.XdgShell
+import Symmetria.Compositor
 
 Item {
     id: pane
@@ -91,7 +99,12 @@ Item {
     // not to this model. It exists so cycling has a stable order.
     ListModel { id: surfaces }
 
-    WaylandCompositor {
+    // Ours, not Qt's stock `WaylandCompositor` — the difference is the host
+    // clipboard bridge (native/symmetria-compositor). A nested compositor gets
+    // its own `wl_data_device` and Qt bridges nothing, so without this a URL
+    // copied in the browser could not be pasted into a terminal or agent pane:
+    // an island, in the one surface whose whole job is feeding the others.
+    SymmetriaCompositor {
         id: browserCompositor
         socketName: pane.socketName
 
