@@ -235,9 +235,52 @@ Item {
         }
     }
 
+    // Clipped so a client surface can never paint over the IDE's own chrome.
+    // Chrome positions its popups against the screen we advertise, and Qt
+    // honours that position without constraining it (see SymmetriaOutput), so
+    // there is nothing else standing between an oversized popup and the file
+    // tree next door.
     Item {
         id: surfaceHost
         anchors.fill: parent
+        clip: true
+    }
+
+    // Pointer input reaches a nested surface ONLY through hover, and Qt does
+    // not enable it. `QWaylandQuickItem` implements hoverEnterEvent and
+    // hoverMoveEvent — the two places that call `sendMouseMoveEvent` and so
+    // give the seat's pointer a focused surface — but never sets
+    // `acceptHoverEvents`, so on a stock item neither ever fires.
+    //
+    // The visible casualty is SCROLLING: `wheelEvent` sends only the axis
+    // delta, never a position, so with no pointer focus the event lands
+    // nowhere and pages do not scroll at all. `mousePressEvent` does call
+    // `sendMouseMoveEvent` itself, which is why clicking works and why scroll
+    // appears to "start working" after a click — a very misleading symptom.
+    // Everything else pointer-driven is affected too: link hover states,
+    // menus that open on hover, cursor shape, and highlighting rows in the
+    // omnibox dropdown.
+    //
+    // Popups have to be handled by walking children because Qt creates them in
+    // C++ (`QWaylandQuickShellSurfaceItemPrivate::maybeCreateAutoPopup`), as
+    // plain items we never get to declare. Creating them from QML instead
+    // would mean reimplementing Qt's popup positioning, which is the one part
+    // of this it does for us. The walk recurses because a popup can parent
+    // further popups (a submenu inside a menu).
+    function _enableHoverTree(item) {
+        if (!item)
+            return
+        item.hoverEnabled = true
+        item.childrenChanged.connect(function () {
+            for (var i = 0; i < item.children.length; i++) {
+                var child = item.children[i]
+                // Only shell-surface items — `shellSurface` is what identifies
+                // one, and touching hoverEnabled on anything else would be a
+                // silent no-op at best.
+                if (child && child.shellSurface !== undefined && !child.hoverEnabled)
+                    pane._enableHoverTree(child)
+            }
+        })
     }
 
     Component {
@@ -249,6 +292,8 @@ Item {
             // Chrome's menus, omnibox dropdown and tooltips are xdg_popups;
             // without this they never appear at all.
             autoCreatePopupItems: true
+
+            Component.onCompleted: pane._enableHoverTree(surfaceItem)
 
             onSurfaceDestroyed: {
                 // Compared against the delegate's own id rather than `this`:

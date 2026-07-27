@@ -241,6 +241,14 @@ def build_chrome_argv(
         f"--user-data-dir={profile}",
         "--no-first-run",
         "--no-default-browser-check",
+        # We terminate Chrome on IDE quit (SIGTERM), and Chrome scores that as
+        # an unclean exit — so without this every single launch opens with a
+        # "Restore pages?" bubble. It is pure noise here: an agent's browsing
+        # session is not something anyone wants restored, and the bubble is an
+        # xdg-popup that lands over the page in a pane that has no room for it.
+        # Suppressing the bubble is the fix rather than chasing a cleaner exit,
+        # because the exit is not fully ours to control.
+        "--hide-crash-restore-bubble",
     ]
     if cdp_port > 0:
         argv.append(f"--remote-debugging-port={cdp_port}")

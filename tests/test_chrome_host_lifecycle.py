@@ -93,6 +93,14 @@ class TestColdStart:
         # display — a loose window on the user's workspace.
         assert "--ozone-platform=wayland" in argv
 
+    def test_spawn_suppresses_the_crash_restore_bubble(self, host):
+        """We terminate Chrome on IDE quit and it scores that as an unclean
+        exit, so without this EVERY launch opens with a "Restore pages?"
+        popup over the page — in a pane with no room for it, and offering to
+        restore a session nobody wants back."""
+        host.open_window("https://a.test", lambda _r: None)
+        assert "--hide-crash-restore-bubble" in host.test_spawns[0]["argv"]
+
     def test_spawn_points_chrome_at_our_compositor(self, host):
         host.open_window("https://a.test", lambda _r: None)
         env = host.test_spawns[0]["env"]
