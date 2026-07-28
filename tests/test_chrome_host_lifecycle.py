@@ -15,6 +15,7 @@ makes that impossible).
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -66,13 +67,33 @@ def host(tmp_path, monkeypatch):
     def fake_popen(argv, **kwargs):
         proc = FakeProc(list(argv))
         # The proc is recorded alongside the argv so teardown tests can reach
-        # it without re-patching Popen and shadowing this fake.
+        # it without re-patching Popen and shadowing this fake. `stderr` is
+        # recorded too — asserting on the FAKE's own attribute would pass for
+        # every possible production value, including the DEVNULL this
+        # deliberately moved away from.
         spawns.append(
-            {"argv": list(argv), "env": kwargs.get("env") or {}, "proc": proc}
+            {
+                "argv": list(argv),
+                "env": kwargs.get("env") or {},
+                "stderr": kwargs.get("stderr"),
+                "proc": proc,
+            }
         )
         return proc
 
     monkeypatch.setattr(chrome_host.subprocess, "Popen", fake_popen)
+
+    # Real drain threads would run concurrently with caplog's handler teardown
+    # ("I/O operation on closed file"), and this suite already has a
+    # load-sensitive intermittency problem worth not feeding — see
+    # .claude/memory/reference/qt-pyside/processevents_shared_app_segv.md. The
+    # drain itself is still exercised, synchronously, by the tests that call
+    # `_drain_chrome_stderr` directly.
+    monkeypatch.setattr(
+        chrome_host.threading,
+        "Thread",
+        lambda *a, **k: SimpleNamespace(start=lambda: None),
+    )
 
     h = chrome_host.ChromeHost("/home/jc/projects/thing")
     h.test_spawns = spawns
@@ -177,12 +198,21 @@ class TestCrashForensics:
     discard it and a crash reads as "the browser silently vanished"."""
 
     def test_stderr_is_piped_not_discarded(self, host):
+        """Asserted on the kwarg the spawn actually passed. Checking the fake's
+        own `.stderr` attribute instead would hold for every possible
+        production value — including the DEVNULL this moved away from."""
         host.open_window("https://a.test", lambda _r: None)
-        assert host.test_spawns[0]["proc"].stderr is not None
+        assert host.test_spawns[0]["stderr"] is chrome_host.subprocess.PIPE
+
+    def test_warm_open_also_pipes_stderr(self, host):
+        """The path most likely to die unexplained: its own docstring says it
+        can lose the handoff race and BECOME the primary Chrome."""
+        host.open_window("https://a.test", lambda _r: None)  # cold
+        host.open_window("https://b.test", lambda _r: None)  # warm, CDP down
+        assert host.test_spawns[1]["stderr"] is chrome_host.subprocess.PIPE
 
     def test_fatal_lines_are_logged_at_error(self, host, caplog):
-        host.open_window("https://a.test", lambda _r: None)
-        host._proc = FakeProc(
+        proc = FakeProc(
             [],
             [
                 b"[123:456] some routine warning\n",
@@ -190,15 +220,30 @@ class TestCrashForensics:
             ],
         )
         with caplog.at_level("ERROR"):
-            host._drain_chrome_stderr()
-        assert any("protocol error" in r.getMessage() for r in caplog.records)
+            host._drain_chrome_stderr(proc)
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        # Both halves. Chrome warns about fonts, GPU and dbus on every launch,
+        # so a regression that promotes EVERY line to error would drown the log
+        # in noise while still passing a one-sided assertion.
+        assert len(errors) == 1
+        assert "protocol error" in errors[0].getMessage()
+        assert "routine warning" not in errors[0].getMessage()
 
     def test_draining_also_reaps(self, host):
         """The drain replaces the reaper thread's wait(), so it has to do that
         job too — and an unread PIPE would block Chrome once it fills."""
         proc = FakeProc([], [b"noise\n"])
-        host._proc = proc
-        host._drain_chrome_stderr()
+        host._drain_chrome_stderr(proc)
+        assert proc.waited
+
+    def test_the_drain_is_handed_its_process(self, host):
+        """It must not re-read `self._proc`: `stop()` clears that and a respawn
+        rebinds it, so a thread reading it later would either skip its own
+        process — leaking the pipe and leaving a zombie — or start draining a
+        different one alongside its real reader."""
+        proc = FakeProc([], [b"noise\n"])
+        host._proc = None  # as stop() leaves it
+        host._drain_chrome_stderr(proc)
         assert proc.waited
 
 

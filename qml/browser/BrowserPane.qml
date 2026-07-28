@@ -267,32 +267,42 @@ Item {
     // would mean reimplementing Qt's popup positioning, which is the one part
     // of this it does for us. The walk recurses because a popup can parent
     // further popups (a submenu inside a menu).
+    function _hoverSweep(item) {
+        for (var i = 0; i < item.children.length; i++) {
+            var child = item.children[i]
+            // Only shell-surface items — `shellSurface` is what identifies
+            // one, and touching hoverEnabled on anything else would be a
+            // silent no-op at best.
+            if (child && child.shellSurface !== undefined && !child.hoverEnabled)
+                pane._enableHoverTree(child)
+        }
+    }
+
     function _enableHoverTree(item) {
         if (!item)
             return
         item.hoverEnabled = true
-        item.childrenChanged.connect(function () {
-            for (var i = 0; i < item.children.length; i++) {
-                var child = item.children[i]
-                // Only shell-surface items — `shellSurface` is what identifies
-                // one, and touching hoverEnabled on anything else would be a
-                // silent no-op at best.
-                if (child && child.shellSurface !== undefined && !child.hoverEnabled)
-                    pane._enableHoverTree(child)
-            }
-        })
+        // Swept ONCE immediately as well as on the signal. `childrenChanged`
+        // only reports what arrives AFTER the connect, so a popup that parents
+        // a sub-popup during its own construction would be missed and the walk
+        // would stop one level short — silently, since a dead submenu looks
+        // like a Chrome quirk rather than a missing property.
+        _hoverSweep(item)
+        item.childrenChanged.connect(function () { pane._hoverSweep(item) })
     }
 
     Component {
         id: surfaceComponent
 
-        // Ours, not Qt's stock `ShellSurfaceItem`: the only difference is that
-        // wheel events survive. Qt's send path truncates any `angleDelta`
-        // under 12 to a zero-valued axis event, which on a high-resolution
-        // wheel or a touchpad — neither of which emits the 120-unit steps that
-        // arithmetic assumes — is every event. Pages did not scroll at all,
-        // while dragging their scrollbars worked perfectly, because press and
-        // move never touch it. See symmetriashellsurfaceitem.h.
+        // Ours, not Qt's stock `ShellSurfaceItem`. Two differences, and losing
+        // EITHER one stops the browser scrolling entirely: wheel events survive
+        // quantisation (Qt truncates any `angleDelta` under 12 to a zero-valued
+        // axis, which on a high-resolution wheel or a touchpad — neither of
+        // which emits the 120-unit steps that arithmetic assumes — is every
+        // event), and a `wl_pointer.frame` follows each axis (Chromium only
+        // buffers on the axis itself and flushes on the frame). Dragging a
+        // scrollbar worked throughout, because press and move touch neither.
+        // See symmetriashellsurfaceitem.h.
         SymmetriaShellSurfaceItem {
             id: surfaceItem
             anchors.fill: surfaceHost

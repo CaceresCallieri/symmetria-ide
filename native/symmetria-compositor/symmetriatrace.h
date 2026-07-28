@@ -17,15 +17,29 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace symmetria {
 
+// Truthiness, not mere presence. Everything documents this as `=1`, so someone
+// disabling it with `=0` must actually get silence — otherwise they get
+// per-wheel-event spam on a pointer hot path and no way to tell why.
 inline bool traceEnabled()
 {
-    static const bool enabled = std::getenv("SYMMETRIA_COMPOSITOR_DEBUG") != nullptr;
+    static const bool enabled = [] {
+        const char *value = std::getenv("SYMMETRIA_COMPOSITOR_DEBUG");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
     return enabled;
 }
 
+// The format attribute is not decoration: these are printf-style varargs, so a
+// format/argument mismatch is silent undefined behaviour. Call sites already
+// migrated once from `trace(what, count)` to format strings — exactly the edit
+// this makes the compiler police.
+#if defined(__GNUC__) || defined(__clang__)
+[[gnu::format(printf, 1, 2)]]
+#endif
 inline void trace(const char *format, ...)
 {
     if (!traceEnabled())

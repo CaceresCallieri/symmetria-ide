@@ -23,18 +23,26 @@
 // dragging a page's scrollbar works perfectly, because press/move/release never
 // touch this arithmetic. That makes it look like a focus or hover problem.
 //
-// WHAT IT DOES. Accumulates `angleDelta` and forwards only whole multiples of
-// 12, carrying the remainder to the next event, so fragments add up instead of
-// being discarded. The forwarding is done by handing a re-quantised event to
-// the BASE implementation rather than reimplementing the send — Qt keeps
-// ownership of the input-region and focus checks, and there is one send path,
-// not two.
+// WHAT IT DOES, in two parts — reverting to the stock item breaks scrolling
+// through EITHER of them, so both have to be understood together:
 //
-// ⚠ Popups are NOT covered. Qt creates those items itself in C++
+//  1. Accumulates `angleDelta` and forwards only whole multiples of 12,
+//     carrying the remainder to the next event, so fragments add up instead of
+//     being discarded. The forwarding hands a re-quantised event to the BASE
+//     implementation rather than reimplementing the send — Qt keeps ownership
+//     of the input-region and focus checks, and there is one send path.
+//  2. Sends `wl_pointer.frame` after each axis. Chromium NEVER dispatches a
+//     scroll on the axis event itself; it only buffers, and the single call
+//     site that flushes the buffer lives in its frame handler. Without this
+//     the browser does not scroll at all, however correct the axis values are.
+//     The full argument, including why it is a deliberate protocol deviation,
+//     is on `sendPointerFrame` in the .cpp.
+//
+// ⚠ Popups get NEITHER. Qt creates those items itself in C++
 // (`maybeCreateAutoPopup`) and there is no hook to substitute a subclass, so
-// scrolling INSIDE a long Chrome dropdown still hits the stock arithmetic.
-// Fixing that means creating popup items from QML, which means reimplementing
-// Qt's popup positioning — a worse trade for a rarer case.
+// scrolling INSIDE a long Chrome dropdown hits the stock arithmetic AND never
+// gets a frame. Fixing that means creating popup items from QML, which means
+// reimplementing Qt's popup positioning — a worse trade for a rarer case.
 
 #pragma once
 

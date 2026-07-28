@@ -1,0 +1,99 @@
+---
+name: nested-compositor-pointer-input
+description: Scrolling in the nested-Chrome pane needs THREE non-default things; all three mislead as focus bugs
+metadata: 
+  node_type: memory
+  type: reference
+  originSessionId: 1dc16f14-6524-437a-9b81-8d0fde68876c
+  modified: 2026-07-28T01:28:50.948Z
+---
+
+Pointer input into the IDE's nested-Wayland browser pane needs three things
+that Qt does not do by default. Each is **independently fatal to scrolling**,
+and — the reason this cost several rounds — all three produce the SAME
+misleading symptom: clicking works and dragging a page's scrollbar works, so
+every one of them reads as a focus bug. Press and move touch none of the three
+paths.
+
+Live code: `native/symmetria-compositor/symmetriashellsurfaceitem.{h,cpp}` and
+`qml/browser/BrowserPane.qml`. Both carry the full argument inline; this file
+is the "why does this look wrong but is correct" record for anyone tempted to
+simplify one of them.
+
+## 1. No pointer motion at all — hover is never enabled
+
+`QWaylandQuickItem` implements `hoverEnterEvent`/`hoverMoveEvent`, the only two
+callers of `sendMouseMoveEvent` — which is what gives the seat's pointer a
+focused surface — but it never sets `acceptHoverEvents`. On a stock item
+neither handler fires, so the client gets no pointer motion whatsoever:
+no scroll, no link hover states, no hover-opened menus, no cursor shape, no
+row highlighting in the omnibox dropdown.
+
+`mousePressEvent` calls `sendMouseMoveEvent` itself, which is why scrolling
+appears to "start working after a click" — the single most misleading clue.
+
+Fix: `hoverEnabled: true`. Popups need it too and cannot be given it
+declaratively (Qt builds those items in C++, `maybeCreateAutoPopup`), so
+BrowserPane walks children recursively — sweeping existing children as well as
+connecting to `childrenChanged`, since a popup can parent a sub-popup during
+its own construction.
+
+## 2. The wheel value is truncated to zero
+
+`QWaylandPointer::sendMouseWheelEvent` ends in
+`wl_fixed_from_int(-delta / 12)` — truncating integer division — so any
+`angleDelta` under 12 becomes a zero-valued axis event: sent, accepted, doing
+nothing. Only a classic detented wheel (120 per notch) survives it.
+
+This is not an edge case on modern hardware. Measured on the machine where it
+was found: the mouse advertises `REL_WHEEL_HI_RES` and **not** `REL_WHEEL`, so
+it cannot emit a 120-unit step at all, and the touchpad reports no wheel axis
+whatsoever. Both scroll entirely in fragments.
+
+Fix: accumulate and forward whole multiples of 12, carrying the remainder.
+Hand the re-quantised event to the BASE implementation rather than
+reimplementing the send — Qt keeps the input-region and focus checks, and there
+is one send path. Two traps in the accumulation: reset the carry on
+`ScrollBegin` and on a direction reversal (a stale remainder otherwise eats up
+to a full grain of the new direction), and restore it when the base REFUSES the
+forwarded event (no surface / outside the input region), because in that case
+no axis was sent.
+
+## 3. Chromium never dispatches on the axis — it waits for `wl_pointer.frame`
+
+The one with no symptom on our side at all: the axis events are sent, correct,
+and traceable. `WaylandEventSource::OnPointerAxisEvent` only ACCUMULATES into
+`pointer_scroll_data_`, and its single flush call site,
+`ProcessPointerScrollData()`, runs inside `OnPointerFrameEvent()`. No timeout,
+no other trigger. Qt's compositor never sends a frame, so every scroll piles
+into a buffer nothing empties. Buttons and motion are unaffected because
+Chromium dispatches those immediately unless a feature flag says otherwise.
+
+Fix: send `wl_pointer.frame` after the axis. **This is a deliberate protocol
+deviation** — `frame` is a wl_pointer v5 event and Qt hardcodes its seat global
+at version 4 (`QWaylandSeat::initialize`) — and it needs PRIVATE Qt headers,
+since `send_frame` has no public equivalent. It is received anyway: Chromium
+registers `.frame` in its listener unconditionally, and libwayland-client
+demarshals by opcode without consulting the bound version. Both read from
+source; the negotiated version was read off a live `WAYLAND_DEBUG=1` trace.
+
+What contains the risk: this compositor has exactly ONE client, the Chrome the
+IDE spawns itself on a socket named after its own pid.
+
+Advertising v5 properly is worse, not better: frames then become MANDATORY for
+every pointer event group, so motion, buttons, enter and leave would all need
+them too, and the version bump itself means reimplementing
+`QWaylandSeat::initialize()` against private internals. Strictly more private
+API for strictly more risk. Remove the deviation the day Qt's compositor
+advertises 5 and sends its own frames.
+
+## Debugging
+
+`SYMMETRIA_COMPOSITOR_DEBUG=1` traces each wheel event on stderr (angleDelta,
+pixelDelta, phase, accumulated carry, whether the item has a surface) plus both
+clipboard directions. It goes to stderr rather than Qt logging because the IDE
+installs a message handler that swallows `qWarning` and QML `console.log`. That
+trace is what separated "the wheel never arrived" from "it arrived and was
+thrown away" — two opposite causes with one symptom.
+
+Related: [nested compositor clipboard](./nested_compositor_clipboard.md).

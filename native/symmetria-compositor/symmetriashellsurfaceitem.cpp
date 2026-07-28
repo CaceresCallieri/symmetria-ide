@@ -16,6 +16,16 @@
 #include <QtCore/private/qobject_p.h>
 #include <QtWaylandCompositor/private/qwaylandpointer_p.h>
 
+// Private headers carry no source-compatibility promise BETWEEN versions
+// either, so "it compiled" is not evidence it still means the same thing. The
+// layout below was read off 6.11; pin the claim so an older or much newer Qt
+// fails at build time rather than misbehaving at runtime — a silent
+// misbehaviour here is a browser that stops scrolling for no visible reason,
+// which is precisely the bug this file exists to fix.
+static_assert(QT_VERSION >= QT_VERSION_CHECK(6, 11, 0),
+              "QWaylandPointerPrivate/send_frame access was verified against "
+              "Qt 6.11; re-verify the private layout before lowering this.");
+
 namespace {
 
 // The divisor inside QWaylandPointer::sendMouseWheelEvent. Anything that is
@@ -94,17 +104,34 @@ SymmetriaShellSurfaceItem::SymmetriaShellSurfaceItem(QQuickItem *parent)
 
 void SymmetriaShellSurfaceItem::wheelEvent(QWheelEvent *event)
 {
+    // A new gesture starts from zero. Otherwise a leftover sub-grain remainder
+    // outlives the gesture that produced it and biases the next one — most
+    // visibly on a REVERSAL, where up to a full grain of the new direction is
+    // spent cancelling the old one before anything moves.
+    if (event->phase() == Qt::ScrollBegin)
+        m_carry = QPoint();
+    // Same reasoning for devices that send no phase at all (a plain wheel):
+    // a direction change abandons whatever the previous direction had banked.
+    if (m_carry.x() * event->angleDelta().x() < 0)
+        m_carry.setX(0);
+    if (m_carry.y() * event->angleDelta().y() < 0)
+        m_carry.setY(0);
+
     m_carry += event->angleDelta();
 
     // The one place that can distinguish "the wheel never arrived" from "it
     // arrived and was thrown away", which every other symptom of this confuses.
     // Enable with SYMMETRIA_COMPOSITOR_DEBUG=1; see symmetriatrace.h for why
-    // this does not go through Qt logging.
-    symmetria::trace(
-        "wheel angle=(%d,%d) pixel=(%d,%d) phase=%d carry=(%d,%d) surface=%s",
-        event->angleDelta().x(), event->angleDelta().y(),
-        event->pixelDelta().x(), event->pixelDelta().y(), int(event->phase()),
-        m_carry.x(), m_carry.y(), surface() != nullptr ? "yes" : "NONE");
+    // this does not go through Qt logging. Guarded rather than relying on the
+    // check inside trace(), so the eight accessor calls below cost nothing on
+    // this hot path when tracing is off.
+    if (symmetria::traceEnabled()) {
+        symmetria::trace(
+            "wheel angle=(%d,%d) pixel=(%d,%d) phase=%d carry=(%d,%d) surface=%s",
+            event->angleDelta().x(), event->angleDelta().y(),
+            event->pixelDelta().x(), event->pixelDelta().y(), int(event->phase()),
+            m_carry.x(), m_carry.y(), surface() != nullptr ? "yes" : "NONE");
+    }
 
     const QPoint step(quantise(m_carry.x()), quantise(m_carry.y()));
     if (step.isNull()) {
@@ -119,17 +146,34 @@ void SymmetriaShellSurfaceItem::wheelEvent(QWheelEvent *event)
     // Re-quantised copy handed to the base class, so Qt still owns the
     // input-region test, the seat lookup and the actual send. Reimplementing
     // those here would create a second send path to keep in sync.
+    //
+    // `pixelDelta` is passed through UNQUANTISED and that is deliberate: Qt's
+    // send path reads only `angleDelta`, so quantising both would be a lie
+    // about the gesture for no gain. If a future Qt starts preferring
+    // pixelDelta, the quantisation is silently bypassed — check here first.
     QWheelEvent forwarded(event->position(), event->globalPosition(),
                           event->pixelDelta(), step, event->buttons(),
                           event->modifiers(), event->phase(), event->inverted(),
                           Qt::MouseEventSynthesizedByApplication,
                           event->pointingDevice());
+    forwarded.setAccepted(true);
     QWaylandQuickShellSurfaceItem::wheelEvent(&forwarded);
+
+    // The base REFUSES the event — leaving it unaccepted — when the item has
+    // no surface or the position falls outside the client's input region, and
+    // in that case no axis was sent at all. Treating that as success would
+    // spend the carry on a scroll that never happened, emit a frame with
+    // nothing in it, and swallow a wheel that an ancestor should have seen.
+    if (!forwarded.isAccepted()) {
+        m_carry += step;
+        event->ignore();
+        return;
+    }
 
     // The base call above sent the axis. Without the frame that follows it,
     // Chromium buffers the scroll and never dispatches it — see
     // sendPointerFrame. Sent only when an axis actually went out, so an
-    // under-threshold event does not emit an empty sequence.
+    // under-threshold or refused event does not emit an empty sequence.
     if (QWaylandCompositor *comp = compositor())
         sendPointerFrame(comp->seatFor(event));
 

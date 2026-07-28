@@ -376,9 +376,13 @@ class ChromeHost(QObject):
         # zombie for the life of the IDE. Draining stderr is part of reaping,
         # not a separate nicety: a PIPE nobody reads fills its buffer and
         # BLOCKS Chrome the moment it becomes chatty.
-        threading.Thread(
-            target=self._drain_chrome_stderr, daemon=True, name="chrome-reap"
-        ).start()
+        #
+        # The process is HANDED to the thread rather than re-read from
+        # `self._proc` there: `stop()` sets that to None and a respawn after a
+        # crash rebinds it, so a thread that read it later would either skip
+        # its own process (leaking the fd and leaving a zombie) or end up
+        # draining a DIFFERENT process's pipe alongside its real reader.
+        self._start_stderr_drain(self._proc, "chrome-reap")
         self._cdp.connect_to(self.cdp_port())
         return ""
 
@@ -405,7 +409,19 @@ class ChromeHost(QObject):
         env.pop("WAYLAND_SOCKET", None)
         return env
 
-    def _drain_chrome_stderr(self) -> None:
+    def _start_stderr_drain(self, proc: subprocess.Popen, name: str) -> None:
+        """Reap `proc` on a daemon thread, logging whatever it says on the way.
+
+        Every Chrome spawn goes through here — including the warm
+        `--new-window` handoff, which can win the race and BECOME the primary
+        process, and whose death would otherwise be as unexplainable as the
+        cold path's was.
+        """
+        threading.Thread(
+            target=self._drain_chrome_stderr, args=(proc,), daemon=True, name=name
+        ).start()
+
+    def _drain_chrome_stderr(self, proc: subprocess.Popen) -> None:
         """Forward Chrome's stderr into the app log, then reap the process.
 
         Runs on a daemon thread and only ever logs — no Qt signal crosses out
@@ -417,10 +433,10 @@ class ChromeHost(QObject):
         are re-logged at error: a Wayland protocol error or a failed CHECK is
         the last thing Chrome says before SIGTRAP, and it is the only readable
         account of why — the core is a stripped binary.
+
+        Takes `proc` as an argument rather than reading `self._proc`, which
+        moves underneath it — see the call site.
         """
-        proc = self._proc
-        if proc is None:
-            return
         # getattr, not attribute access: `Popen.stderr` is None whenever the
         # pipe was not requested, and this must degrade to "just reap" rather
         # than take the reaper down with it.
@@ -540,12 +556,19 @@ class ChromeHost(QObject):
                 argv,
                 env=self.chrome_env(),
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                # PIPE for the same reason as the cold path, and with more
+                # force here: the docstring above says this invocation can lose
+                # the race and become the PRIMARY Chrome. Discarding stderr on
+                # the one path most likely to fail in a way nobody expects is
+                # exactly backwards.
+                stderr=subprocess.PIPE,
             )
         except OSError:
             log.exception("chrome --new-window failed")
             return "chrome-spawn-failed"
-        threading.Thread(target=proc.wait, daemon=True, name="chrome-open-reap").start()
+        # Drains AND waits, so it replaces the bare reaper rather than adding
+        # a second thread.
+        self._start_stderr_drain(proc, "chrome-open-reap")
         return ""
 
     def close_window(self, target_id: str) -> None:

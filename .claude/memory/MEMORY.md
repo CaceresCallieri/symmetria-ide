@@ -40,6 +40,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Notification system is Symmetria Shell, not swaync](reference/host/notification_system.md) — do not invoke swaync-client or makoctl
 - [fff.nvim watches nvim's cwd](reference/host/fff_watcher_roots_at_cwd.md) — never root embedded nvim at $HOME; recursive Rust watch → thermal runaway. Fix spans IDE + dotfiles
 - [STT chip stuck = stale hub broadcast](reference/host/stt_chip_hub_broadcast.md) — IDE reads hub stt field, shell reads local AgentService; fix is hub self-heal in agent-bridge.py
+- [Chrome system-ui font](reference/host/chrome_system_ui_font.md) — CaskaydiaCove NFM is a HOST quirk (headed vs headless), not the nested compositor
 - [Shim the binary for subprocess forensics](reference/host/shim_the_binary_for_subprocess_forensics.md) — log $* from a PATH shim; don't infer cause from exit codes
 
 ## Reference — nvim-rpc — `reference/nvim-rpc/` (NeoVim `--listen` socket, pynvim RPC-only, msgpack)
@@ -58,6 +59,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [ApplicationShortcut masks terminal keys](reference/qt-pyside/applicationshortcut_masks_terminal_keys.md) — chrome Shortcut eats keys before QMLTermWidget; suspect it when a key fails in-IDE but works in Ghostty
 - [QtWebEngine CDP era (SUPERSEDED)](reference/qt-pyside/qtwebengine_cdp_devtools_mcp.md) — embedded-engine CDP notes; real Chrome replaced it 2026-07-27
 - [Startup performance](reference/qt-pyside/startup_perf.md) — SYMMETRIA_IDE_TRACE waterfall + interleaved A/B; fixed browser-MCP GUI-thread import (~1s) + eager WebEngine (~430ms)
+- [Nested-compositor pointer input](reference/qt-pyside/nested_compositor_pointer_input.md) — scroll needs 3 non-default things; all mislead as focus bugs
 - [Nested-compositor clipboard](reference/qt-pyside/nested_compositor_clipboard.md) — isolated BOTH ways; bridging needs a ~30-line C++ QWaylandCompositor subclass
 - [processEvents() shared-app SEGV](reference/qt-pyside/processevents_shared_app_segv.md) — never pump the session app in tests; runs prior tests' deleteLater → gotcha #10 crash; hand-deliver queued slots
 
