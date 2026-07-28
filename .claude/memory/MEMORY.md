@@ -10,6 +10,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Clay chrome surfaces](feedback/clay_chrome_surfaces.md) — new chrome uses PillSurface/PillCard + Theme.depth, gate depth via `elevated`; no flat Rectangles
 - [MCP enablement is per-project](feedback/mcp_enablement_per_project.md) — costly agent MCP gates per PROJECT (default off, IDE-owned), never per agent
 - [Prefer peer over shell coordination](feedback/prefer_peer_over_shell_coordination.md) — cross-IDE state via shared file/socket, NOT the shell bridge; survives shell swap/outage
+- [Never loop the suite unattended](feedback/never_loop_the_suite_unattended.md) — repeated full-suite runs killed the user's Claude session (exit 137); run it once
 - [Shift+S = back in drill-ins](feedback/shift_s_back_navigation.md) — canonical go-back key for in-place detail views; bind at the root so it works mid-load
 
 ## Project — meta — `project/meta/` (identity, governance, key decisions)
@@ -59,6 +60,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [ApplicationShortcut masks terminal keys](reference/qt-pyside/applicationshortcut_masks_terminal_keys.md) — chrome Shortcut eats keys before QMLTermWidget; suspect it when a key fails in-IDE but works in Ghostty
 - [QtWebEngine CDP era (SUPERSEDED)](reference/qt-pyside/qtwebengine_cdp_devtools_mcp.md) — embedded-engine CDP notes; real Chrome replaced it 2026-07-27
 - [Startup performance](reference/qt-pyside/startup_perf.md) — SYMMETRIA_IDE_TRACE waterfall + interleaved A/B; fixed browser-MCP GUI-thread import (~1s) + eager WebEngine (~430ms)
+- [Nested-compositor output mode](reference/qt-pyside/nested_compositor_output_mode.md) — the wl_output must describe the PANE, not the window; only C++ can say so
 - [Nested-compositor pointer input](reference/qt-pyside/nested_compositor_pointer_input.md) — scroll needs 3 non-default things; all mislead as focus bugs
 - [Nested-compositor clipboard](reference/qt-pyside/nested_compositor_clipboard.md) — isolated BOTH ways; bridging needs a ~30-line C++ QWaylandCompositor subclass
 - [processEvents() shared-app SEGV](reference/qt-pyside/processevents_shared_app_segv.md) — never pump the session app in tests; runs prior tests' deleteLater → gotcha #10 crash; hand-deliver queued slots

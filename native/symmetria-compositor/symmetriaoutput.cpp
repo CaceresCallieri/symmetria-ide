@@ -3,6 +3,7 @@
 
 #include "symmetriaoutput.h"
 
+#include <QtCore/QDebug>
 #include <QtCore/QtMath>
 #include <QtGui/QScreen>
 #include <QtGui/QWindow>
@@ -19,12 +20,33 @@ constexpr int kFallbackRefreshRateMilliHz = 60000;
 
 } // namespace
 
+bool SymmetriaOutput::hasMode() const
+{
+    return currentMode().isValid();
+}
+
+QSize SymmetriaOutput::modeSize() const
+{
+    return currentMode().size();
+}
+
 void SymmetriaOutput::setModeSize(const QSize &size)
 {
     // A pane still being laid out is 0-sized, and `QWaylandOutputMode` rejects
     // that as invalid — so this would otherwise be a warning per startup frame.
     if (size.isEmpty())
         return;
+
+    // The header's central requirement, and nothing but this notices when it
+    // is broken: with `sizeFollowsWindow` on, Qt overwrites whatever we set
+    // here on the next window resize. That flag is one line in a different
+    // file, and the only symptom of flipping it is a subtly misplaced Chrome
+    // popup — no error, no crash. Warned once rather than per push.
+    if (sizeFollowsWindow() && !m_warnedAboutSizeFollowsWindow) {
+        m_warnedAboutSizeFollowsWindow = true;
+        qWarning("SymmetriaOutput: sizeFollowsWindow must be false, or Qt "
+                 "overwrites this mode on the next window resize");
+    }
 
     const QWaylandOutputMode existing = currentMode();
     // The no-op that keeps the mode list from growing (see the header): callers
@@ -33,14 +55,17 @@ void SymmetriaOutput::setModeSize(const QSize &size)
     if (existing.isValid() && existing.size() == size)
         return;
 
-    int refreshRate = existing.isValid() ? existing.refreshRate() : 0;
-    if (refreshRate <= 0) {
-        const QWindow *hostWindow = window();
-        const QScreen *screen =
-            hostWindow != nullptr ? hostWindow->screen() : nullptr;
-        if (screen != nullptr)
-            refreshRate = qFloor(screen->refreshRate() * 1000);
-    }
+    // Screen FIRST, previous mode only as a fallback. The other order freezes
+    // the rate at whatever the first push saw — including a value queried
+    // before the window had a screen — and moving the IDE to a different-Hz
+    // monitor could then never correct it.
+    int refreshRate = 0;
+    const QWindow *hostWindow = window();
+    const QScreen *screen = hostWindow != nullptr ? hostWindow->screen() : nullptr;
+    if (screen != nullptr)
+        refreshRate = qFloor(screen->refreshRate() * 1000);
+    if (refreshRate <= 0 && existing.isValid())
+        refreshRate = existing.refreshRate();
     if (refreshRate <= 0)
         refreshRate = kFallbackRefreshRateMilliHz;
 

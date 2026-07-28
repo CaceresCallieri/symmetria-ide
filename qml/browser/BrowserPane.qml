@@ -85,11 +85,22 @@ Item {
                 // silently un-maximizes the window.
                 browserCompositor.defaultSeat.keyboardFocus = item.shellSurface.surface
                 item.shellSurface.toplevel.sendConfigure(
-                    Qt.size(pane.width, pane.height),
+                    pane._paneSize(),
                     [XdgToplevel.ActivatedState, XdgToplevel.MaximizedState])
                 item.forceActiveFocus()
             }
         }
+    }
+
+    // The pane rect, in the RAW logical units every toplevel configure uses.
+    // One definition because the unit contract has two halves in different
+    // places: configures pass this straight through, while the output mode
+    // multiplies it by `scaleFactor` (see SymmetriaOutput). With the size
+    // spelled out at each site instead, a change to one was invisible from the
+    // others — and the two halves disagreeing IS the bug this pane was fixed
+    // for, a window measured against a screen in different units.
+    function _paneSize() {
+        return Qt.size(pane.width, pane.height)
     }
 
     function _configureAll() {
@@ -100,31 +111,45 @@ Item {
                 // hide its tabs and omnibox, and the full browser chrome is
                 // explicitly wanted — this browser doubles as a surface for
                 // showing things to other people.
-                item.shellSurface.toplevel.sendMaximized(Qt.size(pane.width, pane.height))
+                item.shellSurface.toplevel.sendMaximized(pane._paneSize())
         }
     }
 
-    // The output's mode gets a SETTLE delay rather than the per-frame
-    // coalescing the toplevels get, because the two have different costs. A
-    // configure is cheap and idempotent; a mode change permanently appends to
-    // the output's mode list and re-broadcasts the whole list to every client
-    // (Qt's public API has no in-place setter — see symmetriaoutput.h). One
-    // entry per settled size is affordable, one per frame of a drag is not.
-    // Lagging a resize by this much is harmless: the mode only feeds Chrome's
-    // popup-placement decisions, not its layout.
+    // How long the output's mode waits for a resize to settle. The toplevels
+    // are configured per FRAME instead, because the two have different costs:
+    // a configure is cheap and idempotent, while a mode change permanently
+    // appends to the output's mode list and re-broadcasts the whole list to
+    // every client (Qt's public API has no in-place setter — see
+    // symmetriaoutput.h). One entry per settled size is affordable; one per
+    // frame of a drag is not.
+    readonly property int outputModeSettleMs: 150
+
     function _scheduleOutputMode() {
-        // The very first push cannot wait — until it lands the output has no
-        // mode at all, and a client connecting into that window sees a screen
-        // with no resolution.
-        if (!browserOutput.modeApplied)
+        // GROWTH is never debounced, and the reason is the whole point of this
+        // pane. The toplevel is configured per frame, so while the pane grows a
+        // lagging mode leaves Chrome's window LARGER than the screen it is told
+        // it occupies — the exact state that makes it flip the omnibox dropdown
+        // up over the omnibox. Debouncing a shrink is harmless (the screen is
+        // merely bigger than the window for a moment); debouncing a grow
+        // reinstates the bug for the length of the drag.
+        //
+        // The first push cannot wait either: with `sizeFollowsWindow` off Qt
+        // adds no mode at all, so until one lands a connecting client sees a
+        // screen with no resolution.
+        var want = browserOutput.wantedModeSize()
+        var current = browserOutput.modeSize()
+        if (!browserOutput.hasMode()
+                || want.width > current.width || want.height > current.height) {
+            outputModeSettle.stop()
             browserOutput.syncMode()
-        else
+        } else {
             outputModeSettle.restart()
+        }
     }
 
     Timer {
         id: outputModeSettle
-        interval: 150
+        interval: pane.outputModeSettleMs
         onTriggered: browserOutput.syncMode()
     }
 
@@ -191,26 +216,35 @@ Item {
                                                ? pane.hostWindow.devicePixelRatio
                                                : 1))
 
-            // Set once a real mode has been pushed. Until then the output has
-            // NO mode at all — with `sizeFollowsWindow` off, Qt's initialize()
-            // adds none — so the first push must not wait on the settle timer.
-            property bool modeApplied: false
-
+            // The mode this pane size calls for, in PHYSICAL pixels.
+            //
             // Multiplying by `scaleFactor` is what puts the client's logical
-            // units on the same footing as ours: it divides the mode by the
-            // advertised scale, so it lands back on exactly the pane size we
-            // pass to `sendMaximized`. Get this wrong and window and screen are
-            // measured in different units — which is the bug this replaced,
+            // units on the same footing as ours: the client divides the mode by
+            // the advertised scale, so it lands back on exactly the pane size
+            // we pass to `sendMaximized`. Get this wrong and window and screen
+            // are measured in different units — which is the bug this replaced,
             // where a 1311x868 window sat on a 1273x733 screen.
+            //
+            // Rounded, not truncated: QML's `size` is a QSizeF and the
+            // conversion to QSize at the C++ boundary truncates.
+            function wantedModeSize() {
+                var size = pane._paneSize()
+                return Qt.size(
+                    Math.round(size.width * browserOutput.scaleFactor),
+                    Math.round(size.height * browserOutput.scaleFactor))
+            }
+
             function syncMode() {
                 if (pane.width <= 0 || pane.height <= 0)
                     return
-                setModeSize(Qt.size(Math.round(pane.width * scaleFactor),
-                                    Math.round(pane.height * scaleFactor)))
-                modeApplied = true
+                browserOutput.setModeSize(browserOutput.wantedModeSize())
             }
 
-            onScaleFactorChanged: pane._scheduleOutputMode()
+            // Direct, not debounced. A scale change is rare, never per-frame,
+            // and delaying it leaves the advertised screen wrong for the whole
+            // settle — including the case where the first push happened before
+            // this binding had evaluated.
+            onScaleFactorChanged: browserOutput.syncMode()
         }
 
         XdgShell {
@@ -229,7 +263,7 @@ Item {
                 }
                 surfaces.append({ "item": item })
                 pane.currentIndex = surfaces.count - 1
-                toplevel.sendMaximized(Qt.size(pane.width, pane.height))
+                toplevel.sendMaximized(pane._paneSize())
                 pane.activateCurrent()
             }
         }

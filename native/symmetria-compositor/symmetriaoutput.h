@@ -54,8 +54,27 @@ public:
     // `paneSizeInLogicalPixels * scaleFactor` to make a client's logical screen
     // match the pane one-to-one.
     //
+    // ⚠ QML's `size` value type is a QSizeF, and the conversion to QSize at the
+    // metacall boundary TRUNCATES — so callers must round rather than hand over
+    // a fractional product. That rounding is load-bearing, not cosmetic.
+    //
     // Ignores an empty size and a size already current, so it is safe to call
     // on every geometry change. Requires `sizeFollowsWindow: false`, or Qt
-    // overwrites the mode on the next window resize.
+    // overwrites the mode on the next window resize — warned about once if it
+    // is left on.
     Q_INVOKABLE void setModeSize(const QSize &size);
+
+    // Whether a mode has been set at all. C++ is the single source of truth
+    // here: a QML-side "we pushed one" flag would claim success for the early
+    // returns above, and with `sizeFollowsWindow` off a mode-less output means
+    // a client seeing a screen with no resolution.
+    Q_INVOKABLE bool hasMode() const;
+
+    // Current resolution in physical pixels, so a caller can tell a GROWING
+    // pane from a shrinking one — the former must not be debounced. Invalid
+    // when no mode is set.
+    Q_INVOKABLE QSize modeSize() const;
+
+private:
+    bool m_warnedAboutSizeFollowsWindow = false;
 };
