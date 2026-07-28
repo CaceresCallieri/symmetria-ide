@@ -43,15 +43,22 @@ repos:
         types_or: [lua]
         pass_filenames: true
 
-      # QML lint — must use Qt6's qmllint, not the bare `qmllint` on PATH
-      # (which resolves to Qt5's binary on Arch and chokes on Qt6 syntax
-      # like inline component `Component { Window { ... } }` or aliased
-      # imports `import Foo.Bar as Baz`). See CLAUDE.md: the Qt6 binary
-      # lives at /usr/lib/qt6/bin/qmllint.
+      # QML lint, via a ratchet rather than the binary directly. Calling
+      # `qmllint` here is what we did before and it cannot fail a commit: it
+      # exits 0 on warnings, so it printed findings and passed — which is how
+      # a real `unqualified` violation reached `BrowserPane.qml`. Failing on
+      # any finding is equally unusable (~1500 exist, most of them context
+      # properties qmllint cannot resolve by construction), so the gate allows
+      # each file the findings `scripts/qmllint-baseline.json` records for it
+      # and fails on an increase. The script's docstring carries the reasoning
+      # and the one guarantee it does NOT give.
+      #
+      # It picks the Qt6 binary itself — the bare `qmllint` on PATH is Qt5's
+      # on Arch and chokes on Qt6 syntax such as aliased imports.
       - id: qmllint
-        name: qmllint (QML)
+        name: qmllint (QML — no new findings)
         language: system
-        entry: /usr/lib/qt6/bin/qmllint
+        entry: python3 scripts/qmllint_gate.py
         files: \.qml$
         pass_filenames: true
 

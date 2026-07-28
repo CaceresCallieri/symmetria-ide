@@ -29,6 +29,15 @@
 // contains the failure without ever deactivating. Same class of dependency as
 // the qmltermwidget fork, which likewise breaks its panes when unpackaged.
 
+// The surface delegate below is an inline `Component`, and it reaches for ids
+// declared out here (`pane`, `surfaces`, `surfaceHost`). Without this pragma
+// those resolve through the dynamic scope chain at run time — the `unqualified`
+// findings that qmllint reports and that the QML→C++ compiler cannot lower.
+// Safe here specifically because nothing in this file is a view delegate: the
+// pragma also stops `index`/`model` being injected implicitly, which would
+// silently break a Repeater or ListView delegate that relied on them.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtWayland.Compositor
 import QtWayland.Compositor.XdgShell

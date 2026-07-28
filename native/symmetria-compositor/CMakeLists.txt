@@ -21,6 +21,14 @@ qt_add_qml_module(symmetriacompositor
     VERSION 1.0
     PLUGIN_TARGET symmetriacompositor
     OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/qml/Symmetria/Compositor
+    # No `DEPENDENCIES QtWayland.Compositor` here, and it is not an oversight.
+    # qmllint reports our three types as "used but not resolved" because it
+    # cannot find their Qt base classes, and declaring the dependency is the
+    # obvious fix — measured, it changes nothing. The bases are unresolvable at
+    # the source: qt6-wayland's own .qmltypes names them as C++ symbols (one is
+    # the template `QWaylandShellTemplate<QWaylandXdgShell>`), which no
+    # .qmltypes can express. Adding the line would only force QtWayland.
+    # Compositor to load on every import of this module, for nothing.
     SOURCES
         symmetriatrace.h
         symmetriacompositor.h
