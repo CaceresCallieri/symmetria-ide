@@ -2,8 +2,25 @@
 
 A real reporter is simulated by connecting to the server's Unix socket and
 writing JSON lines, exercising the genuine accept → per-connection handler →
-queued `hook_received` path. Delivery crosses from a handler thread to the GUI
-thread via a queued signal, so assertions pump the QCoreApplication event loop.
+`hook_received` path.
+
+⚠ EVERY spy here connects with an explicit `Qt.ConnectionType.DirectConnection`,
+and nothing in this file pumps the Qt event loop. That is not a style choice.
+The emit happens on a handler thread, so an auto connection may be queued, and
+the obvious way to collect a queued payload — `QCoreApplication.processEvents()`
+— drains the GLOBAL queue of the session-scoped app, running `deleteLater`
+deletions left by earlier QML-heavy modules and tripping the Python-3.14
+cyclic-GC-vs-Qt SEGV (gotcha #10). This file WAS the suite's main source of
+intermittent death for exactly that reason: 4 failures in 9 full-suite runs, as
+a hang, as exit 139 and as exit 134, while passing in isolation every single
+time. Direct delivery captures the payload synchronously on the handler thread,
+so `wait_until` only has to wait for that thread — no loop, nothing global
+touched.
+
+What direct delivery gives up, and why it is acceptable: these tests no longer
+prove that a QUEUED connection delivers. That is Qt's behaviour, not ours;
+production's queued connect sites live in `app.py` and are asserted
+structurally there.
 """
 
 from __future__ import annotations
@@ -16,6 +33,9 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+from conftest import wait_until
+from PySide6.QtCore import Qt
 
 from symmetria_ide.agent_events import (
     AgentEventsServer,
@@ -31,15 +51,14 @@ _REPORTER = (
 )
 
 
-def _pump_events(predicate, timeout: float = 3.0) -> None:
-    """Process Qt events until `predicate()` is true (queued-signal delivery)."""
-    from PySide6.QtCore import QCoreApplication
+def _spy(signal, sink: list) -> None:
+    """Capture a signal's payload synchronously on the emitting thread.
 
-    deadline = time.monotonic() + timeout
-    while not predicate() and time.monotonic() < deadline:
-        QCoreApplication.processEvents()
-        time.sleep(0.01)
-    assert predicate(), "condition not reached while pumping events"
+    Explicit rather than relying on what an auto connection resolves to for a
+    plain Python callable — the whole point is that no delivery depends on the
+    event loop. See the module docstring.
+    """
+    signal.connect(sink.append, Qt.ConnectionType.DirectConnection)
 
 
 def _report(sock_path: str, payload: dict) -> None:
@@ -94,11 +113,11 @@ def test_hook_line_is_emitted(tmp_path):
     path = str(tmp_path / "agents.sock")
     server = AgentEventsServer(socket_path=path)
     received: list[dict] = []
-    server.hook_received.connect(received.append)
+    _spy(server.hook_received, received)
     try:
         server.start()
         _report(path, {"type": "hook", "agent_id": "100_1", "hook_event_name": "Stop"})
-        _pump_events(lambda: len(received) >= 1)
+        wait_until(lambda: len(received) >= 1)
         assert received[0]["agent_id"] == "100_1"
         assert received[0]["hook_event_name"] == "Stop"
     finally:
@@ -109,12 +128,12 @@ def test_multiple_connections_each_emit(tmp_path):
     path = str(tmp_path / "agents.sock")
     server = AgentEventsServer(socket_path=path)
     received: list[dict] = []
-    server.hook_received.connect(received.append)
+    _spy(server.hook_received, received)
     try:
         server.start()
         for i in range(3):
             _report(path, {"type": "hook", "agent_id": f"100_{i}"})
-        _pump_events(lambda: len(received) >= 3)
+        wait_until(lambda: len(received) >= 3)
         assert sorted(r["agent_id"] for r in received) == ["100_0", "100_1", "100_2"]
     finally:
         server.stop()
@@ -124,7 +143,7 @@ def test_bad_json_is_skipped(tmp_path):
     path = str(tmp_path / "agents.sock")
     server = AgentEventsServer(socket_path=path)
     received: list[dict] = []
-    server.hook_received.connect(received.append)
+    _spy(server.hook_received, received)
     try:
         server.start()
         # A garbage line followed by a valid one on a fresh connection: the bad
@@ -133,7 +152,7 @@ def test_bad_json_is_skipped(tmp_path):
             sock.connect(path)
             sock.sendall(b"not json\n")
         _report(path, {"type": "hook", "agent_id": "100_9"})
-        _pump_events(lambda: len(received) >= 1)
+        wait_until(lambda: len(received) >= 1)
         assert received[0]["agent_id"] == "100_9"
     finally:
         server.stop()
@@ -143,14 +162,14 @@ def test_non_dict_json_is_skipped(tmp_path):
     path = str(tmp_path / "agents.sock")
     server = AgentEventsServer(socket_path=path)
     received: list[dict] = []
-    server.hook_received.connect(received.append)
+    _spy(server.hook_received, received)
     try:
         server.start()
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.connect(path)
             sock.sendall(b"[1, 2, 3]\n")  # valid JSON, wrong shape
         _report(path, {"type": "hook", "agent_id": "100_5"})
-        _pump_events(lambda: len(received) >= 1)
+        wait_until(lambda: len(received) >= 1)
         assert received[0]["agent_id"] == "100_5"
     finally:
         server.stop()
@@ -206,7 +225,7 @@ def test_reporter_forwards_curated_fields(tmp_path):
     path = str(tmp_path / "agents.sock")
     server = AgentEventsServer(socket_path=path)
     received: list[dict] = []
-    server.hook_received.connect(received.append)
+    _spy(server.hook_received, received)
     try:
         server.start()
         _run_reporter(
@@ -220,7 +239,7 @@ def test_reporter_forwards_curated_fields(tmp_path):
                 "tool_input": {"command": "rm -rf /tmp/whatever"},
             },
         )
-        _pump_events(lambda: len(received) >= 1)
+        wait_until(lambda: len(received) >= 1)
         msg = received[0]
         assert msg["type"] == "hook"
         assert msg["agent_id"] == "100_1"  # from SYMMETRIA_AGENT_ID env
@@ -239,11 +258,11 @@ def test_reporter_idle_notification_argv_marker(tmp_path):
     path = str(tmp_path / "agents.sock")
     server = AgentEventsServer(socket_path=path)
     received: list[dict] = []
-    server.hook_received.connect(received.append)
+    _spy(server.hook_received, received)
     try:
         server.start()
         _run_reporter(path, {"hook_event_name": "Notification"}, "idle-notification")
-        _pump_events(lambda: len(received) >= 1)
+        wait_until(lambda: len(received) >= 1)
         assert received[0]["idle_notification"] is True
     finally:
         server.stop()
@@ -258,11 +277,11 @@ def test_stt_recording_is_emitted(tmp_path):
     path = str(tmp_path / "agents.sock")
     server = AgentEventsServer(socket_path=path)
     received: list[dict] = []
-    server.stt_recording_received.connect(received.append)
+    _spy(server.stt_recording_received, received)
     try:
         server.start()
         _report(path, {"type": "stt_recording", "buf": 1, "transcribing": True})
-        _pump_events(lambda: len(received) >= 1)
+        wait_until(lambda: len(received) >= 1)
         assert received[0]["buf"] == 1
         assert received[0]["transcribing"] is True
     finally:
@@ -285,27 +304,32 @@ def _run_inject_client(path: str, request: dict, reply: dict) -> threading.Threa
 
 
 def test_stt_inject_request_reply(tmp_path):
-    from PySide6.QtCore import Qt
-
     path = str(tmp_path / "agents.sock")
     server = AgentEventsServer(socket_path=path)
     seen: list[dict] = []
 
-    # Queued (like production: the resolve runs on the GUI thread via
-    # agent_inject_done, NOT on the handler thread). Simulate the QML paste by
-    # resolving as soon as the inject is delivered here.
+    # Stands in for the QML paste: resolve the moment the inject is delivered.
+    #
+    # DIRECT, so this runs on the handler thread — production connects this
+    # queued and resolves from the GUI thread, and the difference is safe to
+    # erase here because `_handle_inject` registers the Future BEFORE it emits.
+    # Resolving inside the emit therefore lands on an already-registered
+    # Future, and the `future.result()` that follows returns immediately
+    # instead of blocking. What this cannot do is collect a QUEUED delivery:
+    # that needs the loop pumped, which is what made this file the suite's
+    # main source of intermittent SEGVs (see the module docstring).
     def on_inject(payload: dict) -> None:
         seen.append(payload)
         server.resolve_inject(payload["request_id"], True, True, "")
 
-    server.stt_inject_received.connect(on_inject, Qt.ConnectionType.QueuedConnection)
+    server.stt_inject_received.connect(on_inject, Qt.ConnectionType.DirectConnection)
     reply: dict = {}
     try:
         server.start()
         t = _run_inject_client(
             path, {"type": "stt_inject", "buf": 1, "text": "hi", "submit": True}, reply
         )
-        _pump_events(lambda: "msg" in reply, timeout=8.0)
+        wait_until(lambda: "msg" in reply, timeout=8.0)
         t.join(timeout=2.0)
         assert reply["msg"] == {
             "type": "stt_inject_result",
@@ -325,13 +349,13 @@ def test_stop_releases_pending_inject(tmp_path):
     path = str(tmp_path / "agents.sock")
     server = AgentEventsServer(socket_path=path)
     arrived: list[dict] = []
-    server.stt_inject_received.connect(arrived.append)  # captured, NOT resolved
+    _spy(server.stt_inject_received, arrived)  # captured, NOT resolved
     reply: dict = {}
     server.start()
     t = _run_inject_client(path, {"type": "stt_inject", "buf": 1, "text": "hi"}, reply)
-    _pump_events(lambda: len(arrived) >= 1)  # handler now blocked on the Future
+    wait_until(lambda: len(arrived) >= 1)  # handler now blocked on the Future
     server.stop()  # releases pending → handler writes the shutting-down reply
-    _pump_events(lambda: "msg" in reply, timeout=3.0)
+    wait_until(lambda: "msg" in reply, timeout=3.0)
     t.join(timeout=2.0)
     assert reply["msg"]["ok"] is False
     assert reply["msg"]["error"] == "shutting-down"
@@ -350,7 +374,7 @@ def test_reporter_without_env_is_silent_noop(tmp_path):
     path = str(tmp_path / "agents.sock")
     server = AgentEventsServer(socket_path=path)
     received: list[dict] = []
-    server.hook_received.connect(received.append)
+    _spy(server.hook_received, received)
     try:
         server.start()
         subprocess.run(
@@ -362,10 +386,9 @@ def test_reporter_without_env_is_silent_noop(tmp_path):
             check=True,
         )
         # Give any (erroneous) delivery a brief window, then assert silence.
+        # A sleep is enough and a pump is not needed: the spy is direct, so a
+        # report that DID arrive would already be in the list.
         time.sleep(0.3)
-        from PySide6.QtCore import QCoreApplication
-
-        QCoreApplication.processEvents()
         assert received == []
     finally:
         server.stop()

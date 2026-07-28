@@ -2,9 +2,21 @@
 
 A real Unix-socket server stands in for the shell's agent-bridge.py, so
 these tests exercise the genuine connect / replay / publish / subscribe
-paths without any shell dependency. Snapshot delivery crosses from the
-reader thread to the GUI thread via a queued signal, so assertions on
-`snapshot_received` pump the QCoreApplication event loop.
+paths without any shell dependency.
+
+⚠ Nothing here pumps the Qt event loop, and spies connect with an explicit
+`Qt.ConnectionType.DirectConnection`. Snapshot delivery crosses from the reader
+thread, so an auto connection may be queued and the tempting way to collect it
+— `QCoreApplication.processEvents()` — drains the GLOBAL queue of the
+session-scoped app and runs `deleteLater` deletions posted by earlier
+QML-heavy modules, tripping the Python-3.14 cyclic-GC-vs-Qt SEGV (gotcha #10).
+`tests/test_agent_events.py` did exactly that and was the suite's main source
+of intermittent death; see `conftest.wait_until` for the measurements.
+
+The one thing that genuinely needed the loop is the 200ms title debounce, which
+is a `QTimer` on the GUI thread. Those tests call `_flush_titles` — the timer's
+own slot — by hand instead, and assert the timer is armed separately, so the
+debounce is still covered without a running loop.
 """
 
 from __future__ import annotations
@@ -15,7 +27,8 @@ import threading
 import time
 
 import pytest
-from PySide6.QtCore import QCoreApplication
+from conftest import wait_until
+from PySide6.QtCore import Qt
 
 from symmetria_ide.agent_bridge import AgentBridgeClient
 
@@ -98,13 +111,14 @@ def client(bridge_server):
     c.stop()
 
 
-def _pump_events(predicate, timeout: float = 3.0) -> None:
-    """Process Qt events until `predicate()` is true (queued-signal delivery)."""
-    deadline = time.monotonic() + timeout
-    while not predicate() and time.monotonic() < deadline:
-        QCoreApplication.processEvents()
-        time.sleep(0.01)
-    assert predicate(), "condition not reached while pumping events"
+def _spy(signal, sink: list) -> None:
+    """Capture a signal's payload synchronously on the emitting thread.
+
+    Explicit rather than relying on what an auto connection resolves to for a
+    plain Python callable — no delivery here may depend on the event loop. See
+    the module docstring.
+    """
+    signal.connect(sink.append, Qt.ConnectionType.DirectConnection)
 
 
 def _instance(slot: int, **overrides) -> dict:
@@ -199,9 +213,15 @@ def test_notify_title_debounces_and_publishes_updated(bridge_server, client):
     client.notify_spawn(_instance(1))
     client.notify_title(1, "first")
     client.notify_title(1, "final title")
-    # The debounce timer fires on the GUI thread — pump events until the
-    # updated message lands server-side.
-    _pump_events(
+    # The debounce is a single-shot GUI-thread QTimer, so firing it for real
+    # needs a running loop — which is the one thing tests here may not do.
+    # Asserting it is ARMED and then calling its own slot covers the same
+    # contract: `notify_title` defers rather than sends, and one flush emits one
+    # coalesced message. What is not covered is Qt actually firing the timer.
+    assert client._title_timer.isActive(), "notify_title must arm the debounce"
+    assert client._title_timer.isSingleShot(), "a repeating timer would re-send"
+    client._flush_titles()
+    wait_until(
         lambda: any(m["type"] == "updated" for m in bridge_server.received),
         timeout=3.0,
     )
@@ -215,12 +235,20 @@ def test_notify_title_for_unknown_slot_is_dropped(bridge_server, client):
     client.start()
     bridge_server.wait_for_messages(3)
     client.notify_title(9, "ghost")
-    # The debounce timer fires after 200ms; pump events for long enough to cover
-    # that window AND give the (absent) updated message a chance to arrive
-    # server-side.  _pump_events drains the Qt event loop on each iteration
-    # instead of using a raw sleep (project-standards §8: no time.sleep in tests).
-    _pump_events(lambda: True, timeout=0.5)
-    assert not any(m["type"] == "updated" for m in bridge_server.received)
+    # Absence is asserted behind a POSITIVE signal rather than a wait: register a
+    # real slot, title it, and let that message land. Because both went through
+    # the same single flush, the ghost has had its full chance by the time the
+    # real one arrives — no sleep to tune, and no false pass on a slow machine.
+    client.notify_spawn(_instance(1))
+    client.notify_title(1, "real")
+    client._flush_titles()
+    wait_until(
+        lambda: any(
+            m["type"] == "updated" and m.get("title") == "real"
+            for m in bridge_server.received
+        )
+    )
+    assert not any(m.get("title") == "ghost" for m in bridge_server.received)
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +263,7 @@ def test_notify_activity_wire_format(bridge_server, client):
     client.notify_activity(
         1, state="working", tool="Running", in_plan_mode=True, session_id="sess-1"
     )
-    _pump_events(
+    wait_until(
         lambda: any(
             m["type"] == "updated" and "activity_state" in m
             for m in bridge_server.received
@@ -264,7 +292,7 @@ def test_notify_activity_omits_empty_session_id(bridge_server, client):
         1, state="working", tool="", in_plan_mode=False, session_id="sess-orig"
     )
     client.notify_activity(1, state="", tool="", in_plan_mode=False)  # clear, no id
-    _pump_events(
+    wait_until(
         lambda: (
             sum(
                 m["type"] == "updated" and "activity_state" in m
@@ -287,10 +315,17 @@ def test_notify_activity_for_unknown_slot_is_dropped(bridge_server, client):
     client.start()
     bridge_server.wait_for_messages(3)
     client.notify_activity(9, state="working", tool="Running", in_plan_mode=False)
-    _pump_events(lambda: True, timeout=0.5)
-    assert not any(
-        m["type"] == "updated" and "activity_state" in m for m in bridge_server.received
+    # Same shape as the title case: a registered slot's activity is sent AFTER
+    # the ghost's on the same socket, so its arrival proves the ghost's would
+    # already have arrived had one been sent.
+    client.notify_spawn(_instance(1))
+    client.notify_activity(1, state="thinking", tool="", in_plan_mode=False)
+    wait_until(
+        lambda: any(
+            m.get("activity_state") == "thinking" for m in bridge_server.received
+        )
     )
+    assert not any(m.get("activity_state") == "working" for m in bridge_server.received)
 
 
 def test_notify_activity_carried_in_reconnect_sync(bridge_server, client):
@@ -301,7 +336,7 @@ def test_notify_activity_carried_in_reconnect_sync(bridge_server, client):
     bridge_server.wait_for_messages(3)
     client.notify_spawn(_instance(1))
     client.notify_activity(1, state="thinking", tool="", in_plan_mode=False)
-    _pump_events(
+    wait_until(
         lambda: any(
             m["type"] == "updated" and "activity_state" in m
             for m in bridge_server.received
@@ -309,7 +344,7 @@ def test_notify_activity_carried_in_reconnect_sync(bridge_server, client):
     )
     # Drop the connection; the reader reconnects and replays hello/sync/subscribe.
     bridge_server.drop_client()
-    _pump_events(
+    wait_until(
         lambda: sum(m["type"] == "sync" for m in bridge_server.received) >= 2,
         timeout=5.0,
     )
@@ -327,25 +362,25 @@ def test_notify_activity_carried_in_reconnect_sync(bridge_server, client):
 
 def test_snapshot_lines_emit_snapshot_received(bridge_server, client):
     received: list[dict] = []
-    client.snapshot_received.connect(received.append)
+    _spy(client.snapshot_received, received)
     client.start()
     bridge_server.wait_for_messages(3)
     bridge_server.push(
         {"agents": [{"id": "1_1", "activity_state": "working"}], "projects": ["demo"]}
     )
-    _pump_events(lambda: len(received) == 1)
+    wait_until(lambda: len(received) == 1)
     assert received[0]["agents"][0]["activity_state"] == "working"
 
 
 def test_malformed_snapshot_line_is_skipped(bridge_server, client):
     received: list[dict] = []
-    client.snapshot_received.connect(received.append)
+    _spy(client.snapshot_received, received)
     client.start()
     bridge_server.wait_for_messages(3)
     assert bridge_server._conn_ready.wait(timeout=3.0)
     bridge_server._conn.sendall(b"this is not json\n")
     bridge_server.push({"agents": [], "projects": []})
-    _pump_events(lambda: len(received) == 1)
+    wait_until(lambda: len(received) == 1)
     assert received[0] == {"agents": [], "projects": []}
 
 
@@ -360,7 +395,7 @@ def test_malformed_snapshot_line_is_skipped(bridge_server, client):
 
 def test_all_inbound_lines_route_to_snapshot(bridge_server, client):
     snapshots: list[dict] = []
-    client.snapshot_received.connect(snapshots.append)
+    _spy(client.snapshot_received, snapshots)
     client.start()
     bridge_server.wait_for_messages(3)
     # A line that in the old protocol would have been an inject command now
@@ -369,7 +404,7 @@ def test_all_inbound_lines_route_to_snapshot(bridge_server, client):
         {"type": "inject", "request_id": "r1", "buf": 2, "text": "hola", "submit": True}
     )
     bridge_server.push({"agents": [], "projects": []})
-    _pump_events(lambda: len(snapshots) == 2)
+    wait_until(lambda: len(snapshots) == 2)
     assert snapshots[0]["request_id"] == "r1"
     assert snapshots[1] == {"agents": [], "projects": []}
 
@@ -394,12 +429,12 @@ def test_reconnect_replays_sync_with_registered_instances(bridge_server, client)
 
 def test_connection_changed_signals_connect_and_drop(bridge_server, client):
     states: list[bool] = []
-    client.connection_changed.connect(states.append)
+    _spy(client.connection_changed, states)
     client.start()
     bridge_server.wait_for_messages(3)
-    _pump_events(lambda: states == [True])
+    wait_until(lambda: states == [True])
     bridge_server.drop_client()
-    _pump_events(lambda: len(states) >= 2, timeout=8.0)
+    wait_until(lambda: len(states) >= 2, timeout=8.0)
     assert states[1] is False
 
 

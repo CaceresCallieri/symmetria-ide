@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import inspect
 import sys
+import time
+from typing import ClassVar
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QObject, Signal
@@ -163,6 +165,114 @@ def _isolate_agent_tmux(monkeypatch, _tmux_sock_dir):
     )
 
 
+# AppController's sub-controllers that own a worker thread. Each thread's
+# target is a BOUND METHOD, so a running thread holds a reference to its
+# controller — which is why an un-stopped one is not merely idle but keeps the
+# whole AppController graph alive. See `_release_app_controller_workers`.
+_WORKER_OWNING_SUBCONTROLLERS = (
+    "_git_controller",
+    "_git_log_controller",
+    "_git_branch_controller",
+    "_git_ops_controller",
+    "_gh_pr_controller",
+)
+
+
+@pytest.fixture(autouse=True)
+def _release_app_controller_workers(monkeypatch):
+    """Stop every AppController a test built, so the suite stops accumulating.
+
+    THE LEAK. Seven test modules construct an `AppController` and never call
+    `shutdown()`. Each one starts five worker threads, and because a thread's
+    target is a bound method, each running thread pins its controller — so
+    nothing is ever garbage-collected, including the `QFileSystemWatcher` each
+    `GitController` owns. Measured mid-suite before this fixture existed: **230
+    live AppControllers, 1159 threads, and 224 inotify instances held by one
+    pytest process**, against a system budget (`fs.inotify.max_user_instances`)
+    of 1024 that is SHARED with the developer's running desktop — their IDE,
+    file manager and shell hold hundreds more.
+
+    That is the mechanism behind the suite's "intermittent" deaths: it is not
+    random, it is a resource ramp that crosses a shared ceiling at a point
+    determined by what else is running. It surfaces as a hang, a 139 or a 134
+    depending on which allocation loses, and it never reproduces when a single
+    file is run in isolation. Observed live as a hang inside
+    `QFileSystemWatcher()` construction with the main thread on a futex.
+
+    Stopping the threads is what un-pins the controller, which is what lets the
+    watcher — and its inotify fd — be collected. A/B over the same 194 tests
+    (`test_app_controller_term_agents` + `_central_surface`): **779 threads
+    still alive at session end without this fixture, 4 with it.**
+
+    ⚠ It takes `monkeypatch` on purpose, and not because it patches anything.
+    Autouse fixtures set up FIRST and therefore finalise LAST, which would run
+    this after a test's monkeypatched `subprocess.run` had been restored and let
+    teardown shell out for real. Requesting the same function-scoped
+    `monkeypatch` instance the tests use forces it to set up after — and so
+    tear down before — the patches come off.
+
+    Deliberately NOT calling `AppController.shutdown()`: that also saves the
+    session, quits nvim over RPC and tears down Chrome, none of which the
+    modules that skip it have prepared for. This releases the OS resources and
+    nothing else.
+    """
+    from symmetria_ide import app as app_module
+
+    created: list = []
+    original_init = app_module.AppController.__init__
+
+    def tracking_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(app_module.AppController, "__init__", tracking_init)
+    yield
+    for controller in created:
+        for name in _WORKER_OWNING_SUBCONTROLLERS:
+            sub = getattr(controller, name, None)
+            stop = getattr(sub, "stop", None)
+            if stop is None:
+                continue
+            try:
+                stop()
+            except Exception as exc:  # noqa: BLE001 — see below
+                # Blind on purpose: this runs after EVERY test, including ones
+                # that failed halfway through construction, so a sub-controller
+                # can be in any state. Raising here would replace the test's own
+                # failure with a teardown error and hide what actually broke.
+                # Reported rather than swallowed, so a controller that cannot be
+                # stopped is still visible as the leak it will become.
+                print(f"[conftest] {name}.stop() failed during teardown: {exc}")
+
+
+def wait_until(predicate, timeout: float = 3.0, message: str = "") -> None:
+    """Sleep-poll until ``predicate()`` is true. Deliberately does NOT pump Qt.
+
+    For assertions that wait on a WORKER THREAD to run — a socket handler
+    accepting a connection, a client thread writing a reply. The thread makes
+    progress on its own; this only yields the GIL to let it.
+
+    ⚠ It must never grow a ``QCoreApplication.processEvents()`` call, however
+    convenient that looks when a queued signal will not arrive. Pumping drains
+    the GLOBAL queue of the session-scoped app, which by mid-suite holds
+    ``deleteLater`` deletions posted by earlier QML-heavy modules; running
+    those here trips the Python-3.14 cyclic-GC-vs-Qt SEGV (CLAUDE.md gotcha
+    #10). It surfaces as a hang, a 139, or a 134 in whichever file did the
+    pumping — a file that passes in isolation every time. Measured at 4 failures
+    in 9 full-suite runs before the last two pumps were removed, and the rate
+    rises with machine load, so a clean run on an idle box proves nothing.
+
+    The way to test a queued delivery instead: connect the spy with an explicit
+    ``Qt.ConnectionType.DirectConnection`` so the payload is captured
+    synchronously, and hand-deliver the slot. See the memo at
+    `.claude/memory/reference/qt-pyside/processevents_shared_app_segv.md`.
+    """
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert predicate(), message or "condition not reached within timeout"
+
+
 def construction_source(cls) -> str:
     """Return ``__init__`` source concatenated with every ``_init_*`` helper.
 
@@ -250,7 +360,11 @@ class FakeSshfsMount(QObject):
     """
 
     stateChanged = Signal()
-    instances: list = []
+    # ClassVar, not an instance default: fixtures reset it with
+    # `FakeSshfsMount.instances = []` and then assert on it from outside any
+    # instance, so it is shared state by design. The annotation says so — it was
+    # bare `list` before, which ruff reads as an accidental mutable default.
+    instances: ClassVar[list] = []
 
     def __init__(self, server, remote_path, parent=None) -> None:
         super().__init__(parent)

@@ -63,7 +63,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Nested-compositor output mode](reference/qt-pyside/nested_compositor_output_mode.md) — the wl_output must describe the PANE, not the window; only C++ can say so
 - [Nested-compositor pointer input](reference/qt-pyside/nested_compositor_pointer_input.md) — scroll needs 3 non-default things; all mislead as focus bugs
 - [Nested-compositor clipboard](reference/qt-pyside/nested_compositor_clipboard.md) — isolated BOTH ways; bridging needs a ~30-line C++ QWaylandCompositor subclass
-- [processEvents() shared-app SEGV](reference/qt-pyside/processevents_shared_app_segv.md) — never pump the session app in tests; runs prior tests' deleteLater → gotcha #10 crash; hand-deliver queued slots
+- [Why the suite dies "intermittently"](reference/qt-pyside/processevents_shared_app_segv.md) — two causes: pumping the session app, and leaked AppControllers (a worker thread pins its own object)
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
 
