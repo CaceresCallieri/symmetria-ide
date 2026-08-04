@@ -30,7 +30,14 @@ import pytest
 from conftest import wait_until
 from PySide6.QtCore import Qt
 
-from symmetria_ide.agent_bridge import AgentBridgeClient
+from symmetria_ide.agent_bridge import _BACKOFF_MAX_SECONDS, AgentBridgeClient
+
+# How long a test may wait for the client to come back after a dropped
+# connection. DERIVED from the client's own backoff cap rather than written as a
+# literal: the two were 5.0 and 8.0, a margin thin enough that a loaded machine
+# ate it — observed failing at load 21 and passing in isolation seconds later,
+# which is the signature that sends people hunting for a race that is not there.
+_RECONNECT_TIMEOUT = _BACKOFF_MAX_SECONDS * 4
 
 
 class FakeBridgeServer:
@@ -201,7 +208,7 @@ def test_notify_focus_publishes_focus_and_updates_active_flags(bridge_server, cl
     # Registry reflects the focus flip — visible in the next reconnect sync.
     bridge_server.drop_client()
     msgs_before = len(bridge_server.received)
-    bridge_server.wait_for_messages(msgs_before + 2, timeout=8.0)
+    bridge_server.wait_for_messages(msgs_before + 2, timeout=_RECONNECT_TIMEOUT)
     sync = next(m for m in bridge_server.received[msgs_before:] if m["type"] == "sync")
     actives = {i["buf"]: i["active"] for i in sync["instances"]}
     assert actives == {1: False, 2: True}
@@ -346,7 +353,7 @@ def test_notify_activity_carried_in_reconnect_sync(bridge_server, client):
     bridge_server.drop_client()
     wait_until(
         lambda: sum(m["type"] == "sync" for m in bridge_server.received) >= 2,
-        timeout=5.0,
+        timeout=_RECONNECT_TIMEOUT,
     )
     last_sync = [m for m in bridge_server.received if m["type"] == "sync"][-1]
     inst = next(i for i in last_sync["instances"] if i["buf"] == 1)
@@ -421,7 +428,7 @@ def test_reconnect_replays_sync_with_registered_instances(bridge_server, client)
     bridge_server.wait_for_messages(4)
     before = len(bridge_server.received)
     bridge_server.drop_client()
-    bridge_server.wait_for_messages(before + 3, timeout=8.0)
+    bridge_server.wait_for_messages(before + 3, timeout=_RECONNECT_TIMEOUT)
     replay = bridge_server.received[before:]
     assert [m["type"] for m in replay[:3]] == ["hello", "sync", "subscribe"]
     assert [i["buf"] for i in replay[1]["instances"]] == [3]
@@ -434,7 +441,7 @@ def test_connection_changed_signals_connect_and_drop(bridge_server, client):
     bridge_server.wait_for_messages(3)
     wait_until(lambda: states == [True])
     bridge_server.drop_client()
-    wait_until(lambda: len(states) >= 2, timeout=8.0)
+    wait_until(lambda: len(states) >= 2, timeout=_RECONNECT_TIMEOUT)
     assert states[1] is False
 
 
