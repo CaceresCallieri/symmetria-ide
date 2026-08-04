@@ -81,6 +81,39 @@ _TEMPLATE_PROFILE_DIRS = ("Local Storage", "IndexedDB")
 _SLUG_SAFE = re.compile(r"[^a-zA-Z0-9._-]+")
 
 
+def _machine_state() -> str:
+    """Available memory and load, for the log line at an unexpected Chrome exit.
+
+    Read straight from procfs rather than through psutil: this runs on the path
+    where Chrome has just died, so it must not depend on an optional package,
+    and it must not raise — a diagnostic that can break the handler it is
+    diagnosing is worse than no diagnostic. Everything is best-effort and any
+    failure degrades to "unknown".
+
+    MemAvailable rather than MemFree, deliberately: free memory is routinely
+    near zero on a healthy machine because the page cache uses it, and reading
+    the wrong one is how "out of memory" gets diagnosed where there is none.
+    """
+    memory = "mem unknown"
+    try:
+        with open("/proc/meminfo", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    memory = f"{int(line.split()[1]) / 1024 / 1024:.1f}GiB available"
+                    break
+    except OSError:
+        pass
+
+    load = "load unknown"
+    try:
+        one, five, fifteen = os.getloadavg()
+        load = f"load {one:.2f} {five:.2f} {fifteen:.2f}"
+    except OSError:
+        pass
+
+    return f"{memory}, {load}"
+
+
 def data_home() -> str:
     """`$XDG_DATA_HOME/symmetria-ide` (never writes outside XDG — §9)."""
     base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
@@ -471,7 +504,21 @@ class ChromeHost(QObject):
         """
         if self._stopping:
             return  # our own teardown closed the socket; the owner knows
-        log.info("Chrome disconnected — dropping the window registry")
+        # Logged at WARNING with the machine's state, because an UNEXPECTED
+        # disconnect is Chrome dying and the interesting question is always
+        # "what else was happening". Chrome's own reason is already on the
+        # stderr drain (`FATAL: GPU process isn't usable. Goodbye.` is the one
+        # seen in the wild), but the reason alone does not say why the GPU
+        # process failed THAT time and not the hundred before it.
+        #
+        # Worth the two extra lines: this crash could not be reproduced on
+        # demand. CPU load was ruled out under a controlled run (load 19.6, no
+        # failure) and so was a deliberately broken GPU launcher, which leaves
+        # AVAILABLE MEMORY as the leading hypothesis on the strength of a single
+        # observation (~1.5GiB free when it died, 4.2GiB when it would not
+        # reproduce). One line of context at the moment of death settles that on
+        # the next occurrence instead of costing another investigation.
+        log.warning("Chrome disconnected unexpectedly — %s", _machine_state())
         self.browserGone.emit()
 
     def stop(self) -> None:
