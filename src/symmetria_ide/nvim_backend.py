@@ -39,7 +39,6 @@ from typing import Any
 import pynvim
 from PySide6.QtCore import QObject, Signal, Slot
 
-
 log = logging.getLogger(__name__)
 
 

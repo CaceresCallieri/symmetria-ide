@@ -74,6 +74,7 @@ class TestConfigureHeadlessModeSignature:
 
     def test_function_has_expected_parameters(self):
         import inspect
+
         from symmetria_ide.bootstrap import configure_headless_mode
 
         sig = inspect.signature(configure_headless_mode)
@@ -93,6 +94,7 @@ class TestConfigureHeadlessModeSignature:
         because the caller checks `if shot_path or test_keys` before calling.
         """
         import inspect
+
         from symmetria_ide.bootstrap import configure_headless_mode
 
         sig = inspect.signature(configure_headless_mode)

@@ -36,7 +36,6 @@ from symmetria_ide.git_controller import (
     parse_porcelain_v2,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixture helpers — build NUL-terminated porcelain records.
 # ---------------------------------------------------------------------------
@@ -48,7 +47,7 @@ def _ordinary(xy: str, path: str) -> bytes:
     Mode/hash fields are filled with placeholders — the parser doesn't
     read them, so realistic-looking values would only obscure intent.
     """
-    return f"1 {xy} N... 100644 100644 100644 abc123 def456 {path}".encode("utf-8")
+    return f"1 {xy} N... 100644 100644 100644 abc123 def456 {path}".encode()
 
 
 def _rename(xy: str, new_path: str, orig_path: str, score: str = "R100") -> bytes:
@@ -58,22 +57,20 @@ def _rename(xy: str, new_path: str, orig_path: str, score: str = "R100") -> byte
     caller joins records with NUL separators so the embedded NUL between
     `new_path` and `orig_path` falls out naturally.
     """
-    head = f"2 {xy} N... 100644 100644 100644 abc123 def456 {score} {new_path}".encode(
-        "utf-8"
-    )
+    head = f"2 {xy} N... 100644 100644 100644 abc123 def456 {score} {new_path}".encode()
     return head + b"\x00" + orig_path.encode("utf-8")
 
 
 def _unmerged(xy: str, path: str) -> bytes:
-    return f"u {xy} N... 100644 100644 100644 100644 h1 h2 h3 {path}".encode("utf-8")
+    return f"u {xy} N... 100644 100644 100644 100644 h1 h2 h3 {path}".encode()
 
 
 def _untracked(path: str) -> bytes:
-    return f"? {path}".encode("utf-8")
+    return f"? {path}".encode()
 
 
 def _ignored(path: str) -> bytes:
-    return f"! {path}".encode("utf-8")
+    return f"! {path}".encode()
 
 
 def _join(*records: bytes) -> bytes:
@@ -1036,12 +1033,12 @@ def test_controller_set_repo_root_to_empty_clears_state() -> None:
 
 def _numstat(adds: str, dels: str, path: str) -> bytes:
     """One ordinary numstat row: ``adds\\tdels\\tpath``."""
-    return f"{adds}\t{dels}\t{path}".encode("utf-8")
+    return f"{adds}\t{dels}\t{path}".encode()
 
 
 def _numstat_rename(adds: str, dels: str, new: str) -> bytes:
     """One rename row with `-z`: empty path slot, then a second NUL field."""
-    head = f"{adds}\t{dels}\t".encode("utf-8")  # trailing tab, empty path
+    head = f"{adds}\t{dels}\t".encode()  # trailing tab, empty path
     return head + b"\x00" + new.encode("utf-8")
 
 

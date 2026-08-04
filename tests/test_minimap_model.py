@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from symmetria_ide.minimap_model import MinimapModel
 
-
 # ---------------------------------------------------------------------------
 # Empty-state contract
 # ---------------------------------------------------------------------------
@@ -565,7 +564,7 @@ def test_indent_level_pure_function_spaces():
 def test_indent_level_clamps_to_max():
     """Very deeply nested code clamps to the palette's max rung rather
     than overflowing the indent palette index."""
-    from symmetria_ide.minimap_model import _compute_indent_level, _MAX_INDENT_LEVEL
+    from symmetria_ide.minimap_model import _MAX_INDENT_LEVEL, _compute_indent_level
 
     assert _MAX_INDENT_LEVEL == 3
     # Far-past-max indent still returns the max rung.
@@ -790,6 +789,7 @@ def test_app_connects_minimap_viewport_event_with_queued_connection():
     must be explicit Qt.QueuedConnection per §4 P2. Mirrors the
     minimap_event connection's contract."""
     import inspect
+
     from symmetria_ide import app
 
     src = inspect.getsource(app)
@@ -813,6 +813,7 @@ def test_nvim_backend_force_pushes_minimap_viewport():
     """Subscribe-race fix for the viewport channel — Lua-side helper
     is _G.symmetria_minimap_push_viewport."""
     import inspect
+
     from symmetria_ide import nvim_backend
 
     src = inspect.getsource(nvim_backend)
@@ -834,6 +835,7 @@ def test_seek_to_row_uses_async_call_and_1_indexed_goto():
     thread) and (b) issue a 1-indexed `normal! NG` jump (nvim's :goto
     counts from 1; the @Slot signature counts from 0)."""
     import inspect
+
     from symmetria_ide.app import AppController
 
     src = inspect.getsource(AppController.seek_to_row)
@@ -1062,6 +1064,7 @@ def test_app_connects_phase4_signals_with_queued_connection():
     explicit Qt.QueuedConnection per §4 P2 — they originate on the
     pynvim worker thread."""
     import inspect
+
     from symmetria_ide import app
 
     src = inspect.getsource(app)
@@ -1086,6 +1089,7 @@ def test_nvim_backend_force_pushes_phase4_helpers():
     """Subscribe-race fixes — the Lua helpers must be invoked
     immediately after subscribing."""
     import inspect
+
     from symmetria_ide import nvim_backend
 
     src = inspect.getsource(nvim_backend)

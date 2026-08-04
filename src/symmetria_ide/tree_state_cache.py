@@ -41,7 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .fs_atomic import atomic_write_json
@@ -116,7 +116,7 @@ def save_expanded(repo_root: str, paths: list[str]) -> None:
     payload = {
         "version": KNOWN_VERSION,
         "repo_root": repo_root,
-        "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "saved_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         # Sorted for a stable on-disk representation across saves with
         # the same logical set — keeps diffs small if the file is ever
         # version-controlled and avoids spurious change detection by

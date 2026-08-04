@@ -29,7 +29,6 @@ import pytest
 from symmetria_ide.app import AppController
 from symmetria_ide.nvim_backend import NvimBackend
 
-
 # ---------------------------------------------------------------------------
 # Subprocess-free fixtures — patch start/stop on the RPC backend so a bare
 # AppController() + start() + shutdown() cycle is hermetic. After the

@@ -213,7 +213,7 @@ def _extract_braced_body(text: str, decl_start: int) -> str:
             if depth == 0:
                 return text[open_idx : j + 1]
         j += 1
-    raise AssertionError("unbalanced braces from declaration at index %d" % decl_start)
+    raise AssertionError(f"unbalanced braces from declaration at index {decl_start}")
 
 
 def test_window_activation_considers_terminal_visible(main_qml: str):

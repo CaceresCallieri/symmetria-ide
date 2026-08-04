@@ -13,8 +13,8 @@ QObject subclasses. A module-level fixture creates one for the session.
 from __future__ import annotations
 
 import sys
-import pytest
 
+import pytest
 from PySide6.QtCore import QCoreApplication
 
 

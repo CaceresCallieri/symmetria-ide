@@ -23,9 +23,9 @@ import threading
 import time
 
 import pytest
+from conftest import FakeRemoteContext, FakeSshfsMount
 from PySide6.QtCore import Qt
 
-from conftest import FakeRemoteContext, FakeSshfsMount
 from symmetria_ide.app import AppController
 from symmetria_ide.remote_location import RemoteContext, remote_repo_path
 from symmetria_ide.server_registry import RemoteServer

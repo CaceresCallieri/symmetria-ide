@@ -34,7 +34,6 @@ from symmetria_ide.agent_interrupt import (
 )
 from symmetria_ide.app import AppController
 
-
 # ---------------------------------------------------------------------------
 # Layer 1: the pure gate
 # ---------------------------------------------------------------------------

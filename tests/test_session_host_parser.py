@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from symmetria_ide.session_host import parse_jsonl_line
 
-
 # ---------------------------------------------------------------------------
 # Happy path
 # ---------------------------------------------------------------------------

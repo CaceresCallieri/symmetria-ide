@@ -58,8 +58,8 @@ Findings in these files/directories get prioritized. When two findings are equal
 
 ### P2 — Recommended
 
-- **`ruff` is the single tool for lint + format.** Covers pyflakes, pycodestyle, isort, pyupgrade, bugbear. Do not install black/flake8/isort alongside — configuration divergence.
-- **Line length 100.** 88 is cramped for typed code; 120 hides issues in side-by-side diff.
+- **`ruff` is the single tool for lint + format.** Covers pyflakes, pycodestyle, isort, pyupgrade, bugbear. Do not install black/flake8/isort alongside — configuration divergence. **The rule set is pinned in `pyproject.toml`'s `[tool.ruff.lint]` and must stay pinned:** with no config, ruff enforces whatever its build happens to default to (measured on 0.16.0: 415 rules, not the documented ~30), so the pre-commit hook's meaning changed with the installed version. `E501` is deliberately ignored — the formatter owns line length.
+- **Line length 88** (`pyproject.toml`). This bullet used to say 100, but nothing enforced it and the whole tree is formatted at 88; moving to 100 would reflow 77 files for no functional gain. Change the config and reformat together if it is ever wanted deliberately — not one without the other.
 - **`src/` layout — already in place.** Forces install-before-test; catches packaging bugs locally.
 - **`pytest.mark.parametrize` with `ids=[...]` for readable output.**
 - **Structured logging via `logger.info("event_name", extra={"field": val})`.** Never f-string the payload into the message — filters can't destructure it back.

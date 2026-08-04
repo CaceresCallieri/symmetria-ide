@@ -37,11 +37,10 @@ from symmetria_ide.minimap_view import (
     _INDENT_RGBA,
     _INDENT_STEP_PX,
     _MIN_ROW_HEIGHT_PX,
+    MinimapView,
     _background_color,
     _indent_colors,
-    MinimapView,
 )
-
 
 # ---------------------------------------------------------------------------
 # QML registration — the @QmlElement decorator + module-level constants
@@ -722,8 +721,8 @@ def test_main_qml_has_scrubber_mouse_area():
 def test_diagnostic_palette_constants_present():
     """4-rung diagnostic palette + memoized QColors + key→index map."""
     from symmetria_ide.minimap_view import (
-        _DIAGNOSTIC_RGBA,
         _DIAGNOSTIC_KEY_TO_COLOR_INDEX,
+        _DIAGNOSTIC_RGBA,
         _diagnostic_colors,
     )
 
@@ -742,8 +741,8 @@ def test_diagnostic_palette_constants_present():
 def test_gitdiff_palette_constants_present():
     """3-rung git-diff palette + memoized QColors + key→index map."""
     from symmetria_ide.minimap_view import (
-        _GITDIFF_RGBA,
         _GITDIFF_KEY_TO_COLOR_INDEX,
+        _GITDIFF_RGBA,
         _gitdiff_colors,
     )
 

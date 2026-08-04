@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from PySide6.QtCore import Qt
 
@@ -37,7 +37,7 @@ from symmetria_ide.gh_pr_controller import (
     relative_time,
 )
 
-_NOW = datetime(2026, 7, 12, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 7, 12, 12, 0, 0, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------

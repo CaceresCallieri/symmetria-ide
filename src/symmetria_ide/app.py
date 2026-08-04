@@ -15,9 +15,6 @@ by QML polling.
 
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor
-from typing import ClassVar, TypedDict
-
 import argparse
 import errno
 import gc
@@ -27,15 +24,17 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
 import sys
-import shutil
 import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import ClassVar, TypedDict
 
 from PySide6.QtCore import (
     Property,
@@ -43,19 +42,25 @@ from PySide6.QtCore import (
     QModelIndex,
     QObject,
     Qt,
-    QtMsgType,
     QTimer,
+    QtMsgType,
     QUrl,
     Signal,
     Slot,
     qInstallMessageHandler,
 )
 from PySide6.QtGui import QGuiApplication, QSurfaceFormat
-from PySide6.QtQml import QQmlApplicationEngine, QmlElement
+from PySide6.QtQml import QmlElement, QQmlApplicationEngine
 
-from . import agent_coordination
-from . import agent_harness
-from . import agent_registry
+from . import (
+    agent_coordination,
+    agent_harness,
+    agent_registry,
+    git_subprocess,
+    remote_location,
+    session_store,
+    ssh_runner,
+)
 from .account_usage_store import AccountUsageStore
 from .agent_activity import AgentActivityMachine
 from .agent_bash_attribution import bash_delta, probe_dirty_leaves, probe_status_map
@@ -63,17 +68,20 @@ from .agent_bridge import AgentBridgeClient, emit_gc_safe
 from .agent_events import AgentEventsServer
 from .agent_interrupt import (
     INTERRUPT_CLEAR_GRACE_MS as _INTERRUPT_CLEAR_GRACE_MS,
+)
+from .agent_interrupt import (
     EscapeWatcher,
     should_arm_interrupt_clear,
 )
+from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .browser_mcp import BrowserMcpBridge, BrowserMcpServer
 from .chrome_host import ChromeHost, browser_identity
-from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
-from .trace import trace
-from .cmdline_models import (  # noqa: F401 — side-effect: @QmlElement registration
+from .cmdline_models import (  # importing also registers these @QmlElement types
     CmdlineState,
     CompletionModel,
 )
+from .editor_font import DEFAULT_FONT_POINT_SIZE, default_font
+from .gh_pr_controller import GhPrController, GhPrListModel, GhPrTimelineModel
 from .git_branch_controller import GitBranchController, GitBranchListModel
 from .git_controller import (
     GitController,
@@ -81,45 +89,48 @@ from .git_controller import (
     GitStatusListModel,
     _fold_agent_changes,
 )
-from .gh_pr_controller import GhPrController, GhPrListModel, GhPrTimelineModel
 from .git_log_controller import GitLogController, GitLogListModel
 from .git_ops_controller import GitOpsController
 from .minimap_model import MinimapModel
-from .minimap_view import MinimapView  # noqa: F401 — side-effect: @QmlElement registration
-from .editor_font import DEFAULT_FONT_POINT_SIZE, default_font
+from .minimap_view import MinimapView  # import also registers the @QmlElement type
+from .mount_manager import SshfsMount
 from .nvim_backend import _RUNTIME_DIR, NvimBackend
-from .session_host import SessionHost
-from .session_models import (  # noqa: F401 — side-effect: @QmlElement registration
-    SessionModel,
-)
 from .project_browser_marker import (
     browser_agents_enabled,
     harness_model_effort,
     resolve_project_root,
     set_browser_agents,
 )
-from .worktree import canonical_project_root, linked_worktree_info
-from . import git_subprocess
-from . import remote_location
-from .mount_manager import SshfsMount
 from .remote_location import RemoteContext
-from . import ssh_runner
+from .session_host import SessionHost
+from .session_models import (  # importing also registers this @QmlElement type
+    SessionModel,
+)
+from .trace import trace
 from .tree_state_cache import load_expanded, save_expanded
-from . import session_store
 from .usage_poller import UsagePoller
 from .usage_providers import (
     CLAUDE as _USAGE_CLAUDE,
+)
+from .usage_providers import (
     KEY_SESSION as _USAGE_KEY_SESSION,
+)
+from .usage_providers import (
     KEY_WEEKLY as _USAGE_KEY_WEEKLY,
+)
+from .usage_providers import (
     PROVIDER_IDS as _USAGE_PROVIDER_IDS,
+)
+from .usage_providers import (
     ProviderUsage,
     merge_tap_observation,
 )
 from .usage_store import UsageStore
-from .whichkey_models import (  # noqa: F401 — side-effect: @QmlElement registration
+from .whichkey_models import (  # importing also registers these @QmlElement types
     WhichKeyModel,
     WhichKeyState,
 )
+from .worktree import canonical_project_root, linked_worktree_info
 
 QML_IMPORT_NAME = "Symmetria.Ide"
 QML_IMPORT_MAJOR_VERSION = 1
@@ -358,7 +369,7 @@ class CapsuleModel(QAbstractListModel):
             self.ValueRole: b"value",
         }
 
-    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: B008, ARG002
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: B008
         return len(self._items)
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
@@ -1973,8 +1984,7 @@ class AppController(QObject):
         rather than crashing — matches the pattern other QML-driven
         nvim commands use (e.g. agent-pane chord wirings).
         """
-        if row < 0:
-            row = 0
+        row = max(row, 0)
         target_line = row + 1  # 1-indexed for nvim's :goto
 
         def _do_goto() -> None:
@@ -1983,7 +1993,7 @@ class AppController(QObject):
                 # suppresses user-defined remappings of G — important
                 # because some users remap G to a different motion.
                 self._backend._nvim.command(f"normal! {target_line}G")
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("seek_to_row: nvim.command failed for row=%d", row)
 
         if self._backend._nvim is not None:
@@ -2916,7 +2926,7 @@ class AppController(QObject):
         # subsequent property read reflects what's on disk. Don't
         # emit `expandedPathsCacheChanged` — we'd ping-pong with the
         # FM's binding update.
-        self._expanded_paths_cache = sorted(set(p for p in paths if isinstance(p, str)))
+        self._expanded_paths_cache = sorted({p for p in paths if isinstance(p, str)})
 
     @Slot()
     def _sync_git_repo_root(self) -> None:
@@ -2946,7 +2956,7 @@ class AppController(QObject):
         self._gh_pr_controller.set_repo_root(self.displayedRoot)
 
     @Slot(str, bool, str)
-    def _on_git_op_finished(self, op: str, ok: bool, message: str) -> None:  # noqa: ARG002
+    def _on_git_op_finished(self, op: str, ok: bool, message: str) -> None:
         """Refresh the read-only git surfaces after any pull/push attempt.
 
         Connected QUEUED to `GitOpsController.operationFinished` (the worker
@@ -5406,6 +5416,7 @@ class AppController(QObject):
                 proc = subprocess.run(
                     agent_coordination.judge_argv(prompt),
                     capture_output=True,
+                    check=False,
                     text=True,
                     timeout=self._COORD_JUDGE_TIMEOUT_S,
                     cwd=tempfile.gettempdir(),
@@ -5742,6 +5753,7 @@ class AppController(QObject):
         try:
             result = subprocess.run(
                 ["opencode", "session", "list", "--format", "json"],
+                check=False,
                 cwd=cwd,
                 capture_output=True,
                 text=True,
@@ -8562,20 +8574,22 @@ def _memory_pressure_note() -> tuple[bool, str]:
     rather than crashing, and an individual malformed line is skipped rather
     than discarding the whole parse.
     """
+    fields: dict[str, int] = {}
+    # The open and the read share one `try`, so a mid-iteration I/O error lands
+    # in the same (False, "") fallback the docstring promises for an unreadable
+    # file — the caller's generic message is right either way.
     try:
-        meminfo_lines = open("/proc/meminfo", encoding="ascii")
+        with open("/proc/meminfo", encoding="ascii") as meminfo_lines:
+            for line in meminfo_lines:
+                key, sep, rest = line.partition(":")
+                if not sep:
+                    continue
+                try:
+                    fields[key] = int(rest.strip().split()[0])  # value is in kB
+                except (ValueError, IndexError):
+                    continue  # a malformed line never aborts the whole read
     except OSError:
         return (False, "")
-    fields: dict[str, int] = {}
-    with meminfo_lines:
-        for line in meminfo_lines:
-            key, sep, rest = line.partition(":")
-            if not sep:
-                continue
-            try:
-                fields[key] = int(rest.strip().split()[0])  # value is in kB
-            except (ValueError, IndexError):
-                continue  # a malformed line never aborts the whole read
     mem_avail_mb = fields.get("MemAvailable", 0) / 1024
     swap_total = fields.get("SwapTotal", 0)
     swap_free = fields.get("SwapFree", 0)

@@ -21,7 +21,6 @@ import json
 
 from symmetria_ide.browser_mcp import SERVER_NAME, BrowserMcpBridge, BrowserMcpServer
 
-
 # ---------------------------------------------------------------------------
 # Bridge — read marshaling + future resolution.
 # ---------------------------------------------------------------------------

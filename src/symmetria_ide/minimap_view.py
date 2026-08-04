@@ -54,7 +54,6 @@ from PySide6.QtQuick import QQuickPaintedItem
 
 from .minimap_model import MinimapModel
 
-
 log = logging.getLogger(__name__)
 
 

@@ -267,7 +267,7 @@ class AgentEventsServer(QObject):
         while not self._stop_event.is_set():
             try:
                 conn, _ = sock.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue  # poll the stop event
             except OSError:
                 # Socket closed under us (stop) or a transient accept error.

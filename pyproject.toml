@@ -57,6 +57,31 @@ symmetria_ide = [
     "runtime/**/*.lua",
 ]
 
+[tool.ruff]
+# ⚠ This section is load-bearing for the pre-commit hook, and its ABSENCE was a
+# real defect: with no config, the enforced rule set is whatever the installed
+# ruff happens to default to. Measured on ruff 0.16.0 (Arch, 2026-08-04): 415
+# rules — not the ~30 of the documented default. That made `ruff check` fail on
+# 152 pre-existing findings across 55 files, so the hook failed on most commits
+# and the only way through was `--no-verify`, which is a hook that protects
+# nothing. It also meant a ruff upgrade could change the rule set underfoot.
+#
+# 88, not the 100 that `.claude/project-standards.md` used to state: the tree is
+# already formatted at 88 everywhere, and 100 would reflow 77 files for no
+# functional gain. Flip both together if that is ever wanted deliberately.
+line-length = 88
+
+[tool.ruff.lint]
+# The set the project standards describe: pyflakes, pycodestyle, isort,
+# pyupgrade, bugbear. Deliberately NOT `RUF` — RUF100 (unused-noqa) would flag
+# every `# noqa: ARG002` / `# noqa: BLE001` in the tree, since those name rules
+# this selection does not enable. Enable ARG/BLE first if RUF is ever wanted.
+select = ["E", "F", "I", "UP", "B"]
+# `ruff format` owns line length. E501 only ever fires on what the formatter
+# CANNOT split — long comments, URLs, string literals — so it is noise here
+# rather than a second opinion. (Ruff's own docs recommend this pairing.)
+ignore = ["E501"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

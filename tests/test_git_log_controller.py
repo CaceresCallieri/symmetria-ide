@@ -364,7 +364,7 @@ def test_refresh_shorter_list_is_a_reset() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_stopped_controller() -> "GitLogController":
+def _make_stopped_controller() -> GitLogController:
     """A real controller with its worker stopped immediately — `set_ref` /
     `set_repo_root` state transitions are synchronous on the caller side, so
     everything below asserts without an event loop or a live worker."""

@@ -20,7 +20,6 @@ import functools
 
 from PySide6.QtGui import QFont, QFontDatabase
 
-
 # Default cell point size. One point above the user's Ghostty config
 # (font-size 8.5) — explicitly requested 2026-06-09 after the sharpness
 # pass; font configuration is not yet user-exposed. Float — consumers

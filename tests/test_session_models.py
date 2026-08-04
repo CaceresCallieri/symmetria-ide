@@ -9,6 +9,8 @@ lightweight signal-capture helper.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from symmetria_ide.session_models import (
@@ -26,7 +28,6 @@ from symmetria_ide.session_models import (
     _row_from_user,
     _unified_diff,
 )
-
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -532,7 +533,9 @@ def test_apply_routes_user_tool_result_through_apply_path():
 
 def test_agent_row_is_frozen():
     row = AgentRow(kind="x", role="", text="", partial=False, subtype="", raw={})
-    with pytest.raises(Exception):  # frozen dataclass raises FrozenInstanceError
+    # The specific exception, not a blind `Exception`: naming it is what makes
+    # this assert prove the dataclass is FROZEN rather than merely broken.
+    with pytest.raises(dataclasses.FrozenInstanceError):
         row.text = "mutated"  # type: ignore[misc]
 
 

@@ -51,7 +51,6 @@ from typing import Any
 
 from PySide6.QtCore import Property, QObject, Signal, Slot
 
-
 log = logging.getLogger(__name__)
 
 

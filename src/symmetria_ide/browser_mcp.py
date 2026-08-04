@@ -50,8 +50,8 @@ import shutil
 import socket
 import tempfile
 import threading
+from collections.abc import Callable
 from contextlib import asynccontextmanager
-from typing import Callable
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 
@@ -383,8 +383,8 @@ class BrowserMcpServer:
             # Recovery from a genuine transient failure is an IDE restart.
 
     def _start(self) -> None:
-        from mcp.server.fastmcp import FastMCP  # lazy: optional dependency
         import uvicorn
+        from mcp.server.fastmcp import FastMCP  # lazy: optional dependency
 
         # Sweep configs left by hard-killed IDEs before writing our own (keeps
         # client discovery from latching onto a dead instance's port).

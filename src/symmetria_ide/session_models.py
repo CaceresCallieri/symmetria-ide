@@ -193,9 +193,14 @@ class SessionModel(QAbstractListModel):
             self.RequestIdRole: b"requestId",
         }
 
-    def rowCount(  # noqa: B008
+    def rowCount(
         self,
-        parent: QModelIndex = QModelIndex(),  # noqa: ARG002
+        # noqa must sit on the offending line, not the `def`. The default IS a
+        # call, and deliberately: this is Qt's own signature, and gotcha #7 says
+        # not to reshape these to satisfy a linter — it breaks the metaobject
+        # system. (`ARG002` was also listed here but names a rule this project
+        # does not enable, so it suppressed nothing.)
+        parent: QModelIndex = QModelIndex(),  # noqa: B008
     ) -> int:
         return len(self._rows)
 

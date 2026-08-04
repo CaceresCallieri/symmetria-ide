@@ -48,7 +48,7 @@ import queue
 import subprocess
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from PySide6.QtCore import (
     Property,
@@ -129,7 +129,7 @@ def relative_time(iso: str, now: datetime) -> str:
     except ValueError:
         return ""
     if then.tzinfo is None:
-        then = then.replace(tzinfo=timezone.utc)
+        then = then.replace(tzinfo=UTC)
     seconds = int((now - then).total_seconds())
     if seconds < _MINUTE:
         return "just now"
@@ -791,7 +791,7 @@ class GhPrController(QObject):
             if rc != 0:
                 error = classify_gh_failure(rc, err)
             else:
-                rows = parse_pr_list(out, datetime.now(timezone.utc))
+                rows = parse_pr_list(out, datetime.now(UTC))
 
         with self._lock:
             # Race guard: a project switch OR a filter toggle may have landed
@@ -819,7 +819,7 @@ class GhPrController(QObject):
             ["pr", "view", str(number), "--json", _DETAIL_FIELDS],
             timeout=_DETAIL_TIMEOUT_SEC,
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         detail: dict = {}
         error = ""
         timeline: list[TimelineEntry] = []

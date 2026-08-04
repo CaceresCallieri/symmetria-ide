@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import faulthandler
+import os
+import sys
+from pathlib import Path
+
 # trace MUST be the very first project-internal import so its T0 captures
 # the earliest possible monotonic reading — before PySide6/pynvim get
 # pulled in by `.app`. The tracer is env-gated (SYMMETRIA_IDE_TRACE),
 # so production launches pay no cost beyond one module import.
 from .trace import trace  # noqa: E402 — intentionally first
-
-import faulthandler
-import os
-import sys
-from pathlib import Path
 
 trace("imports_basic_done")
 

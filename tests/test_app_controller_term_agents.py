@@ -2230,7 +2230,8 @@ def test_bash_probe_ready_failed_probe_aborts_window(controller):
 
 
 class _NoopFuture:
-    def add_done_callback(self, cb):  # noqa: ARG002 — probe not awaited in this test
+    # `cb` is intentionally dropped — this probe is never awaited in this test.
+    def add_done_callback(self, cb):
         pass
 
 

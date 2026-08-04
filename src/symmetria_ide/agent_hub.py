@@ -307,7 +307,7 @@ class HeadlessAgentHub:
                     "cancellation reconciliation disabled"
                 )
             return
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning(
                 "reconcile | claude agents --json timed out after %ds",
                 CLAUDE_CLI_TIMEOUT_SECONDS,
@@ -390,7 +390,7 @@ class HeadlessAgentHub:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=5)
         except FileNotFoundError:
             return  # no tmux binary — nothing to prune against
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("prune | tmux list-sessions timed out")
             return
         except OSError as exc:

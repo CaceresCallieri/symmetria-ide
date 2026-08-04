@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .fs_atomic import atomic_write_json
@@ -114,7 +114,7 @@ def save(root: str, manifest: dict) -> bool:
     payload = dict(manifest)
     payload["version"] = KNOWN_VERSION
     payload["root"] = root
-    payload["saved_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload["saved_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     return atomic_write_json(_session_path(root), payload)
 
 

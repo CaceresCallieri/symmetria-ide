@@ -17,7 +17,6 @@ import pytest
 
 from symmetria_ide.jsonl_transport import encode_jsonl_line, parse_jsonl_line
 
-
 # ---------------------------------------------------------------------------
 # encode_jsonl_line
 # ---------------------------------------------------------------------------

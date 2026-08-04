@@ -12,10 +12,9 @@ STT Future.
 from __future__ import annotations
 
 import pytest
+from test_app_controller_term_agents import FakeBridge
 
 from symmetria_ide.app import AppController
-
-from test_app_controller_term_agents import FakeBridge
 
 
 @pytest.fixture

@@ -15,11 +15,10 @@ import os
 import subprocess
 
 import pytest
+from test_app_controller_term_agents import FakeBridge
 
 from symmetria_ide import agent_coordination as coord
 from symmetria_ide.app import AppController
-
-from test_app_controller_term_agents import FakeBridge
 
 
 @pytest.fixture

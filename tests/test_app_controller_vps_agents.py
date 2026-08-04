@@ -14,9 +14,9 @@ from __future__ import annotations
 import time
 
 import pytest
+from conftest import FakeRemoteContext, FakeSshfsMount
 from PySide6.QtCore import Qt
 
-from conftest import FakeRemoteContext, FakeSshfsMount
 from symmetria_ide import ssh_runner
 from symmetria_ide.app import AppController
 from symmetria_ide.server_registry import RemoteServer

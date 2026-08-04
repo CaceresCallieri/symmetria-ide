@@ -74,7 +74,7 @@ def read(path: Path) -> dict | None:
     happen given atomic_write_json, but defensive) both read as "no value".
     """
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None

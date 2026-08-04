@@ -254,7 +254,7 @@ def _claude_oauth(credentials_path: Path) -> dict | None:
     refresh and could invalidate the user's live session.
     """
     try:
-        with open(credentials_path, "r", encoding="utf-8") as f:
+        with open(credentials_path, encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None

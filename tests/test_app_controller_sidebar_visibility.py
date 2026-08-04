@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import pytest
 
-from symmetria_ide.app import AppController, SIDEBAR_MIN_WINDOW_WIDTH
+from symmetria_ide.app import SIDEBAR_MIN_WINDOW_WIDTH, AppController
 
 
 @pytest.fixture

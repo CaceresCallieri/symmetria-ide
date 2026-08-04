@@ -75,7 +75,7 @@ def read(path: Path) -> dict[str, ProviderUsage]:
     raising — the panel simply shows nothing for that provider.
     """
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
