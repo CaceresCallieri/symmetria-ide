@@ -44,6 +44,7 @@ _DELIBERATELY_EXCLUDED = {
     "_agent_bridge": "socket client; a test that starts one owns stopping it",
     "_agent_events": "same — and unlinks a socket path the test chose",
     "_account_usage_store": "no worker thread pinning the controller",
+    "_usage_store": "same — watcher only; its poller IS covered by the fixture",
     "_browser_mcp_server": "daemon thread, reaped at interpreter exit",
     "_chrome_host": "terminates a Chrome the suite never spawns (fixture-blocked)",
 }

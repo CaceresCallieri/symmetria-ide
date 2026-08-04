@@ -255,6 +255,13 @@ def spawn_argv(
         # with the sock (the tap needs the socket to send to). Inert for opencode
         # (no opencode status-line integration yet).
         argv.append("SYMMETRIA_IDE_STATUSLINE_TAP=1")
+        # Second capability advert, deliberately SEPARATE from the tap one:
+        # this IDE renders account usage in its own status bar (UsageIndicator),
+        # so `status-line.sh` omits its 5h/7d segment here rather than printing
+        # the same numbers twice. It must not ride the tap var — the stable
+        # build sets THAT one but has no panel, and gating on it would blank the
+        # usage display in the user's daily driver until this promotes.
+        argv.append("SYMMETRIA_IDE_USAGE_PANEL=1")
     if dangerous:
         argv += [f"{key}={value}" for key, value in harness.dangerous_env]
     # Inline MCP config env (opencode): rides the env wrapper like dangerous_env.

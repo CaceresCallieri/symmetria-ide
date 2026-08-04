@@ -46,6 +46,12 @@ Rectangle {
                                          && !controller.fmVisible
                                          && controller.editorVisible
 
+    // The subscription-usage readout, exposed so Main.qml can hover-track it
+    // and anchor the detail popup above it. The popup itself is mounted at
+    // WINDOW scope, not here: this bar is `Theme.size.statusBarHeight` (24px)
+    // tall and would clip any panel parented into it.
+    readonly property alias usageIndicator: usageIndicator
+
     // True only when a CLAUDE agent is the visible surface. The status-line
     // fields (model / effort / context%) and the account-usage segment gate on
     // this: their data is Claude-specific, so showing it in the editor, FM,
@@ -62,78 +68,14 @@ Rectangle {
         && controller.focusedAgent >= 1
         && (controller.agentActivity[controller.focusedAgent - 1] || {}).agentType === "claude"
 
-    // Live "now" (ms) for the rate-limit reset countdown — the Timer below ticks
-    // it while the usage segment is visible. Seeded with Date.now() (not 0) so the
-    // very first paint has a sane baseline; a 0 seed would render a ~19000-day
-    // countdown for one frame before the Timer's triggeredOnStart corrects it.
-    // Date.now() is fine in QML/JS (the ban is workflow-script-only).
-    property double nowMs: Date.now()
-
-    // Usage threshold colour — mirrors status-line.sh::get_usage_color.
+    // Usage threshold colour, still used by the per-agent CONTEXT segment
+    // below. The threshold table itself moved to `UsageFormat` when the usage
+    // panel became its second consumer — three copies of the same tiers (this
+    // one, the panel's, and status-line.sh's) is how one of them drifts.
+    // The nowMs clock and the countdown formatter that lived here left with
+    // the 5h/7d chips; the panel owns both now.
     function _usageColor(pct) {
-        if (pct >= 80) return Theme.color.usage.crit
-        if (pct >= 50) return Theme.color.usage.warn
-        return Theme.color.usage.good
-    }
-
-    // Compact countdown to a unix-epoch (seconds) reset; ports
-    // status-line.sh::format_reset_countdown. "" when absent, "now" when elapsed.
-    function _resetCountdown(resetEpochSec) {
-        if (!resetEpochSec || resetEpochSec <= 0)
-            return ""
-        var diff = Math.floor(resetEpochSec - root.nowMs / 1000)
-        if (diff <= 0)
-            return "now"
-        var d = Math.floor(diff / 86400)
-        var h = Math.floor((diff % 86400) / 3600)
-        var m = Math.floor((diff % 3600) / 60)
-        if (d > 0) return d + "d" + h + "h"
-        if (h > 0) return h + "h" + m + "m"
-        return m + "m"
-    }
-
-    Timer {
-        // Minute-precision countdown; 30s keeps the displayed "Xm" honest without
-        // burning cycles. Only runs while the (Claude-gated) usage segment shows.
-        interval: 30000
-        repeat: true
-        running: root.claudeAgentActive && controller.accountUsageValid
-        triggeredOnStart: true   // seed nowMs the moment it starts
-        onTriggered: root.nowMs = Date.now()
-    }
-
-    // One 5h/7d usage chip — "<label> <pct>% ⟲<countdown>". Inline component so
-    // the two chips share one definition (DRY) instead of a copy-paste pair.
-    component UsageChip: Row {
-        id: chip
-        property string label: ""
-        property int pct: 0
-        property int resetEpoch: 0
-        spacing: Theme.spacing.xs
-
-        Text {
-            text: chip.label
-            color: Theme.color.text.dim
-            font.family: Theme.font.family
-            font.pixelSize: Theme.font.size.sm
-            renderType: Text.NativeRendering
-        }
-        Text {
-            text: chip.pct + "%"
-            color: root._usageColor(chip.pct)
-            font.family: Theme.font.family
-            font.pixelSize: Theme.font.size.sm
-            renderType: Text.NativeRendering
-        }
-        Text {
-            readonly property string cd: root._resetCountdown(chip.resetEpoch)
-            visible: cd !== ""
-            text: "⟲" + cd
-            color: Theme.color.text.dim
-            font.family: Theme.font.family
-            font.pixelSize: Theme.font.size.xs
-            renderType: Text.NativeRendering
-        }
+        return UsageFormat.usageColor(pct)
     }
 
     // The surface switcher (terminal / editor / agents) lived here
@@ -477,21 +419,12 @@ Rectangle {
                     }
                 }
 
-                // account usage — 5h (session) and 7d (weekly) are SEPARATE
-                // modules now (each a direct agentInfo child, so each gets the xl
-                // inter-module gap) so the two limits stand clearly apart.
-                UsageChip {
-                    visible: controller.accountUsageValid
-                    label: "5h"
-                    pct: controller.accountUsage5hPct
-                    resetEpoch: controller.accountUsage5hReset
-                }
-                UsageChip {
-                    visible: controller.accountUsageValid
-                    label: "7d"
-                    pct: controller.accountUsage7dPct
-                    resetEpoch: controller.accountUsage7dReset
-                }
+                // The account-usage 5h/7d chips used to sit here, gated on
+                // `claudeAgentActive` — so they were visible only while looking
+                // at a Claude agent, which is precisely when the user least
+                // needs to be told. They now live in `UsageIndicator` in this
+                // bar's right-hand column: always visible, multi-provider, and
+                // kept fresh by a poller instead of by agent turns.
             }
         }
 
@@ -500,16 +433,26 @@ Rectangle {
         // Main.qml — two call sites is the threshold for promoting
         // to a Theme token (per the §3 P2 note quoted in Main.qml
         // around gitPanelMaxFraction); a third use is when to
-        // refactor. Stays empty: this column has no nvim-equivalent
-        // status to surface; the chrome background continues the
-        // bar visually under the tree without claiming the area
-        // belongs to it.
+        // refactor. It carried no content at all until the usage
+        // panel landed — there is no nvim-equivalent status to put
+        // under the tree, but ACCOUNT-level state belongs to no
+        // pane, which makes this the one honest home for it.
         Item {
             Layout.preferredWidth: 280
             Layout.minimumWidth: 280
             Layout.maximumWidth: 280
             Layout.fillHeight: true
-            visible: controller.treeVisible
+            // Also shown with the tree hidden, so the readout does not
+            // vanish with a panel it has nothing to do with.
+            visible: controller.treeVisible || usageIndicator.hasRows
+
+            UsageIndicator {
+                id: usageIndicator
+                anchors.right: parent.right
+                anchors.rightMargin: Theme.spacing.md
+                anchors.verticalCenter: parent.verticalCenter
+                providers: controller.usageProviders
+            }
         }
     }
 }

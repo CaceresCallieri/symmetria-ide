@@ -348,6 +348,28 @@ Window {
         }
     }
 
+    // Subscription-usage detail (Ctrl+Shift+I — I for info). Toggles the
+    // popup PINNED, so it survives the pointer leaving the readout; pressing
+    // again closes it. I is one of the few free letters left: E/T/G/D/B/M/A/Q/
+    // H/L/V/U/K/P/R/S/C are all taken.
+    //
+    // No `_anyModalVisible()` guard, unlike the modal chords above: this popup
+    // is non-modal and takes no focus, so it can neither be stacked under a
+    // modal's key catcher nor steal keys from one.
+    Shortcut {
+        sequences: ["Ctrl+Shift+I"]
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (usagePopup.visible && root.usagePopupPinned) {
+                root.usagePopupPinned = false;
+                usagePopup.close();
+            } else {
+                root.usagePopupPinned = true;
+                usagePopup.open();
+            }
+        }
+    }
+
     // Model picker (Alt+M): inject `/model` into the focused agent's pane so
     // Claude Code's OWN native model picker opens — we drive the CLI's picker
     // rather than reimplement one in QML (compose, don't reimplement). Alt+M,
@@ -2751,6 +2773,55 @@ Window {
     McpMenu {
         id: mcpMenu
         onDismissed: root._restoreCentralFocus()
+    }
+
+    // ----------------------------------------------------------------
+    // Subscription-usage detail popup (hover the status-bar readout, or
+    // Ctrl+Shift+I). Window-scoped and NON-modal: no scrim, no focus grab —
+    // see UsageDetailPopup's header for why this one breaks the ModalOverlay
+    // convention every other popup follows.
+    // ----------------------------------------------------------------
+
+    // True when the chord opened it, which makes it survive the pointer
+    // leaving the readout. Hover-opened, it closes on hover-out.
+    property bool usagePopupPinned: false
+
+    // The pointer is over EITHER surface. Or-ing them is what lets the pointer
+    // travel from the readout into the card without the popup closing under it
+    // mid-move (they are adjacent, not overlapping).
+    readonly property bool usageHovered: statusBar.usageIndicator.hovered || usagePopup.hovered
+
+    onUsageHoveredChanged: {
+        if (root.usageHovered) {
+            usageCloseTimer.stop();
+            usagePopup.open();
+        } else if (!root.usagePopupPinned) {
+            usageCloseTimer.restart();
+        }
+    }
+
+    Timer {
+        // Grace period for the gap between the two hover regions. Short enough
+        // that leaving the corner feels immediate, long enough that crossing
+        // the few pixels between readout and card never flickers.
+        id: usageCloseTimer
+        interval: 200
+        onTriggered: {
+            if (!root.usageHovered && !root.usagePopupPinned)
+                usagePopup.close();
+        }
+    }
+
+    UsageDetailPopup {
+        id: usagePopup
+        z: 50 // above every central surface and the modals (z 40) — same as Toast
+        anchors.right: parent.right
+        // Matches UsageIndicator's own right margin in StatusBar, so the card's
+        // right edge lines up with the readout it belongs to.
+        anchors.rightMargin: Theme.spacing.md
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: Theme.size.statusBarHeight + Theme.spacing.xs
+        providers: controller.usageProviders
     }
 
     // Transient agent spawn-failure toast (non-modal). The controller emits

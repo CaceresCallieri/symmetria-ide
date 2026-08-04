@@ -123,12 +123,13 @@ def test_claude_injects_settings_and_sock_env():
     )
     # The sock env rides the env wrapper, right after the agent id, followed by
     # the status-line capability advert.
-    assert argv[: 4 + len(CLAUDE_ENV_UNSET_ARGS)] == [
+    assert argv[: 5 + len(CLAUDE_ENV_UNSET_ARGS)] == [
         "env",
         *CLAUDE_ENV_UNSET_ARGS,
         "SYMMETRIA_AGENT_ID=42_1",
         "SYMMETRIA_IDE_AGENT_SOCK=/run/user/1000/symmetria-ide-agents-42.sock",
         "SYMMETRIA_IDE_STATUSLINE_TAP=1",
+        "SYMMETRIA_IDE_USAGE_PANEL=1",
     ]
     # The settings string is passed inline after the --settings flag.
     assert "--settings" in argv
@@ -179,6 +180,23 @@ def test_statusline_tap_advert_rides_the_sock():
         agent_sock_path="/run/user/1000/symmetria-ide-agents-42.sock",
     )
     assert "SYMMETRIA_IDE_STATUSLINE_TAP=1" in argv
+
+
+def test_usage_panel_advert_is_separate_from_the_tap_advert():
+    # Two adverts, not one: `status-line.sh` omits its 5h/7d segment on the
+    # USAGE_PANEL var alone. Collapsing them would blank usage in the stable
+    # build, which sets the tap var but has no panel. Both ride the sock.
+    with_sock = spawn_argv(
+        HARNESSES["claude"],
+        "fresh",
+        True,
+        "42_1",
+        agent_sock_path="/run/user/1000/symmetria-ide-agents-42.sock",
+    )
+    assert "SYMMETRIA_IDE_USAGE_PANEL=1" in with_sock
+    assert "SYMMETRIA_IDE_USAGE_PANEL=1" not in spawn_argv(
+        HARNESSES["claude"], "fresh", True, "42_1"
+    )
 
 
 # ---------------------------------------------------------------------------

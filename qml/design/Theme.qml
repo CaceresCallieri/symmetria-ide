@@ -78,6 +78,12 @@ QtObject {
         // changes panel (a repo the focused agent changed OTHER than the
         // displayed one). Escape, never the literal PUA char (Theme rule).
         readonly property string repo: "\uf401"
+        // Subscription-usage providers (UsageIndicator / UsageDetailPopup).
+        // nf-fa-asterisk for Claude's starburst mark; nf-fa-code for Codex.
+        // Both verified present in JetBrainsMono Nerd Font AND in the Symbols
+        // Nerd Font fallback, so neither depends on which family resolves.
+        readonly property string providerClaude: "\uf069"
+        readonly property string providerCodex: "\uf121"
     }
 
     // ─── Color ───────────────────────────────────────────────────

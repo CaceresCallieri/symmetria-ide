@@ -106,6 +106,16 @@ from .remote_location import RemoteContext
 from . import ssh_runner
 from .tree_state_cache import load_expanded, save_expanded
 from . import session_store
+from .usage_poller import UsagePoller
+from .usage_providers import (
+    CLAUDE as _USAGE_CLAUDE,
+    KEY_SESSION as _USAGE_KEY_SESSION,
+    KEY_WEEKLY as _USAGE_KEY_WEEKLY,
+    PROVIDER_IDS as _USAGE_PROVIDER_IDS,
+    ProviderUsage,
+    merge_tap_observation,
+)
+from .usage_store import UsageStore
 from .whichkey_models import (  # noqa: F401 — side-effect: @QmlElement registration
     WhichKeyModel,
     WhichKeyState,
@@ -511,6 +521,9 @@ class AppController(QObject):
     # Account-global usage (5h / 7d rate limits) — the freshest observation across
     # this IDE's agents AND (via the shared peer file) every other IDE instance.
     accountUsageChanged = Signal()
+    # The multi-provider usage panel's model changed — a new observation landed
+    # (ours or a peer's), or a provider's error state moved.
+    usageChanged = Signal()
     # STT recording/transcribing indicator for the AgentTopBar chips. The
     # shell pushes its STT target into the bridge hub, the hub carries it
     # in snapshots as the top-level "stt" field, and _on_bridge_snapshot
@@ -1013,6 +1026,18 @@ class AppController(QObject):
         # connection is correct.
         self._account_usage_store = AccountUsageStore(self)
         self._account_usage_store.changed.connect(self._on_shared_usage_changed)
+        # The multi-provider successor (Claude AND Codex, extensible): same peer
+        # doctrine, its own file so the stable IDE's legacy writer can't clobber
+        # it — see usage_store's module docstring. The poller fills the gap the
+        # event sources leave (an idle IDE observes nothing), under a
+        # cross-process lock so N windows still make ONE request per round.
+        self._usage_store = UsageStore(self)
+        self._usage_store.changed.connect(self._on_usage_store_changed)
+        self._usage_poller = UsagePoller(self._usage_store, self)
+        self._usage_poller.errorsChanged.connect(self._on_usage_errors_changed)
+        # Snapshot of the shared file, re-read on every `changed`. QML binds the
+        # derived `usageProviders` list; empty until the first observation lands.
+        self._usage: dict[str, ProviderUsage] = {}
         # queued: the STT signals also originate on agent-events handler threads
         # (inversion P4 — direct STT channel). _on_stt_inject emits
         # agentInjectRequested → QML paste → agent_inject_done → resolve_inject,
@@ -3382,6 +3407,79 @@ class AppController(QObject):
     @Property(int, notify=accountUsageChanged)
     def accountUsage7dReset(self) -> int:
         return int(self._account_usage["seven_reset"])
+
+    # -- Multi-provider usage panel (Claude + Codex) — see usage_store /
+    # usage_poller. Supersedes the two accountUsage* chips above, which stay
+    # until this promotes to stable (they still back the legacy peer file).
+
+    @Property(bool, notify=usageChanged)
+    def usageValid(self) -> bool:
+        """True once ANY provider has been observed — the panel's visibility."""
+        return any(u.observed_at_ns > 0 for u in self._usage.values())
+
+    @Property("QVariantList", notify=usageChanged)
+    def usageProviders(self) -> list:
+        """One row per provider, in registry order, for the status-bar panel.
+
+        `session` / `weekly` are pre-selected into their own keys because the
+        compact row shows exactly those two and a QML delegate filtering a
+        windows array per paint would be both slower and harder to read. The
+        full `windows` list rides along for the detail popup (it carries the
+        per-model scoped buckets the compact row deliberately omits).
+
+        `observedAt` is epoch SECONDS (not the store's nanoseconds) so QML can
+        compare it against its own `Date.now() / 1000` countdown clock without
+        a unit conversion at every binding site.
+        """
+        rows = []
+        errors = self._usage_poller.errors
+        for provider in _USAGE_PROVIDER_IDS:
+            usage = self._usage.get(provider)
+            error = errors.get(provider, "")
+            if usage is None and not error:
+                continue  # never observed, never failed — nothing to say yet
+            if usage is None:
+                usage = ProviderUsage(provider=provider, label=provider.title())
+            rows.append(
+                {
+                    "provider": usage.provider,
+                    "label": usage.label or provider.title(),
+                    "plan": usage.plan,
+                    "session": self._usage_window_dict(usage, _USAGE_KEY_SESSION),
+                    "weekly": self._usage_window_dict(usage, _USAGE_KEY_WEEKLY),
+                    "windows": [w.as_dict() for w in usage.windows],
+                    "extra": usage.extra,
+                    "observedAt": usage.observed_at_ns // 1_000_000_000,
+                    "source": usage.source,
+                    # The live poll error, if any — not persisted in the shared
+                    # file (an errored snapshot must never displace good data).
+                    "error": error,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _usage_window_dict(usage: ProviderUsage, key: str) -> dict:
+        """The account-wide window of `key` as a dict, or `{}` when absent.
+
+        `{}` (not None) so a QML delegate can bind `row.session.label` and get
+        a falsy undefined instead of a type error — Codex legitimately has no
+        session window today.
+        """
+        for window in usage.windows:
+            if window.key == key and not window.scope:
+                return window.as_dict()
+        return {}
+
+    @Slot()
+    def _on_usage_store_changed(self) -> None:
+        """Re-read the shared file — a peer window, our poller, or a tap wrote it."""
+        self._usage = self._usage_store.read_current()
+        self.usageChanged.emit()
+
+    @Slot()
+    def _on_usage_errors_changed(self) -> None:
+        self.usageChanged.emit()
 
     @Property(int, notify=focusedAgentChanged)
     def focusedAgent(self) -> int:
@@ -6063,6 +6161,21 @@ class AppController(QObject):
         if self._adopt_account_usage(candidate):
             # We advanced the global freshest → share it with peer IDEs.
             self._account_usage_store.publish(candidate)
+            # …and with the multi-provider channel, folded into whatever the
+            # last poll learned (plan / per-model buckets / credits), which the
+            # tap itself never reports. `_on_usage_store_changed` re-reads and
+            # notifies QML through the store's own watcher, so there is exactly
+            # one refresh path regardless of who wrote.
+            self._usage_store.publish(
+                merge_tap_observation(
+                    self._usage.get(_USAGE_CLAUDE),
+                    candidate["five_pct"],
+                    candidate["five_reset"],
+                    candidate["seven_pct"],
+                    candidate["seven_reset"],
+                    ts,
+                )
+            )
 
     def _adopt_account_usage(self, candidate: dict) -> bool:
         """Adopt `candidate` iff its `observed_at_ns` beats the current freshest.
@@ -7276,6 +7389,12 @@ class AppController(QObject):
         # any of its own agents transact (the persistence win of a file channel).
         self._account_usage_store.start()
         self._on_shared_usage_changed()
+        # Same two moves for the multi-provider channel, then start the poller —
+        # which checks immediately, so a cold or stale shared file is refreshed
+        # within seconds of launch instead of waiting a full tick.
+        self._usage_store.start()
+        self._on_usage_store_changed()
+        self._usage_poller.start()
         # Start the IDE MCP server (browser window tools + wait_for_agent
         # coordination) unconditionally BUT backgrounded: start() only spawns a
         # daemon starter thread, so the ~1s FastMCP+uvicorn import never touches
@@ -7728,6 +7847,10 @@ class AppController(QObject):
         # socket (reap_dead would clean it eventually, but a clean exit is tidy).
         agent_registry.remove_entry(os.getpid())
         self._account_usage_store.stop()
+        # Poller first: it must stop submitting before the store it publishes
+        # through goes away.
+        self._usage_poller.stop()
+        self._usage_store.stop()
         # Stop the Bash-attribution + foreign-status probe pools; cancel queued
         # probes and don't wait on any in-flight `git status` (a wedged probe
         # would delay exit up to its 5s timeout — pool threads are reaped at

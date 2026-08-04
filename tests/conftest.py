@@ -175,6 +175,9 @@ _WORKER_OWNING_SUBCONTROLLERS = (
     "_git_branch_controller",
     "_git_ops_controller",
     "_gh_pr_controller",
+    # Owns a ThreadPoolExecutor whose task is a bound method, so a submitted
+    # poll pins its AppController exactly like the git controllers' threads do.
+    "_usage_poller",
 )
 
 
