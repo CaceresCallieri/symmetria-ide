@@ -64,6 +64,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Nested-compositor pointer input](reference/qt-pyside/nested_compositor_pointer_input.md) — scroll needs 3 non-default things; all mislead as focus bugs
 - [Nested-compositor frame starvation](reference/qt-pyside/nested_compositor_frame_starvation.md) — host stops rendering → client stalls forever; needs a watchdog
 - [Nested-compositor clipboard](reference/qt-pyside/nested_compositor_clipboard.md) — bridge SHIPPED; nested→host works unfocused, host→nested needs IDE focus (self-heals)
+- [Nested-compositor has no dmabuf](reference/qt-pyside/nested_compositor_no_dmabuf.md) — Qt 6.11 implements the protocol nowhere; the EGL warning names the wrong layer
 - [Why the suite dies "intermittently"](reference/qt-pyside/processevents_shared_app_segv.md) — two causes: pumping the session app, and leaked AppControllers
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
