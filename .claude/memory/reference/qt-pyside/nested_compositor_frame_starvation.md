@@ -50,8 +50,8 @@ window visibility will miss it.
 An earlier measurement in this project concluded the opposite ("hiding the
 browser surface is free; do not add machinery to keep it alive") and was written
 into CLAUDE.md. It was wrong, and it cost a re-diagnosis that started by
-doubting the compositor. Treat a recorded "we measured this and it is fine" as a
-claim to re-run, not a fact, when the symptom says otherwise.
+doubting the compositor — the layer the note had cleared. That lesson is now a
+rule: `.claude/rules/rerun_recorded_measurements.md`.
 
 ## What works
 

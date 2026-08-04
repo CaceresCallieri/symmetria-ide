@@ -60,10 +60,10 @@ headers actually installed here.) So
 the assignment threw on the walk's FIRST line, aborting it before the recursion
 or the signal connect. The entire symptom was one "Cannot assign to
 non-existent property" per session, and an inert hover walk is indistinguishable
-from a working one by reading it. The generalisable lesson: **when a QML
-property assignment is the fix, check the property exists on that TYPE** —
-`setAcceptHoverEvents` is a method with no QML equivalent, which is exactly why
-it belongs in the subclass alongside (2) and (3).
+from a working one by reading it. `setAcceptHoverEvents` is a method with no QML
+equivalent, which is exactly why it belongs in the subclass alongside (2) and
+(3). The generalisable half is now a rule:
+`.claude/rules/qml_property_must_exist_on_type.md`.
 
 ## 2. The wheel value is truncated to zero
 

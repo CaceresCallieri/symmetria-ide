@@ -30,7 +30,7 @@ If it's both a rule and a learned reference, default to `.claude/rules/` — rul
 Knowledge has a lifecycle. Move it forward as it stabilizes; never leave everything in memory forever.
 
 1. **Scratch** — observed once in conversation. Don't write yet; let it pass unless the user marks it as a decision or asks you to remember it.
-2. **Memory** — explicitly requested by the user, or confirmed useful in a second independent context: write a topic file under `.claude/memory/<area>/`, add one bullet to `MEMORY.md` (≤150 chars). When unsure whether something merits memory, default to NOT writing — ask the user instead.
+2. **Memory** — explicitly requested by the user, or confirmed useful in a second independent context: write a topic file under `.claude/memory/<area>/`, add one bullet to `MEMORY.md` (≤200 chars). When unsure whether something merits memory, default to NOT writing — ask the user instead.
 3. **Rule** — when a memory becomes "always do X" or "never do Y": move the file to `.claude/rules/<name>.md`, drop the `type:` and `originSessionId:` frontmatter fields (those are auto-memory fields — memory files keep them; rule files do not), optionally add `paths:` for file-scoped triggers, **remove the bullet from MEMORY.md**.
 4. **Pointer** — when a system ships and is documented elsewhere (code, scripts, CLAUDE.md): shrink the memory file to a one-line pointer (`see src/symmetria_ide/X.py` or `see qml/Y.qml`), keep the file in `project/shipped/`, **remove its bullet from MEMORY.md** (it lives under the consolidated shipped-systems bullet).
 
@@ -40,7 +40,10 @@ If unsure which tier a piece of knowledge belongs in, default to `.claude/memory
 
 ## MEMORY.md index discipline
 
-- `MEMORY.md` is an INDEX, never memory content. Each entry is one bullet, ≤150 chars: `- [Title](path/to/file.md) — one-line hook`. No frontmatter on `MEMORY.md` itself — the memory system reads it as plain markdown; frontmatter would render as stale content in the first lines.
+- `MEMORY.md` is an INDEX, never memory content. Each entry is one bullet, ≤200 chars
+  (raised from 150 on 2026-08-04: roughly 40 bullets exceeded the old figure while
+  the file sat at 77 of its 200 allowed LINES, so the limit was policing the wrong
+  budget — the line count is what decides whether the index loads): `- [Title](path/to/file.md) — one-line hook`. No frontmatter on `MEMORY.md` itself — the memory system reads it as plain markdown; frontmatter would render as stale content in the first lines.
 - Headers (`## Section`) and blank lines count toward the 200-line budget. Use the section list in the current `MEMORY.md` as the canonical category set; don't invent new sections without (a) adding the new section name to the subfolder list below and (b) adding the new subfolder to the area list in this file.
 - Topic files live in subfolders by area:
   - `feedback/` — user preferences and validated approaches (stable, project-wide)

@@ -1,6 +1,6 @@
 # Memory index
 
-Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the layout rules and promotion lifecycle. Each memory file gets exactly one bullet entry here (≤150 chars).
+Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the layout rules and promotion lifecycle. Each memory file gets exactly one bullet entry here (≤200 chars).
 
 ## Feedback — `feedback/` (user preferences, validated approaches)
 
@@ -26,8 +26,8 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Phase 2 SDK pane (parked+env-gated 2026-06-10)](project/active/phase2_current_state.md) — terminal-agent runtime superseded it; mounts only via SYMMETRIA_IDE_SDK_PANE=1
 - [GitView history viewer](project/active/gitview_history_viewer.md) — comprehension-first "git" surface; pull/push (transport) now in scope via GitOpsController, no authoring mutations
 - [Markdown preview in IDE (idea)](project/active/markdown_preview_in_ide.md) — future: themed HTML .md preview in the embedded browser, key-toggled
-- [Startup optimization outcomes](project/active/startup_optimization_followups.md) — gc.collect drop SHIPPED (51bf26c, ~20ms); WebEngine import deferral spiked+works but HELD (Qt-deprecated late init)
-- [Agent ownership inversion (P1-4 SHIPPED; P5 IDE-decoupled)](project/active/agent_ownership_inversion.md) — claude agents IDE-owned; STT now pure-direct shell→IDE (bridge STT/inject removed); orchestrator.nvim KEPT (IDE just decoupled). Live dictation verify owed. See docs/agent-ownership-inversion.md
+- [Startup optimization outcomes](project/active/startup_optimization_followups.md) — gc.collect drop SHIPPED (~20ms); WebEngine import deferral works but HELD
+- [Agent ownership inversion (P1-4 SHIPPED; P5 IDE-decoupled)](project/active/agent_ownership_inversion.md) — agents IDE-owned; STT direct shell→IDE; orchestrator.nvim kept. Live dictation verify owed
 - [VPS location toggle (SHIPPED 2026-07-12)](project/active/vps_location_toggle.md) — Local↔VPS per-project context; invariants in CLAUDE.md; deferrals: reconnect chip, vps coordination, mosh
 - [Agentic browser = nested-compositor Chrome (SHIPPED)](project/active/chrome_external_browser.md) — QtWebEngine and the pinned-window form both retired; Chrome renders in-pane
 
@@ -57,7 +57,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [QML Array.isArray rejects QVariantList](reference/qt-pyside/qml_qvariantlist_array_check.md) — PySide6 list props fail `Array.isArray()` in Qt 6.11; use `x != null && x.length > 0`
 - [grabWindow GIL deadlock](reference/qt-pyside/grabwindow_gil_deadlock.md) — sync grab + Python QQuickPaintedItem + threaded loop = ABBA hang; force basic loop
 - [Fork changes need makepkg](reference/qt-pyside/fork_changes_need_makepkg.md) — launchers load the pacman qmltermwidget pkg; commit + makepkg -sif after fork edits
-- [ApplicationShortcut masks terminal keys](reference/qt-pyside/applicationshortcut_masks_terminal_keys.md) — chrome Shortcut eats keys before QMLTermWidget; suspect it when a key fails in-IDE but works in Ghostty
+- [ApplicationShortcut masks terminal keys](reference/qt-pyside/applicationshortcut_masks_terminal_keys.md) — chrome Shortcut eats keys before QMLTermWidget; suspect it if a key works only in Ghostty
 - [QtWebEngine CDP era (SUPERSEDED)](reference/qt-pyside/qtwebengine_cdp_devtools_mcp.md) — embedded-engine CDP notes; real Chrome replaced it 2026-07-27
 - [Startup performance](reference/qt-pyside/startup_perf.md) — SYMMETRIA_IDE_TRACE waterfall + interleaved A/B; fixed browser-MCP GUI-thread import (~1s) + eager WebEngine (~430ms)
 - [Nested-compositor output mode](reference/qt-pyside/nested_compositor_output_mode.md) — the wl_output must describe the PANE, not the window; only C++ can say so
