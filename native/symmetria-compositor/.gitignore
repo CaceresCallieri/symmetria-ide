@@ -1,8 +1,15 @@
 # makepkg build output. Two of these are traps rather than mere noise:
-# `src/` and `symmetria-ide/` are clones of THIS repo (makepkg builds from the
-# committed tree), so tracking them embeds a git repository inside itself.
+# `src/` and the `symmetria-ide*/` clone are copies of THIS repo (makepkg builds
+# from the committed tree), so tracking them embeds a git repository inside
+# itself.
+#
+# The glob is load-bearing: makepkg names that clone after the source URL's
+# basename, so it is `symmetria-ide/` from the dev worktree and
+# `symmetria-ide-stable/` from the stable one. The bare name matched only dev,
+# so a promotion — the one time this package is built from stable — left an
+# untracked clone of the whole repo sitting in the stable tree.
 src/
 pkg/
 build/
-symmetria-ide/
+symmetria-ide*/
 *.pkg.tar.zst
