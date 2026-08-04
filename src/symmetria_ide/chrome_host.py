@@ -55,6 +55,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from collections import deque
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -86,7 +87,9 @@ _TEMPLATE_PROFILE_DIRS = ("Local Storage", "IndexedDB")
 # Sized against what it has to hold rather than picked round: a GPU failure
 # announces itself over a handful of lines and only the LAST of them was being
 # logged. 200 spans a whole launch's chatter with room to spare, bounded at
-# roughly 40KB of held strings.
+# roughly 40KB of held strings. Self-diagnosing at that size, too: the dump
+# ages each line, so an oldest entry only seconds old says the buffer wrapped
+# and the number wants raising — no need to guess it right in advance.
 _STDERR_HISTORY_LINES = 200
 
 _SLUG_SAFE = re.compile(r"[^a-zA-Z0-9._-]+")
@@ -500,7 +503,11 @@ class ChromeHost(QObject):
         Takes `proc` as an argument rather than reading `self._proc`, which
         moves underneath it — see the call site.
         """
-        history: deque[str] = deque(maxlen=_STDERR_HISTORY_LINES)
+        # Each line is stamped, because the SHAPE of the sequence is half the
+        # diagnosis: three GPU crashes two seconds apart is a transient
+        # resource failure, the same three spread over three hours is
+        # something accumulating. An undated dump cannot tell those apart.
+        history: deque[tuple[float, str]] = deque(maxlen=_STDERR_HISTORY_LINES)
         # getattr, not attribute access: `Popen.stderr` is None whenever the
         # pipe was not requested, and this must degrade to "just reap" rather
         # than take the reaper down with it.
@@ -511,7 +518,7 @@ class ChromeHost(QObject):
                     line = raw.decode("utf-8", "replace").rstrip()
                     if not line:
                         continue
-                    history.append(line)
+                    history.append((time.monotonic(), line))
                     lowered = line.lower()
                     if (
                         "protocol error" in lowered
@@ -527,7 +534,9 @@ class ChromeHost(QObject):
         finally:
             self._report_chrome_exit(proc.wait(), history)
 
-    def _report_chrome_exit(self, status: int, history: deque[str]) -> None:
+    def _report_chrome_exit(
+        self, status: int, history: deque[tuple[float, str]]
+    ) -> None:
         """Say how Chrome exited, and dump the stderr tail when it went badly.
 
         Split out of the drain so it can be exercised without a live pipe.
@@ -556,10 +565,14 @@ class ChromeHost(QObject):
         cause = f"signal {-status}" if status < 0 else f"status {status}"
         log.warning("chrome: exited on %s — %s", cause, _machine_state())
         if history:
+            # Ages relative to the exit, not wall clock: the reader's question
+            # is "how long before the end did this happen", and a relative
+            # figure answers it without them subtracting timestamps by hand.
+            end = history[-1][0]
             log.warning(
-                "chrome: last %d stderr line(s) before the exit:\n  %s",
+                "chrome: last %d stderr line(s) before the exit (age at exit):\n  %s",
                 len(history),
-                "\n  ".join(history),
+                "\n  ".join(f"{at - end:8.1f}s  {line}" for at, line in history),
             )
 
     @Slot()

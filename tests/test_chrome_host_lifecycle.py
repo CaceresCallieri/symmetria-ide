@@ -280,6 +280,23 @@ class TestStderrHistory:
         assert "crashed 3 time(s)" in dump
         assert "exit_code=15" in dump
 
+    def test_the_dump_ages_every_line(self, host, caplog, monkeypatch):
+        """Three GPU crashes two seconds apart is a transient resource failure;
+        the same three over three hours is something accumulating. An undated
+        dump cannot tell those apart, which is the question it exists for."""
+        clock = iter([0.0, 60.0, 3600.0])
+        monkeypatch.setattr(chrome_host.time, "monotonic", lambda: next(clock))
+        proc = FakeProc([], GPU_DEATH, exit_status=-5)
+        with caplog.at_level("DEBUG"):
+            host._drain_chrome_stderr(proc)
+        dump = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        )
+        # Relative to the exit, so the oldest line carries the largest age.
+        assert "-3600.0s" in dump
+        assert "-3540.0s" in dump
+        assert "     0.0s" in dump
+
     def test_a_bad_exit_names_the_signal(self, host, caplog):
         """-5 is SIGTRAP, which Chrome raises on its OWN failed CHECK. Reading
         it as "something killed us" points the next investigation outward, at
