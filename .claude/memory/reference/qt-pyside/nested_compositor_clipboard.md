@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: reference
   originSessionId: 1dc16f14-6524-437a-9b81-8d0fde68876c
-  modified: 2026-07-27T04:33:31.275Z
+  modified: 2026-08-04T06:26:45.838Z
 ---
 
 # Nested-compositor clipboard is isolated both ways
@@ -52,6 +52,37 @@ Conclusion: a small C++ QML plugin subclassing `QWaylandCompositor`, on the orde
 of 30 lines. That is a shape this project already maintains (the qmltermwidget
 fork), and the user has already said C++ is acceptable. So the clipboard is a
 **scoping fact, not a viability blocker** for the nested-compositor browser.
+
+## SHIPPED and verified end to end (2026-08-04)
+
+Built as `SymmetriaCompositor` in `native/symmetria-compositor/`. Round-tripped
+sentinel strings both ways, exact match, with the plugin's
+`SYMMETRIA_COMPOSITOR_DEBUG=1` trace confirming each hop.
+
+**The two directions have DIFFERENT focus requirements, and that asymmetry is
+the whole of what is surprising here:**
+
+| direction | needs the IDE focused? |
+|---|---|
+| nested → host (`writeText` → `wl-paste`) | **no** — worked with the IDE unfocused on another workspace |
+| host → nested (`wl-copy` → `readText`) | **yes**, at some point after the copy |
+
+nested → host is free because the client only needs focus in OUR seat, which the
+nested compositor grants regardless of the host. host → nested is gated because
+an unfocused Qt app receives no data offer, so `QClipboard::mimeData()` is empty
+and `pushHostSelectionToClients` returns before its trace ever prints.
+
+**The stale read that results is NOT a bug and NOT the loop guard.** Measured:
+copy on the host with the IDE unfocused, and the client keeps reading its
+previous value at 0s, 2s and 5s — no trace fires at all. Focus the IDE and the
+trace fires immediately and the client reads the current value. It is a latency
+property with a self-healing edge. Do not "fix" it by polling the host
+clipboard: an unfocused app has nothing to poll.
+
+Diagnostic note, cost an hour: `Page.bringToFront` HANGS over CDP against this
+nested Chrome, and a `Runtime.evaluate` behind it looks exactly like a broken
+clipboard API. Drop it and evaluate directly. Also pass `suppress_origin=True`
+to `websocket-client`, or Chrome rejects the CDP upgrade with a 403.
 
 Related: [fork-changes-need-makepkg](./fork_changes_need_makepkg.md) — any such
 plugin has to be packaged before launcher-launched IDEs can load it.
