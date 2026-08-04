@@ -62,14 +62,25 @@ repos:
         files: \.qml$
         pass_filenames: true
 
-      # pyright runs in REPORT-ONLY mode for now — the project baseline is
-      # ~39 errors (known PySide6-stubs false positives, gotcha #7).
-      # Blocking commits here would be noisy until the baseline is clean.
-      # Remove `verbose: true` once the baseline error count drops to zero.
+      # pyright runs in REPORT-ONLY mode — it never blocks a commit.
+      #
+      # Baseline: 85 errors, measured 2026-08-04 against the `[tool.pyright]`
+      # scope in pyproject.toml (which is what took it down from 608; read the
+      # comment there before touching this). The number this comment used to
+      # claim, ~39, was stale AND measured against no config at all — the same
+      # class of drift as the missing ruff config, so verify it rather than
+      # trusting it. `pyright | tail -1` is the check.
+      #
+      # ONLY THE SUMMARY LINE is printed. Piping the full output meant 608 lines
+      # on every single commit, which is not a report anybody reads — it is how
+      # a hook trains people to ignore it. Run `pyright` yourself for detail.
+      # The obvious upgrade is a qmllint-style ratchet (see
+      # scripts/qmllint_gate.py) so the count can only go down; until then this
+      # exists to make drift visible, not to gate.
       - id: pyright
         name: pyright (type check — report only)
         language: system
-        entry: bash -c 'pyright || true'
+        entry: bash -c 'pyright 2>&1 | tail -1 || true'
         pass_filenames: false
         always_run: true
         verbose: true

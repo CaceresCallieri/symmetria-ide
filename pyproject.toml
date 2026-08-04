@@ -82,6 +82,33 @@ select = ["E", "F", "I", "UP", "B"]
 # rather than a second opinion. (Ruff's own docs recommend this pairing.)
 ignore = ["E501"]
 
+[tool.pyright]
+# Same defect the ruff section above records, in a second tool: with no config
+# committed, `pyright` reported 608 errors and the pre-commit hook printed all
+# of them on every commit. Two thirds of that was noise of two specific kinds.
+#
+# 1. `native/` is EXCLUDED because makepkg stages the whole repo under
+#    `native/symmetria-compositor/src/`, so pyright was type-checking a second
+#    copy of every file — that alone was 304 of the 608.
+# 2. `tests/` is not included at all. The suite deliberately passes duck-typed
+#    doubles (`FakeEvent`, recording pools, stub controllers) where a real type
+#    is declared; that is the test style, not a defect to report on 189 times.
+#
+# `basic` rather than the CLI's default `standard`: basic already suppresses the
+# `QAbstractItemModel.data/rowCount/roleNames` override complaints that gotcha #7
+# says NOT to "fix" (reshaping those signatures breaks Qt's metaobject system).
+# An explicit `reportIncompatibleMethodOverride = false` was measured to change
+# nothing on top of it, so it is deliberately absent rather than decorative.
+#
+# What remains is ~85, of which ~69 are in app.py and most are PySide6's own
+# untyped idioms — `@Property("QVariantList", ...)` reads as a `Property`
+# descriptor rather than the value it returns. The hook stays REPORT-ONLY for
+# that reason; the honest count lives in `.pre-commit-config.yaml`, and a
+# qmllint-style ratchet is the obvious next step if this is ever to block.
+include = ["src", "scripts", "tools", "bench", "runtime"]
+exclude = ["**/__pycache__", "native", "sidecar", ".claude"]
+typeCheckingMode = "basic"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
