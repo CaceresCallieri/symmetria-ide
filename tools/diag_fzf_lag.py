@@ -43,13 +43,13 @@ FZF_COUNTER_RE = r"\b\d+/\d+\b"
 PROMPT_SENTINEL = "DIAG_PROMPT_READY_42"
 
 
-def send(proc: "subprocess.Popen[str]", **payload: Any) -> None:
+def send(proc: subprocess.Popen[str], **payload: Any) -> None:
     assert proc.stdin is not None
     proc.stdin.write(json.dumps(payload) + "\n")
     proc.stdin.flush()
 
 
-def recv_for(proc: "subprocess.Popen[str]", req_id: str) -> dict[str, Any]:
+def recv_for(proc: subprocess.Popen[str], req_id: str) -> dict[str, Any]:
     """Read events until one with matching id arrives; echo out-of-band
     events (`closed`, errors with no id) to stderr for diagnostics."""
     assert proc.stdout is not None

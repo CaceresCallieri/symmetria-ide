@@ -37,7 +37,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +66,7 @@ def parse_iso(ts: str) -> float:
     # accepts that on 3.11+. We force UTC explicitly to avoid local-tz drift.
     if ts.endswith("Z"):
         ts = ts[:-1] + "+00:00"
-    return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc).timestamp()
+    return datetime.fromisoformat(ts).replace(tzinfo=UTC).timestamp()
 
 
 def parse_trace(text: str) -> dict[str, float]:
