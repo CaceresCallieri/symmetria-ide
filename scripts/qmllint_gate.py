@@ -32,6 +32,17 @@ there is nothing finer to key on that would survive a day. The cost is real and
 worth naming: swapping one finding for another inside the same file and
 category passes. The guarantee is only that the total never grows.
 
+TWO HOLES, BOTH DELIBERATE
+==========================
+1. Same-category swaps, per the paragraph above.
+2. **Cross-file findings.** pre-commit passes only the files being committed,
+   and qmllint findings are not local: removing a property from `Theme.qml` or
+   `PillSurface.qml` raises `missing-property` counts in every consumer. A
+   commit can therefore add findings across files it never touched and pass.
+   Closing this means tallying the whole tree on every commit, which is the
+   cost the per-file scope exists to avoid; run `--update` and read the diff
+   when changing a shared component.
+
 Usage:
     qmllint_gate.py <file.qml> ...   # check (what pre-commit runs)
     qmllint_gate.py --update         # regenerate the baseline from every
@@ -56,10 +67,15 @@ QMLLINT = os.environ.get("SYMMETRIA_QMLLINT", "/usr/lib/qt6/bin/qmllint")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_PATH = REPO_ROOT / "scripts" / "qmllint-baseline.json"
 
-# qmllint's own severity for a finding. Anything outside this set is an actual
-# error and is never baselined — those already fail the binary's exit code, and
-# the ratchet must not become a way to grandfather one in.
-_ADVISORY_TYPES = frozenset({"warning", "info"})
+# qmllint severities that are NEVER baselined: a parse error stops the analysis,
+# so the file's warning count afterwards is not comparable to anything, and
+# grandfathering one in would hide whatever it masked.
+#
+# A deny-list rather than an allow-list, deliberately. Inverted, an unfamiliar
+# severity (qmllint emits `debug` in some configurations) would be reclassified
+# as a hard error and block every commit touching the file, with a message that
+# reads like a real defect. Unknown severities are advisory.
+_FATAL_TYPES = frozenset({"critical", "error"})
 
 
 def _relative(path: Path) -> str:
@@ -78,12 +94,22 @@ def _run_qmllint(files: list[Path]) -> dict:
     there (`id`) instead of a bracketed suffix to be parsed back out of a
     message that also contains source text.
     """
-    result = subprocess.run(
-        [QMLLINT, "--json", "-", *[str(f) for f in files]],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [QMLLINT, "--json", "-", *[str(f) for f in files]],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        # A traceback out of a pre-commit hook reads as "the hook is broken",
+        # and the reflex that follows is `--no-verify` — which disables the
+        # gate permanently for a missing binary.
+        raise SystemExit(
+            f"qmllint not found at {QMLLINT}.\n"
+            "Install Qt6's qmllint (`pacman -S qt6-declarative`) or point\n"
+            "SYMMETRIA_QMLLINT at it."
+        ) from None
     if not result.stdout.strip():
         raise SystemExit(
             f"{QMLLINT} produced no JSON report.\n"
@@ -104,7 +130,7 @@ def _tally(report: dict) -> tuple[dict[str, dict[str, int]], list[str]]:
         per_category: collections.Counter[str] = collections.Counter()
         for warning in entry.get("warnings", []):
             category = warning.get("id") or "uncategorised"
-            if warning.get("type") not in _ADVISORY_TYPES:
+            if warning.get("type") in _FATAL_TYPES:
                 errors.append(
                     f"{rel}:{warning.get('line')}:{warning.get('column')}: "
                     f"{warning.get('message')} [{category}]"
@@ -116,19 +142,31 @@ def _tally(report: dict) -> tuple[dict[str, dict[str, int]], list[str]]:
 
 
 def _tracked_qml_files() -> list[Path]:
+    # `-z`, because plain `split()` breaks on any path containing a space (and
+    # `git ls-files` would additionally quote it) — and this is the path that
+    # WRITES the ledger, so a mangled name here corrupts the baseline itself.
     listing = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "ls-files", "*.qml"],
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "*.qml"],
         capture_output=True,
         text=True,
         check=True,
     )
-    return [REPO_ROOT / line for line in listing.stdout.split()]
+    return [REPO_ROOT / name for name in listing.stdout.split("\0") if name]
 
 
 def _load_baseline() -> dict[str, dict[str, int]]:
     if not BASELINE_PATH.exists():
         return {}
-    return json.loads(BASELINE_PATH.read_text())
+    try:
+        return json.loads(BASELINE_PATH.read_text())
+    except json.JSONDecodeError as exc:
+        # The likely cause is a merge conflict left in the ledger. Naming the
+        # file and the repair command keeps this from reading as a hook bug.
+        raise SystemExit(
+            f"{_relative(BASELINE_PATH)} is not valid JSON ({exc}).\n"
+            "Resolve the conflict, or regenerate it with:\n"
+            "  python3 scripts/qmllint_gate.py --update"
+        ) from None
 
 
 def update_baseline() -> int:
@@ -183,6 +221,12 @@ def check(paths: list[str]) -> int:
     files = [Path(p) for p in paths if p.endswith(".qml")]
     if not files:
         return 0
+    # Named explicitly. qmllint reports a nonexistent path as an `import`
+    # finding, which the ratchet then presents as "0 -> 1" — a typo would read
+    # as a code regression.
+    missing = [f for f in files if not f.exists()]
+    if missing:
+        raise SystemExit("no such file: " + ", ".join(str(f) for f in missing))
     counts, errors = _tally(_run_qmllint(files))
     failures = regressions(counts, _load_baseline())
 

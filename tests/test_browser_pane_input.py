@@ -3,9 +3,14 @@
 Same pattern as the sibling browser-pane tests: the invariant lives in QML and
 C++, so it is asserted by reading the files.
 
-WHAT IS BEING PROTECTED. Pages in the nested browser did not scroll, and it
-took THREE independent defects to explain it. All three are guarded here
-because any one alone brings the symptom back.
+WHAT IS BEING PROTECTED. Three separate things Qt does not do by default. (2)
+and (3) are each independently fatal to SCROLLING; (1) is fatal to pointer
+MOTION — hover states, hover-opened menus, cursor shape. All three are guarded
+here.
+
+The split is not theoretical: (1) was written in QML against a property that
+does not exist, so it never ran for weeks while scrolling worked fine. An
+earlier version of this docstring called all three fatal to scrolling.
 
 1. **No pointer motion reaches the client.** `QWaylandQuickItem` implements
    `hoverEnterEvent`/`hoverMoveEvent` — the only two callers of
@@ -29,10 +34,11 @@ because any one alone brings the symptom back.
    look sent and correct.
 
 All three point away from themselves, which is the reason for the fuss.
-`mousePressEvent` calls `sendMouseMoveEvent` itself, so #1 looks like scrolling
-that "starts working after a click"; and dragging a scrollbar works under #2
-and #3 alike, because press and move touch neither the arithmetic nor the
-frame. Every one of them reads as a focus problem.
+`mousePressEvent` calls `sendMouseMoveEvent` itself, so under #1 the client
+learns where the pointer is only when something is clicked — hover states come
+and go for no apparent reason. And dragging a scrollbar works under #2 and #3
+alike, because press and move touch neither the arithmetic nor the frame. Every
+one of them reads as a focus problem.
 
 Popups get the hover treatment but NEITHER the wheel quantisation nor the
 frame, and none of it can be given declaratively: Qt creates those items in C++
@@ -51,6 +57,7 @@ import re
 from pathlib import Path
 
 import pytest
+from conftest import braced_block
 
 
 @pytest.fixture(scope="module")
@@ -60,7 +67,7 @@ def pane_qml() -> str:
 
 
 @pytest.fixture(scope="module")
-def wheel_cpp() -> str:
+def item_cpp() -> str:
     repo_root = Path(__file__).resolve().parent.parent
     return (
         repo_root / "native" / "symmetria-compositor" / "symmetriashellsurfaceitem.cpp"
@@ -68,25 +75,12 @@ def wheel_cpp() -> str:
 
 
 @pytest.fixture(scope="module")
-def hover_block(wheel_cpp: str) -> str:
-    """`enableHoverTree`, delimited by brace counting rather than a fixed width
-    — a character count silently moves the assertions out of the window as the
-    function grows, and the failure then reads as a regression in the code."""
-    start = wheel_cpp.index("void SymmetriaShellSurfaceItem::enableHoverTree")
-    open_at = wheel_cpp.index("{", start)
-    depth = 0
-    for i in range(open_at, len(wheel_cpp)):
-        if wheel_cpp[i] == "{":
-            depth += 1
-        elif wheel_cpp[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return wheel_cpp[start : i + 1]
-    raise AssertionError("unbalanced braces in enableHoverTree")
+def hover_block(item_cpp: str) -> str:
+    return braced_block(item_cpp, "void SymmetriaShellSurfaceItem::enableHoverTree")
 
 
 class TestPointerReachesTheSurface:
-    def test_hover_is_enabled_in_cpp_not_qml(self, wheel_cpp: str, pane_qml: str):
+    def test_hover_is_enabled_in_cpp_not_qml(self, item_cpp: str, pane_qml: str):
         """`setAcceptHoverEvents` is a C++ METHOD with no QML equivalent, and
         that is the whole point of this assertion.
 
@@ -98,7 +92,7 @@ class TestPointerReachesTheSurface:
         the popups. Its only trace was one "Cannot assign to non-existent
         property" per session, and hover looked broken for reasons nobody could
         find. Guarded from both sides so it cannot come back."""
-        assert "setAcceptHoverEvents(true)" in wheel_cpp
+        assert "setAcceptHoverEvents(true)" in item_cpp
         # Comment lines stripped first: the file explains this trap on purpose,
         # and a bare substring check would forbid documenting the very thing it
         # is guarding against — which is how a well-meant guard gets deleted.
@@ -109,12 +103,12 @@ class TestPointerReachesTheSurface:
             "hoverEnabled is not a property of any Wayland item class"
         )
 
-    def test_the_constructor_enables_it(self, wheel_cpp: str):
+    def test_the_constructor_enables_it(self, item_cpp: str):
         """Enabled at construction rather than on first use: the seat has no
         focused surface until motion arrives, so a client that has not been
         hovered yet does not know where the pointer is."""
-        start = wheel_cpp.index("SymmetriaShellSurfaceItem::SymmetriaShellSurfaceItem")
-        body = wheel_cpp[start : wheel_cpp.index("\n}", start)]
+        start = item_cpp.index("SymmetriaShellSurfaceItem::SymmetriaShellSurfaceItem")
+        body = item_cpp[start : item_cpp.index("\n}", start)]
         assert "enableHoverTree(this)" in body
 
     def test_popups_are_reached_by_recursing(self, hover_block: str):
@@ -163,36 +157,32 @@ class TestWheelSurvivesTheTrip:
             "a stock ShellSurfaceItem drops sub-threshold wheel events"
         )
 
-    def test_the_remainder_is_carried_not_dropped(self, wheel_cpp: str):
+    def test_the_remainder_is_carried_not_dropped(self, item_cpp: str):
         """Quantising without a carry would discard every fragment below the
         grain — the same failure as Qt's truncation, just relocated."""
-        assert "kWaylandAngleStep = 12" in wheel_cpp
-        assert "m_carry += event->angleDelta()" in wheel_cpp
-        assert "m_carry -= step" in wheel_cpp
+        assert "kWaylandAngleStep = 12" in item_cpp
+        assert "m_carry += event->angleDelta()" in item_cpp
+        assert "m_carry -= step" in item_cpp
 
 
 class TestChromiumDispatchesTheScroll:
-    def test_a_pointer_frame_follows_the_axis(self, wheel_cpp: str):
+    def test_a_pointer_frame_follows_the_axis(self, item_cpp: str):
         """The defect with NO symptom on our side: axis events look sent and
         correct, and Chromium buffers every one of them because
         `ProcessPointerScrollData()` runs only from its frame handler. Delete
         the frame send and every structural test here still passes while
         scrolling is dead again."""
-        assert "send_frame(" in wheel_cpp
-        body = wheel_cpp[
-            wheel_cpp.index("void SymmetriaShellSurfaceItem::wheelEvent") :
-        ]
+        assert "send_frame(" in item_cpp
+        body = item_cpp[item_cpp.index("void SymmetriaShellSurfaceItem::wheelEvent") :]
         assert "sendPointerFrame(" in body, (
             "the frame must be sent from the wheel path, not merely defined"
         )
 
-    def test_a_refused_forward_sends_no_frame_and_keeps_the_carry(self, wheel_cpp: str):
+    def test_a_refused_forward_sends_no_frame_and_keeps_the_carry(self, item_cpp: str):
         """The base refuses the event (no surface, or outside the input region)
         without sending any axis. Treating that as success spends the carry on
         a scroll that never happened and emits an empty frame group."""
-        body = wheel_cpp[
-            wheel_cpp.index("void SymmetriaShellSurfaceItem::wheelEvent") :
-        ]
+        body = item_cpp[item_cpp.index("void SymmetriaShellSurfaceItem::wheelEvent") :]
         assert "forwarded.isAccepted()" in body
         assert "m_carry += step" in body, "a refused forward must restore the carry"
 

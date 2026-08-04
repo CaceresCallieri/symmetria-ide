@@ -5,8 +5,13 @@ metadata:
   node_type: memory
   type: reference
   originSessionId: 6e18d2b3-fa99-4df3-ae3c-7e2a050321cf
-  modified: 2026-07-28T04:00:05.047Z
+  modified: 2026-08-04T16:45:58.693Z
 ---
+
+> Filed under "processevents" for history, and kept there so inbound links
+> survive. It now covers **both** causes of the suite's non-deterministic death:
+> event pumping (below) and leaked `AppController`s (last section). If you
+> arrived here grepping for a thread or inotify leak, you are in the right file.
 
 **Never call `QCoreApplication.processEvents()` (or otherwise pump the event
 loop) in a unit test that runs against the shared session-scoped
@@ -76,13 +81,14 @@ threads and 224 inotify instances in one pytest process** — at only 38% throug
 the run, against `fs.inotify.max_user_instances = 1024` that is SHARED with the
 developer's running desktop.
 
-Seven test modules construct an `AppController` and never call `shutdown()`.
+Several test modules construct an `AppController` and never call `shutdown()`.
 The load-bearing detail is WHY that leaks rather than merely littering: a
 `threading.Thread(target=self._run_loop)` stores a **bound method**, so a
 running worker holds a strong reference to its controller. An un-stopped worker
 therefore pins the entire object graph behind it, `QFileSystemWatcher` and
 inotify fd included. Fixed by `conftest._release_app_controller_workers`
-(autouse; stops the five worker-owning sub-controllers). A/B over the same 194
+(autouse; stops each worker-owning sub-controller — the current list is the
+tuple in that file, kept honest by `tests/test_worker_leak_fixture.py`). A/B over the same 194
 tests: **779 threads alive at session end without it, 4 with it**; the full
 suite went from wedging to 1691 passed in 25s.
 
@@ -92,3 +98,5 @@ shared with the rest of the machine, which is exactly why load made it worse
 and why a single file in isolation always looked clean. When a suite failure
 is load-sensitive and isolation-clean, count a resource (`ls /proc/<pid>/task |
 wc -l`, inotify fds under `/proc/<pid>/fd`) before theorising about a race.
+
+Related: [never loop the suite unattended](../../feedback/never_loop_the_suite_unattended.md) — the other reason a full-suite run is not free.

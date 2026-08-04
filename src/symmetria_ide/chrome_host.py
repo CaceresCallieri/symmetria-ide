@@ -101,7 +101,11 @@ def _machine_state() -> str:
                 if line.startswith("MemAvailable:"):
                     memory = f"{int(line.split()[1]) / 1024 / 1024:.1f}GiB available"
                     break
-    except OSError:
+    # ValueError/IndexError as well as OSError: a malformed or unexpectedly
+    # shaped `MemAvailable:` line would otherwise raise out of a handler that
+    # runs when Chrome has ALREADY died — and taking `browserGone.emit()` down
+    # with it would turn a diagnostic into an outage.
+    except (OSError, ValueError, IndexError):
         pass
 
     load = "load unknown"

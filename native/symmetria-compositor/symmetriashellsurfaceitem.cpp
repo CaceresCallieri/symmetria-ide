@@ -8,6 +8,7 @@
 #include <QtGui/QWheelEvent>
 #include <QtWaylandCompositor/QWaylandCompositor>
 #include <QtWaylandCompositor/QWaylandPointer>
+#include <QtWaylandCompositor/QWaylandQuickItem>
 #include <QtWaylandCompositor/QWaylandSeat>
 #include <QtWaylandCompositor/QWaylandSurface>
 #include <QtWaylandCompositor/QWaylandView>
@@ -112,7 +113,15 @@ void SymmetriaShellSurfaceItem::enableHoverTree(QQuickItem *item)
     if (item == nullptr)
         return;
 
-    item->setAcceptHoverEvents(true);
+    // Only surface-bearing items are hover-enabled — the C++ equivalent of the
+    // `child.shellSurface !== undefined` test the QML version carried. Every
+    // hover-accepting item joins the window's hover delivery list, so switching
+    // this to "every descendant" would dispatch enter/move/leave to items that
+    // ignore them. The RECURSION is deliberately unfiltered: a popup could be
+    // parented under a plain wrapper Item, and stopping the walk there would
+    // lose the surface underneath it.
+    if (qobject_cast<QWaylandQuickItem *>(item) != nullptr)
+        item->setAcceptHoverEvents(true);
 
     for (QQuickItem *child : item->childItems())
         enableHoverTree(child);
@@ -135,7 +144,12 @@ void SymmetriaShellSurfaceItem::onChildrenChanged()
 {
     // `sender()` rather than a captured pointer is what lets this be a plain
     // member slot; Qt also drops the connection when the item dies, so there is
-    // no lifetime bookkeeping to get wrong.
+    // no lifetime bookkeeping to get wrong for the DESTRUCTION case.
+    //
+    // Accepted gap: an item REPARENTED away from this surface keeps its
+    // connection, so it goes on being re-swept. Harmless here and not worth the
+    // descendant check it would cost — Chrome's popups are destroyed when they
+    // close, never moved to another surface item.
     enableHoverTree(qobject_cast<QQuickItem *>(sender()));
 }
 

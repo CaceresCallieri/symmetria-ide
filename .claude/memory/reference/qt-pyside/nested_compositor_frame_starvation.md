@@ -8,6 +8,11 @@ metadata:
   modified: 2026-08-04T05:44:40.940Z
 ---
 
+All measurements below: **2026-07-28**, dev IDE on Hyprland workspace 6 with
+workspace 10 active. rAF counted with a `requestAnimationFrame` loop driven
+through CDP `Runtime.evaluate`; screenshots via `chrome-devtools-mcp`; CPU
+from `/proc/<pid>/stat` deltas over a fixed window.
+
 A nested Wayland client gets frame callbacks from ONE place: the host window's
 render loop. `QWaylandQuickOutput::initialize()` wires
 `QQuickWindow::beforeSynchronizing → updateStarted() → frameStarted()` and
@@ -37,8 +42,9 @@ first diagnosis chased the wrong layer.
 
 An inactive workspace is the obvious case, but a Qt window renders only when
 something in it is **dirty**. An IDE in full view showing an idle terminal
-renders a handful of frames a second and starves the client just as well —
-measured at ~3.5fps in exactly that state. Any check narrowed to workspace or
+renders a handful of frames a second and starves the client just as well.
+Measured at ~3.5fps in exactly that state — derived, not sampled directly:
+the watchdog found no host frame on 66 of ~80 ticks at 20Hz. Any check narrowed to workspace or
 window visibility will miss it.
 
 An earlier measurement in this project concluded the opposite ("hiding the
@@ -67,7 +73,10 @@ Four things that are easy to get wrong:
   The pane's compositor is built at startup and never torn down, so an ungated
   timer ticks for the whole session in every IDE — and this user runs ~10.
   Connect `surfaceAboutToBeDestroyed` **queued**: it fires while the surface is
-  still in `surfaces()`, so a direct re-count never reaches zero.
+  still in `surfaces()`, so a direct re-count never reaches zero. Symptom if
+  missed: the watchdog never disarms after the last surface goes — the exact
+  permanent-timer cost the gate exists to prevent, visible as
+  `SYMMETRIA_COMPOSITOR_DEBUG=1` traces still pumping after Chrome has exited.
 - **Do not try to force the host to render instead.** The same deadlock exists
   one level up — Hyprland sends no frame callbacks to a window it is not
   displaying, so Qt's render loop is blocked too.
@@ -76,8 +85,10 @@ Four things that are easy to get wrong:
 
 Frame callbacks PERMIT drawing, they do not force it — a client asks for one
 only when it has something to draw. A static page is therefore free at any rate.
-The pathological end (a full-screen animation repainting every frame with the
-pane invisible) is ~9% of one core. That asymmetry is what makes a fixed 20Hz
+The pathological end is ~9% of one core: a full-screen `hue-rotate` CSS
+animation injected into a static page, repainting every frame with the pane
+invisible, summing the IDE and Chrome browser-process `/proc/<pid>/stat`
+deltas over 4s. That asymmetry is what makes a fixed 20Hz
 interval defensible instead of something adaptive.
 
 Related: [nested compositor output mode](./nested_compositor_output_mode.md),

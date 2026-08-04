@@ -1,36 +1,47 @@
 ---
 name: nested-compositor-pointer-input
-description: Scrolling in the nested-Chrome pane needs THREE non-default things; all three mislead as focus bugs
+description: Pointer input in the nested-Chrome pane needs THREE non-default things — two fatal to scrolling, one to motion; all mislead as focus bugs
 metadata: 
   node_type: memory
   type: reference
   originSessionId: 1dc16f14-6524-437a-9b81-8d0fde68876c
-  modified: 2026-08-04T05:55:51.614Z
+  modified: 2026-08-04T16:44:03.428Z
 ---
 
 Pointer input into the IDE's nested-Wayland browser pane needs three things
-that Qt does not do by default. Each is **independently fatal to scrolling**,
-and — the reason this cost several rounds — all three produce the SAME
+that Qt does not do by default. **(2) and (3) are each independently fatal to
+SCROLLING; (1) is fatal to pointer MOTION** — hover states, hover-opened menus,
+cursor shape. The split is not a nicety: (1) was written in QML against a
+property that does not exist, so it never ran for weeks while scrolling worked
+perfectly, and an earlier version of this file called all three fatal to
+scrolling. That claim is retracted.
+
+What they DO share — the reason this cost several rounds — is the same
 misleading symptom: clicking works and dragging a page's scrollbar works, so
 every one of them reads as a focus bug. Press and move touch none of the three
 paths.
 
-Live code: `native/symmetria-compositor/symmetriashellsurfaceitem.{h,cpp}` and
-`qml/browser/BrowserPane.qml`. Both carry the full argument inline; this file
-is the "why does this look wrong but is correct" record for anyone tempted to
-simplify one of them.
+Live code: `native/symmetria-compositor/symmetriashellsurfaceitem.{h,cpp}` —
+all three live there and carry the full argument inline. This file is the "why
+does this look wrong but is correct" record for anyone tempted to simplify one
+of them. `qml/browser/BrowserPane.qml` retains only a comment recording why (1)
+must NOT go back to QML.
 
 ## 1. No pointer motion at all — hover is never enabled
 
 `QWaylandQuickItem` implements `hoverEnterEvent`/`hoverMoveEvent`, the only two
-callers of `sendMouseMoveEvent` — which is what gives the seat's pointer a
-focused surface — but it never sets `acceptHoverEvents`. On a stock item
-neither handler fires, so the client gets no pointer motion whatsoever:
-no scroll, no link hover states, no hover-opened menus, no cursor shape, no
-row highlighting in the omnibox dropdown.
+callers of `sendMouseMoveEvent` — which is what tells the client where the
+pointer is — but it never sets `acceptHoverEvents`, and neither does
+`QWaylandQuickShellSurfaceItem` (both verified against upstream Qt **6.8**
+source). On a stock item neither handler fires, so the client learns the
+pointer position only when a button goes down: no link hover states, no
+hover-opened menus, no cursor shape, no row highlighting in the omnibox
+dropdown.
 
-`mousePressEvent` calls `sendMouseMoveEvent` itself, which is why scrolling
-appears to "start working after a click" — the single most misleading clue.
+**Scrolling survives without it**, because `mousePressEvent` calls
+`sendMouseMoveEvent` itself — which is why an inert hover fix went unnoticed
+for weeks, and why "hover seems to work" is an unreliable observation here
+(hover states update at each click and freeze in between).
 
 Fix: **`setAcceptHoverEvents(true)`, in C++** — `SymmetriaShellSurfaceItem`'s
 constructor, walking its own children recursively for the popups Qt builds
@@ -40,8 +51,12 @@ construction, and the watch uses a member slot with `UniqueConnection` because
 the sweep re-runs over the whole subtree and a lambda would stack connections.
 
 ⚠ **This was first written in QML as `item.hoverEnabled = true`, and it never
-ran.** No Wayland item class has that property — in Qt 6.11 the Q_PROPERTY is
-declared only in `qquickmousearea_p.h` and three QtQuickTemplates2 headers — so
+ran.** No Wayland item class has that property — grepping the INSTALLED **6.11**
+headers, the Q_PROPERTY is declared only in `qquickmousearea_p.h` and three
+QtQuickTemplates2 headers. (Two Qt versions appear in this file on purpose: the
+"nothing calls `setAcceptHoverEvents`" claim was read from upstream 6.8 source,
+which is what is fetchable; the property-declaration claim from the 6.11
+headers actually installed here.) So
 the assignment threw on the walk's FIRST line, aborting it before the recursion
 or the signal connect. The entire symptom was one "Cannot assign to
 non-existent property" per session, and an inert hover walk is indistinguishable

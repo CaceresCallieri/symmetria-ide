@@ -59,9 +59,7 @@ class TestNeverDeactivated:
 
 
 class TestRequiredProperties:
-    def test_pane_is_constructed_with_its_required_properties(
-        self, loader_block: str
-    ):
+    def test_pane_is_constructed_with_its_required_properties(self, loader_block: str):
         """They are `required`, so they can only be supplied at construction —
         `setSource` is what makes that possible, and assigning them in
         `onLoaded` instead fails the load outright."""

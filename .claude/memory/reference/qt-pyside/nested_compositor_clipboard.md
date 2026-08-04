@@ -1,6 +1,6 @@
 ---
 name: nested-compositor-clipboard
-description: "Qt's nested Wayland compositor isolates the clipboard both ways; bridging it needs a ~30-line C++ QWaylandCompositor subclass (PySide6 has no bindings)"
+description: "Nested clipboard is isolated both ways; the C++ bridge SHIPPED 2026-08-04 — and the two directions have DIFFERENT focus requirements"
 metadata: 
   node_type: memory
   type: reference
@@ -9,6 +9,12 @@ metadata:
 ---
 
 # Nested-compositor clipboard is isolated both ways
+
+> **STATUS: SHIPPED 2026-08-04** as `SymmetriaCompositor` in
+> `native/symmetria-compositor/`, and verified in both directions — see the
+> section at the end. **Everything between here and there is the pre-build
+> scoping record**, kept for the reasoning trail; it is written in the
+> speculative tense of a decision not yet made.
 
 Spiked live 2026-07-27 while scoping the in-window browser (real Chrome as a
 `ShellSurfaceItem` inside the IDE — see [chrome-host-external-browser](../../project/active/chrome_external_browser.md)).
@@ -79,10 +85,21 @@ trace fires immediately and the client reads the current value. It is a latency
 property with a self-healing edge. Do not "fix" it by polling the host
 clipboard: an unfocused app has nothing to poll.
 
-Diagnostic note, cost an hour: `Page.bringToFront` HANGS over CDP against this
-nested Chrome, and a `Runtime.evaluate` behind it looks exactly like a broken
-clipboard API. Drop it and evaluate directly. Also pass `suppress_origin=True`
-to `websocket-client`, or Chrome rejects the CDP upgrade with a 403.
+Two diagnostic traps, an hour between them:
+
+- **`Page.bringToFront` HANGS over CDP against this nested Chrome**, and a
+  `Runtime.evaluate` queued behind it looks exactly like a broken clipboard
+  API. Drop it and evaluate directly. ⚠ Observed AFTER the frame-callback
+  watchdog landed, so it is NOT the
+  [frame starvation](./nested_compositor_frame_starvation.md) stall whose
+  signature is also a render-dependent CDP call never returning — the two
+  look identical and only the ordering separates them.
+- When probing this Chrome from an **ad-hoc Python script** (not
+  `cdp_client.py`, which uses QtWebSockets and is unaffected), pass
+  `suppress_origin=True` to `websocket-client` or Chrome rejects the CDP
+  upgrade with a 403.
 
 Related: [fork-changes-need-makepkg](./fork_changes_need_makepkg.md) — any such
-plugin has to be packaged before launcher-launched IDEs can load it.
+plugin has to be packaged before launcher-launched IDEs can load it;
+[nested compositor frame starvation](./nested_compositor_frame_starvation.md);
+[nested compositor pointer input](./nested_compositor_pointer_input.md).

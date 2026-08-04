@@ -95,10 +95,17 @@
 
 #pragma once
 
+#include <atomic>
+
+#include <QtCore/QPointer>
 #include <QtCore/QSize>
 #include <QtCore/QTimer>
 #include <QtQml/qqmlregistration.h>
 #include <QtWaylandCompositor/QWaylandQuickOutput>
+
+QT_BEGIN_NAMESPACE
+class QWaylandCompositor;
+QT_END_NAMESPACE
 
 class SymmetriaOutput : public QWaylandQuickOutput
 {
@@ -172,26 +179,45 @@ private:
     // time.
     void rewireRenderWatch();
     void rewireSurfaceWatch();
-    // Runs the watchdog only while a client actually has a surface here. The
-    // browser pane's compositor is built at startup and never torn down (its
-    // Loader must stay active or Chrome loses its display), so without this the
-    // timer would tick in every IDE for the whole session — and the user runs
-    // roughly ten at once, which turns a rounding error into ~200 pointless
-    // wakeups a second across the desktop. A project that never browses should
-    // pay nothing, which is the same principle that makes Chrome lazy-spawned.
+    // Runs the watchdog only while the COMPOSITOR has at least one surface.
+    // Deliberately not "a surface on this output": the count is
+    // `compositor()->surfaces()`, which includes cursor and subsurfaces
+    // belonging to no output. Equivalent today because the pane has exactly one
+    // output, and narrowing it to per-output views would buy nothing — but the
+    // distinction is written down so a second output does not silently keep the
+    // watchdog armed for the wrong reason.
+    //
+    // The browser pane's compositor is built at startup and never torn down
+    // (its Loader must stay active or Chrome loses its display), so without
+    // this gate the timer would tick in every IDE for the whole session — and
+    // the user runs roughly ten at once, which turns a rounding error into ~200
+    // pointless wakeups a second across the desktop. A project that never
+    // browses should pay nothing, the same principle that makes Chrome
+    // lazy-spawned.
     void updateWatchdogEnabled();
     void pumpFrameCallbacksIfStalled();
 
     bool m_warnedAboutSizeFollowsWindow = false;
 
     QTimer m_frameWatchdog;
-    // Written by the `afterRendering` handler and read by the watchdog tick.
-    // Both run on the GUI thread — `afterRendering` is emitted on the RENDER
-    // thread, so the connection is deliberately left queued (Qt's own
-    // `doFrameCallbacks` connection is queued for the same reason). A direct
-    // connection here would be a data race on this flag.
-    bool m_renderedSinceLastTick = false;
+    // Written by the `afterRendering` handler, read by the watchdog tick.
+    // `afterRendering` is emitted on the RENDER thread, so the connection is
+    // deliberately left queued (Qt's own `doFrameCallbacks` connection is
+    // queued for the same reason) and both ends therefore run on the GUI
+    // thread.
+    //
+    // Atomic anyway, and that is not belt-and-braces: the safety rests on an
+    // IMPLICIT `Qt::AutoConnection` resolving to queued, which is invisible at
+    // the connect site. Someone adding `Qt::DirectConnection` there as an
+    // obvious latency win would turn this into a cross-thread data race with
+    // nothing — not the compiler, not a test — to catch it. Free at this size.
+    std::atomic<bool> m_renderedSinceLastTick{false};
     QMetaObject::Connection m_renderWatch;
     QMetaObject::Connection m_surfaceAdded;
     QMetaObject::Connection m_surfaceRemoved;
+    // Guarded rather than re-read from `compositor()`: the surface watch is
+    // QUEUED, so its slot can run after the compositor is gone. Today the
+    // output is a child of the compositor and dies with it, but nothing
+    // enforces that, and a dangling read here would be a crash on teardown.
+    QPointer<QWaylandCompositor> m_compositor;
 };

@@ -87,6 +87,17 @@ class TestTally:
         assert len(errors) == 1
         assert "syntax" in errors[0]
 
+    def test_an_unknown_severity_is_advisory_not_fatal(self, gate):
+        """The severity check is a deny-list on purpose. Inverted, qmllint's
+        `debug` type (emitted in some configurations) would be promoted to a
+        hard error and block every commit touching the file, with a message
+        that reads like a real defect."""
+        counts, errors = gate._tally(
+            _report("qml/Fake.qml", [_warning("some-new-category", type_="debug")])
+        )
+        assert errors == []
+        assert counts == {"qml/Fake.qml": {"some-new-category": 1}}
+
 
 class TestRatchet:
     def test_a_count_at_the_baseline_passes(self, gate):
@@ -140,10 +151,15 @@ class TestBaselineFile:
         assert isinstance(data, dict)
         assert data, "an empty baseline would fail every QML commit"
 
-    def test_the_baseline_covers_the_tracked_tree(self, gate):
-        """Guards the ordering trap: regenerating the baseline from a partial
-        file list silently drops every file not passed, and the next commit
-        touching one of them fails for reasons that read as unrelated."""
+    def test_the_baseline_names_no_untracked_file(self, gate):
+        """Catches STALE entries — a deleted or renamed .qml whose row outlives
+        it, quietly granting a budget to nothing.
+
+        It does NOT catch the opposite (a baseline regenerated from a partial
+        file list, dropping rows): proving that needs a full-tree tally, which
+        would make the suite depend on a Qt6 qmllint being installed. CI runs
+        `pyside6-qmllint` instead, so the test would fail there for reasons
+        unrelated to the code."""
         listed = set(json.loads(gate.BASELINE_PATH.read_text()))
         tracked = {gate._relative(path) for path in gate._tracked_qml_files()}
         assert listed <= tracked, "the baseline names files that are not tracked"

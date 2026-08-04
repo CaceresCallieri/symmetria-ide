@@ -222,8 +222,15 @@ def _release_app_controller_workers(monkeypatch):
     original_init = app_module.AppController.__init__
 
     def tracking_init(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
+        # Tracked BEFORE construction, not after: a controller whose __init__
+        # raises partway has usually already started some of its worker
+        # threads, and those are exactly the ones that pin it. Appending
+        # afterwards would leave the failed-construction case — the one the
+        # teardown below claims to cover — untracked. `self` is a valid object
+        # here, and the teardown's `getattr(sub, "stop", None)` already
+        # tolerates the half-built attributes that follow from this.
         created.append(self)
+        original_init(self, *args, **kwargs)
 
     monkeypatch.setattr(app_module.AppController, "__init__", tracking_init)
     yield
@@ -271,6 +278,30 @@ def wait_until(predicate, timeout: float = 3.0, message: str = "") -> None:
     while not predicate() and time.monotonic() < deadline:
         time.sleep(0.01)
     assert predicate(), message or "condition not reached within timeout"
+
+
+def braced_block(text: str, marker: str) -> str:
+    """The ``{ ... }`` block introduced by ``marker``, by brace counting.
+
+    For the structural tests that assert against C++/QML source. Fixed-width
+    slices were used for this before and are a trap: grow the block past the
+    magic length and the assertions silently move out of the inspected window,
+    so the failure reads as a regression in the code rather than in the test.
+
+    Lives here because two sibling test modules had grown character-identical
+    copies, comment and all — the standard setup for one of them drifting.
+    """
+    start = text.index(marker)
+    open_at = text.index("{", start)
+    depth = 0
+    for i in range(open_at, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    raise AssertionError(f"unbalanced braces after {marker!r}")
 
 
 def construction_source(cls) -> str:

@@ -27,10 +27,25 @@ import pytest
 
 _TESTS_DIR = Path(__file__).resolve().parent
 
-# Method names that run the global event queue. `qWait` and `exec` are here
-# alongside `processEvents` because they pump it just as thoroughly, so
-# forbidding only the famous one moves the fault under a name nobody greps for.
-_PUMPING_METHODS = frozenset({"processEvents", "qWait", "exec", "exec_"})
+# Method names that run the global event queue. Everything past
+# `processEvents` is here because it pumps just as thoroughly, and forbidding
+# only the famous one moves the fault under a name nobody greps for.
+#
+# `sendPostedEvents` deserves its place at the front: narrowing the pump to
+# `sendPostedEvents(None, QEvent.Type.MetaCall)` was TRIED as a fix for the
+# original crash and did not work (3/3 still failed), so it is a known and
+# tempting wrong turn — and `sendPostedEvents(None, DeferredDelete)` would run
+# precisely the deletions this whole guard exists to prevent.
+_PUMPING_METHODS = frozenset(
+    {
+        "processEvents",
+        "sendPostedEvents",
+        "qWait",
+        "qWaitFor",
+        "exec",
+        "exec_",
+    }
+)
 
 
 def _pump_calls(source: str) -> list[str]:
@@ -47,13 +62,22 @@ def _pump_calls(source: str) -> list[str]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
+        # Attribute AND bare-name calls: `p = app.processEvents; p()` rebinds
+        # the method and would slip past an attribute-only check.
         if isinstance(func, ast.Attribute) and func.attr in _PUMPING_METHODS:
             found.append(f"line {node.lineno}: .{func.attr}()")
+        elif isinstance(func, ast.Name) and func.id in _PUMPING_METHODS:
+            found.append(f"line {node.lineno}: {func.id}()")
     return found
 
 
 def _test_sources() -> list[Path]:
-    return sorted(_TESTS_DIR.glob("*.py"))
+    # Recursive: a non-recursive glob exempts the first `tests/<subdir>/`
+    # anyone adds, silently — the exact bug this same change fixed in CI, where
+    # `qml/*.qml` had been skipping `qml/browser/` for months.
+    return sorted(
+        path for path in _TESTS_DIR.rglob("*.py") if "__pycache__" not in path.parts
+    )
 
 
 @pytest.mark.parametrize("path", _test_sources(), ids=lambda p: p.name)
@@ -74,6 +98,16 @@ class TestTheDetector:
         assert _pump_calls("QCoreApplication.processEvents()")
         assert _pump_calls("QTest.qWait(100)")
         assert _pump_calls("app.exec()")
+
+    def test_the_narrowed_pump_is_found(self):
+        """The one that was actually tried as a fix and did not work — so it is
+        the likeliest to be reached for again."""
+        assert _pump_calls("QCoreApplication.sendPostedEvents(None, MetaCall)")
+        assert _pump_calls("QTest.qWaitFor(lambda: done)")
+
+    def test_a_rebound_pump_is_found(self):
+        """`p = app.processEvents; p()` defeats an attribute-only matcher."""
+        assert _pump_calls("processEvents()")
 
     def test_prose_about_the_rule_is_not_a_pump(self):
         """The rule has to stay explainable in the files it governs."""

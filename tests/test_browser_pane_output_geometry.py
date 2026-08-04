@@ -27,29 +27,9 @@ import re
 from pathlib import Path
 
 import pytest
+from conftest import braced_block as _braced_block
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-def _braced_block(text: str, marker: str) -> str:
-    """The `{ ... }` block introduced by `marker`, by brace counting.
-
-    Fixed-width slices were used here before and are a trap: grow the block past
-    the magic length and the assertions silently move out of the inspected
-    window, so the failure reads as a regression in the code rather than in the
-    test.
-    """
-    start = text.index(marker)
-    open_at = text.index("{", start)
-    depth = 0
-    for i in range(open_at, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    raise AssertionError(f"unbalanced braces after {marker!r}")
 
 
 def _call_args(text: str, call: str) -> list[str]:
@@ -271,8 +251,36 @@ class TestOutputImplementation:
         block = _braced_block(
             output_cpp, "void SymmetriaOutput::updateWatchdogEnabled()"
         )
-        assert "surfaces().isEmpty()" in block
+        assert "surfaces.isEmpty()" in block
         assert ".start()" in block and ".stop()" in block
+
+    def test_the_compositor_is_reached_through_a_guarded_pointer(self, output_cpp: str):
+        """The destroy watch is QUEUED, so its slot can run after the compositor
+        is destroyed; reading `compositor()` there would dangle. Today the
+        output is a child of the compositor and dies with it, but nothing
+        enforces that, and the crash would land on teardown — where it is
+        hardest to attribute to anything."""
+        header = (
+            _REPO_ROOT / "native" / "symmetria-compositor" / "symmetriaoutput.h"
+        ).read_text()
+        assert "QPointer<QWaylandCompositor> m_compositor" in header
+        block = _braced_block(
+            output_cpp, "void SymmetriaOutput::updateWatchdogEnabled()"
+        )
+        assert "compositor()" not in block, "must read the QPointer, not re-fetch"
+
+    def test_a_non_positive_interval_is_refused_not_clamped(self, output_cpp: str):
+        """The interval is QML-settable so it can be retuned without rebuilding
+        a packaged plugin. Zero or negative would turn the watchdog into a busy
+        loop firing on every event-loop pass — refused loudly rather than
+        silently substituted, because a clamp hides the mistake behind a
+        machine that merely runs hot."""
+        block = _braced_block(
+            output_cpp, "void SymmetriaOutput::setStalledFrameIntervalMs"
+        )
+        assert "intervalMs <= 0" in block
+        assert "qWarning" in block
+        assert "return" in block[block.index("qWarning") :], "must not fall through"
 
     def test_the_destroy_signal_is_queued(self, output_cpp: str):
         """`surfaceAboutToBeDestroyed` fires while the surface is STILL in

@@ -29,7 +29,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Startup optimization outcomes](project/active/startup_optimization_followups.md) — gc.collect drop SHIPPED (51bf26c, ~20ms); WebEngine import deferral spiked+works but HELD (Qt-deprecated late init)
 - [Agent ownership inversion (P1-4 SHIPPED; P5 IDE-decoupled)](project/active/agent_ownership_inversion.md) — claude agents IDE-owned; STT now pure-direct shell→IDE (bridge STT/inject removed); orchestrator.nvim KEPT (IDE just decoupled). Live dictation verify owed. See docs/agent-ownership-inversion.md
 - [VPS location toggle (SHIPPED 2026-07-12)](project/active/vps_location_toggle.md) — Local↔VPS per-project context; invariants in CLAUDE.md; deferrals: reconnect chip, vps coordination, mosh
-- [Agentic browser = external Chrome (SHIPPED 2026-07-27)](project/active/chrome_external_browser.md) — QtWebEngine retired; in-window form next via nested Wayland compositor
+- [Agentic browser = nested-compositor Chrome (SHIPPED)](project/active/chrome_external_browser.md) — QtWebEngine and the pinned-window form both retired; Chrome renders in-pane
 
 ## Project — shipped — `project/shipped/` (past-tense systems; one consolidated bullet)
 
@@ -62,9 +62,9 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Startup performance](reference/qt-pyside/startup_perf.md) — SYMMETRIA_IDE_TRACE waterfall + interleaved A/B; fixed browser-MCP GUI-thread import (~1s) + eager WebEngine (~430ms)
 - [Nested-compositor output mode](reference/qt-pyside/nested_compositor_output_mode.md) — the wl_output must describe the PANE, not the window; only C++ can say so
 - [Nested-compositor pointer input](reference/qt-pyside/nested_compositor_pointer_input.md) — scroll needs 3 non-default things; all mislead as focus bugs
-- [Nested-compositor frame starvation](reference/qt-pyside/nested_compositor_frame_starvation.md) — host stops rendering → client stalls FOREVER (rAF 0); needs a watchdog, not a workspace check
-- [Nested-compositor clipboard](reference/qt-pyside/nested_compositor_clipboard.md) — isolated BOTH ways; bridging needs a ~30-line C++ QWaylandCompositor subclass
-- [Why the suite dies "intermittently"](reference/qt-pyside/processevents_shared_app_segv.md) — two causes: pumping the session app, and leaked AppControllers (a worker thread pins its own object)
+- [Nested-compositor frame starvation](reference/qt-pyside/nested_compositor_frame_starvation.md) — host stops rendering → client stalls forever; needs a watchdog
+- [Nested-compositor clipboard](reference/qt-pyside/nested_compositor_clipboard.md) — bridge SHIPPED; nested→host works unfocused, host→nested needs IDE focus (self-heals)
+- [Why the suite dies "intermittently"](reference/qt-pyside/processevents_shared_app_segv.md) — two causes: pumping the session app, and leaked AppControllers
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
 

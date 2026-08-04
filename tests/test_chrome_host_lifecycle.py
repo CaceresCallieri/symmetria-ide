@@ -14,6 +14,7 @@ makes that impossible).
 
 from __future__ import annotations
 
+import io
 import os
 from types import SimpleNamespace
 
@@ -270,3 +271,66 @@ class TestTeardown:
         host.stop()
         host._on_cdp_disconnected()
         assert seen == []
+
+
+class TestMachineStateDiagnostic:
+    """`_machine_state` runs in the log line for an UNEXPECTED Chrome death.
+
+    That is its whole hazard: it executes only when something has already gone
+    wrong, so a regression here is discovered exactly when the diagnostic was
+    needed and no longer available. Worse, it sits upstream of
+    `browserGone.emit()` — a raise would swallow the signal that drops the
+    window registry, turning a browser crash into a browser crash the IDE does
+    not notice.
+    """
+
+    def test_it_reports_available_memory_not_free(self, monkeypatch):
+        """MemFree is near zero on a healthy machine because the page cache
+        holds it — reading the wrong one is how "out of memory" gets diagnosed
+        where there is none."""
+        monkeypatch.setattr(
+            chrome_host,
+            "open",
+            lambda *a, **k: io.StringIO(
+                "MemFree: 12345 kB\nMemAvailable: 4194304 kB\n"
+            ),
+            raising=False,
+        )
+        assert "4.0GiB available" in chrome_host._machine_state()
+
+    @pytest.mark.parametrize(
+        "meminfo",
+        [
+            pytest.param("MemTotal: 1 kB\n", id="no-MemAvailable-line"),
+            pytest.param("MemAvailable: not-a-number kB\n", id="unparseable-value"),
+            pytest.param("MemAvailable:\n", id="value-field-missing"),
+        ],
+    )
+    def test_a_malformed_meminfo_degrades_instead_of_raising(
+        self, monkeypatch, meminfo
+    ):
+        """The last two raise ValueError and IndexError respectively — neither
+        is an OSError, so a narrower except would let them out."""
+        monkeypatch.setattr(
+            chrome_host, "open", lambda *a, **k: io.StringIO(meminfo), raising=False
+        )
+        assert "mem unknown" in chrome_host._machine_state()
+
+    def test_an_unreadable_procfs_degrades(self, monkeypatch):
+        def boom(*_args, **_kwargs):
+            raise OSError("procfs gone")
+
+        monkeypatch.setattr(chrome_host, "open", boom, raising=False)
+        assert "mem unknown" in chrome_host._machine_state()
+
+    def test_load_is_reported_and_its_failure_is_survivable(self, monkeypatch):
+        assert "load " in chrome_host._machine_state()
+
+        def boom():
+            raise OSError("no loadavg")
+
+        monkeypatch.setattr(chrome_host.os, "getloadavg", boom)
+        state = chrome_host._machine_state()
+        assert "load unknown" in state
+        # The other half must still be reported — the two are independent.
+        assert "available" in state

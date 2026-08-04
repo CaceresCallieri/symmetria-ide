@@ -104,7 +104,11 @@ void SymmetriaOutput::rewireSurfaceWatch()
     disconnect(m_surfaceAdded);
     disconnect(m_surfaceRemoved);
 
-    QWaylandCompositor *comp = compositor();
+    // Stored, not re-read in the slot: the destroy connection below is QUEUED,
+    // so its slot can run after the compositor is destroyed, and a raw
+    // `compositor()` read there would dangle.
+    m_compositor = compositor();
+    QWaylandCompositor *comp = m_compositor;
     if (comp == nullptr) {
         m_frameWatchdog.stop();
         return;
@@ -124,14 +128,20 @@ void SymmetriaOutput::rewireSurfaceWatch()
 
 void SymmetriaOutput::updateWatchdogEnabled()
 {
-    const QWaylandCompositor *comp = compositor();
-    const bool wanted = comp != nullptr && !comp->surfaces().isEmpty();
+    // Through the QPointer, so a compositor destroyed between a queued
+    // `surfaceAboutToBeDestroyed` and its delivery reads as "no surfaces"
+    // rather than as a dangling pointer.
+    const QWaylandCompositor *comp = m_compositor;
+    // Fetched once: `surfaces()` returns a QList BY VALUE and this runs on
+    // every surface creation.
+    const auto surfaces =
+        comp != nullptr ? comp->surfaces() : QList<QWaylandSurface *>{};
+    const bool wanted = !surfaces.isEmpty();
 
     if (symmetria::traceEnabled())
         symmetria::trace("frame watchdog: re-evaluated (compositor=%p surfaces=%d "
                          "wanted=%d active=%d)",
-                         static_cast<const void *>(comp),
-                         comp != nullptr ? int(comp->surfaces().size()) : -1,
+                         static_cast<const void *>(comp), int(surfaces.size()),
                          int(wanted), int(m_frameWatchdog.isActive()));
 
     if (wanted == m_frameWatchdog.isActive())
@@ -165,7 +175,7 @@ void SymmetriaOutput::pumpFrameCallbacksIfStalled()
     // Mirrors Qt's own guard in `updateStarted()`. An output can outlive or
     // precede its compositor during teardown and QML construction, and both
     // calls below reach through it.
-    if (compositor() == nullptr)
+    if (m_compositor.isNull())
         return;
 
     if (symmetria::traceEnabled())
