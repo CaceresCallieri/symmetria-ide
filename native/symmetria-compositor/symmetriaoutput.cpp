@@ -169,6 +169,10 @@ void SymmetriaOutput::pumpFrameCallbacksIfStalled()
     // frames the host has no intention of showing.
     if (m_renderedSinceLastTick) {
         m_renderedSinceLastTick = false;
+        if (m_stalledPumps > 0 && symmetria::traceEnabled())
+            symmetria::trace("frame watchdog: host resumed after %d pump(s)",
+                             m_stalledPumps);
+        m_stalledPumps = 0;
         return;
     }
 
@@ -178,8 +182,19 @@ void SymmetriaOutput::pumpFrameCallbacksIfStalled()
     if (m_compositor.isNull())
         return;
 
-    if (symmetria::traceEnabled())
-        symmetria::trace("frame watchdog: host stalled, pumping callbacks");
+    // Both edges and a periodic summary, never the tick itself — see
+    // `m_stalledPumps`. The interval is in PUMPS rather than seconds so it
+    // stays tied to the thing being reported; at the 20Hz tick that is one
+    // line every ten seconds.
+    static constexpr int kStalledTraceEveryPumps = 200;
+    ++m_stalledPumps;
+    if (symmetria::traceEnabled()) {
+        if (m_stalledPumps == 1)
+            symmetria::trace("frame watchdog: host stalled, pumping callbacks");
+        else if (m_stalledPumps % kStalledTraceEveryPumps == 0)
+            symmetria::trace("frame watchdog: still stalled (%d pumps)",
+                             m_stalledPumps);
+    }
 
     // The exact pair the render loop calls, in the same order: `frameStarted`
     // marks each surface as beginning a frame, `sendFrameCallbacks` then

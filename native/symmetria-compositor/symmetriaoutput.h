@@ -212,6 +212,13 @@ private:
     // obvious latency win would turn this into a cross-thread data race with
     // nothing — not the compiler, not a test — to catch it. Free at this size.
     std::atomic<bool> m_renderedSinceLastTick{false};
+    // Consecutive stalled ticks, for the trace only — a fixed-rate watchdog
+    // that traces EVERY pump emits 20 lines a second forever, and the first
+    // version did. It buried a whole day of the IDE's own log under 752k
+    // identical lines, which is a real cost: `SYMMETRIA_COMPOSITOR_DEBUG=1`
+    // gets turned on to investigate something, and this drowns whatever that
+    // was. Traced on the transitions plus a periodic summary instead.
+    int m_stalledPumps = 0;
     QMetaObject::Connection m_renderWatch;
     QMetaObject::Connection m_surfaceAdded;
     QMetaObject::Connection m_surfaceRemoved;
