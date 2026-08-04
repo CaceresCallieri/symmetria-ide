@@ -24,11 +24,14 @@ from symmetria_ide import chrome_host
 
 
 class FakeProc:
-    def __init__(self, argv, stderr_lines=()):
+    def __init__(self, argv, stderr_lines=(), exit_status=0):
         self.argv = argv
         self.terminated = False
         self.waited = False
         self._alive = True
+        # Negative is `-signum`, as Popen reports it. Chrome's FATAL raises
+        # SIGTRAP, so -5 is what a real crash looks like here.
+        self._exit_status = exit_status
         # Bytes, like the real pipe yields.
         self.stderr = iter(list(stderr_lines))
 
@@ -37,7 +40,7 @@ class FakeProc:
 
     def wait(self):
         self.waited = True
-        return 0
+        return self._exit_status
 
     def terminate(self):
         self.terminated = True
@@ -246,6 +249,80 @@ class TestCrashForensics:
         host._proc = None  # as stop() leaves it
         host._drain_chrome_stderr(proc)
         assert proc.waited
+
+
+# The real GPU-death sequence, in order, from a `strings` read of the installed
+# Chrome. Only the LAST line matches the drain's loud-line allow-list, which is
+# how three crashes came to be recorded as a lone context-free `Goodbye.`.
+GPU_DEATH = [
+    b"[123:456] The GPU process has crashed 3 time(s)\n",
+    b"[123:456] GPU process exited unexpectedly: exit_code=15\n",
+    (
+        b"[123:456] FATAL:gpu_data_manager_impl_private.cc:416] "
+        b"GPU process isn't usable. Goodbye.\n"
+    ),
+]
+
+
+class TestStderrHistory:
+    """The allow-list alone kept the LAST line of a GPU failure and dropped the
+    three before it that say why — see `_drain_chrome_stderr`."""
+
+    def test_a_bad_exit_dumps_what_chrome_said_first(self, host, caplog):
+        proc = FakeProc([], GPU_DEATH, exit_status=-5)
+        with caplog.at_level("DEBUG"):
+            host._drain_chrome_stderr(proc)
+        dump = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        )
+        # The two lines the allow-list had no token for. Asserting on the FATAL
+        # would pass against the old code, which already logged that one.
+        assert "crashed 3 time(s)" in dump
+        assert "exit_code=15" in dump
+
+    def test_a_bad_exit_names_the_signal(self, host, caplog):
+        """-5 is SIGTRAP, which Chrome raises on its OWN failed CHECK. Reading
+        it as "something killed us" points the next investigation outward, at
+        the OOM killer and the session manager, where there is nothing."""
+        proc = FakeProc([], GPU_DEATH, exit_status=-5)
+        with caplog.at_level("DEBUG"):
+            host._drain_chrome_stderr(proc)
+        assert any(
+            "signal 5" in r.getMessage()
+            for r in caplog.records
+            if r.levelname == "WARNING"
+        )
+
+    def test_our_own_teardown_dumps_nothing(self, host, caplog):
+        """`stop()` SIGTERMs Chrome on every IDE quit. A tail dumped there
+        teaches the reader to skip the block, which is only ever read once."""
+        host._stopping = True
+        proc = FakeProc([], GPU_DEATH, exit_status=-15)
+        with caplog.at_level("DEBUG"):
+            host._drain_chrome_stderr(proc)
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+    def test_a_clean_exit_dumps_nothing(self, host, caplog):
+        """The warm `--new-window` handoff ends this way every time it wins."""
+        proc = FakeProc([], [b"[123:456] some routine warning\n"], exit_status=0)
+        with caplog.at_level("DEBUG"):
+            host._drain_chrome_stderr(proc)
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+    def test_the_history_is_bounded(self, host, caplog):
+        """A browser left open for days must not accumulate its whole stderr in
+        memory waiting for a crash that may never come."""
+        flood = [
+            b"chatter %d\n" % n for n in range(chrome_host._STDERR_HISTORY_LINES * 3)
+        ]
+        proc = FakeProc([], flood, exit_status=-5)
+        with caplog.at_level("DEBUG"):
+            host._drain_chrome_stderr(proc)
+        dump = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        )
+        assert "chatter 0" not in dump  # evicted
+        assert f"chatter {len(flood) - 1}" in dump  # the newest survives
 
 
 class TestTeardown:

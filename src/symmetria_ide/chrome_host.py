@@ -15,11 +15,14 @@ enforced: `hyprctl clients` does not list the browser AT ALL, so there is no
 window to escape, no map-time race to lose, and no workspace rule to maintain
 (the whole `hyprland_ipc` module went away with it).
 
-Measured before committing to it: with the IDE on an INACTIVE workspace and the
-browser surface hidden four different ways, `Page.captureScreenshot` stayed at
-~60ms and the page kept a full 60Hz of requestAnimationFrame. The obvious fear —
-that an unrendered surface stops getting frame callbacks and reintroduces the
-QtWebEngine stall by another door — did not materialise.
+⚠ That fear DID materialise, and an earlier version of this docstring said
+otherwise on the strength of a bad measurement. Re-measured 2026-07-28 in the
+same configuration: **0 rAF ticks in 1007ms** and screenshots that never
+returned. A nested client stalls permanently once the host stops producing
+frames, and the trigger is that — not "another workspace"; an IDE in full view
+showing an idle terminal starves it too. The fix is the frame-callback watchdog
+in `SymmetriaOutput`; the retraction and the method are in
+`.claude/memory/reference/qt-pyside/nested_compositor_frame_starvation.md`.
 
 Three constraints shape everything here, and all three trace back to one fact:
 **Chrome is a singleton per `--user-data-dir`.**
@@ -52,6 +55,7 @@ import re
 import shutil
 import subprocess
 import threading
+from collections import deque
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -77,6 +81,13 @@ _TEMPLATE_PROFILE_FILES = (
     "Web Data",
 )
 _TEMPLATE_PROFILE_DIRS = ("Local Storage", "IndexedDB")
+
+# How many of Chrome's most recent stderr lines to keep for the post-mortem.
+# Sized against what it has to hold rather than picked round: a GPU failure
+# announces itself over a handful of lines and only the LAST of them was being
+# logged. 200 spans a whole launch's chatter with room to spare, bounded at
+# roughly 40KB of held strings.
+_STDERR_HISTORY_LINES = 200
 
 _SLUG_SAFE = re.compile(r"[^a-zA-Z0-9._-]+")
 
@@ -465,15 +476,31 @@ class ChromeHost(QObject):
         of here, so it is outside gotcha #10's blast radius.
 
         Chrome is noisy about things that do not matter (font, GPU and dbus
-        warnings on every launch), so the routine lines go to debug. The lines
-        that matter announce themselves loudly enough to grep for, and those
-        are re-logged at error: a Wayland protocol error or a failed CHECK is
-        the last thing Chrome says before SIGTRAP, and it is the only readable
-        account of why — the core is a stripped binary.
+        warnings on every launch), so the routine lines go to debug and a
+        loud-line allow-list is re-logged at error: a Wayland protocol error or
+        a failed CHECK is the last thing Chrome says before SIGTRAP, and the
+        core it leaves is a stripped binary.
+
+        **That allow-list on its own silently discarded the only evidence that
+        mattered.** `FATAL: GPU process isn't usable. Goodbye.` is the END of a
+        sequence — it means Chrome ran out of GPU fallback modes — and the three
+        lines that say why (`GPU process exited unexpectedly: exit_code=`, `The
+        GPU process has crashed N time(s)`, `Exiting GPU process due to errors
+        during initialization`; all four confirmed present in the installed
+        binary with `strings`) contain not one of the allow-list's tokens. Three
+        crashes were captured in the wild as a lone context-free FATAL line, and
+        the investigation they should have settled is still open.
+
+        So every line also goes into a bounded ring buffer, dumped by
+        `_report_chrome_exit` when the process dies badly. Deliberately NOT
+        "add the GPU tokens to the allow-list": that repairs this failure mode
+        and discards the next one exactly as quietly. A recorder that needs no
+        advance knowledge of the vocabulary is the whole point.
 
         Takes `proc` as an argument rather than reading `self._proc`, which
         moves underneath it — see the call site.
         """
+        history: deque[str] = deque(maxlen=_STDERR_HISTORY_LINES)
         # getattr, not attribute access: `Popen.stderr` is None whenever the
         # pipe was not requested, and this must degrade to "just reap" rather
         # than take the reaper down with it.
@@ -484,6 +511,7 @@ class ChromeHost(QObject):
                     line = raw.decode("utf-8", "replace").rstrip()
                     if not line:
                         continue
+                    history.append(line)
                     lowered = line.lower()
                     if (
                         "protocol error" in lowered
@@ -497,7 +525,42 @@ class ChromeHost(QObject):
             # The pipe went away with the process — nothing left to report.
             pass
         finally:
-            proc.wait()
+            self._report_chrome_exit(proc.wait(), history)
+
+    def _report_chrome_exit(self, status: int, history: deque[str]) -> None:
+        """Say how Chrome exited, and dump the stderr tail when it went badly.
+
+        Split out of the drain so it can be exercised without a live pipe.
+
+        This is the ONE path that also covers a Chrome which died before CDP
+        ever attached — `_on_cdp_disconnected` cannot fire for a session that
+        never existed, and "errors during initialization" is precisely such a
+        case. That is why the machine state is read here as well: a duplicated
+        line at a rare event costs nothing next to a blind spot.
+        """
+        if self._stopping:
+            # We sent that SIGTERM ourselves. Dumping the whole tail on every
+            # clean IDE quit would train the reader to skip exactly the block
+            # that matters on the one quit that was not clean.
+            log.info("chrome: exited on our own terminate (status %d)", status)
+            return
+        if status == 0:
+            # The warm `--new-window` handoff's normal end: it hands the
+            # request to the running Chrome and returns.
+            log.info("chrome: exited cleanly")
+            return
+        # A negative status is `-signum`. Chrome's FATAL path raises SIGTRAP, so
+        # a -5 here is the signature of its own CHECK rather than of anything
+        # having killed the process from outside — worth telling apart at a
+        # glance, since the two lead to opposite investigations.
+        cause = f"signal {-status}" if status < 0 else f"status {status}"
+        log.warning("chrome: exited on %s — %s", cause, _machine_state())
+        if history:
+            log.warning(
+                "chrome: last %d stderr line(s) before the exit:\n  %s",
+                len(history),
+                "\n  ".join(history),
+            )
 
     @Slot()
     def _on_cdp_disconnected(self) -> None:
