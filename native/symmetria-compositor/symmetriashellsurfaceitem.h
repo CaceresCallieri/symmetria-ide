@@ -23,8 +23,8 @@
 // dragging a page's scrollbar works perfectly, because press/move/release never
 // touch this arithmetic. That makes it look like a focus or hover problem.
 //
-// WHAT IT DOES, in two parts — reverting to the stock item breaks scrolling
-// through EITHER of them, so both have to be understood together:
+// WHAT IT DOES, in three parts — reverting to the stock item breaks scrolling
+// through either of the first two, so those have to be understood together:
 //
 //  1. Accumulates `angleDelta` and forwards only whole multiples of 12,
 //     carrying the remainder to the next event, so fragments add up instead of
@@ -37,11 +37,31 @@
 //     the browser does not scroll at all, however correct the axis values are.
 //     The full argument, including why it is a deliberate protocol deviation,
 //     is on `sendPointerFrame` in the .cpp.
+//  3. Accepts HOVER events, for itself and for the popup items Qt builds under
+//     it. `QWaylandQuickItem::hoverEnterEvent` / `hoverMoveEvent` are the only
+//     callers of `sendMouseMoveEvent` — the call that gives the seat's pointer
+//     a focused surface and a position — and NOTHING in Qt turns hover on:
+//     verified against 6.8 source that neither `QWaylandQuickItem` nor
+//     `QWaylandQuickShellSurfaceItem` ever calls `setAcceptHoverEvents`. So a
+//     stock item receives pointer motion only while a button is held, and the
+//     client is told where the pointer is only when something is clicked.
 //
-// ⚠ Popups get NEITHER. Qt creates those items itself in C++
-// (`maybeCreateAutoPopup`) and there is no hook to substitute a subclass, so
-// scrolling INSIDE a long Chrome dropdown hits the stock arithmetic AND never
-// gets a frame. Fixing that means creating popup items from QML, which means
+// ⚠ (3) REPLACES A DEAD QML ATTEMPT — do not restore it. `BrowserPane.qml`
+// used to walk the item tree assigning `item.hoverEnabled = true`, but
+// `hoverEnabled` is not a property of `QQuickItem`, `QWaylandQuickItem` or
+// `QWaylandQuickShellSurfaceItem` (in Qt 6.11 that Q_PROPERTY exists only on
+// `MouseArea` and three QtQuickTemplates2 types). The assignment threw on its
+// first line, which aborted the function before it could recurse or connect its
+// signal — so the walk never ran at all, for the surface OR the popups, and its
+// only trace was a single "Cannot assign to non-existent property" per session.
+// The real API is `setAcceptHoverEvents`, a C++ method with no QML equivalent,
+// which is why this belongs here and could never have worked there.
+//
+// Popups are handled by walking children in C++ because Qt builds them itself
+// (`maybeCreateAutoPopup`) as stock items we never get to declare. That walk
+// can give them (3) but NOT (1) or (2), which need the subclass: scrolling
+// INSIDE a long Chrome dropdown still hits the stock arithmetic and never gets
+// a frame. Fixing that means creating popup items from QML, which means
 // reimplementing Qt's popup positioning — a worse trade for a rarer case.
 
 #pragma once
@@ -65,7 +85,18 @@ public:
 protected:
     void wheelEvent(QWheelEvent *event) override;
 
+private Q_SLOTS:
+    // Re-sweeps the item that emitted `childrenChanged`. A member slot, not a
+    // lambda, so the connection can be `UniqueConnection` — see the .cpp.
+    void onChildrenChanged();
+
 private:
+    // Turns hover on for `item` and everything under it, and keeps doing so as
+    // Qt adds children — a popup can parent a further popup (a submenu inside a
+    // menu), and `childrenChanged` only reports what arrives AFTER the connect,
+    // so each new item is swept immediately as well as watched.
+    void enableHoverTree(QQuickItem *item);
+
     // Sub-threshold scroll carried into the next event. Per-item, because two
     // browser windows scroll independently.
     QPoint m_carry;

@@ -289,71 +289,34 @@ Item {
         clip: true
     }
 
-    // Pointer input reaches a nested surface ONLY through hover, and Qt does
-    // not enable it. `QWaylandQuickItem` implements hoverEnterEvent and
-    // hoverMoveEvent — the two places that call `sendMouseMoveEvent` and so
-    // give the seat's pointer a focused surface — but never sets
-    // `acceptHoverEvents`, so on a stock item neither ever fires.
-    //
-    // The visible casualty is SCROLLING: `wheelEvent` sends only the axis
-    // delta, never a position, so with no pointer focus the event lands
-    // nowhere and pages do not scroll at all. `mousePressEvent` does call
-    // `sendMouseMoveEvent` itself, which is why clicking works and why scroll
-    // appears to "start working" after a click — a very misleading symptom.
-    // Everything else pointer-driven is affected too: link hover states,
-    // menus that open on hover, cursor shape, and highlighting rows in the
-    // omnibox dropdown.
-    //
-    // Popups have to be handled by walking children because Qt creates them in
-    // C++ (`QWaylandQuickShellSurfaceItemPrivate::maybeCreateAutoPopup`), as
-    // plain items we never get to declare. Creating them from QML instead
-    // would mean reimplementing Qt's popup positioning, which is the one part
-    // of this it does for us. The walk recurses because a popup can parent
-    // further popups (a submenu inside a menu).
-    function _hoverSweep(item) {
-        for (var i = 0; i < item.children.length; i++) {
-            var child = item.children[i]
-            // Only shell-surface items — `shellSurface` is what identifies
-            // one, and touching hoverEnabled on anything else would be a
-            // silent no-op at best.
-            if (child && child.shellSurface !== undefined && !child.hoverEnabled)
-                pane._enableHoverTree(child)
-        }
-    }
-
-    function _enableHoverTree(item) {
-        if (!item)
-            return
-        item.hoverEnabled = true
-        // Swept ONCE immediately as well as on the signal. `childrenChanged`
-        // only reports what arrives AFTER the connect, so a popup that parents
-        // a sub-popup during its own construction would be missed and the walk
-        // would stop one level short — silently, since a dead submenu looks
-        // like a Chrome quirk rather than a missing property.
-        _hoverSweep(item)
-        item.childrenChanged.connect(function () { pane._hoverSweep(item) })
-    }
-
     Component {
         id: surfaceComponent
 
-        // Ours, not Qt's stock `ShellSurfaceItem`. Two differences, and losing
-        // EITHER one stops the browser scrolling entirely: wheel events survive
+        // Ours, not Qt's stock `ShellSurfaceItem`, for three things it does
+        // that the stock item does not — all of them C++-only, which is the
+        // whole reason the subclass exists. Losing either of the first two
+        // stops the browser scrolling entirely: wheel events survive
         // quantisation (Qt truncates any `angleDelta` under 12 to a zero-valued
         // axis, which on a high-resolution wheel or a touchpad — neither of
         // which emits the 120-unit steps that arithmetic assumes — is every
         // event), and a `wl_pointer.frame` follows each axis (Chromium only
         // buffers on the axis itself and flushes on the frame). Dragging a
         // scrollbar worked throughout, because press and move touch neither.
-        // See symmetriashellsurfaceitem.h.
+        // The third is hover: nothing in Qt calls `setAcceptHoverEvents`, and
+        // `hoverEnterEvent`/`hoverMoveEvent` are the only callers of
+        // `sendMouseMoveEvent`, so without it the client is told where the
+        // pointer is only when a button goes down.
+        //
+        // ⚠ Hover was once attempted HERE, by walking the item tree assigning
+        // `item.hoverEnabled = true`. That property does not exist on any of
+        // these types, so the assignment threw on its first line and the walk
+        // never ran — do not reintroduce it. See symmetriashellsurfaceitem.h.
         SymmetriaShellSurfaceItem {
             id: surfaceItem
             anchors.fill: surfaceHost
             // Chrome's menus, omnibox dropdown and tooltips are xdg_popups;
             // without this they never appear at all.
             autoCreatePopupItems: true
-
-            Component.onCompleted: pane._enableHoverTree(surfaceItem)
 
             onSurfaceDestroyed: {
                 // Compared against the delegate's own id rather than `this`:

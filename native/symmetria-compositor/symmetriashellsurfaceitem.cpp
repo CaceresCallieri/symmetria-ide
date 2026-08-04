@@ -100,6 +100,43 @@ void sendPointerFrame(QWaylandSeat *seat)
 SymmetriaShellSurfaceItem::SymmetriaShellSurfaceItem(QQuickItem *parent)
     : QWaylandQuickShellSurfaceItem(parent)
 {
+    // See the header, part (3). Without this the client is never told where the
+    // pointer is except when a button goes down, because `hoverEnterEvent` /
+    // `hoverMoveEvent` are the only callers of `sendMouseMoveEvent` and Qt
+    // never enables them.
+    enableHoverTree(this);
+}
+
+void SymmetriaShellSurfaceItem::enableHoverTree(QQuickItem *item)
+{
+    if (item == nullptr)
+        return;
+
+    item->setAcceptHoverEvents(true);
+
+    for (QQuickItem *child : item->childItems())
+        enableHoverTree(child);
+
+    // Connected per item rather than once at the root: a popup is parented to
+    // whichever item spawned it, so a submenu's arrival is only visible on ITS
+    // parent's signal. `childrenChanged` also reports removals and reparents,
+    // and re-sweeping an item that is already hover-enabled is a no-op, so the
+    // handler does not need to work out what actually changed.
+    //
+    // ⚠ A member slot with `UniqueConnection`, deliberately NOT a lambda: this
+    // function re-runs over the whole subtree on every children change, so a
+    // lambda — which `UniqueConnection` does not support — would stack a fresh
+    // connection per item per sweep and grow without bound.
+    connect(item, &QQuickItem::childrenChanged, this,
+            &SymmetriaShellSurfaceItem::onChildrenChanged, Qt::UniqueConnection);
+}
+
+void SymmetriaShellSurfaceItem::onChildrenChanged()
+{
+    // `sender()` rather than a captured pointer is what lets this be a plain
+    // member slot; Qt also drops the connection when the item dies, so there is
+    // no lifetime bookkeeping to get wrong.
+    enableHoverTree(qobject_cast<QQuickItem *>(sender()));
 }
 
 void SymmetriaShellSurfaceItem::wheelEvent(QWheelEvent *event)
