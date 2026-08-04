@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: reference
   originSessionId: 1dc16f14-6524-437a-9b81-8d0fde68876c
-  modified: 2026-07-28T01:28:50.948Z
+  modified: 2026-08-04T05:55:51.614Z
 ---
 
 Pointer input into the IDE's nested-Wayland browser pane needs three things
@@ -32,11 +32,23 @@ row highlighting in the omnibox dropdown.
 `mousePressEvent` calls `sendMouseMoveEvent` itself, which is why scrolling
 appears to "start working after a click" — the single most misleading clue.
 
-Fix: `hoverEnabled: true`. Popups need it too and cannot be given it
-declaratively (Qt builds those items in C++, `maybeCreateAutoPopup`), so
-BrowserPane walks children recursively — sweeping existing children as well as
-connecting to `childrenChanged`, since a popup can parent a sub-popup during
-its own construction.
+Fix: **`setAcceptHoverEvents(true)`, in C++** — `SymmetriaShellSurfaceItem`'s
+constructor, walking its own children recursively for the popups Qt builds
+itself (`maybeCreateAutoPopup`). It sweeps existing children as well as watching
+`childrenChanged`, since a popup can parent a sub-popup during its own
+construction, and the watch uses a member slot with `UniqueConnection` because
+the sweep re-runs over the whole subtree and a lambda would stack connections.
+
+⚠ **This was first written in QML as `item.hoverEnabled = true`, and it never
+ran.** No Wayland item class has that property — in Qt 6.11 the Q_PROPERTY is
+declared only in `qquickmousearea_p.h` and three QtQuickTemplates2 headers — so
+the assignment threw on the walk's FIRST line, aborting it before the recursion
+or the signal connect. The entire symptom was one "Cannot assign to
+non-existent property" per session, and an inert hover walk is indistinguishable
+from a working one by reading it. The generalisable lesson: **when a QML
+property assignment is the fix, check the property exists on that TYPE** —
+`setAcceptHoverEvents` is a method with no QML equivalent, which is exactly why
+it belongs in the subclass alongside (2) and (3).
 
 ## 2. The wheel value is truncated to zero
 
