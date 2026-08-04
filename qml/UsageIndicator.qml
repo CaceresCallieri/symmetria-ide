@@ -67,19 +67,21 @@ Item {
 
                 spacing: Theme.spacing.xs
 
-                Text {
-                    text: providerRow.modelData.provider === "codex"
-                        ? Theme.glyph.providerCodex
-                        : Theme.glyph.providerClaude
-                    color: Theme.color.text.dim
-                    // Theme.font.family IS `editorFontFamily` (Theme.qml binds
-                    // it directly), so the glyph resolves through the same
-                    // Nerd Font cascade Theme.glyph's contract requires — while
-                    // avoiding the unqualified context-property access the two
-                    // older glyph call sites incur.
-                    font.family: Theme.font.family
-                    font.pixelSize: Theme.font.size.sm
-                    renderType: Text.NativeRendering
+                // The provider's real brand mark. Brand fills are baked into
+                // the SVGs and identify the account regardless of theme —
+                // intentionally NOT Theme-tokened, the same call the spawn
+                // menu's icons make.
+                Image {
+                    anchors.verticalCenter: parent.verticalCenter
+                    source: UsageFormat.providerIcon(providerRow.modelData.provider)
+                    // Rasterize at 2x the display box so the mark stays crisp
+                    // at this size (the spawn menu's icons do the same).
+                    sourceSize.width: Theme.size.usageProviderIcon * 2
+                    sourceSize.height: Theme.size.usageProviderIcon * 2
+                    width: Theme.size.usageProviderIcon
+                    height: Theme.size.usageProviderIcon
+                    smooth: true
+                    fillMode: Image.PreserveAspectFit
                 }
 
                 // Session (5h) — absent for providers that expose no such

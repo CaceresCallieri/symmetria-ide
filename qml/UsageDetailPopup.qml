@@ -151,14 +151,18 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             spacing: Theme.spacing.xs
 
-                            Text {
-                                text: providerBlock.modelData.provider === "codex"
-                                    ? Theme.glyph.providerCodex
-                                    : Theme.glyph.providerClaude
-                                color: Theme.color.text.dim
-                                font.family: Theme.font.family
-                                font.pixelSize: Theme.font.size.sm
-                                renderType: Text.NativeRendering
+                            // Same brand mark as the compact readout, same
+                            // size — the popup is the readout expanded, not a
+                            // different surface with its own iconography.
+                            Image {
+                                anchors.verticalCenter: parent.verticalCenter
+                                source: UsageFormat.providerIcon(providerBlock.modelData.provider)
+                                sourceSize.width: Theme.size.usageProviderIcon * 2
+                                sourceSize.height: Theme.size.usageProviderIcon * 2
+                                width: Theme.size.usageProviderIcon
+                                height: Theme.size.usageProviderIcon
+                                smooth: true
+                                fillMode: Image.PreserveAspectFit
                             }
                             Text {
                                 id: providerName

@@ -78,12 +78,12 @@ QtObject {
         // changes panel (a repo the focused agent changed OTHER than the
         // displayed one). Escape, never the literal PUA char (Theme rule).
         readonly property string repo: "\uf401"
-        // Subscription-usage providers (UsageIndicator / UsageDetailPopup).
-        // nf-fa-asterisk for Claude's starburst mark; nf-fa-code for Codex.
-        // Both verified present in JetBrainsMono Nerd Font AND in the Symbols
-        // Nerd Font fallback, so neither depends on which family resolves.
-        readonly property string providerClaude: "\uf069"
-        readonly property string providerCodex: "\uf121"
+        // NOTE: the subscription-usage panel deliberately takes NO glyph from
+        // here. Nerd-Font marks (nf-fa-asterisk / nf-fa-code) were the first
+        // cut and read as generic symbols rather than as Anthropic and OpenAI;
+        // it renders the real brand SVGs from `qml/assets/` instead, via
+        // `UsageFormat.providerIcon` \u2014 the same Claude asset the spawn menu
+        // uses, so one mark means one thing across the IDE.
     }
 
     // ─── Color ───────────────────────────────────────────────────
@@ -672,6 +672,10 @@ QtObject {
         readonly property int statusBarHeight: 24     // was 30
         readonly property int modeBadgeHeight: 18     // was 22
         readonly property int popupRowHeight: 20      // was 24
+        // Provider brand mark in the usage readout + its detail popup. Sized
+        // to the `sm` text rung it sits beside rather than to a round number:
+        // a logo taller than its neighbouring digits reads as a button.
+        readonly property int usageProviderIcon: 11
         readonly property int whichKeyRowHeight: 18   // was 22
         readonly property int whichKeyFooterHeight: 24 // was 28
 

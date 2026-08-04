@@ -24,6 +24,16 @@ import QtQuick
 QtObject {
     id: format
 
+    // The provider's real brand mark, as a resolved URL.
+    //
+    // `Qt.resolvedUrl` against THIS file (qml/design/) rather than a bare
+    // relative string: a relative source would resolve against whichever file
+    // renders it, which silently breaks the moment a consumer lives anywhere
+    // but qml/. Same asset the spawn menu uses for Claude — one copy, one look.
+    function providerIcon(provider) {
+        return Qt.resolvedUrl(provider === "codex" ? "../assets/openai-icon.svg" : "../assets/claude-icon.svg");
+    }
+
     // Threshold colour for a 0-100 percentage. Mirrors status-line.sh's
     // get_usage_color tiers so the IDE and the in-terminal status line never
     // disagree about what "amber" means.
