@@ -37,7 +37,7 @@
   "qml/Main.qml": {
     "import": 11,
     "missing-property": 66,
-    "unqualified": 268,
+    "unqualified": 269,
     "unresolved-type": 7,
     "unused-imports": 2
   },
@@ -65,7 +65,7 @@
   },
   "qml/StatusBar.qml": {
     "missing-property": 71,
-    "unqualified": 48
+    "unqualified": 50
   },
   "qml/Toast.qml": {
     "missing-property": 25,
@@ -76,10 +76,10 @@
     "unqualified": 1
   },
   "qml/UsageDetailPopup.qml": {
-    "missing-property": 49
+    "missing-property": 48
   },
   "qml/UsageIndicator.qml": {
-    "missing-property": 16
+    "missing-property": 17
   },
   "qml/WhichKeyOverlay.qml": {
     "missing-property": 39,

@@ -1035,6 +1035,8 @@ class AppController(QObject):
         self._usage_store.changed.connect(self._on_usage_store_changed)
         self._usage_poller = UsagePoller(self._usage_store, self)
         self._usage_poller.errorsChanged.connect(self._on_usage_errors_changed)
+        # Same funnel: both feed the one `usageChanged` notify the panel binds.
+        self._usage_poller.refreshingChanged.connect(self._on_usage_errors_changed)
         # Snapshot of the shared file, re-read on every `changed`. QML binds the
         # derived `usageProviders` list; empty until the first observation lands.
         self._usage: dict[str, ProviderUsage] = {}
@@ -3416,6 +3418,21 @@ class AppController(QObject):
     def usageValid(self) -> bool:
         """True once ANY provider has been observed — the panel's visibility."""
         return any(u.observed_at_ns > 0 for u in self._usage.values())
+
+    @Property(bool, notify=usageChanged)
+    def usageRefreshing(self) -> bool:
+        """True while a user-requested poll is in flight (the readout pulses)."""
+        return self._usage_poller.refreshing
+
+    @Slot()
+    def refresh_usage(self) -> None:
+        """Poll every provider now — the status-bar readout's click handler.
+
+        Deliberately unconditional: the point of clicking is to be told the
+        numbers are current, so the TTL that suppresses automatic rounds does
+        not apply here.
+        """
+        self._usage_poller.refresh()
 
     @Property("QVariantList", notify=usageChanged)
     def usageProviders(self) -> list:

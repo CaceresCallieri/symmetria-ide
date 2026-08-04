@@ -27,6 +27,7 @@ never replace good numbers — see `usage_providers`' error contract).
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -62,6 +63,11 @@ class UsagePoller(QObject):
     # The per-provider error map changed; the panel re-reads `errors`.
     errorsChanged = Signal()
 
+    # A user-requested refresh started or finished; the readout pulses while
+    # it is true. Automatic rounds deliberately do NOT raise it — a status bar
+    # that blinks every five minutes on its own reads as a glitch, not as work.
+    refreshingChanged = Signal()
+
     def __init__(
         self,
         store: UsageStore,
@@ -75,6 +81,7 @@ class UsagePoller(QObject):
         self._ttl_ns = ttl_seconds * _NS_PER_SECOND
         self._errors: dict[str, str] = {}
         self._inflight = False
+        self._refreshing = False
         self._stop_event = threading.Event()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="usage-poll")
         self._timer = QTimer(self)
@@ -89,12 +96,28 @@ class UsagePoller(QObject):
         """provider id → failure reason for the last round that touched it."""
         return dict(self._errors)
 
+    @property
+    def refreshing(self) -> bool:
+        """True while a round the USER asked for is in flight."""
+        return self._refreshing
+
     def start(self) -> None:
         """Begin ticking, and check immediately (don't wait a full interval).
 
         The immediate check is what makes a freshly-launched IDE show usage
         within a second or two when the shared file is cold or stale.
+
+        ⚠ `SYMMETRIA_IDE_USAGE_POLL=0` disables polling entirely, and it is the
+        TEST SUITE'S HARD OFF SWITCH (set for every test in conftest). Several
+        tests call `AppController.start()`, which reaches here — without the
+        switch each of those fires a real request against the user's Anthropic
+        account and spawns a real `codex app-server`, from a suite that is
+        supposed to touch nothing live. Manual `refresh()` is deliberately NOT
+        gated: it only ever runs because someone clicked.
         """
+        if os.environ.get("SYMMETRIA_IDE_USAGE_POLL") == "0":
+            log.debug("usage poller disabled (SYMMETRIA_IDE_USAGE_POLL=0)")
+            return
         self._timer.start()
         self._tick()
 
@@ -107,6 +130,38 @@ class UsagePoller(QObject):
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     # -- scheduling ------------------------------------------------------
+
+    @Slot()
+    def refresh(self) -> None:
+        """Poll EVERY provider now, TTL ignored — the user asked explicitly.
+
+        Distinct from `_tick` in two ways. It targets all providers rather than
+        only the stale ones (the point of asking is "prove these numbers are
+        current", which a skipped-because-fresh provider does not do), and it
+        raises `refreshing` so the readout can show the work.
+
+        If a round is already in flight, this adopts it instead of queueing a
+        second one: the pool has a single worker, so a queued round would run
+        AFTER the current one and double the requests for no new information.
+
+        ⚠ Losing the cross-process poll lock is a legitimate outcome, not a
+        failure: another IDE window is fetching this very moment, and its result
+        reaches us through the file watcher within seconds. The spinner clears
+        when our round ends either way — it means "we checked", not "we fetched".
+        """
+        if self._stop_event.is_set():
+            return
+        self._set_refreshing(True)
+        if self._inflight:
+            return  # adopt the running round; _on_results clears the flag
+        self._inflight = True
+        self._pool.submit(self._run_round, PROVIDER_IDS)
+
+    def _set_refreshing(self, value: bool) -> None:
+        if self._refreshing == value:
+            return
+        self._refreshing = value
+        self.refreshingChanged.emit()
 
     @Slot()
     def _tick(self) -> None:
@@ -166,6 +221,8 @@ class UsagePoller(QObject):
     @Slot(dict)
     def _on_results(self, errors: dict) -> None:
         self._inflight = False
+        # Whatever raised it — this round is over, so the readout stops pulsing.
+        self._set_refreshing(False)
         # Only providers the round ATTEMPTED are touched. A round that skipped
         # Claude (its status-line tap kept it fresh) must not clear a real Codex
         # error, and a round that lost the poll lock reports nothing at all.

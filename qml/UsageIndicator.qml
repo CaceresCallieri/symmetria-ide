@@ -35,11 +35,45 @@ Item {
     // popup from this (and keeps it open while the pointer is over the popup).
     readonly property bool hovered: hoverArea.containsMouse
 
+    // Bound to controller.usageRefreshing: a user-requested poll is running.
+    property bool refreshing: false
+
+    // The user clicked the readout asking for fresh numbers. Emitted rather
+    // than calling the controller here, so this component stays free of the
+    // context property and can be rendered by a harness (or reused) as-is.
+    signal refreshRequested
+
     readonly property bool hasRows: providers != null && providers.length > 0
 
     implicitWidth: layout.implicitWidth
     implicitHeight: layout.implicitHeight
     visible: hasRows
+
+    // Pulse while refreshing. The animation drives `_pulse` — an ordinary
+    // property with no binding — and `opacity` merely READS it, because a
+    // `NumberAnimation on opacity` would destroy opacity's binding for good
+    // and leave the readout stuck at whatever value the last frame wrote.
+    property real _pulse: 1.0
+    opacity: root.refreshing ? root._pulse : 1.0
+
+    SequentialAnimation {
+        running: root.refreshing
+        loops: Animation.Infinite
+        NumberAnimation {
+            target: root
+            property: "_pulse"
+            to: 0.35
+            duration: Theme.anim.duration
+            easing.type: Easing.InOutQuad
+        }
+        NumberAnimation {
+            target: root
+            property: "_pulse"
+            to: 1.0
+            duration: Theme.anim.duration
+            easing.type: Easing.InOutQuad
+        }
+    }
 
     Timer {
         // 30s is minute-honest for a countdown rendered in whole minutes, at a
@@ -148,9 +182,12 @@ Item {
         // `hoverEnabled` genuinely exists on MouseArea — this is the one type
         // family that has it (see the qml_property_must_exist_on_type rule).
         hoverEnabled: true
-        // Pass clicks through: the readout is informational, and the popup is
-        // reached by hover or by chord. Accepting clicks here would swallow
-        // them from whatever sits behind the status bar.
-        acceptedButtons: Qt.NoButton
+        // Left-click forces a poll of every provider. Only the left button is
+        // taken; right/middle still fall through to whatever sits behind the
+        // status bar. A click during a refresh is ignored by the poller, which
+        // adopts the running round rather than queueing a second one.
+        acceptedButtons: Qt.LeftButton
+        cursorShape: Qt.PointingHandCursor
+        onClicked: root.refreshRequested()
     }
 }

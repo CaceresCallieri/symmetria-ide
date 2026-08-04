@@ -2822,6 +2822,7 @@ Window {
         anchors.bottom: parent.bottom
         anchors.bottomMargin: Theme.size.statusBarHeight + Theme.spacing.xs
         providers: controller.usageProviders
+        refreshing: controller.usageRefreshing
     }
 
     // Transient agent spawn-failure toast (non-modal). The controller emits

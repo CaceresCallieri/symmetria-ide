@@ -42,6 +42,11 @@ Item {
 
     property double nowMs: Date.now()
 
+    // Bound to controller.usageRefreshing. The popup says so in words rather
+    // than pulsing like the compact readout: here the age line is the thing
+    // being refreshed, so replacing it is clearer than animating the card.
+    property bool refreshing: false
+
     implicitWidth: card.width
     implicitHeight: card.height
     visible: false
@@ -186,7 +191,9 @@ Item {
                         Text {
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
-                            text: UsageFormat.age(providerBlock.modelData.observedAt, root.nowMs)
+                            text: root.refreshing
+                                ? "updating…"
+                                : UsageFormat.age(providerBlock.modelData.observedAt, root.nowMs)
                             color: Theme.color.text.dim
                             font.family: Theme.font.family
                             font.pixelSize: Theme.font.size.xs

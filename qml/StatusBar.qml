@@ -452,6 +452,10 @@ Rectangle {
                 anchors.rightMargin: Theme.spacing.md
                 anchors.verticalCenter: parent.verticalCenter
                 providers: controller.usageProviders
+                refreshing: controller.usageRefreshing
+                // The controller call lives here, not in the component: the
+                // readout stays context-property-free (see its `refreshRequested`).
+                onRefreshRequested: controller.refresh_usage()
             }
         }
     }
