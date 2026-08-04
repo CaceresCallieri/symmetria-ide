@@ -29,7 +29,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Startup optimization outcomes](project/active/startup_optimization_followups.md) — gc.collect drop SHIPPED (~20ms); WebEngine import deferral works but HELD
 - [Agent ownership inversion (P1-4 SHIPPED; P5 IDE-decoupled)](project/active/agent_ownership_inversion.md) — agents IDE-owned; STT direct shell→IDE; orchestrator.nvim kept. Live dictation verify owed
 - [VPS location toggle (SHIPPED 2026-07-12)](project/active/vps_location_toggle.md) — Local↔VPS per-project context; invariants in CLAUDE.md; deferrals: reconnect chip, vps coordination, mosh
-- [Agentic browser = nested-compositor Chrome (SHIPPED)](project/active/chrome_external_browser.md) — QtWebEngine and the pinned-window form both retired; Chrome renders in-pane
+- [Agentic browser (dev only)](project/active/agentic_browser_state.md) — Chrome in a nested compositor; stable promotion needs the NEW symmetria-compositor package
 
 ## Project — shipped — `project/shipped/` (past-tense systems; one consolidated bullet)
 

@@ -17,7 +17,7 @@ metadata:
 > speculative tense of a decision not yet made.
 
 Spiked live 2026-07-27 while scoping the in-window browser (real Chrome as a
-`ShellSurfaceItem` inside the IDE — see [chrome-host-external-browser](../../project/active/chrome_external_browser.md)).
+`ShellSurfaceItem` inside the IDE — see [agentic-browser-state](../../project/active/agentic_browser_state.md)).
 
 **Measured, not inferred.** A PySide6 app hosting `QtWayland.Compositor`, with a
 Qt client running inside it (`WAYLAND_DISPLAY=<nested socket>`):

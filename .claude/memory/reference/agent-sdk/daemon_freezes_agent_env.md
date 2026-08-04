@@ -5,6 +5,7 @@ metadata:
   node_type: memory
   type: reference
   originSessionId: abbd1f64-5c0c-4d36-a9f3-891535be69d9
+  modified: 2026-08-04T20:01:12.160Z
 ---
 
 # Claude Code's daemon/spare-pool breaks env-based agent attribution
@@ -40,7 +41,8 @@ vars (`CHILD_SESSION_UNSET_ARGS` in `agent_harness.py` unsets
 `CLAUDE_CODE_SESSION_ID`) to force top-level transcript persistence, and injecting
 a session id touches that same session-identity machinery — so it was NOT done.
 
-**Fix shipped (dev, 2026-07-04) — `see src/symmetria_ide/agent_registry.py`:**
+**Fix shipped (dev 2026-07-04, PROMOTED — verified in `main` 2026-08-04) —
+`see src/symmetria_ide/agent_registry.py`:**
 - On-disk cross-IDE registry `$XDG_RUNTIME_DIR/symmetria-ide/registry/<pid>.json`
   = `{pid, socket, project_root, sessions{session_id: slot}}`, one file per IDE.
 - The reporter hook (`runtime/symmetria-ide-agent-hook.py`) now adds `cwd` and
@@ -54,12 +56,22 @@ a session id touches that same session-identity machinery — so it was NOT done
 - `_sync_agent_registry()` re-publishes on spawn/close/root-change/session-bind;
   `reap_dead()` at startup, `remove_entry()` on shutdown.
 
-**Rollout:** only helps **newly-spawned** agents once the change is **promoted to
-stable** (running agents baked the stable reporter path into their `--settings`).
-Degrades cleanly: empty registry → old frozen-env-socket behaviour.
+**Rollout: DONE.** This needed stable promotion to reach the daily driver, and it
+got there — checked 2026-08-04 by diffing `main..dev` over all three pieces
+(`agent_registry.py`, `runtime/symmetria-ide-agent-hook.py`, and app.py's
+`resolve_slot_for_event` call path): identical in both, so nothing here is
+pending. Still only helps **newly-spawned** agents (a running agent baked its
+reporter path into `--settings` at spawn). Degrades cleanly: empty registry →
+old frozen-env-socket behaviour.
 
-**Known remaining gap:** the **status-line tap** (`_on_status_line` +
-`symmetria-statusline-tap.py` in dotfiles) still uses env-prefix resolution, so
-model/effort/context% display can misattribute for daemon-pooled agents. Not the
-reported symptom (sparkle); tracked as follow-up. opencode is unaffected (separate
-binary, no shared claude daemon).
+**Known remaining gap (still open as of 2026-08-04):** the **status-line tap**
+(`_on_status_line` + `symmetria-statusline-tap.py` in dotfiles) still uses
+env-prefix resolution, so model/effort/context% display can misattribute for
+daemon-pooled agents. Not the reported symptom (sparkle); tracked as follow-up.
+opencode is unaffected (separate binary, no shared claude daemon).
+
+Narrower than it looks, though: the tap's **account usage** (5h/7d rate limits →
+the subscription-usage panel) is ingested BEFORE the per-slot guard in
+`_on_status_line`, deliberately, and those numbers are account-global anyway — so
+a misattributed tap cannot corrupt them. Only the three per-agent fields
+(model / effort / context%) are exposed to this.

@@ -5,11 +5,16 @@ metadata:
   node_type: memory
   type: project
   originSessionId: cb49982d-c379-4cc4-ace1-865cf4657921
+  modified: 2026-08-04T20:01:55.579Z
 ---
 
-# VPS location toggle — shipped 2026-07-12 (dev, needs stable promotion)
+# VPS location toggle — shipped 2026-07-12, PROMOTED to stable
 
-All 5 phases landed on `dev` (`dce2985`→`bbc56c7`): location state +
+All 5 phases landed on `dev` (`dce2985`→`bbc56c7`) and have since reached
+`main` — verified 2026-08-04 by diffing `main..dev` over `server_registry.py`,
+`ssh_runner.py`, `remote_location.py` and `mount_manager.py` (identical) plus
+the `Ctrl+Shift+U` chord in `Main.qml`. Nothing here is pending promotion.
+The phases: location state +
 pairing probe, VPS agents (tmux attach on the Vigilia shared socket,
 detach-vs-kill, hub-fed sparkles), SSHFS tree + remote git status/poll +
 status bar, full git surface (log/branches/pull-push) remote, remote
