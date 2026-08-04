@@ -19,7 +19,8 @@
 # break loud rather than silent.
 #
 # Build + install (run from THIS directory):
-#     cd /home/jc/projects/symmetria-ide/native/symmetria-compositor && makepkg -si
+#     cd <worktree>/native/symmetria-compositor && makepkg -si
+#   (works from EITHER worktree — it packages the checkout it lives in.)
 #   (commit changes first — the source is the committed git tree.)
 #
 # WITHOUT THIS PACKAGE THERE IS NO BROWSER PANE. BrowserPane.qml imports
@@ -46,17 +47,26 @@ makedepends=('git' 'cmake')
 # PKGBUILD's own directory, so the package always builds the checkout it lives
 # in.
 _repo="$(git -C "$startdir" rev-parse --show-toplevel)"
+# The clone `makepkg` creates under $srcdir is named after the source URL's
+# basename — so it is `symmetria-ide` from the dev worktree but
+# `symmetria-ide-stable` from the stable one. This was hardcoded to the former,
+# which meant the package built fine in dev and died in pkgver() with "No such
+# file or directory" the first time anyone tried to build it from stable — i.e.
+# exactly during a promotion, which is the one moment this package MUST build
+# (main does not ship it otherwise, and without it there is no browser pane).
+# Derived from `_repo` for the same reason `_repo` itself is derived.
+_srcname="$(basename "$_repo")"
 _subdir="native/symmetria-compositor"
 source=("git+file://${_repo}")
 sha256sums=('SKIP')
 
 pkgver() {
-    cd "$srcdir/symmetria-ide"
+    cd "$srcdir/$_srcname"
     printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
 build() {
-    cd "$srcdir/symmetria-ide/$_subdir"
+    cd "$srcdir/$_srcname/$_subdir"
     cmake -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr \
@@ -65,6 +75,6 @@ build() {
 }
 
 package() {
-    cd "$srcdir/symmetria-ide/$_subdir"
+    cd "$srcdir/$_srcname/$_subdir"
     DESTDIR="$pkgdir" cmake --install build
 }
