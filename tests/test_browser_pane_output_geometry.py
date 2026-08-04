@@ -231,6 +231,60 @@ class TestOutputImplementation:
         assert "sizeFollowsWindow()" in output_cpp
         assert "qWarning" in output_cpp
 
+    def test_the_watchdog_is_wired_from_initialize(self, output_cpp: str):
+        """The signals alone are NOT enough, measured. With the output declared
+        inside the compositor in QML, `compositorChanged` never reached us, so a
+        watch wired only from that signal stayed unarmed and the whole fix did
+        nothing — with no error anywhere, because an unarmed watchdog looks
+        exactly like a working one until an agent's screenshot hangs."""
+        assert "void SymmetriaOutput::initialize()" in output_cpp
+        block = _braced_block(output_cpp, "void SymmetriaOutput::initialize()")
+        assert "QWaylandQuickOutput::initialize()" in block, (
+            "skipping the base leaves the output uninitialised"
+        )
+        assert "rewireSurfaceWatch()" in block
+        assert "rewireRenderWatch()" in block
+
+    def test_frame_started_precedes_send_frame_callbacks(self, output_cpp: str):
+        """The pair the render loop calls, in the order it calls them:
+        `frameStarted` marks each surface as beginning a frame, and only then
+        does `sendFrameCallbacks` release the clients waiting on one."""
+        block = _braced_block(
+            output_cpp, "void SymmetriaOutput::pumpFrameCallbacksIfStalled()"
+        )
+        assert block.index("frameStarted()") < block.index("sendFrameCallbacks()")
+
+    def test_a_real_host_frame_suppresses_the_pump(self, output_cpp: str):
+        """Without this the watchdog would double-send while the host renders
+        normally, inviting the client to draw frames nobody will show."""
+        block = _braced_block(
+            output_cpp, "void SymmetriaOutput::pumpFrameCallbacksIfStalled()"
+        )
+        assert "m_renderedSinceLastTick" in block
+        assert block.index("m_renderedSinceLastTick") < block.index("frameStarted()")
+
+    def test_the_watchdog_runs_only_while_a_client_has_a_surface(self, output_cpp: str):
+        """The pane's compositor is built at startup and never torn down, so an
+        ungated timer would tick for the whole session in EVERY IDE — and the
+        user runs about ten at once. A project that never browses must pay
+        nothing, the same principle that makes Chrome lazy-spawned."""
+        block = _braced_block(
+            output_cpp, "void SymmetriaOutput::updateWatchdogEnabled()"
+        )
+        assert "surfaces().isEmpty()" in block
+        assert ".start()" in block and ".stop()" in block
+
+    def test_the_destroy_signal_is_queued(self, output_cpp: str):
+        """`surfaceAboutToBeDestroyed` fires while the surface is STILL in
+        `surfaces()`. Counted directly, the last close would see the doomed
+        surface, conclude a client is present, and leave the watchdog ticking
+        forever — the exact cost the gate exists to avoid."""
+        block = _braced_block(output_cpp, "void SymmetriaOutput::rewireSurfaceWatch()")
+        destroy_at = block.index("surfaceAboutToBeDestroyed")
+        assert "Qt::QueuedConnection" in block[destroy_at:], (
+            "a direct connection re-counts the surface before it is gone"
+        )
+
     def test_the_refresh_rate_is_requeried_not_frozen(self, output_cpp: str):
         """Taking the previous mode's rate first freezes whatever the first
         push saw — including a value queried before the window had a screen —
