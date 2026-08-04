@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
+from symmetria_ide import usage_poller
 from symmetria_ide.usage_poller import UsagePoller
 from symmetria_ide.usage_providers import PROVIDER_IDS, ProviderUsage, UsageWindow
 from symmetria_ide.usage_store import UsageStore
@@ -158,12 +161,98 @@ def test_refresh_after_stop_does_nothing(tmp_path):
     assert poller.refreshing is False
 
 
+# -- the worker's own path (the recording pool never runs it) -----------
+
+
+def test_worker_never_touches_the_gui_thread_watcher(monkeypatch, tmp_path):
+    # Regression: `_run_round` used to call `UsageStore.publish`, which re-arms
+    # a QFileSystemWatcher — a GUI-thread QObject — from the pool thread. That
+    # corrupts the watcher silently rather than raising, so only a test that
+    # actually runs the worker body can catch it.
+    poller, _pool = _poller(tmp_path)
+    monkeypatch.setattr(
+        UsageStore,
+        "publish",
+        lambda *_a, **_kw: pytest.fail("worker touched the GUI-thread watcher"),
+    )
+    monkeypatch.setattr(usage_poller, "fetch", lambda provider: _fresh(provider))
+
+    poller._run_round(("claude",))
+
+    assert poller._store.read_current()["claude"].provider == "claude"
+    poller.stop()
+
+
+def test_worker_reports_a_failed_write_instead_of_silent_success(monkeypatch, tmp_path):
+    # A write that fails leaves the file un-advanced, so the provider is
+    # re-fetched every tick forever. Without this the panel shows no error and
+    # the hot loop is invisible.
+    poller, _pool = _poller(tmp_path)
+    monkeypatch.setattr(usage_poller, "fetch", lambda provider: _fresh(provider))
+    monkeypatch.setattr(usage_poller, "publish_if_newer", lambda *_a: False)
+    seen: list[dict] = []
+    poller._resultsReady.connect(seen.append)
+
+    poller._run_round(("claude",))
+
+    assert seen and seen[0]["claude"] == "publish-failed"
+    poller.stop()
+
+
+def test_worker_does_not_report_failure_when_a_peer_wrote_something_newer(
+    monkeypatch, tmp_path
+):
+    # `publish_if_newer` returns False for BOTH "write failed" and "someone
+    # else is already newer". A status-line tap from any window can land
+    # between our fetch and our write, and calling that an error would put a
+    # spurious "could not save result" on the panel.
+    poller, _pool = _poller(tmp_path)
+    monkeypatch.setattr(
+        usage_poller, "fetch", lambda provider: _fresh(provider, age_seconds=5)
+    )
+    poller._store.publish(_fresh("claude"))  # a newer observation already stored
+    seen: list[dict] = []
+    poller._resultsReady.connect(seen.append)
+
+    poller._run_round(("claude",))
+
+    assert seen and seen[0]["claude"] == ""
+    poller.stop()
+
+
+def test_a_click_during_the_result_gap_starts_a_real_round(tmp_path):
+    # `_inflight` clears in the QUEUED `_on_results`, so a click can land after
+    # the worker finished but before that slot runs. Adopting the dead round
+    # there would drop the click and clear the spinner without fetching.
+    poller, pool = _poller(tmp_path)
+    poller._tick()
+    assert len(pool.submitted) == 1
+    poller.refresh()  # adopted — the round is still "in flight"
+    assert len(pool.submitted) == 1
+
+    poller._on_results({"claude": "", "codex": ""})
+
+    assert len(pool.submitted) == 2  # the pending ask became a real round
+    assert pool.submitted[1] == (PROVIDER_IDS,)
+    assert poller.refreshing is True  # spinner survives the handover
+    poller.stop()
+
+
 def test_refreshing_signal_fires_once_per_transition(tmp_path):
+    # The flag is edge-triggered, and it survives the pending-ask handover:
+    # a second click during a round schedules another one, so the spinner must
+    # NOT blink off in between.
     poller, _pool = _poller(tmp_path)
     seen: list[bool] = []
     poller.refreshingChanged.connect(lambda: seen.append(poller.refreshing))
+
     poller.refresh()
     poller.refresh()  # already refreshing — must not re-emit
-    poller._on_results({})
+    assert seen == [True]
+
+    poller._on_results({})  # honours the pending ask → still refreshing
+    assert seen == [True]
+
+    poller._on_results({})  # nothing pending now → done
     assert seen == [True, False]
     poller.stop()

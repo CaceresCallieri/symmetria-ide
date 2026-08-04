@@ -36,7 +36,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 
 from .agent_bridge import emit_gc_safe
 from .usage_providers import PROVIDER_IDS, fetch
-from .usage_store import UsageStore, poll_lock
+from .usage_store import UsageStore, poll_lock, publish_if_newer, read
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +82,7 @@ class UsagePoller(QObject):
         self._errors: dict[str, str] = {}
         self._inflight = False
         self._refreshing = False
+        self._refresh_pending = False
         self._stop_event = threading.Event()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="usage-poll")
         self._timer = QTimer(self)
@@ -122,6 +123,14 @@ class UsagePoller(QObject):
         self._tick()
 
     def stop(self) -> None:
+        """Terminal — the poller is NOT restartable after this.
+
+        The stop event is never cleared and the pool is shut down for good, so a
+        later `start()` / `refresh()` silently no-ops. That is correct for the
+        one caller (`AppController.shutdown`); anything that ever needs a
+        pause/resume must rebuild the pool and clear the event here rather than
+        assume `start()` revives it.
+        """
         self._stop_event.set()
         self._timer.stop()
         # wait=False: shutdown runs on the GUI thread during teardown and an
@@ -153,9 +162,19 @@ class UsagePoller(QObject):
             return
         self._set_refreshing(True)
         if self._inflight:
-            return  # adopt the running round; _on_results clears the flag
+            # Adopt the running round — but remember the ask. `_inflight` is
+            # cleared in the QUEUED `_on_results`, so a click can land after the
+            # worker already finished and before that slot runs; adopting a dead
+            # round there would clear the spinner without fetching anything and
+            # the click would be silently lost. The flag makes `_on_results`
+            # start a real round instead.
+            self._refresh_pending = True
+            return
+        self._start_round(PROVIDER_IDS)
+
+    def _start_round(self, providers: tuple[str, ...]) -> None:
         self._inflight = True
-        self._pool.submit(self._run_round, PROVIDER_IDS)
+        self._pool.submit(self._run_round, providers)
 
     def _set_refreshing(self, value: bool) -> None:
         if self._refreshing == value:
@@ -170,8 +189,7 @@ class UsagePoller(QObject):
         stale = self._stale_providers()
         if not stale:
             return
-        self._inflight = True
-        self._pool.submit(self._run_round, stale)
+        self._start_round(stale)
 
     def _stale_providers(self) -> tuple[str, ...]:
         """Providers whose stored observation is older than the TTL.
@@ -206,8 +224,30 @@ class UsagePoller(QObject):
                         return
                     usage = fetch(provider)
                     errors[provider] = usage.error  # "" on success
-                    if not usage.error:
-                        self._store.publish(usage)
+                    if usage.error:
+                        continue
+                    # ⚠ The module-level function, NOT `self._store.publish` —
+                    # that method re-arms the QFileSystemWatcher, and this is a
+                    # worker thread. Touching a GUI-thread QObject from here
+                    # corrupts the watcher silently rather than raising. The
+                    # re-arm still happens: the rename fires the watcher, and
+                    # `UsageStore._on_file_changed` re-adds the path GUI-side.
+                    if not publish_if_newer(self._store.path, usage):
+                        # False is ambiguous: either a peer's observation is
+                        # already newer (fine — we hold the poll lock, but a
+                        # status-line tap from ANY window can land between our
+                        # fetch and our write), or the write itself failed.
+                        # Only the second is an error, and it matters: a write
+                        # that silently fails leaves the file un-advanced, so
+                        # the provider is re-fetched every tick forever with
+                        # nothing on screen to say why. Re-read to tell them
+                        # apart rather than reporting a spurious failure.
+                        stored = read(self._store.path).get(provider)
+                        if (
+                            stored is None
+                            or stored.observed_at_ns < usage.observed_at_ns
+                        ):
+                            errors[provider] = "publish-failed"
         except Exception:
             # A poll failure must never take down the IDE; the panel keeps
             # showing the last known values with their age.
@@ -221,8 +261,15 @@ class UsagePoller(QObject):
     @Slot(dict)
     def _on_results(self, errors: dict) -> None:
         self._inflight = False
-        # Whatever raised it — this round is over, so the readout stops pulsing.
-        self._set_refreshing(False)
+        if self._refresh_pending and not self._stop_event.is_set():
+            # A click landed while this round was finishing. Honour it with a
+            # real round rather than clearing the spinner on a result the user
+            # never asked for; `refreshing` stays true across the handover.
+            self._refresh_pending = False
+            self._start_round(PROVIDER_IDS)
+        else:
+            # Whatever raised it — the round is over, so the readout stops.
+            self._set_refreshing(False)
         # Only providers the round ATTEMPTED are touched. A round that skipped
         # Claude (its status-line tap kept it fresh) must not clear a real Codex
         # error, and a round that lost the poll lock reports nothing at all.

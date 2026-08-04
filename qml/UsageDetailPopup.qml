@@ -40,6 +40,11 @@ Item {
     // not close the popup mid-travel.
     readonly property alias hovered: cardHover.hovered
 
+    // Driven by UsageIndicator's clock (Main.qml binds it), NOT by a Timer of
+    // its own: two 30s timers would drift up to half a tick apart, so the
+    // readout and the open popup could show different countdowns for the same
+    // window. One clock, one cadence — and the indicator is always present
+    // whenever this popup is reachable.
     property double nowMs: Date.now()
 
     // Bound to controller.usageRefreshing. The popup says so in words rather
@@ -52,20 +57,11 @@ Item {
     visible: false
 
     function open() {
-        root.nowMs = Date.now();
         root.visible = true;
     }
 
     function close() {
         root.visible = false;
-    }
-
-    Timer {
-        interval: 30000
-        repeat: true
-        running: root.visible
-        triggeredOnStart: true
-        onTriggered: root.nowMs = Date.now()
     }
 
     // ⚠ Esc is deliberately NOT handled, and this Item never takes focus.
@@ -108,7 +104,7 @@ Item {
     PillCard {
         id: card
 
-        width: 300
+        width: Theme.size.usagePopupWidth
         implicitHeight: body.implicitHeight + Theme.spacing.lg * 2
         height: implicitHeight
 
@@ -296,17 +292,25 @@ Item {
                         readonly property var credits: providerBlock.modelData.extra
                             ? providerBlock.modelData.extra.credits
                             : null
-                        // Only when there is something to say. Codex reports a
-                        // credits block even on a plan with none, and a bare
-                        // "credits 0" is noise dressed as information.
+                        // Only when there is something to say. Note the test is
+                        // on `enabled`, not on `limit !== undefined`: the
+                        // parser defaults `limit` to 0, so that key is ALWAYS
+                        // present for Claude and the check was vacuously true —
+                        // it rendered "credits 2524/5000" for a plan whose
+                        // extra usage is switched off. Codex likewise reports a
+                        // credits block on plans with none.
+                        // ⚠ The `!!` is load-bearing. Each provider carries only
+                        // ITS OWN credit keys, so the others are `undefined` and
+                        // `false || undefined` evaluates to `undefined`, not
+                        // false — and assigning undefined to a bool property
+                        // does not clear it, it leaves the previous value. That
+                        // rendered "credits 0" for a plan with none.
                         visible: credits != null
-                                 && (credits.limit !== undefined
-                                     || credits.unlimited
-                                     || credits.has_credits)
+                                 && !!(credits.enabled || credits.unlimited || credits.has_credits)
                         text: {
                             if (credits == null)
                                 return "";
-                            if (credits.limit !== undefined)
+                            if (credits.enabled)
                                 return "credits " + credits.used + "/" + credits.limit;
                             if (credits.unlimited)
                                 return "credits unlimited";

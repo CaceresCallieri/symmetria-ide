@@ -76,7 +76,7 @@
     "unqualified": 1
   },
   "qml/UsageDetailPopup.qml": {
-    "missing-property": 48
+    "missing-property": 49
   },
   "qml/UsageIndicator.qml": {
     "missing-property": 17

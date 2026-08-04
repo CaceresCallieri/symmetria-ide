@@ -676,6 +676,10 @@ QtObject {
         // to the `sm` text rung it sits beside rather than to a round number:
         // a logo taller than its neighbouring digits reads as a button.
         readonly property int usageProviderIcon: 11
+        // Usage detail popup. Wide enough for "GPT-5.3-Codex-Spark" plus its
+        // countdown and percentage on one line — the longest row the panel
+        // can produce — without wrapping.
+        readonly property int usagePopupWidth: 300
         readonly property int whichKeyRowHeight: 18   // was 22
         readonly property int whichKeyFooterHeight: 24 // was 28
 

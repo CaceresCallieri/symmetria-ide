@@ -30,8 +30,20 @@ QtObject {
     // relative string: a relative source would resolve against whichever file
     // renders it, which silently breaks the moment a consumer lives anywhere
     // but qml/. Same asset the spawn menu uses for Claude — one copy, one look.
+    // An explicit map, NOT a `provider === "codex" ? … : claude` ternary: this
+    // module is built for growth, and a ternary silently renders every future
+    // provider as Anthropic — a wrong-brand attribution, which is worse than a
+    // missing icon. An unknown provider gets "", and an empty `source` draws
+    // nothing.
+    readonly property var _providerIcons: ({
+        "claude": "../assets/claude-icon.svg",
+        "codex": "../assets/openai-icon.svg",
+        "opencode": "../assets/opencode-icon.svg"
+    })
+
     function providerIcon(provider) {
-        return Qt.resolvedUrl(provider === "codex" ? "../assets/openai-icon.svg" : "../assets/claude-icon.svg");
+        var file = format._providerIcons[provider];
+        return file ? Qt.resolvedUrl(file) : "";
     }
 
     // Threshold colour for a 0-100 percentage. Mirrors status-line.sh's
@@ -101,12 +113,23 @@ QtObject {
             return "not signed in";
         case "not-installed":
             return "CLI not installed";
+        case "spawn-failed":
+            return "could not start CLI";
         case "timeout":
             return "timed out";
         case "bad-response":
             return "unexpected response";
+        case "publish-failed":
+            return "could not save result";
+        case "unknown-provider":
+            return "unsupported provider";
         default:
-            return reason;
+            // `http-<code>` is generated, not enumerated, so it cannot have a
+            // case of its own. Anything else still reaches the user, so it
+            // degrades to a generic word rather than a machine string.
+            if (reason.indexOf("http-") === 0)
+                return "server error " + reason.slice(5);
+            return "unavailable";
         }
     }
 }

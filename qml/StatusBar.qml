@@ -68,15 +68,12 @@ Rectangle {
         && controller.focusedAgent >= 1
         && (controller.agentActivity[controller.focusedAgent - 1] || {}).agentType === "claude"
 
-    // Usage threshold colour, still used by the per-agent CONTEXT segment
-    // below. The threshold table itself moved to `UsageFormat` when the usage
-    // panel became its second consumer — three copies of the same tiers (this
-    // one, the panel's, and status-line.sh's) is how one of them drifts.
-    // The nowMs clock and the countdown formatter that lived here left with
-    // the 5h/7d chips; the panel owns both now.
-    function _usageColor(pct) {
-        return UsageFormat.usageColor(pct)
-    }
+    // The usage threshold table, the nowMs clock and the countdown formatter
+    // all used to live here. The clock and formatter left with the 5h/7d chips;
+    // the tiers moved to `UsageFormat` when the usage panel became their second
+    // consumer — three copies of the same thresholds (this file, the panel, and
+    // status-line.sh) is how one of them drifts. The CONTEXT segment below is
+    // the one remaining caller and binds `UsageFormat.usageColor` directly.
 
     // The surface switcher (terminal / editor / agents) lived here
     // centered until 2026-06-11 — it now sits at the left edge of
@@ -389,7 +386,7 @@ Rectangle {
                     }
                     Text {
                         text: (controller.agentContextPct[controller.focusedAgent - 1] || 0) + "%"
-                        color: root._usageColor(controller.agentContextPct[controller.focusedAgent - 1] || 0)
+                        color: UsageFormat.usageColor(controller.agentContextPct[controller.focusedAgent - 1] || 0)
                         font.family: Theme.font.family
                         font.pixelSize: Theme.font.size.sm
                         renderType: Text.NativeRendering

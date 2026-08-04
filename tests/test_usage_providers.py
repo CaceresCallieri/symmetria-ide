@@ -21,6 +21,7 @@ from symmetria_ide.usage_providers import (
     KEY_SESSION,
     KEY_WEEKLY,
     ProviderUsage,
+    _codex_exchange,
     fetch,
     fetch_claude,
     label_for_window,
@@ -202,6 +203,62 @@ def test_codex_malformed_payload_is_an_error_snapshot():
 
 def test_codex_carries_reset_credits():
     assert parse_codex_usage(_CODEX_PAYLOAD, 1).extra["reset_credits"] == 1
+
+
+# -- codex JSON-RPC framing (no subprocess) -----------------------------
+
+
+class _FakeStdin:
+    def __init__(self):
+        self.lines: list[str] = []
+
+    def write(self, text):
+        self.lines.append(text)
+
+    def flush(self):
+        pass
+
+
+class _FakeProc:
+    """Just enough of Popen for `_codex_exchange`: a writable stdin and an
+    iterable stdout. Lets the framing be tested without spawning anything."""
+
+    def __init__(self, stdout_lines):
+        self.stdin = _FakeStdin()
+        self.stdout = iter(stdout_lines)
+
+
+def test_codex_exchange_matches_on_id_not_arrival_order():
+    # The server interleaves its own notifications between our two requests,
+    # and does not answer in order — so frames must be matched on `id`.
+    proc = _FakeProc(
+        [
+            "not json at all\n",  # stray line: skipped, not fatal
+            json.dumps({"id": 1, "result": {"codexHome": "/x"}}) + "\n",
+            json.dumps({"method": "remoteControl/status/changed", "params": {}}) + "\n",
+            json.dumps({"id": 3, "result": {"unrelated": True}}) + "\n",
+            json.dumps({"id": 2, "result": _CODEX_PAYLOAD}) + "\n",
+        ]
+    )
+
+    result = _codex_exchange(proc)
+
+    assert result == _CODEX_PAYLOAD
+    sent = [json.loads(line) for line in proc.stdin.lines]
+    assert [m.get("method") for m in sent] == [
+        "initialize",
+        "initialized",
+        "account/rateLimits/read",
+    ]
+    # `initialized` is a notification — it must carry no id, or the server
+    # would owe a response nobody reads.
+    assert "id" not in sent[1]
+
+
+def test_codex_exchange_returns_none_when_the_pipe_closes_early():
+    # What the watchdog kill looks like from in here: stdout just ends.
+    proc = _FakeProc([json.dumps({"id": 1, "result": {}}) + "\n"])
+    assert _codex_exchange(proc) is None
 
 
 # -- registry + serialization -------------------------------------------

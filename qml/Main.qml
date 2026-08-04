@@ -362,7 +362,13 @@ Window {
         onActivated: {
             if (usagePopup.visible && root.usagePopupPinned) {
                 root.usagePopupPinned = false;
-                usagePopup.close();
+                // Only actually close when the pointer is elsewhere. Closing
+                // while hovering would strand it: `usageHovered` is already
+                // true, so `onUsageHoveredChanged` never fires again and the
+                // popup stays shut until the pointer leaves and returns.
+                // Unpinning alone hands control back to the hover state.
+                if (!root.usageHovered)
+                    usagePopup.close();
             } else {
                 root.usagePopupPinned = true;
                 usagePopup.open();
@@ -2823,6 +2829,9 @@ Window {
         anchors.bottomMargin: Theme.size.statusBarHeight + Theme.spacing.xs
         providers: controller.usageProviders
         refreshing: controller.usageRefreshing
+        // One clock for both surfaces — the readout owns the Timer, this reads
+        // it, so their countdowns can never disagree by half a tick.
+        nowMs: statusBar.usageIndicator.nowMs
     }
 
     // Transient agent spawn-failure toast (non-modal). The controller emits

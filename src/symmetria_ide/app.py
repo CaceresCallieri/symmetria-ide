@@ -521,9 +521,16 @@ class AppController(QObject):
     # Account-global usage (5h / 7d rate limits) — the freshest observation across
     # this IDE's agents AND (via the shared peer file) every other IDE instance.
     accountUsageChanged = Signal()
-    # The multi-provider usage panel's model changed — a new observation landed
+    # The multi-provider usage panel's MODEL changed — a new observation landed
     # (ours or a peer's), or a provider's error state moved.
     usageChanged = Signal()
+    # The refresh spinner moved. Kept OFF `usageChanged` on purpose: that signal
+    # is `usageProviders`' notify, and re-emitting it hands QML a new array
+    # identity, which makes both Repeaters destroy and rebuild every delegate.
+    # Folding the spinner into it would do that twice per click and on every
+    # agent turn — the same delegate-churn hazard the Active Changes panel
+    # documents.
+    usageRefreshingChanged = Signal()
     # STT recording/transcribing indicator for the AgentTopBar chips. The
     # shell pushes its STT target into the bridge hub, the hub carries it
     # in snapshots as the top-level "stt" field, and _on_bridge_snapshot
@@ -1035,8 +1042,7 @@ class AppController(QObject):
         self._usage_store.changed.connect(self._on_usage_store_changed)
         self._usage_poller = UsagePoller(self._usage_store, self)
         self._usage_poller.errorsChanged.connect(self._on_usage_errors_changed)
-        # Same funnel: both feed the one `usageChanged` notify the panel binds.
-        self._usage_poller.refreshingChanged.connect(self._on_usage_errors_changed)
+        self._usage_poller.refreshingChanged.connect(self.usageRefreshingChanged)
         # Snapshot of the shared file, re-read on every `changed`. QML binds the
         # derived `usageProviders` list; empty until the first observation lands.
         self._usage: dict[str, ProviderUsage] = {}
@@ -3414,12 +3420,7 @@ class AppController(QObject):
     # usage_poller. Supersedes the two accountUsage* chips above, which stay
     # until this promotes to stable (they still back the legacy peer file).
 
-    @Property(bool, notify=usageChanged)
-    def usageValid(self) -> bool:
-        """True once ANY provider has been observed — the panel's visibility."""
-        return any(u.observed_at_ns > 0 for u in self._usage.values())
-
-    @Property(bool, notify=usageChanged)
+    @Property(bool, notify=usageRefreshingChanged)
     def usageRefreshing(self) -> bool:
         """True while a user-requested poll is in flight (the readout pulses)."""
         return self._usage_poller.refreshing
@@ -3467,7 +3468,10 @@ class AppController(QObject):
                     "windows": [w.as_dict() for w in usage.windows],
                     "extra": usage.extra,
                     "observedAt": usage.observed_at_ns // 1_000_000_000,
-                    "source": usage.source,
+                    # `source` ("poll"/"tap") stays in the stored snapshot for
+                    # debugging but is NOT surfaced here — nothing renders it,
+                    # and every field in this row is rebuilt on each scan.
+                    #
                     # The live poll error, if any — not persisted in the shared
                     # file (an errored snapshot must never displace good data).
                     "error": error,

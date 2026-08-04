@@ -222,6 +222,25 @@ def _epoch_from_iso(value) -> int:
 # ---------------------------------------------------------------- claude
 
 
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """Turns any 3xx into an HTTPError instead of following it.
+
+    ⚠ Security, not politeness. `urlopen` follows redirects by default and
+    `HTTPRedirectHandler` carries the request headers to the target — including
+    `Authorization: Bearer <the user's live Claude Code OAuth token>`. The
+    endpoint this talks to is explicitly undocumented and unstable, so a 30x to
+    a different host is a plausible future and would hand out that token. The
+    resulting HTTPError lands in the existing `http-<code>` error branch.
+    """
+
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
+def _no_redirect_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_RefuseRedirect())
+
+
 def _claude_credentials_path() -> Path:
     return Path(os.path.expanduser("~/.claude/.credentials.json"))
 
@@ -297,12 +316,13 @@ def parse_claude_usage(payload: dict, plan: str, observed_at_ns: int) -> Provide
     extra: dict = {}
     credits = payload.get("extra_usage")
     if isinstance(credits, dict):
+        # Only what the popup renders — this dict is serialized into the shared
+        # file and marshalled into a QML row on every observation, so unread
+        # fields (utilization, currency) are pure weight.
         extra["credits"] = {
             "enabled": bool(credits.get("is_enabled")),
             "used": _to_int(credits.get("used_credits")),
             "limit": _to_int(credits.get("monthly_limit")),
-            "pct": _to_int(credits.get("utilization")),
-            "currency": str(credits.get("currency") or ""),
             "disabled_reason": str(credits.get("disabled_reason") or ""),
         }
 
@@ -334,7 +354,9 @@ def fetch_claude(credentials_path: Path | None = None) -> ProviderUsage:
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+        with _no_redirect_opener().open(
+            request, timeout=_HTTP_TIMEOUT_SECONDS
+        ) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         # 401/403 usually means we read the token mid-rotation; the next tick
@@ -487,23 +509,27 @@ def fetch_codex() -> ProviderUsage:
     except OSError:
         return _failed(CODEX, "Codex", "spawn-failed")
 
-    # A watchdog kill (rather than per-read timeouts) is what bounds this: it
-    # closes stdout, so the read loop above terminates on its own with no
-    # select()/non-blocking plumbing.
-    watchdog = threading.Timer(_CODEX_TIMEOUT_SECONDS, proc.kill)
-    watchdog.daemon = True
-    watchdog.start()
-    try:
-        result = _codex_exchange(proc)
-    except OSError:
-        result = None  # broken pipe — the watchdog killed it mid-write
-    finally:
-        watchdog.cancel()
-        proc.kill()
+    # `with`, so Popen.__exit__ closes stdin/stdout even on the path where the
+    # bounded wait below times out. Without it a wedged app-server leaks two
+    # pipe fds per poll round — every few minutes, for the life of the IDE.
+    with proc:
+        # A watchdog kill (rather than per-read timeouts) is what bounds this:
+        # it closes stdout, so the read loop terminates on its own with no
+        # select()/non-blocking plumbing.
+        watchdog = threading.Timer(_CODEX_TIMEOUT_SECONDS, proc.kill)
+        watchdog.daemon = True
+        watchdog.start()
         try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            log.debug("usage: codex app-server did not reap in time")
+            result = _codex_exchange(proc)
+        except OSError:
+            result = None  # broken pipe — the watchdog killed it mid-write
+        finally:
+            watchdog.cancel()
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                log.debug("usage: codex app-server did not reap in time")
 
     if result is None:
         return _failed(CODEX, "Codex", "timeout")

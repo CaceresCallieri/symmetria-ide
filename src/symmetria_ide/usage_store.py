@@ -104,7 +104,17 @@ def _write_lock(path: Path) -> Iterator[None]:
     against the network — the long poll holds `poll_lock`, a different file.
     """
     lock_path = path.with_suffix(path.suffix + ".write.lock")
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as exc:
+        # A read-only or full runtime dir must not turn every agent turn into
+        # an uncaught exception inside a queued GUI-thread slot. Degrade to an
+        # unlocked write: `atomic_write_json` is still crash-safe, we only lose
+        # the cross-process ordering guarantee — which is exactly the tradeoff
+        # `poll_lock` already makes for the same failure.
+        log.debug("usage-store: cannot open write lock (%s)", exc)
+        yield
+        return
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -207,7 +217,13 @@ class UsageStore(QObject):
         return read(self._path)
 
     def publish(self, usage: ProviderUsage) -> bool:
-        """Publish iff newer; on a successful write, re-arm the file watch."""
+        """Publish iff newer; on a successful write, re-arm the file watch.
+
+        ⚠ GUI THREAD ONLY — it touches the QFileSystemWatcher. A worker thread
+        must call the module-level `publish_if_newer` instead (see
+        `UsagePoller._run_round`); the watcher re-arm it skips happens anyway
+        when the rename fires `_on_file_changed` on the GUI thread.
+        """
         wrote = publish_if_newer(self._path, usage)
         if wrote:
             self._ensure_file_watched()
