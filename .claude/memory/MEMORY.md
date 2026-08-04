@@ -62,6 +62,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Startup performance](reference/qt-pyside/startup_perf.md) — SYMMETRIA_IDE_TRACE waterfall + interleaved A/B; fixed browser-MCP GUI-thread import (~1s) + eager WebEngine (~430ms)
 - [Nested-compositor output mode](reference/qt-pyside/nested_compositor_output_mode.md) — the wl_output must describe the PANE, not the window; only C++ can say so
 - [Nested-compositor pointer input](reference/qt-pyside/nested_compositor_pointer_input.md) — scroll needs 3 non-default things; all mislead as focus bugs
+- [Nested-compositor frame starvation](reference/qt-pyside/nested_compositor_frame_starvation.md) — host stops rendering → client stalls FOREVER (rAF 0); needs a watchdog, not a workspace check
 - [Nested-compositor clipboard](reference/qt-pyside/nested_compositor_clipboard.md) — isolated BOTH ways; bridging needs a ~30-line C++ QWaylandCompositor subclass
 - [Why the suite dies "intermittently"](reference/qt-pyside/processevents_shared_app_segv.md) — two causes: pumping the session app, and leaked AppControllers (a worker thread pins its own object)
 
