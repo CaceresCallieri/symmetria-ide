@@ -57,6 +57,23 @@ def _isolate_xdg_config(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_usage_poll(monkeypatch):
+    """Stop the subscription-usage poller from reaching the real accounts.
+
+    ``AppController.start()`` starts the poller, and several tests call it. Left
+    alone, each of those fires a real HTTPS request against the developer's
+    Anthropic account AND spawns a real ``codex app-server`` subprocess — from a
+    suite that is supposed to touch nothing live. It also makes those tests fail
+    offline for reasons unrelated to what they assert.
+
+    Set to ``"0"`` rather than deleted, because ``"0"`` IS the off switch here
+    (unlike the tmux flag, where presence is what enables). ``test_usage_poller``
+    deletes it in the one test that asserts the default-on branch — the branch
+    this fixture otherwise makes unreachable."""
+    monkeypatch.setenv("SYMMETRIA_IDE_USAGE_POLL", "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_xdg_runtime(monkeypatch, tmp_path_factory):
     """Redirect ``XDG_RUNTIME_DIR`` to a throwaway dir for every test.
 
