@@ -96,6 +96,97 @@ def bridge(controller) -> FakeBridge:
     return controller._agent_bridge
 
 
+def test_agent_harness_catalog_projects_registry_metadata(controller):
+    """Metadata + order only — `available` has its own test below.
+
+    The fixture forces `shutil.which` truthy for every executable so spawn
+    tests don't depend on the host, which would make an `available: True`
+    assertion here true by construction rather than by derivation.
+    """
+    catalog = [
+        {key: value for key, value in row.items() if key != "available"}
+        for row in controller.agentHarnessCatalog
+    ]
+    assert catalog == [
+        {
+            "name": "pi",
+            "label": "Pi",
+            "menuKey": "P",
+            "icon": "assets/pi-icon.svg",
+            "resumeLabel": "resume (pi's picker)",
+            "resumeRequiresId": False,
+        },
+        {
+            "name": "claude",
+            "label": "Claude",
+            "menuKey": "C",
+            "icon": "assets/claude-icon.svg",
+            "resumeLabel": "resume (claude's picker)",
+            "resumeRequiresId": False,
+        },
+        {
+            "name": "opencode",
+            "label": "OpenCode",
+            "menuKey": "O",
+            "icon": "assets/opencode-icon.svg",
+            "resumeLabel": "resume (session picker)",
+            "resumeRequiresId": True,
+        },
+    ]
+
+
+def test_agent_harness_catalog_notifies_rather_than_being_constant(controller):
+    """A constant property is read once by QML and frozen for the session.
+
+    `available` moves when a CLI is installed, so the property must carry a
+    notify signal or the chooser can never pick that up.
+    """
+    prop = controller.metaObject().property(
+        controller.metaObject().indexOfProperty("agentHarnessCatalog")
+    )
+    assert not prop.isConstant()
+    assert prop.hasNotifySignal()
+
+
+def test_agent_harness_catalog_keeps_unavailable_harness(controller, monkeypatch):
+    monkeypatch.setattr(
+        "symmetria_ide.app.shutil.which",
+        lambda executable: None if executable == "opencode" else f"/bin/{executable}",
+    )
+    controller.refresh_harness_availability()
+
+    catalog = controller.agentHarnessCatalog
+
+    assert [row["name"] for row in catalog] == ["pi", "claude", "opencode"]
+    assert [row["available"] for row in catalog] == [True, True, False]
+
+
+def test_refresh_harness_availability_emits_only_on_a_real_change(
+    controller, monkeypatch
+):
+    """The chooser refreshes on every open; the common case must not churn."""
+    emissions: list[int] = []
+    controller.agentHarnessCatalogChanged.connect(lambda: emissions.append(1))
+
+    controller.refresh_harness_availability()
+    assert emissions == [], "PATH unchanged — no notify"
+
+    monkeypatch.setattr(
+        "symmetria_ide.app.shutil.which",
+        lambda executable: None if executable == "opencode" else f"/bin/{executable}",
+    )
+    controller.refresh_harness_availability()
+    controller.refresh_harness_availability()
+    assert emissions == [1], "one notify for one change, not one per refresh"
+
+
+def test_harness_menu_entry_is_the_shared_lookup(controller):
+    """Both QML modals resolve a harness through this, not a copy of the scan."""
+    assert controller.harness_menu_entry("opencode")["resumeRequiresId"] is True
+    assert controller.harness_menu_entry("pi")["label"] == "Pi"
+    assert controller.harness_menu_entry("nonesuch") is None
+
+
 # ---------------------------------------------------------------------------
 # Spawn: argv construction + dangerous polarity
 # ---------------------------------------------------------------------------

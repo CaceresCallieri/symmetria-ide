@@ -58,8 +58,8 @@ The screenshot harness is EPHEMERAL (exits on its own — no lingering window). 
 
 **Original spec (for reference) — Location:** `src/symmetria_ide/app.py` in `run()`, immediately before `app.exec()`:
 ```python
-    gc.collect()   # ← the ~20ms cost (removed)
-    gc.freeze()    # ← kept
+gc.collect()  # ← the ~20ms cost (removed)
+gc.freeze()  # ← kept
 ```
 
 **Why it's likely redundant:** `gc.freeze()` moves all currently-tracked objects into a permanent generation never scanned again (the gotcha-#10 mitigation — shrinks the "GC runs while QSGRenderThread paints" SEGV surface under Python 3.14). The preceding `gc.collect()` only serves to free cyclic garbage so it isn't frozen-in. Dropping it saves the full-collection cost (~50ms measured as part of the 57ms start_done→exec phase) but **freezes whatever garbage exists at that point into the permanent gen** = a small one-time memory bump held until process exit.

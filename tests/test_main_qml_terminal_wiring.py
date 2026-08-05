@@ -399,8 +399,25 @@ def test_agent_focus_chords_present(main_qml: str):
     # so the dispatch reads controller.agentOrder, not internal slots.
     assert "controller.focus_agent(order[index])" in main_qml
     # A position with no agent opens the spawn menu (appends as next
-    # dense number) instead of silently no-opping.
-    assert "agentSpawnMenu.open()" in main_qml
+    # dense number) instead of silently no-oping. Scope this to the actual
+    # Ctrl+1..5 dispatch: Ctrl+Shift+A has another open() call and must not be
+    # allowed to satisfy this branch's contract.
+    instantiator_idx = main_qml.index("model: controller.maxAgentSlots")
+    instantiator_decl = main_qml.rfind("Instantiator", 0, instantiator_idx)
+    dispatch = _extract_braced_body(main_qml, instantiator_decl)
+    alias = re.search(r"\bvar\s+(\w+)\s*=\s*agentSpawnMenu\s*;", dispatch)
+    receivers = ["agentSpawnMenu", *(alias.groups() if alias is not None else ())]
+    executable_dispatch = re.sub(r"//[^\n]*", "", dispatch)
+    assert any(
+        re.search(
+            rf"else\s+if\s*\(\s*{receiver}\.visible\s*\)\s*\{{?\s*"
+            rf"{receiver}\.reassert\(\)\s*;[\s\S]*?"
+            rf"else\s*\{{\s*{receiver}\.open\(\)\s*;",
+            executable_dispatch,
+        )
+        is not None
+        for receiver in receivers
+    ), "the Ctrl+1..5 empty-slot branch must open only a closed chooser"
 
 
 def test_agent_management_chords_present(main_qml: str):

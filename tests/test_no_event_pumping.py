@@ -16,6 +16,16 @@ been edited last.
 
 A grep is enough to hold the line, and unlike the prose it fails at the moment
 the pump is written.
+
+ONE EXEMPTION, and it is about the word "shared". A harness that pytest launches
+with `subprocess.run([sys.executable, ...])` gets a fresh interpreter and its
+own application object, so it has no shared queue to drain and no earlier
+module's deletions to run. Qt Quick behaviour cannot be tested any other way —
+delivering a synthesised key requires turning the loop — and the alternative,
+building a QGuiApplication inside the suite, is the very thing that cannot be
+done here (conftest owns a session-scoped QCoreApplication) and would court
+this crash directly. See `_is_out_of_process_harness`, whose three conditions
+are what stop the exemption from covering an ordinary importable helper.
 """
 
 from __future__ import annotations
@@ -71,6 +81,54 @@ def _pump_calls(source: str) -> list[str]:
     return found
 
 
+_HARNESS_DIR = _TESTS_DIR / "qml_harness"
+_QT_APP_TYPES = frozenset({"QGuiApplication", "QApplication", "QCoreApplication"})
+
+
+def _is_out_of_process_harness(path: Path, tree: ast.Module) -> bool:
+    """Does this module own the event loop it pumps?
+
+    The rule above is about the SHARED loop: pumping the session-scoped
+    QCoreApplication runs deletions posted by earlier modules. A harness that
+    pytest launches with `subprocess.run([sys.executable, ...])` has neither —
+    fresh interpreter, its own application object, no prior modules — so the
+    failure mode the guard exists for cannot occur, and a Qt Quick harness
+    cannot be written without pumping (there is no other way to let the scene
+    graph deliver a synthesised key).
+
+    Exempting by directory alone would be too loose: an ordinary helper
+    dropped in `qml_harness/` and IMPORTED by a test module would run inside
+    the shared process and be waved through. All three conditions must hold —
+    the directory, a `__main__` entry point, and constructing its own
+    application object — so a module that could be imported is never exempt.
+    """
+    if path.parent != _HARNESS_DIR:
+        return False
+    constructs_app = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in _QT_APP_TYPES
+        for node in ast.walk(tree)
+    )
+    # `__name__ == "__main__"` exactly. Matching on the left operand alone
+    # accepted `if __name__ != "__main__":` — a guard that runs on IMPORT and
+    # not when launched, i.e. precisely the module this exemption must not
+    # cover.
+    has_main_guard = any(
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "__name__"
+        and len(node.test.ops) == 1
+        and isinstance(node.test.ops[0], ast.Eq)
+        and len(node.test.comparators) == 1
+        and isinstance(node.test.comparators[0], ast.Constant)
+        and node.test.comparators[0].value == "__main__"
+        for node in ast.walk(tree)
+    )
+    return constructs_app and has_main_guard
+
+
 def _test_sources() -> list[Path]:
     # Recursive: a non-recursive glob exempts the first `tests/<subdir>/`
     # anyone adds, silently — the exact bug this same change fixed in CI, where
@@ -82,7 +140,10 @@ def _test_sources() -> list[Path]:
 
 @pytest.mark.parametrize("path", _test_sources(), ids=lambda p: p.name)
 def test_module_does_not_pump_the_event_loop(path: Path):
-    offenders = _pump_calls(path.read_text())
+    source = path.read_text()
+    if _is_out_of_process_harness(path, ast.parse(source)):
+        pytest.skip("standalone subprocess harness — owns the loop it pumps")
+    offenders = _pump_calls(source)
     assert not offenders, (
         f"{path.name} pumps the shared event loop, which runs prior modules' "
         "deleteLater deletions and SEGVs mid-suite (gotcha #10). Spy with an "
@@ -116,3 +177,44 @@ class TestTheDetector:
 
     def test_an_unrelated_call_is_not_a_pump(self):
         assert not _pump_calls("server.stop()")
+
+
+class TestTheHarnessExemption:
+    """The exemption is the guard's only hole — these keep it that size."""
+
+    _STANDALONE = (
+        "app = QGuiApplication(sys.argv)\n"
+        "def main():\n    app.processEvents()\n"
+        'if __name__ == "__main__":\n    main()\n'
+    )
+
+    def test_a_standalone_harness_is_exempt(self):
+        path = _HARNESS_DIR / "probe.py"
+        assert _is_out_of_process_harness(path, ast.parse(self._STANDALONE))
+
+    def test_the_same_file_outside_the_harness_dir_is_not(self):
+        """Directory membership is what marks a file as launched, not run."""
+        path = _TESTS_DIR / "probe.py"
+        assert not _is_out_of_process_harness(path, ast.parse(self._STANDALONE))
+
+    def test_an_importable_helper_in_the_harness_dir_is_not(self):
+        """No `__main__` guard and no application object: this would run inside
+        the shared pytest process, which is exactly what the guard covers."""
+        source = "def helper(app):\n    app.processEvents()\n"
+        path = _HARNESS_DIR / "helper.py"
+        assert not _is_out_of_process_harness(path, ast.parse(source))
+
+    def test_an_inverted_main_guard_does_not_exempt(self):
+        """`__name__ != "__main__"` runs on IMPORT — the shared-process case."""
+        source = (
+            "app = QGuiApplication(sys.argv)\n"
+            "def main():\n    app.processEvents()\n"
+            'if __name__ != "__main__":\n    main()\n'
+        )
+        path = _HARNESS_DIR / "probe.py"
+        assert not _is_out_of_process_harness(path, ast.parse(source))
+
+    def test_a_main_guard_alone_does_not_exempt(self):
+        source = 'def main():\n    app.processEvents()\nif __name__ == "__main__":\n    main()\n'
+        path = _HARNESS_DIR / "probe.py"
+        assert not _is_out_of_process_harness(path, ast.parse(source))

@@ -45,6 +45,32 @@ class AgentHarness:
     name: str
     executable: str
     label: str
+    # ---- Spawn-chooser metadata (AgentSpawnMenu's stage-0 harness rows) ----
+    #
+    # REQUIRED, deliberately: the two-stage chooser projects its rows straight
+    # out of this registry (AppController.agentHarnessCatalog), so a harness
+    # that omitted them would render a keyless, iconless, unselectable row.
+    # Declaring them here is what makes "a fourth harness is a registry entry
+    # plus an icon" true rather than aspirational — there is no parallel UI
+    # table in app.py or QML to keep in sync.
+    #
+    # The single-letter selection key, UPPERCASE. Uppercase because that is
+    # what Qt's key enum carries (`Qt.Key_P` == 0x50 == ord("P")), letting the
+    # menu dispatch by `menuKey.charCodeAt(0) === event.key` with no per-
+    # harness branch. Must be unique across the registry.
+    menu_key: str
+    # Brand mark, as a path RELATIVE TO qml/ (the menu resolves it against its
+    # own directory). Brand fills are baked into the SVG — intentionally NOT
+    # Theme-tokened, so the logo identifies the backend regardless of theme.
+    icon: str
+    # Stage-1 label for the `r` row. It differs per harness because the resume
+    # UX does: claude and pi open their OWN interactive picker inside the
+    # terminal, opencode has no picker flag and defers to the IDE's
+    # AgentSessionPicker (see `resume_requires_id`).
+    resume_label: str
+    # Presentation order in the chooser, ascending. Not the dict order: the
+    # registry is keyed for lookup, this decides what the user sees first.
+    menu_order: int
     # Flags appended to EVERY spawn of this harness, right after the
     # executable. claude carries `--no-chrome`: with the user's global
     # `claudeInChromeDefaultEnabled`, every claude session auto-connects the
@@ -243,6 +269,11 @@ HARNESSES: dict[str, AgentHarness] = {
         name="claude",
         executable="claude",
         label="Claude",
+        menu_key="C",
+        icon="assets/claude-icon.svg",
+        # Bare `-r` opens claude's own interactive picker in the terminal.
+        resume_label="resume (claude's picker)",
+        menu_order=1,
         base_flags=("--no-chrome",),
         dangerous_flag="--dangerously-skip-permissions",
         flags={"fresh": [], "resume": ["-r"], "continue": ["-c"]},
@@ -271,6 +302,12 @@ HARNESSES: dict[str, AgentHarness] = {
         name="opencode",
         executable="opencode",
         label="OpenCode",
+        menu_key="O",
+        icon="assets/opencode-icon.svg",
+        # The one harness whose resume goes through the IDE's own picker —
+        # `--session` requires an id and opencode ships no picker flag.
+        resume_label="resume (session picker)",
+        menu_order=2,
         # The full TUI's auto-approve is the OPENCODE_PERMISSION env var in
         # NESTED allow-all form (every tool, every pattern). A bare "allow"
         # or a config merge is too weak: OpenCode resolves permissions
@@ -307,6 +344,14 @@ HARNESSES: dict[str, AgentHarness] = {
         # runtime and it loads its packages from ~/.pi/agent/settings.json.
         executable="pi",
         label="Pi",
+        menu_key="P",
+        icon="assets/pi-icon.svg",
+        # Like claude, pi's bare `-r` opens its own picker inside the pane —
+        # no IDE-side session list (see `resume_requires_id=False` below).
+        resume_label="resume (pi's picker)",
+        # First in the chooser: the harness this integration exists to make
+        # reachable, and the one whose row the user is looking for.
+        menu_order=0,
         # ⚠ NOT a skip-permissions flag, and must not be documented as one.
         # `--approve` sets `projectTrustOverride` (dist/cli/args.js:163) —
         # it suppresses the blocking "Project is not trusted" startup dialog,
@@ -348,6 +393,16 @@ HARNESSES: dict[str, AgentHarness] = {
         title_placeholders=("pi",),
     ),
 }
+
+# The registry in the order the spawn chooser shows it. Sorted ONCE, here, at
+# import: `HARNESSES` is keyed for lookup and its dict order is incidental, so
+# every consumer that wants presentation order used to sort it again — and the
+# catalog projection did that on every QML read, including one full sort per
+# single-harness lookup. The set is compile-time constant, so the sort has no
+# reason to run more than once in the process.
+MENU_ORDERED_HARNESSES: tuple[AgentHarness, ...] = tuple(
+    sorted(HARNESSES.values(), key=lambda harness: harness.menu_order)
+)
 
 
 def spawn_argv(

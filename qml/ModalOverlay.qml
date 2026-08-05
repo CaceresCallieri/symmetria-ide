@@ -80,6 +80,22 @@ Item {
         overlayRoot.dismissed();
     }
 
+    // What Esc DOES — the single seam a staged modal overrides.
+    //
+    // Deliberately separate from dismiss(), which must keep meaning "close,
+    // now" for its non-Esc callers: Main.qml calls agentSpawnMenu.dismiss()
+    // when Ctrl+1..5 navigates away and from _dismissModals. Overloading
+    // dismiss() with go-back semantics would make Ctrl+1..5 step back a
+    // stage instead of navigating — exactly the class of regression the
+    // Ctrl+1..5 modal exemption exists to prevent.
+    //
+    // Consumers cannot implement this in onKeyPressed: the keyCatcher below
+    // handles Esc and RETURNS before keyPressed is emitted, so an Esc never
+    // reaches a consumer's handler at all.
+    function handleEscape() {
+        dismiss();
+    }
+
     // Entrance motion (FM-style scale-pop + opacity fade) is expressed as a
     // single root "shown" state + a to-only Transition, NOT as Behaviors on
     // visible-bound properties. A `to: "shown"` transition animates only the
@@ -180,11 +196,12 @@ Item {
                 });
         }
         Keys.onPressed: function (event) {
-            // Modal: swallow everything. Esc is universal (every modal
-            // dismisses on it); the rest is the consumer's to interpret.
+            // Modal: swallow everything. Esc routes through handleEscape()
+            // (dismiss by default, overridable for staged modals); the rest
+            // is the consumer's to interpret.
             event.accepted = true;
             if (event.key === Qt.Key_Escape) {
-                overlayRoot.dismiss();
+                overlayRoot.handleEscape();
                 return;
             }
             overlayRoot.keyPressed(event);

@@ -1,12 +1,20 @@
-// Keyboard-first OpenCode session picker — the resume path for the
-// OpenCode harness. Claude needs no equivalent (its bare `-r` opens an
-// interactive picker inside the terminal), but `opencode --session`
-// requires an id, so the IDE lists the project's sessions itself —
+// Keyboard-first session picker — the resume path for the OpenCode harness.
+// Claude and Pi need no equivalent (their bare `-r` opens an interactive
+// picker inside the terminal), but `opencode --session` requires an id, so
+// the IDE lists the project's sessions itself —
 // same approach as orchestrator.nvim's resume_picker, with QML as the
 // selection UI instead of vim.ui.select.
 //
-// Flow: open(dangerous) → controller.request_opencode_sessions() (async
-// worker; `opencode session list` takes ~1s) → onOpencodeSessionsReady
+// ⚠ OpenCode-SPECIFIC, despite the harness-parameterised spawn below: the
+// list comes from `controller.request_opencode_sessions()`, which shells
+// `opencode session list` unconditionally. The harness rides through so the
+// SPAWN is correct, not so the FETCH is general. A second `resumeRequiresId`
+// harness therefore does NOT work here for free — it needs a harness-
+// parameterised fetch on the controller (its own list command and parser)
+// before this modal can serve it.
+//
+// Flow: open(harness, dangerous) → controller.request_opencode_sessions()
+// (async worker; `opencode session list` takes ~1s) → onOpencodeSessionsReady
 // fills the list → j/k/arrows move, Enter spawns
 // `opencode --session <id>`, Esc cancels.
 //
@@ -28,6 +36,22 @@ ModalOverlay {
     // Polarity chosen with the case of the `r` keypress in the spawn
     // menu — carried through to the eventual spawn_agent call.
     property bool dangerous: true
+    // The harness this picker is resuming — an open() ARGUMENT, so the
+    // ordering ("set the harness, then raise") cannot be got wrong by a
+    // caller: the raise sets it. It stays a property because it must survive
+    // the inherited reassert() (a focus-only re-grab that must not re-fetch
+    // or re-decide anything). OpenCode is the default only as the value a
+    // caller that supplies none would get; see the header note on why a
+    // future `resumeRequiresId` harness needs more than this property.
+    property string harness: "opencode"
+    // Display name for the title bar — the catalog's label ("OpenCode"),
+    // falling back to the raw name if the harness is somehow unregistered.
+    // The lookup itself lives on the controller (shared with AgentSpawnMenu);
+    // only the fallback is this modal's own.
+    readonly property string _harnessLabel: {
+        var entry = controller.harness_menu_entry(root.harness);
+        return entry ? entry.label : root.harness;
+    }
     // "loading" | "ready" | "empty" | "error"
     property string state_: "loading"
     property var sessions: []
@@ -36,7 +60,8 @@ ModalOverlay {
     // Override the base open() to (re)fetch the session list. reassert()
     // (Main.qml's modal guard on window re-activation) is INHERITED — it
     // must NOT re-fetch, only re-grab focus, which the base _show() does.
-    function open(dangerous) {
+    function open(harness, dangerous) {
+        root.harness = harness;
         root.dangerous = dangerous;
         root.sessions = [];
         root.selectedIndex = 0;
@@ -50,7 +75,7 @@ ModalOverlay {
             return;
         var session = root.sessions[root.selectedIndex];
         root.visible = false;
-        controller.spawn_agent("resume", root.dangerous, "opencode", session.id);
+        controller.spawn_agent("resume", root.dangerous, root.harness, session.id);
         // Always run the dismissal focus restore: if spawn_agent no-ops
         // (pool filled during the ~1s list fetch, opencode vanished from
         // PATH), focus would otherwise be orphaned with the modal gone.
@@ -109,7 +134,7 @@ ModalOverlay {
     // ---- Panel content (dropped into ModalOverlay's content Column) ----
 
     Text {
-        text: "Resume OpenCode session"
+        text: "Resume " + root._harnessLabel + " session"
               + (root.dangerous ? "  ⚠" : "")
         color: Theme.color.text.strong
         font.family: Theme.font.family

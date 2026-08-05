@@ -111,4 +111,11 @@ typeCheckingMode = "basic"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# `.` as well as `src`, and the repo root is NOT redundant: three test modules
+# import their shared fixtures as `from tests.conftest import ...`, which needs
+# the repo root importable. `python3 -m pytest` puts the cwd on `sys.path` for
+# free, so the suite looked green through that invocation while a bare `pytest`
+# exited 2 on a collection error — the same suite, one green and one red
+# depending only on how it was started. Anything that probes this project by
+# running its canonical command saw the red one.
+pythonpath = ["src", "."]
