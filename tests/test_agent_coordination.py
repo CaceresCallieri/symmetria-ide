@@ -275,5 +275,10 @@ def test_injection_templates_mention_agent_and_note():
     assert "#3" in hold and "hold" in hold.lower()
     cancelled = coord.cancelled_text(3, "")
     assert "#3" in cancelled and "cancelled" in cancelled.lower()
-    caveat = coord.opencode_caveat_text(3, "api merged")
-    assert "#3" in caveat and "opencode" in caveat.lower()
+    for harness in ("OpenCode", "Pi"):
+        caveat = coord.unjudgeable_caveat_text(3, harness, "api merged")
+        lowered = caveat.lower()
+        assert "#3" in caveat and harness.lower() in lowered
+        assert "transcript format" in lowered
+        assert "judge" in lowered and "cannot read" in lowered
+        assert "claude" not in lowered

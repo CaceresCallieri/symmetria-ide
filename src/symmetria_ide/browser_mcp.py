@@ -304,6 +304,14 @@ class BrowserMcpServer:
         self._sock: socket.socket | None = None  # held bound until uvicorn owns it
         self._port = 0
         self._config_path = ""
+        # Latched True once the backgrounded start has FINISHED — succeeded,
+        # failed, or been declined by the kill switch. Distinct from `ready`
+        # (which is "succeeded"): a caller that wants to wait for the server
+        # needs to know when waiting has become pointless, not just when it
+        # can stop. Written from the starter thread, read from the GUI thread;
+        # a lone bool needs no lock (CPython attribute store is atomic, and a
+        # reader that misses the flip by one tick simply polls once more).
+        self._start_settled = False
         # Per-agent config files written by agent_config_path(), unlinked on
         # stop() (orphans from a hard-kill are swept by reap_orphan_configs).
         self._agent_config_paths: set[str] = set()
@@ -333,9 +341,36 @@ class BrowserMcpServer:
         the server isn't running)."""
         return self._config_path
 
+    @property
+    def ready(self) -> bool:
+        """Can `agent_config_path`/`agent_config_content` produce a real config?
+
+        The explicit name for what those two builders test internally (a
+        non-zero `_port`). Because `start()` only spawns a starter thread, an
+        agent spawned in the ~1s before this flips silently gets NO IDE MCP
+        tools — no error, just a missing capability. Anything that spawns an
+        agent at launch (the SYMMETRIA_IDE_SPAWN_AGENT smoke hook) must wait on
+        this rather than assume; a user-initiated spawn is long past it.
+        """
+        return self._port != 0
+
+    @property
+    def start_settled(self) -> bool:
+        """Has the backgrounded start finished — succeeded, failed, or declined?
+
+        The termination condition for a readiness wait. `ready` alone would
+        make a waiter burn its whole budget whenever python-mcp is missing or
+        `SYMMETRIA_IDE_BROWSER_MCP=0` is set, both of which are normal states,
+        not errors.
+        """
+        return self._start_settled
+
     def start(self) -> None:
         if os.environ.get("SYMMETRIA_IDE_BROWSER_MCP") == "0":
             log.info("browser MCP server disabled (SYMMETRIA_IDE_BROWSER_MCP=0)")
+            # Settled-but-not-ready: declining to start is a final answer, so a
+            # readiness waiter proceeds immediately instead of timing out.
+            self._start_settled = True
             return
         # Idempotent: the per-project gate (AppController._refresh_project_
         # browser_enabled) calls this on every displayedRootChanged while the
@@ -361,7 +396,11 @@ class BrowserMcpServer:
 
         Non-fatal on error — Stage-1 manual browsing still works without the
         server; _port stays 0 so agent_config_path() returns "" for every
-        spawn until (if ever) a later start succeeds."""
+        spawn until (if ever) a later start succeeds.
+
+        Latches `_start_settled` in a `finally`, AFTER either outcome has
+        finished writing `_port` — a readiness waiter that saw settled=True
+        must never then read a half-written port."""
         try:
             self._start()
         except Exception:
@@ -381,6 +420,8 @@ class BrowserMcpServer:
             # the dominant failure (python-mcp not installed) fails identically
             # each time, so that would only spam log.exception + spawn churn.
             # Recovery from a genuine transient failure is an IDE restart.
+        finally:
+            self._start_settled = True
 
     def _start(self) -> None:
         import uvicorn

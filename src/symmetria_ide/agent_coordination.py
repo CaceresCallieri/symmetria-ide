@@ -440,10 +440,20 @@ def cancelled_text(display_num: int, note: str) -> str:
     )
 
 
-def opencode_caveat_text(display_num: int, note: str) -> str:
+def non_claude_caveat_text(display_num: int, harness_label: str, note: str) -> str:
+    """Go-ahead for a watched agent the judge cannot verify.
+
+    The judge reads claude's transcript format only, so every other harness
+    gets this disclosed-uncertainty go-ahead instead. `harness_label` is the
+    registry's own label ("OpenCode", "Pi", …) — naming the harness generically
+    is the point: an earlier hardcoded "opencode agent" would have told a user
+    watching a Pi agent the wrong thing.
+    """
     return (
-        f"[Symmetria coordination] Agent #{display_num} went idle. It is an "
-        "opencode agent, so transcript verification is unavailable — proceed "
-        f"only if your condition is plausibly met.{_note_clause(note)} "
-        "If you are unsure whether it actually finished, ask the user."
+        f"[Symmetria coordination] Agent #{display_num} went idle. It runs the "
+        f"{harness_label} harness, so transcript verification is unavailable — "
+        f"the judge reads claude transcripts only, not {harness_label.lower()} "
+        f"ones. Proceed only if your condition is plausibly met."
+        f"{_note_clause(note)} If you are unsure whether it actually finished, "
+        "ask the user."
     )

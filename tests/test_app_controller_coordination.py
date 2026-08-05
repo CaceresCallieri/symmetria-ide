@@ -108,14 +108,32 @@ def test_register_already_idle_with_session_evaluates(two_agents):
     assert trigger.evaluating
 
 
-def test_register_opencode_watched_carries_warning(two_agents):
+@pytest.mark.parametrize("harness", ["opencode", "pi"])
+def test_register_unjudgeable_watched_carries_warning(two_agents, harness):
     c = two_agents
-    c._term_agents[1]["harness"] = "opencode"
+    c._term_agents[1]["harness"] = harness
     _mark_busy(c, 1)
     reply = c._register_wait_for_mcp(1, _agent_id(2), "")
     assert reply["ok"] is True
     assert reply.get("warning")
     assert "verification" in reply["warning"]
+
+
+def test_register_claude_watched_carries_no_warning(two_agents):
+    c = two_agents
+    assert c._term_agents[1]["harness"] == "claude"
+    _mark_busy(c, 1)
+    assert "warning" not in c._register_wait_for_mcp(1, _agent_id(2), "")
+
+
+@pytest.mark.parametrize(
+    ("harness", "judgeable"),
+    [("claude", True), ("opencode", False), ("pi", False), ("nonesuch", False)],
+)
+def test_harness_judgeable_reads_registry_capability(controller, harness, judgeable):
+    """Both coordination sites gate on this one capability lookup, never on a
+    literal harness name — an unknown harness takes the honest caveated path."""
+    assert controller._harness_judgeable(harness) is judgeable
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +174,24 @@ def test_fire_opencode_watched_injects_caveat(two_agents):
     assert injects[0]["submit"] is True
     assert "opencode" in injects[0]["text"]
     assert c._coordination.triggers == []  # completed, not re-armed
+
+
+def test_fire_pi_watched_injects_harness_labelled_caveat(two_agents):
+    c = two_agents
+    c._term_agents[1]["harness"] = "pi"
+    _mark_busy(c, 1)
+    c._register_wait_for_mcp(1, _agent_id(2), "note")
+    injects = _capture_injects(c)
+    c._coord_fire(1)
+    assert len(injects) == 1
+    assert injects[0]["slot"] == 2
+    text = injects[0]["text"]
+    assert "Pi" in text
+    assert "transcript format" in text.lower()
+    assert "cannot read" in text.lower()
+    assert "claude" not in text.lower()
+    assert "opencode" not in text.lower()
+    assert c._coordination.triggers == []
 
 
 def test_fire_claude_without_session_is_needs_user(two_agents, monkeypatch):
