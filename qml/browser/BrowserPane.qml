@@ -18,9 +18,14 @@
 // Wayland connection; unloading it kills every surface and takes the browser
 // process's display with it. Same rule, and the same reason, as the fixed-index
 // Repeater behind the agent terminal panes: a live client is not a view you can
-// recreate. Hiding is free instead — measured with the IDE on an INACTIVE
-// workspace and the surface hidden four different ways, Chrome held a full 60Hz
-// of requestAnimationFrame and screenshots stayed at ~60ms.
+// recreate. Hiding is the correct gate instead — and it is free ONLY because
+// SymmetriaOutput drives frame callbacks itself (a 20Hz watchdog) when the host
+// stops producing frames. ⚠ The measurement this comment used to cite — a full
+// 60Hz of requestAnimationFrame while hidden and off-workspace — was re-run
+// 2026-07-28 and INVERTED: 0 rAF ticks in 1007ms, screenshots never returning.
+// That claim is retracted; without the watchdog a hidden pane stalls the client
+// permanently. See symmetriaoutput.h and
+// .claude/memory/reference/qt-pyside/nested_compositor_frame_starvation.md.
 //
 // It IS mounted through a permanently-active Loader, for a different reason:
 // QML has no conditional imports, so a missing `Symmetria.Compositor` package
@@ -215,12 +220,21 @@ Item {
         // read-only object property, so `defaultSeat.keymap.layout: x` is not
         // a legal binding target.
         Component.onCompleted: {
+            // Guarded because the failure would otherwise be inaudible: a
+            // TypeError here aborts the handler at its first line, the pane
+            // still loads, and the ONLY symptom is a US keyboard plus one
+            // warning in a noisy log. That is the exact shape of
+            // .claude/rules/qml_property_must_exist_on_type.md.
+            if (!pane.hostKeymap) {
+                console.warn("hostKeymap missing — nested seat left on Qt's "
+                             + "US default, so the WHOLE IDE will type US");
+                return;
+            }
             const km = browserCompositor.defaultSeat.keymap;
-            km.rules = pane.hostKeymap.rules;
-            km.model = pane.hostKeymap.model;
-            km.layout = pane.hostKeymap.layout;
-            km.variant = pane.hostKeymap.variant;
-            km.options = pane.hostKeymap.options;
+            // Field-by-field from a list so a partial map cannot half-apply.
+            const fields = ["rules", "model", "layout", "variant", "options"];
+            for (const field of fields)
+                km[field] = pane.hostKeymap[field] || "";
         }
 
         // Ours, not Qt's stock `WaylandOutput`: only a C++ subclass can set the

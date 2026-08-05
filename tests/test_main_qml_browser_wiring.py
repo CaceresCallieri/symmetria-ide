@@ -52,8 +52,12 @@ class TestNeverDeactivated:
         assert "visible" not in match.group(1)
 
     def test_visibility_is_gated_separately(self, loader_block: str):
-        """Hiding is the correct gate — and free (measured: full frame rate
-        and ~60ms screenshots while hidden AND off-workspace)."""
+        """Hiding is the correct gate, and it is free ONLY because
+        `SymmetriaOutput` drives frame callbacks itself (20Hz watchdog) when
+        the host stops rendering. An earlier version of this docstring cited a
+        measurement showing hiding was free on its own; that was re-measured
+        2026-07-28 as 0 rAF ticks in 1007ms and retracted — see
+        `.claude/memory/reference/qt-pyside/nested_compositor_frame_starvation.md`."""
         assert "controller.browserVisible" in loader_block
         assert re.search(r"\bvisible:", loader_block)
 
@@ -66,9 +70,41 @@ class TestRequiredProperties:
         assert "setSource(" in loader_block
         assert '"hostWindow"' in loader_block
         assert '"socketName"' in loader_block
+        assert '"hostKeymap"' in loader_block
 
     def test_socket_name_comes_from_the_context_property(self, loader_block: str):
         assert "browserWaylandSocket" in loader_block
+
+
+class TestKeymapContract:
+    """The nested seat's keymap translates the WHOLE application's keys, not
+    just Chrome's — Qt leaks it into the host window's key translation, and
+    Qt's default is US. Losing any link in this three-part chain silently puts
+    every terminal, agent and editor pane on a US keyboard, with no crash and
+    no failing behavioural test. See CLAUDE.md's agentic-browser section.
+    """
+
+    @pytest.fixture(scope="class")
+    def repo_root(self) -> Path:
+        return Path(__file__).resolve().parent.parent
+
+    def test_host_layout_is_resolved_into_a_context_property(self, repo_root: Path):
+        app_py = (repo_root / "src" / "symmetria_ide" / "app.py").read_text()
+        assert 'setContextProperty("hostKeymap", resolve_host_keymap())' in app_py
+
+    def test_pane_pins_every_field_onto_the_nested_seat(self, repo_root: Path):
+        pane = (repo_root / "qml" / "browser" / "BrowserPane.qml").read_text()
+        assert "defaultSeat.keymap" in pane
+        # Assigned from this list in the QML; a field dropped from it is a
+        # field left at Qt's US default.
+        for field in ("rules", "model", "layout", "variant", "options"):
+            assert f'"{field}"' in pane
+
+    def test_pane_declares_the_keymap_as_required(self, repo_root: Path):
+        """Required, so a caller that forgets it fails loudly at construction
+        rather than typing US forever."""
+        pane = (repo_root / "qml" / "browser" / "BrowserPane.qml").read_text()
+        assert re.search(r"required\s+property\s+var\s+hostKeymap", pane)
 
 
 class TestSocketContract:
