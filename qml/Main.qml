@@ -1387,7 +1387,8 @@ Window {
                     // onLoaded is already too late and fails the load.
                     Component.onCompleted: setSource(
                         "browser/BrowserPane.qml",
-                        { "hostWindow": root, "socketName": browserWaylandSocket })
+                        { "hostWindow": root, "socketName": browserWaylandSocket,
+                          "hostKeymap": hostKeymap })
                     onStatusChanged: if (status === Loader.Error)
                         console.warn("browser pane unavailable — is the "
                                      + "symmetria-compositor package installed?")
