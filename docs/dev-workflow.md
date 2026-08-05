@@ -196,7 +196,7 @@ Pyright currently reports ~59 known PySide6-stubs false positives (gotcha #7) an
 When debugging capsules or redraw events, temporarily raise logging in `nvim_backend.py`:
 
 ```python
-log.debug("capsule notification: %r", payload)   # currently DEBUG
+log.debug("capsule notification: %r", payload)  # currently DEBUG
 ```
 
 Change to `log.info` and run with default logging. Don't commit that — it's chatty on every cursor movement.
