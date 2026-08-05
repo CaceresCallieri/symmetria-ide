@@ -36,11 +36,24 @@ wrapper and not a process-env mutation).
 | `SYMMETRIA_IDE_PI_EXTENSION` | dev override only | Absolute path to an unpromoted extension file; the IDE appends `--extension <path>`. Production relies on Pi's own package discovery instead — the globally registered package is `pi-agent-stable`, so this exists purely so a dev worktree can be exercised without a promotion. |
 
 Pi is **not** subject to Claude Code 2.1.x's daemon spare-pool env freeze, so
-`SYMMETRIA_AGENT_ID` and `SYMMETRIA_IDE_AGENT_SOCK` are trustworthy here: the
-extension reports to the env socket directly and does not re-resolve a target
-through the cross-IDE registry. It still sends `session_id` + `cwd` (§2) so the
-IDE's existing `agent_registry.resolve_slot_for_event` path works unchanged for
-every harness.
+these variables reach the process the IDE meant them for. That is not the same
+as them identifying the *reporter*, and the difference is load-bearing.
+
+⚠ **Every variable in this table is inherited by any nested Pi** started inside
+another agent's tool shell — `SYMMETRIA_AGENT_ID`, `SYMMETRIA_IDE_AGENT_SOCK`
+and `SYMMETRIA_IDE_MCP_CONFIG` alike. A nested process therefore carries a
+perfectly valid-looking id belonging to its parent's slot, and any guard built
+only on the presence of that env, on a module-global latch, or on the root
+session directory (§2.3) will let it report under a slot it does not own,
+polluting activity and touched-file attribution. So the env id is a hint and
+**not authoritative**: the reporter sends its own `session_id` and real `cwd`
+(§2), and the IDE resolves ownership through
+`agent_registry.resolve_slot_for_event`, which is authoritative.
+
+This table lists **only variables consumed by the Pi extension**. `spawn_argv`
+also exports Claude-oriented capability variables that Pi inherits and ignores
+— currently `SYMMETRIA_IDE_STATUSLINE_TAP` and `SYMMETRIA_IDE_USAGE_PANEL` —
+so read it as scoped, never as an exhaustive account of the spawn environment.
 
 ### Launch flags (IDE side, for reference)
 
@@ -106,7 +119,7 @@ from §2's table below is **not** — those are load-bearing.
 | Field | Rule |
 |---|---|
 | `"type"` | Always the literal `"hook"`. `AgentEventsServer._serve` (`agent_events.py`) names exactly three sibling routes — `stt_inject`, `stt_recording`, `status_line` — and **`hook` is the `else` branch**, so any unrecognised type falls through to it silently. Send the literal anyway: a typo would still be routed as a hook today, but would break the moment a fourth explicit route is added. |
-| `"agent_id"` | Verbatim `SYMMETRIA_AGENT_ID`. |
+| `"agent_id"` | Verbatim `SYMMETRIA_AGENT_ID`. A hint, **not authoritative** — it is inherited by any nested Pi, so ownership is resolved from `session_id` + `cwd` (§1). |
 | `"hook_event_name"` | One of the §2.1 vocabulary. Anything else is logged as unmapped. |
 | `"session_id"` | `ctx.sessionManager.getSessionId()`. This is what the IDE persists for `--session` restore, so it must be the resumable id, not a display name. |
 | `"cwd"` | `ctx.cwd`. Slot attribution falls back to this when the id is untrustworthy. |
@@ -167,6 +180,20 @@ Two independent guards:
 2. **`globalThis` latch** keyed on agent id + session id, so a doubly-loaded
    copy (the dev `--extension` override alongside the package-discovered one)
    reports once.
+
+Neither guard catches the case that matters most, and saying so is the point of
+this paragraph. A **nested** Pi launched from another agent's tool shell is a
+separate process with its own root session, so the session-dir guard passes it;
+it is a separate process image, so the `globalThis` latch passes it too. What it
+carries is the **inherited** `SYMMETRIA_AGENT_ID` of the agent whose shell
+started it — plus the inherited `SYMMETRIA_IDE_MCP_CONFIG` — and on the strength
+of that env alone it would report as its parent.
+
+3. **Ownership is resolved, never inherited.** The reporter always sends its own
+   `session_id` and its real `cwd`, and the IDE resolves the slot through
+   `agent_registry.resolve_slot_for_event`, which is authoritative over the
+   env-borne `agent_id`. An event whose session and cwd do not resolve to the
+   claimed slot belongs to somebody else and must not be attributed to it.
 
 ---
 

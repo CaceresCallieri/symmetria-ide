@@ -440,20 +440,28 @@ def cancelled_text(display_num: int, note: str) -> str:
     )
 
 
-def non_claude_caveat_text(display_num: int, harness_label: str, note: str) -> str:
+def unjudgeable_caveat_text(display_num: int, harness_label: str, note: str) -> str:
     """Go-ahead for a watched agent the judge cannot verify.
 
-    The judge reads claude's transcript format only, so every other harness
-    gets this disclosed-uncertainty go-ahead instead. `harness_label` is the
-    registry's own label ("OpenCode", "Pi", …) — naming the harness generically
-    is the point: an earlier hardcoded "opencode agent" would have told a user
-    watching a Pi agent the wrong thing.
+    Named for the capability, not for an identity, and the rename was a review
+    finding rather than tidying. `AgentHarness.judgeable_transcript` is the
+    authority on which harnesses the judge can read, and it may become true for
+    a harness other than Claude — at which point a helper called
+    `non_claude_caveat_text` would be selecting on the wrong axis, and its text
+    would be telling users something the code no longer believes.
+
+    So the message says the watched harness's transcript format is not one the
+    judge can read, rather than claiming the judge reads Claude only.
+    `harness_label` is the registry's own label ("OpenCode", "Pi", …) — naming
+    the harness generically is the point: an earlier hardcoded "opencode agent"
+    would have told a user watching a Pi agent the wrong thing.
     """
     return (
         f"[Symmetria coordination] Agent #{display_num} went idle. It runs the "
-        f"{harness_label} harness, so transcript verification is unavailable — "
-        f"the judge reads claude transcripts only, not {harness_label.lower()} "
-        f"ones. Proceed only if your condition is plausibly met."
+        f"{harness_label} harness, whose transcript format the coordination "
+        f"judge cannot read, so verification is unavailable for "
+        f"{harness_label.lower()} agents. Proceed only if your condition is "
+        f"plausibly met."
         f"{_note_clause(note)} If you are unsure whether it actually finished, "
         "ask the user."
     )

@@ -33,6 +33,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import ClassVar, TypedDict
 
@@ -1218,11 +1219,17 @@ class AppController(QObject):
         # One-shot deferred smoke spawn (see start()'s SYMMETRIA_IDE_SPAWN_AGENT
         # hook): (spawn_type, harness) waiting for the pairing probe to land.
         self._pending_vps_smoke_spawn: tuple[str, str] | None = None
-        # The LOCAL twin of the above: (spawn_type, harness) waiting for the
-        # browser-MCP server to become ready. Same one-shot idiom, different
-        # edge — see _spawn_smoke_agent_when_mcp_ready.
-        self._pending_mcp_smoke_spawn: tuple[str, str] | None = None
-        self._mcp_smoke_wait_ms = 0
+        # The LOCAL twin of the above: one-shot launch work waiting for the
+        # browser-MCP server to become ready. Same idiom, different edge — see
+        # _run_launch_work_when_mcp_ready.
+        #
+        # A callable rather than a (spawn_type, harness) tuple, because the
+        # smoke spawn is not the only launch work that races the server: a
+        # reload restore composes agent argv too, and it did so while the port
+        # was still zero, permanently losing `wait_for_agent` and browser tools
+        # for every restored agent. Both go through this one gate.
+        self._pending_launch_work: tuple[str, Callable[[], None]] | None = None
+        self._launch_work_wait_ms = 0
         self._remote_context = RemoteContext(self)
         # same-thread: pairingChanged fires on the GUI thread (RemoteContext
         # marshals its probe-worker result through an internal queued
@@ -5457,7 +5464,7 @@ class AppController(QObject):
             spec = agent_harness.HARNESSES.get(inst["harness"])
             self._coord_inject(
                 trigger.registrant_slot,
-                agent_coordination.non_claude_caveat_text(
+                agent_coordination.unjudgeable_caveat_text(
                     display,
                     spec.label if spec else inst["harness"],
                     trigger.note,
@@ -7623,8 +7630,11 @@ class AppController(QObject):
                 # gets no MCP config at all — silently, since agent_config_path
                 # returns "" while the port is 0. A user-initiated spawn is
                 # always long past that window; this launch-time one is not.
-                self._pending_mcp_smoke_spawn = (spawn_type, harness or "claude")
-                self._spawn_smoke_agent_when_mcp_ready()
+                smoke_harness = harness or "claude"
+                self._arm_launch_work(
+                    "SYMMETRIA_IDE_SPAWN_AGENT",
+                    lambda: self.spawn_agent(spawn_type, True, smoke_harness),
+                )
         # Reload-in-place restore: a reload re-execs with SYMMETRIA_IDE_RESTORE=1,
         # asking us to rebuild the workspace saved during the previous teardown.
         # Cold launches do NOT auto-restore — they only light the
@@ -7632,18 +7642,38 @@ class AppController(QObject):
         # view. The one-shot smoke env-vars above are stripped from the reload
         # env (_reload_env), so they never fire alongside a restore.
         if os.environ.get("SYMMETRIA_IDE_RESTORE") == "1":
-            self.restore_session()
+            # Through the same gate as the smoke spawn, and for the same
+            # reason: restored agents compose their argv the moment they are
+            # spawned, so a restore that runs while the MCP port is still zero
+            # gets `agent_config_path() == ""` and comes up permanently without
+            # `wait_for_agent` or browser tools. Losing that is silent — the
+            # agents look fine.
+            self._arm_launch_work("SYMMETRIA_IDE_RESTORE", self.restore_session)
         self.backendReady.emit()
 
-    # Readiness-wait budget for the launch-time smoke spawn. The server's
-    # measured cost is the ~1s FastMCP+uvicorn import, so 5s is generous
-    # headroom on a loaded machine while staying BOUNDED — the fallback below
-    # spawns anyway rather than leaving a scripted E2E run with no agent.
+    # Readiness-wait budget for deferred launch work. The server's measured
+    # cost is the ~1s FastMCP+uvicorn import, so 5s is generous headroom on a
+    # loaded machine while staying BOUNDED — the fallback below runs the work
+    # anyway rather than leaving a scripted E2E run with no agent.
     _MCP_SMOKE_WAIT_STEP_MS: ClassVar[int] = 50
     _MCP_SMOKE_WAIT_BUDGET_MS: ClassVar[int] = 5000
 
-    def _spawn_smoke_agent_when_mcp_ready(self) -> None:
-        """Fire the one-shot SYMMETRIA_IDE_SPAWN_AGENT spawn once MCP is up.
+    def _arm_launch_work(self, label: str, work: Callable[[], None]) -> None:
+        """Hold one piece of launch work until the browser-MCP server is up.
+
+        The counter is reset HERE rather than only at construction, and that is
+        the whole reason arming is a method. A second item armed after the
+        first consumed the budget would otherwise inherit an already-expired
+        counter, skip its readiness wait entirely, and compose agent argv
+        against a port that is still zero — the exact defect this gate exists
+        to prevent, reintroduced by the gate's own bookkeeping.
+        """
+        self._pending_launch_work = (label, work)
+        self._launch_work_wait_ms = 0
+        self._run_launch_work_when_mcp_ready()
+
+    def _run_launch_work_when_mcp_ready(self) -> None:
+        """Run the armed launch work once MCP is up, or once waiting is futile.
 
         Same one-shot-pending idiom as `_pending_vps_smoke_spawn`, waiting on a
         different edge. The browser-MCP server starts on a daemon thread so the
@@ -7653,6 +7683,12 @@ class AppController(QObject):
         while the port is 0, so the agent simply comes up with no
         `wait_for_agent` and no browser tools.
 
+        Two callers arm this, and they are not variations of one thing: the
+        `SYMMETRIA_IDE_SPAWN_AGENT` smoke spawn, and a reload's
+        `restore_session`. The second was found racing the same edge after the
+        first had been fixed, which is why the gate holds arbitrary work rather
+        than a spawn request.
+
         Polls rather than waits on a signal because `BrowserMcpServer` is a
         plain object, not a QObject: adding Qt to it to carry one launch-time
         edge would put a cross-thread emit on the starter thread (gotcha #10
@@ -7660,37 +7696,38 @@ class AppController(QObject):
         QTimer chain on the GUI thread — `start()` returns immediately either
         way, so normal startup is never blocked.
 
-        Terminates on THREE conditions, in order: ready (spawn with config),
+        Terminates on THREE conditions, in order: ready (run with config),
         settled-but-not-ready (the server declined or failed — waiting longer
-        cannot help), or the budget expiring (spawn anyway, logging the
+        cannot help), or the budget expiring (run anyway, logging the
         degradation; a smoke run with an un-configured agent still exercises
         the spawn→bridge→activity pipeline, and is strictly better than none).
         """
-        pending = self._pending_mcp_smoke_spawn
+        pending = self._pending_launch_work
         if pending is None:
             return
         server = self._browser_mcp_server
         ready = server.ready
         settled = server.start_settled
-        expired = self._mcp_smoke_wait_ms >= self._MCP_SMOKE_WAIT_BUDGET_MS
+        expired = self._launch_work_wait_ms >= self._MCP_SMOKE_WAIT_BUDGET_MS
         if not (ready or settled or expired):
-            self._mcp_smoke_wait_ms += self._MCP_SMOKE_WAIT_STEP_MS
+            self._launch_work_wait_ms += self._MCP_SMOKE_WAIT_STEP_MS
             QTimer.singleShot(
-                self._MCP_SMOKE_WAIT_STEP_MS, self._spawn_smoke_agent_when_mcp_ready
+                self._MCP_SMOKE_WAIT_STEP_MS, self._run_launch_work_when_mcp_ready
             )
             return
-        # Clear BEFORE spawning — spawn_agent can re-enter the event loop, and
-        # a surviving pending tuple would let a queued tick spawn a second one.
-        self._pending_mcp_smoke_spawn = None
+        # Clear BEFORE running — the work can re-enter the event loop, and a
+        # surviving pending entry would let a queued tick run it twice.
+        self._pending_launch_work = None
+        label, work = pending
         if not ready:
             log.warning(
-                "SYMMETRIA_IDE_SPAWN_AGENT: MCP server not ready after %dms "
-                "(settled=%s) — spawning without MCP config",
-                self._mcp_smoke_wait_ms,
+                "%s: MCP server not ready after %dms (settled=%s) — "
+                "proceeding without MCP config",
+                label,
+                self._launch_work_wait_ms,
                 settled,
             )
-        spawn_type, harness = pending
-        self.spawn_agent(spawn_type, True, harness)
+        work()
 
     @Property(bool)  # imperative read in Main.qml's onClosing — never bound
     def quitAuthorized(self) -> bool:

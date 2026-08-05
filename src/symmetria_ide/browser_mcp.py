@@ -617,8 +617,15 @@ class BrowserMcpServer:
         The config points at this server's URL but adds a `headers` entry
         stamping the agent's `<ide_pid>_<slot>` id, so the browser tool bodies
         can attribute each call back to the spawning agent (the basis for the
-        agent-bubble browser indicator). `agent_spawn_argv` passes the returned
-        path via `--mcp-config`.
+        agent-bubble browser indicator).
+
+        How the path reaches the agent is the harness's declaration, not this
+        method's business: Claude takes the file as a `--mcp-config` flag, while
+        Pi takes its path through the `SYMMETRIA_IDE_MCP_CONFIG` environment
+        variable. `AgentHarness.wants_mcp_config_file` is the predicate that
+        says a harness consumes a config *file* at all — as opposed to
+        OpenCode's inline-content route — and `spawn_argv` owns the two
+        delivery branches.
 
         Since agent coordination (wait_for_agent) rides this server, the
         `symmetria-browser` entry is ALWAYS injected (server up + agent_id
