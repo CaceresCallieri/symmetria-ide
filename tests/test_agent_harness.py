@@ -10,17 +10,94 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from symmetria_ide.agent_harness import (
     CLAUDE_ENV_UNSET_ARGS,
     HARNESSES,
+    MENU_ORDERED_HARNESSES,
     parse_opencode_sessions,
     spawn_argv,
     tmux_session_name,
     tmux_wrap,
 )
+
+QML_DIR = Path(__file__).resolve().parents[1] / "qml"
+
+
+def test_harness_menu_metadata_is_complete_and_ordered():
+    """The spawn chooser is projected from the registry, not a QML side table."""
+    expected = {
+        "pi": {
+            "menu_key": "P",
+            "icon": "assets/pi-icon.svg",
+            "resume_label": "resume (pi's picker)",
+            "menu_order": 0,
+        },
+        "claude": {
+            "menu_key": "C",
+            "icon": "assets/claude-icon.svg",
+            "resume_label": "resume (claude's picker)",
+            "menu_order": 1,
+        },
+        "opencode": {
+            "menu_key": "O",
+            "icon": "assets/opencode-icon.svg",
+            "resume_label": "resume (session picker)",
+            "menu_order": 2,
+        },
+    }
+
+    assert set(HARNESSES) == set(expected)
+    for name, values in expected.items():
+        harness = HARNESSES[name]
+        assert {
+            "menu_key": harness.menu_key,
+            "icon": harness.icon,
+            "resume_label": harness.resume_label,
+            "menu_order": harness.menu_order,
+        } == values
+
+    assert [harness.name for harness in MENU_ORDERED_HARNESSES] == [
+        "pi",
+        "claude",
+        "opencode",
+    ]
+
+
+def test_menu_keys_are_unique_single_uppercase_letters():
+    """The chooser dispatches on `menuKey.charCodeAt(0) === event.key`.
+
+    Qt's letter key enum IS the uppercase ASCII code, so a lowercase or
+    multi-character key would simply never match any keypress — a row that
+    renders correctly and cannot be selected. A duplicate key would make the
+    earlier registry entry win and the later one equally unreachable.
+    """
+    keys = [harness.menu_key for harness in HARNESSES.values()]
+    for key in keys:
+        assert len(key) == 1, f"{key!r} must be a single character"
+        assert key.isalpha() and key.isupper(), f"{key!r} must be an uppercase letter"
+    assert len(set(keys)) == len(keys), f"duplicate menu_key in {keys}"
+
+
+def test_menu_orders_are_unique():
+    """A tie makes the chooser's row order depend on dict insertion order."""
+    orders = [harness.menu_order for harness in HARNESSES.values()]
+    assert len(set(orders)) == len(orders), f"duplicate menu_order in {orders}"
+
+
+def test_every_registered_icon_exists_under_qml():
+    """`icon` is resolved against qml/ at runtime; a typo is a blank row.
+
+    Qt's Image fails a missing source with a log line the IDE's message
+    handler swallows, so the only symptom is a harness row with no brand mark.
+    """
+    for harness in HARNESSES.values():
+        icon = QML_DIR / harness.icon
+        assert icon.is_file(), f"{harness.name} icon missing: {icon}"
+
 
 # ---------------------------------------------------------------------------
 # spawn_argv

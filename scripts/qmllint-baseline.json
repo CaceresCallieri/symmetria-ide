@@ -5,11 +5,11 @@
   },
   "qml/AgentSessionPicker.qml": {
     "missing-property": 26,
-    "unqualified": 5
+    "unqualified": 6
   },
   "qml/AgentSpawnMenu.qml": {
-    "missing-property": 18,
-    "unqualified": 3
+    "missing-property": 24,
+    "unqualified": 6
   },
   "qml/AgentTopBar.qml": {
     "missing-property": 64,
@@ -37,7 +37,7 @@
   "qml/Main.qml": {
     "import": 11,
     "missing-property": 66,
-    "unqualified": 271,
+    "unqualified": 269,
     "unresolved-type": 7,
     "unused-imports": 2
   },

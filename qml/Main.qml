@@ -286,17 +286,29 @@ Window {
                 if (root._anyModalVisible() && !agentSpawnMenu.visible)
                     return;
                 var order = controller.agentOrder;
+                // Bound once: this Shortcut lives in a nested component, so
+                // every `agentSpawnMenu` here is an outer-id access qmllint
+                // cannot qualify (see the gate's baseline). One capture keeps
+                // the four uses below from each adding a finding.
+                var menu = agentSpawnMenu;
                 if (index < order.length) {
                     // Visible-gated: an unconditional dismiss() would emit a
                     // spurious dismissed() → _restoreCentralFocus() even when
                     // no menu was open.
-                    if (agentSpawnMenu.visible)
-                        agentSpawnMenu.dismiss();
+                    if (menu.visible)
+                        menu.dismiss();
                     controller.focus_agent(order[index]);
+                } else if (menu.visible) {
+                    // The menu is ALREADY up and the user asked for an empty
+                    // slot — which is what the menu is already offering to
+                    // fill. open() here would restart the wizard, throwing away
+                    // a stage-1 harness choice the user had already made (the
+                    // exemption above lets Ctrl+1..5 through precisely so the
+                    // menu stays usable, so resetting it defeats the purpose).
+                    // reassert() re-grabs the key catcher and preserves stage.
+                    menu.reassert();
                 } else {
-                    // open() is idempotent — re-asserts the key catcher when
-                    // the menu is already up.
-                    agentSpawnMenu.open();
+                    menu.open();
                 }
             }
         }
@@ -307,10 +319,10 @@ Window {
     // last-focused agent (focusedAgent survives surface swaps, so this
     // is a true "back to where I was"); pressed again while already on
     // the agent surface — or with an empty pool (focusedAgent == 0) —
-    // it opens the spawn menu, the keyboard-first popup where n/c/r
-    // spawn new/continue/resume (dangerous; Shift+letter = the
-    // permission-checked variant) in the selected harness — `o` toggles
-    // Claude ↔ OpenCode without burning more chords.
+    // it opens the spawn menu, the keyboard-first two-stage chooser: a
+    // harness stage (p/c/o — Pi, Claude, `o` for OpenCode) then an
+    // action stage where n/c/r spawn new/continue/resume (dangerous;
+    // Shift+letter = the permission-checked variant).
     Shortcut {
         sequences: ["Ctrl+Shift+A"]
         context: Qt.ApplicationShortcut
@@ -318,12 +330,19 @@ Window {
             // Modal guard (same rationale as _restoreCentralFocus): with
             // another modal open, the go branch would focus_agent and yank
             // focus out of it, leaving it visible but deaf. The spawn menu
-            // itself is exempt — the branch below re-asserts it (open() is
-            // idempotent).
+            // itself is exempt — the branch below re-asserts it.
             if (root._anyModalVisible() && !agentSpawnMenu.visible)
                 return;
-            if (agentSpawnMenu.visible
-                    || controller.focusedAgent === 0
+            // reassert(), NOT open(), for an already-visible chooser. open()
+            // is no longer idempotent: since the menu became a two-stage
+            // wizard it resets stage and harness, so pressing this chord
+            // again after choosing Pi threw the choice away and dropped the
+            // user back on the harness stage. Mirrors both the Ctrl+1..5
+            // dispatch and _restoreCentralFocus, which reassert for the same
+            // reason.
+            if (agentSpawnMenu.visible)
+                agentSpawnMenu.reassert();
+            else if (controller.focusedAgent === 0
                     || controller.agentSurfaceVisible)
                 agentSpawnMenu.open();
             else
@@ -2731,9 +2750,11 @@ Window {
     AgentSpawnMenu {
         id: agentSpawnMenu
         onDismissed: root._restoreCentralFocus()
-        // OpenCode resume needs a session id (`--session` has no
-        // interactive picker form) — chain into the session picker.
-        onResumePickerRequested: dangerous => agentSessionPicker.open(dangerous)
+        // Resume-by-id harnesses (opencode) defer `r` to the IDE's session
+        // picker. The harness rides the signal INTO open(), so the picker
+        // spawns the one that raised it and there is no set-then-raise
+        // ordering for a caller to get wrong.
+        onResumePickerRequested: (harness, dangerous) => agentSessionPicker.open(harness, dangerous)
         // VPS attach (`a` in vps location) — chain into the remote picker,
         // which lists the shared tmux socket's sessions over ssh.
         onAttachPickerRequested: dangerous => remoteSessionPicker.open(dangerous)

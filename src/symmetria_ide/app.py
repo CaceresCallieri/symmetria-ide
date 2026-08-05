@@ -526,6 +526,10 @@ class AppController(QObject):
     termAgentsChanged = Signal()
     focusedAgentChanged = Signal()
     agentActivityChanged = Signal()
+    # The spawn chooser's harness rows changed — in practice only the
+    # `available` flag, when a harness CLI appears on (or leaves) PATH between
+    # two openings of the menu. The registry itself is compile-time.
+    agentHarnessCatalogChanged = Signal()
     # Per-agent status-line fields (model / effort / context%) captured from the
     # Claude status-line tap. Separate from termAgentsChanged/agentActivityChanged
     # so the StatusBar's model/effort/ctx bindings don't re-evaluate on slot
@@ -853,6 +857,11 @@ class AppController(QObject):
         # Ctrl+1..5 chords. Per-slot record: {spawn_type, dangerous,
         # harness, session_id, cwd, title, spawned_at}.
         self._term_agents: dict[int, dict] = {}
+        # Cached PATH probe behind `agentHarnessCatalog`. Cached rather than
+        # re-read per getter call so the property can honestly notify: a value
+        # that changes without its notify signal is a binding QML never
+        # re-evaluates. `refresh_harness_availability` is the one mutator.
+        self._harness_available: dict[str, bool] = self._probe_harness_availability()
         # Account-global rate-limit usage (5h / 7d) — the freshest observation
         # seen, merged across THIS IDE's agents (status-line taps) AND every other
         # IDE instance (the shared peer file, account_usage_store). `observed_at_ns`
@@ -3314,6 +3323,100 @@ class AppController(QObject):
     @Property(int, constant=True)
     def maxAgentSlots(self) -> int:
         return self._MAX_INSTANCES
+
+    def _probe_harness_availability(self) -> dict[str, bool]:
+        """name -> "is this harness's executable on PATH right now"."""
+        return {
+            name: shutil.which(harness.executable) is not None
+            for name, harness in agent_harness.HARNESSES.items()
+        }
+
+    @Slot()
+    def refresh_harness_availability(self) -> None:
+        """Re-read PATH, notifying QML only when the answer actually moved.
+
+        The spawn chooser calls this from its `open()`, which is what makes
+        "install a CLI, reopen the menu, its row lights up" true — a QML
+        binding is only re-evaluated when the property's notify signal fires,
+        so without this the catalog QML read at first open would be the one it
+        kept forever. The emit is conditional so the common case (nothing
+        installed since last open) does not churn the chooser's row bindings.
+        """
+        probed = self._probe_harness_availability()
+        if probed == self._harness_available:
+            return
+        self._harness_available = probed
+        self.agentHarnessCatalogChanged.emit()
+
+    def _harness_row(self, harness: agent_harness.AgentHarness) -> dict[str, object]:
+        """One chooser row: registry metadata + the live PATH answer.
+
+        The single place the projection shape is written, so the whole-catalog
+        read and the single-harness lookup below cannot drift apart on a field.
+        """
+        return {
+            "name": harness.name,
+            "label": harness.label,
+            "menuKey": harness.menu_key,
+            "icon": harness.icon,
+            "resumeLabel": harness.resume_label,
+            "resumeRequiresId": harness.resume_requires_id,
+            "available": self._harness_available.get(harness.name, False),
+        }
+
+    def _harness_catalog_rows(self) -> list[dict[str, object]]:
+        """The catalog as plain Python — what the QML property projects.
+
+        Split from the `@Property` so callers can iterate it: pyright reads a
+        `@Property`-decorated method as the descriptor rather than its return
+        value (gotcha #7), so scanning the property directly adds a spurious
+        "not iterable" error to a baseline that exists to make real ones
+        visible.
+
+        Presentation order comes from the registry's pre-sorted
+        `MENU_ORDERED_HARNESSES`, not a sort here — see that tuple's comment.
+        """
+        return [
+            self._harness_row(harness)
+            for harness in agent_harness.MENU_ORDERED_HARNESSES
+        ]
+
+    @Property("QVariantList", notify=agentHarnessCatalogChanged)
+    def agentHarnessCatalog(self) -> list[dict[str, object]]:
+        """The spawn chooser's stage-0 rows, projected from the registry.
+
+        The SET of harnesses is a compile-time registry and cannot change while
+        the app runs; `available` can, which is why this carries a notify
+        signal rather than `constant=True` (see `refresh_harness_availability`,
+        the only thing that moves it).
+
+        `available` is advisory presentation only — an absent executable dims
+        the row rather than removing it, so the user sees WHY a harness they
+        expected cannot be chosen instead of a silently shorter menu.
+        `spawn_agent` stays the real PATH guard.
+        """
+        return self._harness_catalog_rows()
+
+    @Slot(str, result="QVariant")
+    def harness_menu_entry(self, name: str) -> dict[str, object] | None:
+        """One catalog row by harness name, or None if unregistered.
+
+        The single lookup both QML modals call (the chooser's per-harness
+        decisions, the session picker's title label) — they used to carry a
+        copy each of the same linear scan over the catalog, which is how the
+        two drifted apart on the fallback behaviour.
+
+        Resolves through the registry dict rather than scanning the projected
+        catalog: the chooser calls this several times per keypress (one per
+        stage-1 row plus the header icon), and building every row to return one
+        of them made each of those a full projection of the registry.
+        `_harness_row` still supplies the `available` flag, so the answer here
+        tracks PATH exactly as the whole-catalog read does.
+        """
+        harness = agent_harness.HARNESSES.get(name)
+        if harness is None:
+            return None
+        return self._harness_row(harness)
 
     def _agent_location(self, slot: int) -> str:
         """A pool slot's location tag ("local" default for pre-toggle records)."""

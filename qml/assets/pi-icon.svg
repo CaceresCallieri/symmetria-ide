@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="128" height="128" fill="none">
+  <title>Pi</title>
+  <!-- Pi has no published brand mark, so the harness is identified by its
+       namesake glyph. The fill is BAKED as a literal hex value, never the
+       CSS keyword for "inherit the text colour": Qt's SVG renderer resolves
+       that keyword to black, i.e. invisible on our dark chrome — the same
+       trap documented for openai-icon.svg. White is also the accent the
+       shared agent-UI module gives Pi chips, so the menu row and the chip
+       read as the same harness. -->
+  <path d="M3.6 4.9h16.8v2.9h-2.1l1.1 11.3h-2.9L15.4 7.8h-3.1v11.3H9.4V7.8H7.2l-1.1 11.3H3.2L4.3 7.8H3.6V4.9z" fill="#ffffff" fill-rule="nonzero"/>
+</svg>
