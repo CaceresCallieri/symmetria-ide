@@ -12,6 +12,7 @@ from __future__ import annotations
 import concurrent.futures
 import errno
 import io
+import json
 import os
 import re
 import shutil
@@ -20,7 +21,8 @@ import time
 
 import pytest
 
-from symmetria_ide.agent_harness import CLAUDE_ENV_UNSET_ARGS
+from symmetria_ide import session_store
+from symmetria_ide.agent_harness import CLAUDE_ENV_UNSET_ARGS, HARNESSES
 from symmetria_ide.app import AppController, _agent_tmux_socket, _existing_root
 from symmetria_ide.worktree import linked_worktree_info
 
@@ -183,6 +185,145 @@ def test_spawn_opencode_resume_without_session_id_is_a_no_op(controller):
     # refuses the spawn instead (the QML picker supplies the id).
     controller.spawn_agent("resume", True, "opencode")
     assert controller.agentOrder == []
+
+
+def test_spawn_pi_fresh_permissive_argv(controller):
+    controller.spawn_agent("fresh", True, "pi")
+    argv = controller.agent_spawn_argv(1)
+    assert argv == [
+        "env",
+        *CLAUDE_ENV_UNSET_ARGS,
+        f"SYMMETRIA_AGENT_ID={os.getpid()}_1",
+        f"SYMMETRIA_IDE_AGENT_SOCK={controller._agent_events.socket_path}",
+        "SYMMETRIA_IDE_STATUSLINE_TAP=1",
+        "SYMMETRIA_IDE_USAGE_PANEL=1",
+        "pi",
+        "--approve",
+    ]
+    assert "--settings" not in argv
+
+
+def test_spawn_pi_safe_variant_omits_approve(controller):
+    controller.spawn_agent("fresh", False, "pi")
+    argv = controller.agent_spawn_argv(1)
+    assert "pi" in argv
+    assert "--approve" not in argv
+
+
+def test_spawn_pi_resume_uses_native_picker_without_id(controller):
+    controller.spawn_agent("resume", True, "pi")
+    assert controller.agentOrder == [1]
+    assert controller.agent_spawn_argv(1)[-1] == "-r"
+
+
+def test_spawn_pi_resume_by_id_never_queues_id_after_picker_flag(controller):
+    controller.spawn_agent("resume", False, "pi", "019fc9e5-dead-beef")
+    argv = controller.agent_spawn_argv(1)
+    assert argv[-2:] == ["--session", "019fc9e5-dead-beef"]
+    assert ["-r", "019fc9e5-dead-beef"] != argv[-2:]
+
+
+def test_spawn_pi_missing_from_path_is_a_no_op(controller, monkeypatch):
+    """The gate is `shutil.which("pi")` — nothing else, and no fabricated hits.
+
+    An earlier version returned `/usr/bin/<name>` for every non-pi lookup,
+    which would have absorbed (and silently satisfied) any future unrelated
+    lookup on this path. Here every lookup is recorded and every one of them
+    misses, so the assertion states the intended harness gate rather than
+    coincidentally surviving whatever else the spawn path asks for.
+    """
+    assert HARNESSES["pi"].executable == "pi"
+    lookups: list[str] = []
+
+    def fake_which(executable):
+        lookups.append(executable)
+        return None
+
+    monkeypatch.setattr("symmetria_ide.app.shutil.which", fake_which)
+    controller.spawn_agent("fresh", True, "pi")
+    assert controller.agentOrder == []
+    assert lookups == ["pi"]
+
+
+def test_spawn_pi_publishes_agent_type_and_activity_fallback(controller, bridge):
+    controller.spawn_agent("fresh", True, "pi")
+    assert bridge.spawns[0]["agent_type"] == "pi"
+    assert controller.agentActivity[0]["agentType"] == "pi"
+
+
+def test_pi_spawn_receives_existing_agent_mcp_config_path(
+    controller, monkeypatch, tmp_path
+):
+    # Root the controller at a marker-free dir so the per-project browser gate
+    # is deterministically False. Without this the test reads THIS repo's
+    # committed `.symmetria/ide.json`, whose `browser_agents: true` legitimately
+    # flips the flag — the assertion below is about the gate being PASSED
+    # THROUGH, not about its value.
+    controller._cwd = str(tmp_path)
+    path_calls: list[tuple[str, bool]] = []
+    content_calls: list[tuple[str, bool]] = []
+
+    def config_path(agent_id, *, browser_enabled=False):
+        path_calls.append((agent_id, browser_enabled))
+        return "/tmp/pi-agent-mcp.json"
+
+    def config_content(agent_id, *, browser_enabled=False):
+        content_calls.append((agent_id, browser_enabled))
+        return "should-not-be-used"
+
+    monkeypatch.setattr(
+        controller._browser_mcp_server, "agent_config_path", config_path
+    )
+    monkeypatch.setattr(
+        controller._browser_mcp_server, "agent_config_content", config_content
+    )
+    controller.spawn_agent("fresh", True, "pi")
+    argv = controller.agent_spawn_argv(1)
+    assert path_calls == [(f"{os.getpid()}_1", False)]
+    assert content_calls == []
+    assert "SYMMETRIA_IDE_MCP_CONFIG=/tmp/pi-agent-mcp.json" in argv
+
+
+def test_pi_spawn_uses_project_model_and_thinking_defaults(controller, tmp_path):
+    repo = tmp_path / "repo"
+    marker = repo / ".symmetria" / "ide.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "harness_defaults": {
+                    "pi": {"model": "anthropic/sonnet", "effort": "xhigh"}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    controller._cwd = str(repo)
+    controller.spawn_agent("fresh", False, "pi")
+    argv = controller.agent_spawn_argv(1)
+    assert argv[argv.index("--model") + 1] == "anthropic/sonnet"
+    assert argv[argv.index("--thinking") + 1] == "xhigh"
+
+
+def test_pi_dev_extension_override_is_forwarded(controller, monkeypatch):
+    extension = "/worktrees/pi-agent/extensions/symmetria-ide.ts"
+    monkeypatch.setenv("SYMMETRIA_IDE_PI_EXTENSION", extension)
+    controller.spawn_agent("fresh", False, "pi")
+    argv = controller.agent_spawn_argv(1)
+    assert argv[argv.index("--extension") + 1] == extension
+
+
+def test_focused_agent_scroll_fraction_comes_from_harness_metadata(controller):
+    controller.spawn_agent("fresh", False, "pi")
+    assert controller.focusedAgentScrollFraction() == pytest.approx(0.5)
+    controller.close_agent(1)
+
+    controller.spawn_agent("fresh", False, "claude")
+    assert controller.focusedAgentScrollFraction() == pytest.approx(0.167)
+    controller.close_agent(1)
+
+    controller.spawn_agent("fresh", False, "opencode")
+    assert controller.focusedAgentScrollFraction() == pytest.approx(0.167)
 
 
 # ---------------------------------------------------------------------------
@@ -942,6 +1083,12 @@ def test_bare_opencode_title_is_suppressed(controller):
     # claude's "Claude Code" — no title until a real session summary.
     controller.spawn_agent("fresh", True, "opencode")
     controller.on_agent_title(1, "OpenCode")
+    assert controller.agentTitles[0] == ""
+
+
+def test_bare_pi_title_is_suppressed_from_registry_metadata(controller):
+    controller.spawn_agent("fresh", True, "pi")
+    controller.on_agent_title(1, "Pi")
     assert controller.agentTitles[0] == ""
 
 
@@ -2301,3 +2448,234 @@ def test_focused_agent_changes_follows_focus_via_focus_agent(controller, monkeyp
     # The scope FOLLOWS focus: agent 2 touched nothing → empty.
     assert controller.focusedAgentChangesCount == 0
     assert controller.focusedAgentChangesPathSet == {}
+
+
+# ---------------------------------------------------------------------------
+# Launch-time local work waits for the browser-MCP server (bounded)
+# ---------------------------------------------------------------------------
+
+
+class _FakeMcpServer:
+    """Minimal stand-in exposing only the readiness surface + config builders."""
+
+    def __init__(self, ready: bool = False, settled: bool = False) -> None:
+        self._ready = ready
+        self._settled = settled
+        self.start_calls = 0
+        self.path_calls: list[str] = []
+
+    def start(self) -> None:
+        self.start_calls += 1
+
+    def become_ready(self) -> None:
+        self._ready = True
+        self._settled = True
+
+    def become_failed(self) -> None:
+        self._ready = False
+        self._settled = True
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    @property
+    def start_settled(self) -> bool:
+        return self._settled
+
+    def agent_config_path(self, agent_id, *, browser_enabled=False) -> str:
+        # Mirrors the real builder: "" until the port exists.
+        if not self._ready:
+            return ""
+        self.path_calls.append(agent_id)
+        return "/tmp/smoke-mcp.json"
+
+    def agent_config_content(self, agent_id, *, browser_enabled=False) -> str:
+        return ""
+
+
+class _FakeTimer:
+    """Captures QTimer.singleShot callbacks so the wait can be stepped."""
+
+    def __init__(self) -> None:
+        self.scheduled: list[tuple[int, object]] = []
+        self.fired_delays: list[int] = []
+
+    def singleShot(self, ms, callback) -> None:  # noqa: N802 (Qt spelling)
+        self.scheduled.append((ms, callback))
+
+    def step(self) -> bool:
+        """Run one queued callback; False when nothing was queued."""
+        if not self.scheduled:
+            return False
+        ms, callback = self.scheduled.pop(0)
+        self.fired_delays.append(ms)
+        callback()
+        return True
+
+
+def _make_start_hermetic(controller, monkeypatch):
+    """Let `AppController.start()` reach launch-work routing without I/O."""
+    server = _FakeMcpServer()
+    timer = _FakeTimer()
+    monkeypatch.setattr(controller, "_browser_mcp_server", server)
+    monkeypatch.setattr("symmetria_ide.app.QTimer", timer)
+    monkeypatch.setattr(controller._backend, "start", lambda: None)
+    monkeypatch.setattr(controller._agent_events, "start", lambda: None)
+    monkeypatch.setattr(controller, "_install_escape_watcher", lambda: None)
+    monkeypatch.setattr(controller, "_sync_agent_registry", lambda: None)
+    monkeypatch.setattr("symmetria_ide.app.agent_registry.reap_dead", lambda: None)
+    monkeypatch.setattr(controller._account_usage_store, "start", lambda: None)
+    monkeypatch.setattr(controller, "_on_shared_usage_changed", lambda: None)
+    monkeypatch.setattr(controller._usage_store, "start", lambda: None)
+    monkeypatch.setattr(controller, "_on_usage_store_changed", lambda: None)
+    monkeypatch.setattr(controller._usage_poller, "start", lambda: None)
+    for name in (
+        "SYMMETRIA_IDE_AGENT_PROMPT",
+        "SYMMETRIA_IDE_AGENT_VIEW",
+        "SYMMETRIA_IDE_SPAWN_AGENT",
+        "SYMMETRIA_IDE_SPAWN_AGENT_LOCATION",
+        "SYMMETRIA_IDE_RESTORE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    return controller, server, timer
+
+
+def test_launch_smoke_waits_for_mcp_then_spawns_with_config(controller, monkeypatch):
+    controller, server, timer = _make_start_hermetic(controller, monkeypatch)
+    monkeypatch.setenv("SYMMETRIA_IDE_SPAWN_AGENT", "fresh:claude")
+
+    controller.start()
+
+    # Not ready and not settled → nothing spawned, one retry queued.
+    assert controller.agentOrder == []
+    assert len(timer.scheduled) == 1
+
+    assert timer.step()  # still not ready → re-queues rather than spawning
+    assert controller.agentOrder == []
+
+    server.become_ready()
+    assert timer.step()
+    assert controller.agentOrder == [1]
+    # The whole point: the smoke agent carries real MCP config.
+    argv = controller.agent_spawn_argv(1)
+    assert argv[argv.index("--mcp-config") + 1] == "/tmp/smoke-mcp.json"
+    assert server.path_calls
+    # One-shot: a stale callback after execution cannot re-run the launch work.
+    assert timer.scheduled == []
+    assert timer.step() is False
+    assert controller.agentOrder == [1]
+
+
+def test_launch_smoke_proceeds_immediately_when_mcp_start_failed(
+    controller, monkeypatch
+):
+    controller, server, timer = _make_start_hermetic(controller, monkeypatch)
+    monkeypatch.setenv("SYMMETRIA_IDE_SPAWN_AGENT", "fresh:claude")
+    # A failed / disabled server is a FINAL answer — waiting cannot help, so
+    # the spawn must not burn the whole budget before happening.
+    server.become_failed()
+    controller.start()
+    assert controller.agentOrder == [1]
+    assert timer.scheduled == []
+
+
+def test_launch_smoke_wait_is_bounded_and_spawns_anyway(controller, monkeypatch):
+    controller, _server, timer = _make_start_hermetic(controller, monkeypatch)
+    monkeypatch.setenv("SYMMETRIA_IDE_SPAWN_AGENT", "fresh:claude")
+    # Never becomes ready or settled: the wait must still terminate, and must
+    # degrade to spawning rather than leaving a scripted run with no agent.
+    controller.start()
+    steps = 0
+    while timer.step():
+        steps += 1
+        assert steps < 1000, "readiness wait did not terminate"
+    assert controller.agentOrder == [1]
+    assert 0 < sum(timer.fired_delays) <= 5000
+
+
+def test_each_new_launch_work_item_gets_a_fresh_readiness_budget(
+    controller, monkeypatch
+):
+    """Consuming one bounded fallback must not make the next launch item skip
+    its readiness wait because a stale elapsed counter was retained."""
+    controller, _server, timer = _make_start_hermetic(controller, monkeypatch)
+    monkeypatch.setenv("SYMMETRIA_IDE_SPAWN_AGENT", "fresh:claude")
+
+    controller.start()
+    steps = 0
+    while timer.step():
+        steps += 1
+        assert steps < 1000
+    assert controller.agentOrder == [1]
+    controller.close_agent(1)
+    assert controller.agentOrder == []
+
+    # Arm a second launch item on the same gate. `start()` is used only as the
+    # public env-routing seam; every side effect is a no-op test double.
+    controller.start()
+    assert controller.agentOrder == []
+    assert len(timer.scheduled) == 1
+
+
+@pytest.mark.parametrize("harness", ["claude", "pi"])
+def test_launch_restore_waits_for_mcp_and_captures_harness_delivery(
+    controller, monkeypatch, harness
+):
+    """Reload restore is launch work too: it must not compose an agent argv
+    while `agent_config_path()` still returns the permanent empty fallback."""
+    controller, server, timer = _make_start_hermetic(controller, monkeypatch)
+    session_store.save(
+        controller.displayedRoot,
+        {
+            "central_surface": "agent",
+            "agents": [
+                {
+                    "harness": harness,
+                    "session_id": "session-123",
+                    "dangerous": False,
+                }
+            ],
+        },
+    )
+    monkeypatch.setenv("SYMMETRIA_IDE_RESTORE", "1")
+
+    # QML activates a Loader synchronously on the spawn signal and composes the
+    # command once. Capture at that same seam so becoming ready later cannot
+    # retroactively make a too-early restore look configured.
+    captured_argv: list[list[str]] = []
+    spawn_agent = controller.spawn_agent
+
+    def spawn_and_capture(*args, **kwargs):
+        spawn_agent(*args, **kwargs)
+        captured_argv.append(controller.agent_spawn_argv(controller.focusedAgent))
+
+    monkeypatch.setattr(controller, "spawn_agent", spawn_and_capture)
+
+    controller.start()
+
+    assert controller.agentOrder == []
+    assert captured_argv == []
+    assert len(timer.scheduled) == 1
+
+    server.become_ready()
+    assert timer.step()
+    assert controller.agentOrder == [1]
+    assert len(captured_argv) == 1
+    argv = captured_argv[0]
+    if harness == "claude":
+        assert argv[argv.index("--mcp-config") + 1] == "/tmp/smoke-mcp.json"
+    else:
+        assert "SYMMETRIA_IDE_MCP_CONFIG=/tmp/smoke-mcp.json" in argv
+    assert server.path_calls
+
+
+def test_title_placeholder_matching_is_case_insensitive():
+    # The registry spells claude's placeholder in its natural casing
+    # ("Claude Code"); the aggregate lowercases it, so the match still fires.
+    # Without that lowercasing the chip would render the placeholder as if it
+    # were a real session summary — silent, and only visible on screen.
+    assert "Claude Code" in HARNESSES["claude"].title_placeholders
+    assert AppController._clean_agent_title("✳ Claude Code") == ""
+    assert AppController._clean_agent_title("claude code") == ""
+    assert AppController._clean_agent_title("CLAUDE CODE") == ""

@@ -15,6 +15,7 @@ binding missing its backend connection (terminal renders blank).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -429,6 +430,11 @@ def test_agent_scrollback_chords_present(main_qml: str):
     # (NOT `simulateWheel`, which would re-encode as VT keys and reach claude's
     # own pager) — see the scrollFocusedAgent comment in Main.qml.
     assert "scrollPageFraction(" in main_qml
+    assert (
+        "term.scrollPageFraction(controller.focusedAgentScrollFraction(), direction)"
+        in main_qml
+    )
+    assert "term.scrollPageFraction(0.167, direction)" not in main_qml
 
 
 def test_agent_surface_pool_structure(main_qml: str):
@@ -523,6 +529,35 @@ def test_remote_pane_has_no_cwd_poll_timer(main_qml: str):
     remote_block = main_qml[remote_start : main_qml.index("id: agentSurface")]
     assert "on_shell_cwd" not in remote_block
     assert "Timer" not in remote_block
+
+
+# ---------------------------------------------------------------------------
+# QML → Python seam: every controller.<name>(…) must exist on AppController
+# ---------------------------------------------------------------------------
+
+
+def test_every_controller_call_in_main_qml_is_callable(main_qml: str):
+    """A `controller.foo()` QML typo is a RUNTIME TypeError, not a load error.
+
+    QML resolves the call when the binding runs, so a one-sided rename (or a
+    plain typo) stays silent until the user presses the key that reaches it —
+    exactly how `controller.focusedAgentScrollFraction()` would fail: Ctrl+U/D
+    would simply stop scrolling, with nothing on stdout unless the QML message
+    handler happened to be watched.
+
+    Names are read off the source rather than enumerated here, so a new call
+    site is covered the moment it lands. Dynamic constructs (a computed method
+    name) would not be caught — there are none today, and this asserts the
+    regex found a plausible number of calls so a future refactor that hides
+    every call behind one cannot pass vacuously.
+    """
+    from symmetria_ide.app import AppController
+
+    names = sorted(set(re.findall(r"\bcontroller\.([A-Za-z_]\w*)\s*\(", main_qml)))
+    assert len(names) > 20, "regex stopped matching Main.qml's call sites"
+    assert "focusedAgentScrollFraction" in names
+    missing = [n for n in names if not callable(getattr(AppController, n, None))]
+    assert missing == [], f"Main.qml calls non-existent AppController slots: {missing}"
 
 
 def test_terminal_focus_routes_through_location_dispatch(main_qml: str):

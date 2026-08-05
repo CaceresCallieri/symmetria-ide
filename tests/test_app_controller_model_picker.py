@@ -88,6 +88,17 @@ def test_open_model_picker_opencode_harness_is_noop(one_agent):
     assert c._slash_pending_injects == {}
 
 
+def test_open_model_picker_pi_uses_registry_slash_command(one_agent):
+    c = one_agent
+    c._term_agents[1]["harness"] = "pi"
+    injects = _capture_injects(c)
+    c.open_model_picker()
+    assert len(injects) == 1
+    assert injects[0]["slot"] == 1
+    assert injects[0]["text"] == "/model"
+    assert injects[0]["submit"] is True
+
+
 def test_inject_slash_command_strips_esc(one_agent):
     """An embedded ESC would terminate the bracketed paste early — stripped
     defensively, same as the coordination + STT inject paths."""

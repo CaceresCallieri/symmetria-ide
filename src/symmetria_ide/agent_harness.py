@@ -19,14 +19,27 @@ import re
 import time
 from dataclasses import dataclass, field
 
+# Ctrl+U/D scroll fraction for a harness that declares none, and the value
+# every mouse-tracking TUI uses. A module constant rather than a read of
+# `AgentHarness.scroll_page_fraction`: `slots=True` replaces class-level field
+# defaults with slot descriptors, so that read would return a descriptor.
+DEFAULT_SCROLL_PAGE_FRACTION = 0.167
+
 
 @dataclass(slots=True, frozen=True)
 class AgentHarness:
     """Per-CLI spawn semantics for one agent harness.
 
-    "Dangerous" (skip-permissions) is expressed differently per harness:
-    a launch flag for claude (`dangerous_flag`), an env var for opencode
+    The permissive spawn variant is expressed differently per harness: a
+    launch flag for claude (`dangerous_flag`), an env var for opencode
     (`dangerous_env`) — the bare opencode TUI accepts no permission flag.
+
+    ⚠ It does not mean the same THING everywhere. For claude and opencode it
+    genuinely skips tool permissions. Pi has no per-tool permission gate at
+    all (only `--no-tools`/`--tools`/`--exclude-tools`), so both of its
+    variants are equally unrestricted on tools and its `--approve` only
+    suppresses the blocking project-trust dialog. Do not describe the Pi
+    variants as a permissions difference — see the `pi` entry below.
     """
 
     name: str
@@ -52,6 +65,22 @@ class AgentHarness:
     # claude `-r <id>` resumes non-interactively). A bare claude `-r` (no id)
     # opens claude's own interactive picker.
     flags: dict[str, list[str]] = field(default_factory=dict)
+    # The ONLY flag resume-by-id is ever built from. Harnesses whose picker
+    # flag and resume-by-id flag COINCIDE (claude `-r`, opencode `--session`)
+    # simply name that same flag here, so their argv is unchanged. Pi is why
+    # the field exists: its picker is a bare `-r`, but a trailing token after
+    # `-r` is NOT read as a session id — Pi's arg parser pushes any non-flag
+    # token onto `result.messages` (dist/cli/args.js:194), so `pi -r <uuid>`
+    # opens the picker AND queues the uuid as the session's first user
+    # message. Silent corruption, not an error.
+    #
+    # ⚠ There is deliberately NO fallback to "append the id after the picker
+    # flags". That shape IS the corruption above, so a harness that reaches
+    # `spawn_argv` with a session id and no `resume_id_flag` raises instead of
+    # guessing (see the raise there, and the registry invariant test). A new
+    # harness that can restore a persisted session must name its flag here; one
+    # that genuinely cannot (picker-only) must never be handed a session id.
+    resume_id_flag: str | None = None
     resume_requires_id: bool = False
     # Flag this harness uses to load an extra MCP config FILE at spawn (Phase
     # 4 Stage 2c — injecting the IDE's browser MCP server). claude takes
@@ -67,6 +96,57 @@ class AgentHarness:
     # None (it uses the file+flag form). Verified via spike (2026-07-01) — see
     # .claude/memory/reference/agent-sdk/opencode_remote_mcp_sse_only.md.
     mcp_config_env: str | None = None
+    # Env var this harness's IDE integration reads an MCP config FILE PATH from
+    # (the third delivery form, distinct from both siblings above: `*_flag`
+    # passes a path as a CLI flag, `*_env` passes inline CONTENT in the env,
+    # this one passes a PATH in the env). Pi ships zero MCP support of its own
+    # — verified, `modelcontextprotocol` appears nowhere in its dist — so the
+    # Symmetria Pi extension acts as a generic MCP client and reads the very
+    # same per-agent config file claude gets. Because the file is identical,
+    # per-project gating, call-time gating and X-Symmetria-Agent attribution
+    # all keep working with no new IDE-side tool surface.
+    mcp_config_path_env: str | None = None
+    # Flag this harness uses to load an extra extension/plugin FILE at spawn.
+    # Pi takes `--extension <path>`; used only by the dev override below, since
+    # production Pi auto-discovers the extension from its registered package.
+    extension_flag: str | None = None
+    # Env var holding a DEV override path for that extension. The globally
+    # registered Pi package is `pi-agent-stable`, so an unpromoted extension in
+    # a dev worktree is otherwise unreachable — pointing this at the worktree
+    # file lets the IDE exercise it without a promotion.
+    extension_path_env: str | None = None
+    # Fraction of the visible pane Ctrl+U/D scrolls for this harness. THIS
+    # FIELD IS THE SINGLE AUTHORITY for the value — QML and the AppController
+    # Slot only forward it. Not one constant, because the effective jump
+    # depends on the TUI, not the terminal: a mouse-tracking program (claude)
+    # consumes each emitted wheel event as several of its own lines, so 0.167
+    # lands near a real half page there while a literal 0.5 overshoots to ~1.5
+    # pages. Retune per harness here, nowhere else.
+    scroll_page_fraction: float = DEFAULT_SCROLL_PAGE_FRACTION
+    # Slash command that opens this harness's OWN model picker (Alt+M composes
+    # the CLI's picker rather than reimplementing one in QML). None = the
+    # harness has no such command and the chord is a no-op there (opencode).
+    model_slash_command: str | None = None
+    # Can the coordination judge read this harness's transcript? `wait_for_agent`
+    # (see AppController's coordination section) verifies a watched agent's
+    # busy→idle edge by running a headless `claude -p` over the transcript the
+    # agent wrote. That needs BOTH a known on-disk location and a known JSONL
+    # shape, which today only claude has. False = the registrant still gets its
+    # go-ahead, with an explicit caveat that no verification happened.
+    #
+    # A capability, deliberately NOT a `name == "claude"` test: Pi writes a
+    # genuine JSONL transcript at `getSessionFile()`, so teaching the judge to
+    # read it is a matter of flipping this flag plus a reader — not of hunting
+    # down literal harness-name branches. Adding a harness therefore defaults to
+    # the honest, caveated path rather than to a silently wrong verification.
+    judgeable_transcript: bool = False
+    # Bare product names this harness reports as its OSC title before a session
+    # has a real summary. Write them in their natural casing ("Claude Code") —
+    # matching is case-INSENSITIVE by construction (AppController lowercases
+    # the whole set when aggregating it), so casing here is documentation only.
+    # `_clean_agent_title` treats a match as NO title, so the chip shows just
+    # the sparkle + slot number.
+    title_placeholders: tuple[str, ...] = ()
     # Flag this harness uses to load EXTRA settings at spawn (agent-ownership
     # inversion — injecting the IDE-owned activity-reporter hook). claude takes
     # `--settings <file-or-json>` and we pass an inline JSON string (verified:
@@ -91,6 +171,24 @@ class AgentHarness:
     # not break spawns. An EMPTY set means "don't validate" (opencode's
     # `--variant` is provider-specific and open-ended, so any string passes).
     valid_efforts: frozenset[str] = frozenset()
+
+    @property
+    def wants_mcp_config_file(self) -> bool:
+        """Does this harness consume the per-agent MCP config FILE?
+
+        True for both file-delivery forms — `mcp_config_flag` (claude reads the
+        path as a CLI flag) and `mcp_config_path_env` (pi's extension reads the
+        path out of the env). Explicitly NOT the opencode route, which takes
+        inline CONTENT via `mcp_config_env` and needs no file written at all.
+
+        One named predicate rather than a repeated `flag or path_env` test at
+        the caller: `spawn_argv` deliberately keeps the two delivery branches
+        separate (they place the value differently), but the DECISION to build
+        the config file at all is a single capability question. A future fourth
+        delivery mechanism adds itself here and cannot be silently omitted from
+        the build-config decision.
+        """
+        return bool(self.mcp_config_flag or self.mcp_config_path_env)
 
 
 # `env -u` pairs prepended to EVERY spawn's env wrapper, scrubbing the ambient
@@ -148,8 +246,20 @@ HARNESSES: dict[str, AgentHarness] = {
         base_flags=("--no-chrome",),
         dangerous_flag="--dangerously-skip-permissions",
         flags={"fresh": [], "resume": ["-r"], "continue": ["-c"]},
+        # Picker flag and resume-by-id flag coincide for claude — naming it
+        # here keeps the argv byte-identical while making the semantics
+        # explicit rather than implied by the trailing-append fallback.
+        resume_id_flag="-r",
         mcp_config_flag="--mcp-config",
         settings_flag="--settings",
+        model_slash_command="/model",
+        # The only harness whose transcript the coordination judge can read
+        # today: `~/.claude/projects/<slug>/<session_id>.jsonl`, a format the
+        # judge prompt already understands.
+        judgeable_transcript=True,
+        # Natural casing on purpose — matching is case-insensitive, and the
+        # string reads as what claude actually prints.
+        title_placeholders=("Claude Code",),
         # `--model` takes an alias ('fable'/'opus'/'sonnet') OR a full id;
         # `--effort` takes one of the five levels below (verified via
         # `claude --help`: "Effort level ... (low, medium, high, xhigh, max)").
@@ -174,6 +284,9 @@ HARNESSES: dict[str, AgentHarness] = {
         # has no picker flag equivalent to claude's bare `-r`, so resume
         # goes through the IDE's session picker (AgentSessionPicker.qml).
         flags={"fresh": [], "resume": ["--session"], "continue": ["-c"]},
+        # Same flag either way (bare `--session` errors, so the picker form is
+        # never actually spawned — the QML session picker always supplies one).
+        resume_id_flag="--session",
         resume_requires_id=True,
         # opencode's browser MCP is injected as inline JSON via this env var
         # (it has no --mcp-config flag). The IDE builds the content with
@@ -186,6 +299,53 @@ HARNESSES: dict[str, AgentHarness] = {
         # committed string passes through.
         model_flag="--model",
         effort_flag="--variant",
+        title_placeholders=("opencode",),
+    ),
+    "pi": AgentHarness(
+        name="pi",
+        # The INSTALLED binary, never a repo checkout: /usr/bin/pi is the
+        # runtime and it loads its packages from ~/.pi/agent/settings.json.
+        executable="pi",
+        label="Pi",
+        # ⚠ NOT a skip-permissions flag, and must not be documented as one.
+        # `--approve` sets `projectTrustOverride` (dist/cli/args.js:163) —
+        # it suppresses the blocking "Project is not trusted" startup dialog,
+        # which would otherwise wedge a freshly spawned slot in a new project.
+        # Pi has NO per-tool permission gate at all (only --no-tools/--tools/
+        # --exclude-tools), so both spawn variants are equally unrestricted on
+        # tools; they differ in project-resource trust only.
+        dangerous_flag="--approve",
+        # Bare `-r` opens Pi's own interactive picker (no id, no IDE picker);
+        # resume-by-id goes through `resume_id_flag` — see that field's comment
+        # for why the id must NOT simply be appended after `-r`.
+        flags={"fresh": [], "resume": ["-r"], "continue": ["-c"]},
+        resume_id_flag="--session",
+        resume_requires_id=False,
+        mcp_config_path_env="SYMMETRIA_IDE_MCP_CONFIG",
+        extension_flag="--extension",
+        extension_path_env="SYMMETRIA_IDE_PI_EXTENSION",
+        # `--model <id>`; `--thinking <level>` is Pi's reasoning-effort axis.
+        # `off` is a legal level, not an "unset" sentinel — an explicit `off`
+        # in the committed marker is honoured and emitted.
+        model_flag="--model",
+        effort_flag="--thinking",
+        valid_efforts=frozenset(
+            {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+        ),
+        # ⚠ PREDICTED, NOT YET MEASURED. Derivation: pi emits none of the
+        # ?1000/?1002/?1006/?1049 mouse-tracking / alternate-screen modes, so
+        # it should take Konsole's plain _scrollBar branch where the fraction
+        # is literal (0.5 = half a page) instead of claude's line-multiplying
+        # wheel-event path. The live phase measures a real pi pane and locks or
+        # retunes this — do not treat 0.5 as an observed value until then.
+        scroll_page_fraction=0.5,
+        model_slash_command="/model",
+        # ⚠ PREDICTED, NOT YET MEASURED: pi's actual OSC title string has not
+        # been captured from a running slot. The live phase reads `on_agent_title`
+        # off a real pi agent and finalises this tuple against it. A wrong guess
+        # is cosmetic only (the chip shows the raw placeholder as if it were a
+        # session summary), never a spawn failure.
+        title_placeholders=("pi",),
     ),
 }
 
@@ -203,6 +363,7 @@ def spawn_argv(
     model: str = "",
     effort: str = "",
     executable: str = "",
+    extension_paths: tuple[str, ...] = (),
 ) -> list[str]:
     """argv for a slot's QMLTermSession.
 
@@ -217,9 +378,16 @@ def spawn_argv(
     appends `<flag> <path>` so the agent discovers the IDE's browser MCP
     server (Stage 2c — claude). `mcp_config_content`, when set AND the harness
     declares `mcp_config_env`, exports `<env>=<content>` in the env wrapper —
-    the opencode counterpart (inline JSON, no file). A given harness uses one
-    mechanism or the other; the unused arg (and either arg on a harness lacking
-    the corresponding flag/env) is a silent no-op.
+    the opencode counterpart (inline JSON, no file). `mcp_config_path` ALSO
+    serves the third form: a harness declaring `mcp_config_path_env` gets the
+    same file's PATH exported in the env wrapper (pi, whose extension reads it
+    as a generic MCP client). A given harness uses one mechanism only; the
+    unused arg (and either arg on a harness lacking the corresponding
+    flag/env) is a silent no-op.
+
+    `extension_paths`, when non-empty AND the harness declares
+    `extension_flag`, appends `<flag> <path>` per entry — the dev override for
+    an unpromoted Pi extension.
 
     `agent_sock_path` (when set) exports `SYMMETRIA_IDE_AGENT_SOCK` so the
     claude reporter knows which IDE socket to report to; `settings_json`
@@ -269,6 +437,11 @@ def spawn_argv(
     # JSON needs no quoting, same as OPENCODE_PERMISSION above.
     if mcp_config_content and harness.mcp_config_env:
         argv.append(f"{harness.mcp_config_env}={mcp_config_content}")
+    # Config-file PATH in the env (pi): the same file claude gets via
+    # --mcp-config, handed to Pi's Symmetria extension instead — Pi's own CLI
+    # has no MCP surface to pass it to.
+    if mcp_config_path and harness.mcp_config_path_env:
+        argv.append(f"{harness.mcp_config_path_env}={mcp_config_path}")
     # `executable` overrides the bare harness name with an ABSOLUTE path when the
     # caller has resolved one (tmux mode — so finding the CLI does not depend on
     # the tmux server's inherited PATH). Empty = use the bare name (legacy PTY,
@@ -295,17 +468,34 @@ def spawn_argv(
         and (not harness.valid_efforts or effort in harness.valid_efforts)
     ):
         argv += [harness.effort_flag, effort]
-    argv += harness.flags[spawn_type]
-    # Resume-by-id: append the session id after the resume flag when one is
-    # supplied. opencode REQUIRES it (bare `--session` errors). claude takes
-    # it OPTIONALLY — `-r <id>` resumes that exact session non-interactively
-    # (what session restore replays to re-home a conversation), while a bare
-    # `-r` (empty id) opens claude's own interactive picker. Gating on a
-    # truthy session_id (not `resume_requires_id`) is what unlocks claude's
-    # non-interactive resume without changing opencode (its picker always
-    # supplies an id).
+    # Dev-override extension(s), before the spawn-type flags so a resume's
+    # trailing session id stays last.
+    if extension_paths and harness.extension_flag:
+        for path in extension_paths:
+            argv += [harness.extension_flag, path]
+    # Resume-by-id vs the interactive picker. With an id, `resume_id_flag`
+    # ALONE builds the resume — for claude (`-r`) and opencode (`--session`)
+    # it is the same flag the picker uses, so their argv is unchanged; pi
+    # swaps its bare-`-r` picker for `--session <id>`. Without an id we emit
+    # the picker flags. Gating on a truthy session_id (not `resume_requires_id`)
+    # is what keeps claude's bare `-r` picker reachable.
+    #
+    # No id + no flag fallback: combining picker syntax with a trailing id is
+    # precisely the `pi -r <uuid>` corruption this field exists to prevent, and
+    # it fails SILENTLY (the id becomes a chat message), so a harness that
+    # cannot express resume-by-id must say so by never being handed an id.
     if spawn_type == "resume" and session_id:
-        argv.append(session_id)
+        if not harness.resume_id_flag:
+            raise ValueError(
+                f"harness {harness.name!r} was asked to resume session id "
+                f"{session_id!r} but declares no resume_id_flag; refusing to "
+                "append the id to its picker flags "
+                f"({harness.flags.get('resume', [])!r}) — that shape is read as "
+                "a chat message by at least one CLI, not as a session id"
+            )
+        argv += [harness.resume_id_flag, session_id]
+    else:
+        argv += harness.flags[spawn_type]
     return argv
 
 

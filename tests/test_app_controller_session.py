@@ -205,6 +205,31 @@ def test_restore_session_resumes_with_id_and_fresh_without(controller):
     assert c._central_surface == "agent"
 
 
+def test_restore_session_pi_uses_session_flag_not_native_picker(controller):
+    c = controller
+    session_store.save(
+        c.displayedRoot,
+        {
+            "central_surface": "agent",
+            "agents": [
+                {
+                    "harness": "pi",
+                    "session_id": "019fc9e5-dead-beef",
+                    "dangerous": False,
+                }
+            ],
+        },
+    )
+
+    c.restore_session()
+
+    assert c.agentOrder == [1]
+    assert c._term_agents[1]["harness"] == "pi"
+    argv = c.agent_spawn_argv(1)
+    assert argv[-2:] == ["--session", "019fc9e5-dead-beef"]
+    assert ["-r", "019fc9e5-dead-beef"] != argv[-2:]
+
+
 def test_restore_session_reopens_browser_windows(controller, monkeypatch):
     """Restore drives the real open path, so it needs a Chrome stand-in — the
     suite's env isolation otherwise (correctly) refuses to launch a browser."""

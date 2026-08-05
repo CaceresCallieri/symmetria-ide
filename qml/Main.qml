@@ -470,12 +470,10 @@ Window {
     // ~Half-page scroll of the focused agent terminal — Ctrl+U/D mirror vim's
     // half-page motion via agentSurface.scrollFocusedAgent, which calls the
     // fork's scrollPageFraction slot (NOT simulateWheel — that routes through
-    // wheelEvent and would couple this to the physical mouse wheel). For a
-    // mouse-tracking TUI like claude the fork emits scroll mouse-events to the
-    // program rather than touching Konsole scrollback; claude's per-event line
-    // multiplier is why the fraction is ~0.167, not 0.5 (see scrollFocusedAgent
-    // for the tuning rationale). Gated off while the sidebar holds focus — the
-    // tree owns Ctrl+U/D for its own paging.
+    // wheelEvent and would couple this to the physical mouse wheel). The
+    // fraction itself is per-harness metadata; the single authority is
+    // AgentHarness.scroll_page_fraction in agent_harness.py. Gated off while
+    // the sidebar holds focus — the tree owns Ctrl+U/D for its own paging.
     Shortcut {
         sequences: ["Ctrl+U"]
         context: Qt.ApplicationShortcut
@@ -1246,12 +1244,10 @@ Window {
                         var term = focusedTerminal();
                         if (!term)
                             return;
-                        // ~1/6 of visible height per press. Intentionally below a
-                        // literal "half page": claude's TUI scrolls several of
-                        // its own lines per wheel event scrollByLines emits, so a
-                        // 0.5 fraction overshot to ~1.5 pages. 0.167 lands near a
-                        // real half-page jump. Tune here if the feel drifts.
-                        term.scrollPageFraction(0.167, direction);
+                        // Fraction comes from the focused agent's harness —
+                        // see AgentHarness.scroll_page_fraction, the single
+                        // place it is defined and retuned.
+                        term.scrollPageFraction(controller.focusedAgentScrollFraction(), direction);
                     }
 
                     Repeater {

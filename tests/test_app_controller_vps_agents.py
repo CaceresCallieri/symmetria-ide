@@ -129,6 +129,27 @@ def test_vps_spawn_argv_is_remote(controller):
     assert "dev@203.0.113.7" in argv
 
 
+def test_vps_spawn_never_requests_local_mcp_config(controller, monkeypatch):
+    """The launch-readiness gate is local-only; VPS agents use the remote hub
+    and must not receive a path owned by this IDE's local MCP server."""
+    ctrl, _fake, _spy = controller
+
+    def unexpected_config(*_args, **_kwargs):
+        pytest.fail("VPS argv requested a local browser-MCP config")
+
+    monkeypatch.setattr(
+        ctrl._browser_mcp_server, "agent_config_path", unexpected_config
+    )
+    monkeypatch.setattr(
+        ctrl._browser_mcp_server, "agent_config_content", unexpected_config
+    )
+    ctrl.set_location("vps")
+    argv = ctrl.agent_spawn_argv(_spawn_vps(ctrl))
+    assert argv[0] == "ssh"
+    assert "--mcp-config" not in argv
+    assert not any(arg.startswith("SYMMETRIA_IDE_MCP_CONFIG=") for arg in argv)
+
+
 # ---------------------------------------------------------------------------
 # Location-filtered display order + focus handoff
 # ---------------------------------------------------------------------------

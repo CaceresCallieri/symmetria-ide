@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
+
+import pytest
 
 from symmetria_ide.agent_harness import (
     CLAUDE_ENV_UNSET_ARGS,
@@ -22,6 +25,207 @@ from symmetria_ide.agent_harness import (
 # ---------------------------------------------------------------------------
 # spawn_argv
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("harness", "spawn_type", "session_id", "tail"),
+    [
+        ("claude", "fresh", "", []),
+        ("claude", "fresh", "ses_abc", []),
+        ("claude", "continue", "", ["-c"]),
+        ("claude", "continue", "ses_abc", ["-c"]),
+        ("claude", "resume", "", ["-r"]),
+        ("claude", "resume", "ses_abc", ["-r", "ses_abc"]),
+        ("opencode", "fresh", "", []),
+        ("opencode", "fresh", "ses_abc", []),
+        ("opencode", "continue", "", ["-c"]),
+        ("opencode", "continue", "ses_abc", ["-c"]),
+        ("opencode", "resume", "", ["--session"]),
+        ("opencode", "resume", "ses_abc", ["--session", "ses_abc"]),
+    ],
+)
+def test_existing_harness_argv_stays_byte_identical_across_resume_refactor(
+    harness, spawn_type, session_id, tail
+):
+    """Adding resume_id_flag must not perturb either existing harness.
+
+    This intentionally pins all six spawn_type/session-id permutations for
+    each harness, including the controller-rejected bare OpenCode resume. It
+    is a before-Pi snapshot, not an expectation derived from registry fields.
+    """
+    executable = HARNESSES[harness].executable
+    expected = [
+        "env",
+        *CLAUDE_ENV_UNSET_ARGS,
+        "SYMMETRIA_AGENT_ID=42_1",
+        executable,
+        *(HARNESSES[harness].base_flags),
+        *tail,
+    ]
+    assert (
+        spawn_argv(
+            HARNESSES[harness],
+            spawn_type,
+            False,
+            "42_1",
+            session_id=session_id,
+        )
+        == expected
+    )
+
+
+def test_pi_registry_contract():
+    pi = HARNESSES["pi"]
+    assert pi.name == "pi"
+    assert pi.executable == "pi"  # production resolves the installed binary
+    assert pi.label == "Pi"
+    assert pi.flags == {"fresh": [], "continue": ["-c"], "resume": ["-r"]}
+    assert pi.resume_id_flag == "--session"
+    assert pi.resume_requires_id is False
+    assert pi.dangerous_flag == "--approve"
+    assert pi.mcp_config_path_env == "SYMMETRIA_IDE_MCP_CONFIG"
+    assert pi.extension_flag == "--extension"
+    assert pi.model_flag == "--model"
+    assert pi.effort_flag == "--thinking"
+    assert pi.valid_efforts == frozenset(
+        {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+    )
+    assert pi.scroll_page_fraction == 0.5
+    assert pi.model_slash_command == "/model"
+    assert "pi" in pi.title_placeholders
+
+
+# ---------------------------------------------------------------------------
+# Registry invariants — resume-by-id has exactly one legal shape
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", sorted(HARNESSES))
+def test_every_registered_harness_declares_a_resume_id_flag(name):
+    """A registered harness must name the flag its resume-by-id uses.
+
+    `spawn_argv` refuses to fall back to "picker flags + trailing id" because
+    that shape is silently read as a chat message by pi. Any harness the IDE
+    can hand a persisted session id to (all of them — restore_session is
+    harness-agnostic) must therefore declare the flag explicitly.
+    """
+    harness = HARNESSES[name]
+    assert "resume" in harness.flags
+    assert harness.resume_id_flag, (
+        f"{name} can be handed a restored session id but names no resume_id_flag"
+    )
+    picker_flags = harness.flags["resume"]
+    assert len(picker_flags) <= 1, (
+        f"{name} declares extra resume picker tokens {picker_flags!r}; "
+        "spawn_argv replaces the whole picker form when restoring by id, so "
+        "any token still required for exact restore would be silently lost"
+    )
+
+
+def test_resume_by_id_without_a_flag_raises_instead_of_corrupting_argv():
+    """Malformed harness metadata must fail loudly, not build `-r <uuid>`."""
+    broken = replace(HARNESSES["pi"], name="broken", resume_id_flag=None)
+    with pytest.raises(ValueError) as excinfo:
+        spawn_argv(broken, "resume", False, "42_1", session_id="ses_abc")
+    message = str(excinfo.value)
+    assert "resume_id_flag" in message
+    assert "broken" in message
+    # The picker path is unaffected — only the id form is refused.
+    assert spawn_argv(broken, "resume", False, "42_1")[-1] == "-r"
+
+
+@pytest.mark.parametrize(
+    ("name", "judgeable"),
+    [("claude", True), ("opencode", False), ("pi", False)],
+)
+def test_judgeable_transcript_is_capability_metadata(name, judgeable):
+    """Only claude's transcript is readable by the coordination judge today."""
+    assert HARNESSES[name].judgeable_transcript is judgeable
+
+
+@pytest.mark.parametrize(
+    ("spawn_type", "session_id", "tail"),
+    [
+        ("fresh", "", []),
+        ("continue", "", ["-c"]),
+        ("resume", "", ["-r"]),
+        ("resume", "019fc9e5-dead-beef", ["--session", "019fc9e5-dead-beef"]),
+    ],
+)
+def test_pi_spawn_and_resume_forms(spawn_type, session_id, tail):
+    argv = spawn_argv(
+        HARNESSES["pi"],
+        spawn_type,
+        False,
+        "42_1",
+        session_id=session_id,
+    )
+    assert argv == [
+        "env",
+        *CLAUDE_ENV_UNSET_ARGS,
+        "SYMMETRIA_AGENT_ID=42_1",
+        "pi",
+        *tail,
+    ]
+    if session_id:
+        assert ["-r", session_id] != argv[-2:]
+
+
+def test_pi_permissive_variant_adds_approve_and_safe_variant_omits_it():
+    permissive = spawn_argv(HARNESSES["pi"], "fresh", True, "42_1")
+    safe = spawn_argv(HARNESSES["pi"], "fresh", False, "42_1")
+    assert permissive[-2:] == ["pi", "--approve"]
+    assert "--approve" not in safe
+
+
+@pytest.mark.parametrize(
+    "level", ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+)
+def test_pi_accepts_every_documented_thinking_level(level):
+    argv = spawn_argv(HARNESSES["pi"], "fresh", False, "42_1", effort=level)
+    assert argv[argv.index("--thinking") + 1] == level
+
+
+def test_pi_model_and_invalid_thinking_value():
+    argv = spawn_argv(
+        HARNESSES["pi"],
+        "fresh",
+        False,
+        "42_1",
+        model="anthropic/claude-sonnet-4-5",
+        effort="ultra",
+    )
+    assert argv[argv.index("--model") + 1] == "anthropic/claude-sonnet-4-5"
+    assert "--thinking" not in argv
+    assert "ultra" not in argv
+
+
+def test_pi_receives_mcp_config_path_via_env_not_cli_flag():
+    argv = spawn_argv(
+        HARNESSES["pi"],
+        "fresh",
+        False,
+        "42_1",
+        mcp_config_path="/tmp/symmetria-agent-42_1.json",
+    )
+    config_env = "SYMMETRIA_IDE_MCP_CONFIG=/tmp/symmetria-agent-42_1.json"
+    assert config_env in argv
+    assert argv.index(config_env) < argv.index("pi")
+    assert "--mcp-config" not in argv
+
+
+def test_pi_extension_paths_use_declared_extension_flag():
+    argv = spawn_argv(
+        HARNESSES["pi"],
+        "fresh",
+        False,
+        "42_1",
+        extension_paths=("/worktrees/pi-agent/extensions/symmetria-ide.ts",),
+    )
+    assert argv[-2:] == [
+        "--extension",
+        "/worktrees/pi-agent/extensions/symmetria-ide.ts",
+    ]
 
 
 def test_claude_fresh_dangerous_uses_flag_not_env():

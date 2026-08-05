@@ -33,6 +33,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import ClassVar, TypedDict
 
@@ -1218,6 +1219,17 @@ class AppController(QObject):
         # One-shot deferred smoke spawn (see start()'s SYMMETRIA_IDE_SPAWN_AGENT
         # hook): (spawn_type, harness) waiting for the pairing probe to land.
         self._pending_vps_smoke_spawn: tuple[str, str] | None = None
+        # The LOCAL twin of the above: one-shot launch work waiting for the
+        # browser-MCP server to become ready. Same idiom, different edge — see
+        # _run_launch_work_when_mcp_ready.
+        #
+        # A callable rather than a (spawn_type, harness) tuple, because the
+        # smoke spawn is not the only launch work that races the server: a
+        # reload restore composes agent argv too, and it did so while the port
+        # was still zero, permanently losing `wait_for_agent` and browser tools
+        # for every restored agent. Both go through this one gate.
+        self._pending_launch_work: tuple[str, Callable[[], None]] | None = None
+        self._launch_work_wait_ms = 0
         self._remote_context = RemoteContext(self)
         # same-thread: pairingChanged fires on the GUI thread (RemoteContext
         # marshals its probe-worker result through an internal queued
@@ -3978,7 +3990,7 @@ class AppController(QObject):
     ) -> None:
         """Allocate the lowest free slot for an agent instance and focus it.
 
-        `harness` selects the agent CLI ("claude" | "opencode" — see
+        `harness` selects the agent CLI ("claude" | "opencode" | "pi" — see
         agent_harness.HARNESSES). `dangerous=True` is the DEFAULT
         polarity for every harness (matches the user's orchestrator.nvim
         muscle memory — the lowercase spawn chords skip permissions; the
@@ -3986,8 +3998,8 @@ class AppController(QObject):
         to `agentSlotActive` performs the actual process spawn via
         `agent_spawn_argv`.
 
-        Resume semantics differ per harness: claude's bare `-r` opens
-        its own interactive session picker inside the terminal (no
+        Resume semantics differ per harness: claude's and pi's bare `-r`
+        open their own interactive session pickers inside the terminal (no
         session_id needed); opencode's `--session` REQUIRES an id, which
         the AgentSessionPicker overlay supplies.
         """
@@ -4237,11 +4249,19 @@ class AppController(QObject):
         # only the DELIVERY mechanism differs per harness: claude loads a config
         # FILE via --mcp-config (mcp_config_flag), opencode reads inline JSON
         # from OPENCODE_CONFIG_CONTENT (mcp_config_env, its remote MCP being
-        # SSE-only). Each builder returns "" when the server is down → a
+        # SSE-only), and pi's Symmetria extension reads the SAME FILE claude
+        # gets, whose path arrives in the env (mcp_config_path_env) — pi's CLI
+        # has no MCP surface of its own to pass it to. Reusing the identical
+        # file for pi is what keeps per-project gating, call-time gating and
+        # X-Symmetria-Agent attribution working with no new IDE-side tool
+        # surface. Both file forms answer `wants_mcp_config_file` (the single
+        # named predicate, so a future delivery mechanism can't be silently
+        # omitted here while spawn_argv keeps its separate placement branches).
+        # Each builder returns "" when the server is down → a
         # no-op in spawn_argv (agent gets no IDE MCP tools for that spawn).
         mcp_config_path = ""
         mcp_config_content = ""
-        if spec.mcp_config_flag:
+        if spec.wants_mcp_config_file:
             mcp_config_path = self._browser_mcp_server.agent_config_path(
                 agent_id, browser_enabled=self._project_browser_enabled
             )
@@ -4249,6 +4269,16 @@ class AppController(QObject):
             mcp_config_content = self._browser_mcp_server.agent_config_content(
                 agent_id, browser_enabled=self._project_browser_enabled
             )
+        # Dev override for an UNPROMOTED harness extension: the globally
+        # registered pi package is `pi-agent-stable`, so an extension living in
+        # a dev worktree is otherwise unreachable from the installed binary.
+        # Empty / harness without an extension flag → no-op (production relies
+        # on the harness's own package discovery, not on this).
+        extension_paths: tuple[str, ...] = ()
+        if spec.extension_path_env:
+            override = os.environ.get(spec.extension_path_env, "").strip()
+            if override:
+                extension_paths = (override,)
         # Per-project model / effort defaults from the committed
         # `.symmetria/ide.json` (harness_defaults.<harness>). Read at spawn
         # (cheap, and honours a hand-edit of the marker since the last root
@@ -4290,6 +4320,7 @@ class AppController(QObject):
             settings_json=self._agent_reporter_settings,
             agent_sock_path=self._agent_events.socket_path,
             executable=executable,
+            extension_paths=extension_paths,
         )
         if not tmux_enabled:
             return inner
@@ -4443,6 +4474,30 @@ class AppController(QObject):
             )
         else:
             log.info("worktree follow: override cleared")
+
+    @Slot(result=float)
+    def focusedAgentScrollFraction(self) -> float:
+        """The FOCUSED agent's `AgentHarness.scroll_page_fraction`.
+
+        A Slot, not a Property: the value is only ever consulted at the instant
+        Ctrl+U/D fires, so exposing it as a binding would mean invalidating it
+        on every focus change for a read that happens on a keypress. Why the
+        fraction is per-harness at all is documented once, on the field — this
+        method adds no tuning rationale of its own.
+
+        Falls back to the registry default for a missing / malformed record
+        rather than raising: this is reached from a keyboard chord through QML,
+        where a KeyError would surface as an unhandled exception mid-keypress.
+        """
+        inst = self._term_agents.get(self._focused_term_agent)
+        spec = (
+            agent_harness.HARNESSES.get(inst.get("harness", ""))
+            if inst is not None
+            else None
+        )
+        if spec is None:
+            return agent_harness.DEFAULT_SCROLL_PAGE_FRACTION
+        return spec.scroll_page_fraction
 
     @Slot(int)
     def focus_agent(self, slot: int) -> None:
@@ -4839,9 +4894,23 @@ class AppController(QObject):
         if h
     )
 
+    # Bare product names every registered harness reports before a session has
+    # a real summary ("Claude Code", "opencode", "pi"). Derived from the
+    # registry's `title_placeholders` rather than hardcoded, so a new harness
+    # declares its placeholder once, next to its flags — and LOWERCASED here so
+    # the registry can spell each one naturally: the match below is against an
+    # already-lowercased title, so a registry entry written in its real casing
+    # would otherwise never fire, silently showing the placeholder as if it
+    # were a session summary.
+    _HARNESS_PLACEHOLDERS: ClassVar[frozenset[str]] = frozenset(
+        placeholder.lower()
+        for spec in agent_harness.HARNESSES.values()
+        for placeholder in spec.title_placeholders
+    )
+
     @classmethod
     def _clean_agent_title(cls, title: str) -> str:
-        """Normalise claude's OSC title for chip display.
+        """Normalise a harness's OSC title for chip display.
 
         Strips the leading sparkle glyph(s) + whitespace, and treats the
         bare product name ("Claude Code" — what claude reports before a
@@ -4859,7 +4928,7 @@ class AppController(QObject):
         # Bare product names are placeholders, not session summaries —
         # "opencode" is what the OpenCode TUI reports before (and between)
         # meaningful titles, same role as claude's "Claude Code".
-        if cleaned_lower in ("claude code", "opencode"):
+        if cleaned_lower in cls._HARNESS_PLACEHOLDERS:
             return ""
         # Under the tmux substrate, `set-titles-string "#T"` forwards the pane
         # title, which DEFAULTS to the machine hostname (e.g. "arch") in the
@@ -5293,10 +5362,11 @@ class AppController(QObject):
             result.status,
         )
         reply = {"ok": True, "status": result.status, "watched_agent": display_num}
-        if watched["harness"] != "claude":
+        if not self._harness_judgeable(watched["harness"]):
             reply["warning"] = (
-                "watched agent is not a claude agent — transcript verification "
-                "is unavailable; you will get a caveated go-ahead on its idle"
+                "the watched agent's transcript format is not readable by the "
+                "judge — transcript verification is unavailable; you will get a "
+                "caveated go-ahead on its idle"
             )
         if result.status == "evaluating" and result.trigger is not None:
             # Watched agent is already idle with a session — judge now rather
@@ -5305,6 +5375,18 @@ class AppController(QObject):
             trigger = result.trigger
             QTimer.singleShot(0, lambda: self._coord_judge_trigger(trigger))
         return reply
+
+    @staticmethod
+    def _harness_judgeable(harness: str) -> bool:
+        """Can the coordination judge verify this harness's transcript?
+
+        One lookup serving both coordination sites (the registration warning
+        and the fire-time caveat branch) so they can never disagree about a
+        harness. An UNKNOWN harness name is not judgeable — the honest,
+        caveated path is the safe default; a wrong "verified" is not.
+        """
+        spec = agent_harness.HARNESSES.get(harness)
+        return bool(spec and spec.judgeable_transcript)
 
     def _display_position(self, slot: int) -> int:
         """1-based chip number for an internal slot (falls back to the slot
@@ -5371,13 +5453,22 @@ class AppController(QObject):
             # whose verdict _on_judge_verdict would only then discard.
             return
         display = self._display_position(trigger.watched_slot)
-        if inst["harness"] != "claude":
-            # opencode transcripts have a different (unexplored) format — v1
-            # skips verification with full disclosure rather than killing the
-            # feature for opencode or spamming needs_user.
+        if not self._harness_judgeable(inst["harness"]):
+            # Transcripts the judge cannot read (unexplored formats) — v1 skips
+            # verification with full disclosure rather than killing the feature
+            # for those harnesses or spamming needs_user. Capability-gated on
+            # `judgeable_transcript`, so teaching the judge a second format is a
+            # registry flip, not a hunt for harness-name branches. The caveat
+            # names the harness from its registry label, so a watched Pi agent
+            # is not described to the user as an opencode one.
+            spec = agent_harness.HARNESSES.get(inst["harness"])
             self._coord_inject(
                 trigger.registrant_slot,
-                agent_coordination.opencode_caveat_text(display, trigger.note),
+                agent_coordination.unjudgeable_caveat_text(
+                    display,
+                    spec.label if spec else inst["harness"],
+                    trigger.note,
+                ),
             )
             self._coordination.complete(trigger)
             return
@@ -5622,31 +5713,38 @@ class AppController(QObject):
 
     @Slot()
     def open_model_picker(self) -> None:
-        """Alt+M: open Claude Code's OWN native `/model` picker in the focused
-        agent's pane by injecting `/model` (auto-submit).
+        """Alt+M: open the focused agent's OWN native model picker by injecting
+        its `model_slash_command` (auto-submit).
 
-        We drive Claude Code's built-in picker rather than reimplementing a
+        We drive the CLI's built-in picker rather than reimplementing a
         model/effort selector in QML — "compose, don't reimplement"
         (non-negotiable #4): zero picker state to keep in sync with the CLI, and
         it extends to `/effort` later with no new UI. `Ctrl+M` cannot serve as
         the chord — in a terminal it IS carriage-return (Enter) — so Alt+M is
         used.
 
-        Claude-only: opencode has no `/model` slash command (its model switch is
+        Driven by harness metadata, not a harness name: claude and pi both
+        expose `/model`; opencode has no such slash command (its model switch is
         a different UX), so this is a no-op there rather than injecting a stray
         line into the pane."""
         slot = self._focused_term_agent
         if slot not in self._term_agents:
             log.info("open_model_picker: no focused agent — no-op")
             return
-        if self._term_agents[slot].get("harness") != "claude":
-            log.info("open_model_picker: slot %d is not a claude harness — no-op", slot)
+        harness = self._term_agents[slot].get("harness", "")
+        spec = agent_harness.HARNESSES.get(harness)
+        command = spec.model_slash_command if spec else None
+        if not command:
+            log.info(
+                "open_model_picker: harness %r has no model slash command — no-op",
+                harness,
+            )
             return
         # Bring the agent surface forward so the picker is visible + drivable —
         # the inject itself is surface-independent, but an unseen picker is
         # useless. focus_agent is the same surface-switch Ctrl+1..5 uses.
         self.focus_agent(slot)
-        self._inject_slash_command(slot, "/model")
+        self._inject_slash_command(slot, command)
 
     def _inject_slash_command(self, slot: int, command: str) -> None:
         """Inject a slash command (auto-submit) into an agent's pane, reusing
@@ -7527,7 +7625,16 @@ class AppController(QObject):
                     "SYMMETRIA_IDE_SPAWN_AGENT=%s — spawning at launch",
                     spawn_request,
                 )
-                self.spawn_agent(spawn_type, True, harness or "claude")
+                # NOT a direct spawn: the MCP server start above only launches
+                # a starter thread (~1s), and an agent spawned before it lands
+                # gets no MCP config at all — silently, since agent_config_path
+                # returns "" while the port is 0. A user-initiated spawn is
+                # always long past that window; this launch-time one is not.
+                smoke_harness = harness or "claude"
+                self._arm_launch_work(
+                    "SYMMETRIA_IDE_SPAWN_AGENT",
+                    lambda: self.spawn_agent(spawn_type, True, smoke_harness),
+                )
         # Reload-in-place restore: a reload re-execs with SYMMETRIA_IDE_RESTORE=1,
         # asking us to rebuild the workspace saved during the previous teardown.
         # Cold launches do NOT auto-restore — they only light the
@@ -7535,8 +7642,92 @@ class AppController(QObject):
         # view. The one-shot smoke env-vars above are stripped from the reload
         # env (_reload_env), so they never fire alongside a restore.
         if os.environ.get("SYMMETRIA_IDE_RESTORE") == "1":
-            self.restore_session()
+            # Through the same gate as the smoke spawn, and for the same
+            # reason: restored agents compose their argv the moment they are
+            # spawned, so a restore that runs while the MCP port is still zero
+            # gets `agent_config_path() == ""` and comes up permanently without
+            # `wait_for_agent` or browser tools. Losing that is silent — the
+            # agents look fine.
+            self._arm_launch_work("SYMMETRIA_IDE_RESTORE", self.restore_session)
         self.backendReady.emit()
+
+    # Readiness-wait budget for deferred launch work. The server's measured
+    # cost is the ~1s FastMCP+uvicorn import, so 5s is generous headroom on a
+    # loaded machine while staying BOUNDED — the fallback below runs the work
+    # anyway rather than leaving a scripted E2E run with no agent.
+    _MCP_SMOKE_WAIT_STEP_MS: ClassVar[int] = 50
+    _MCP_SMOKE_WAIT_BUDGET_MS: ClassVar[int] = 5000
+
+    def _arm_launch_work(self, label: str, work: Callable[[], None]) -> None:
+        """Hold one piece of launch work until the browser-MCP server is up.
+
+        The counter is reset HERE rather than only at construction, and that is
+        the whole reason arming is a method. A second item armed after the
+        first consumed the budget would otherwise inherit an already-expired
+        counter, skip its readiness wait entirely, and compose agent argv
+        against a port that is still zero — the exact defect this gate exists
+        to prevent, reintroduced by the gate's own bookkeeping.
+        """
+        self._pending_launch_work = (label, work)
+        self._launch_work_wait_ms = 0
+        self._run_launch_work_when_mcp_ready()
+
+    def _run_launch_work_when_mcp_ready(self) -> None:
+        """Run the armed launch work once MCP is up, or once waiting is futile.
+
+        Same one-shot-pending idiom as `_pending_vps_smoke_spawn`, waiting on a
+        different edge. The browser-MCP server starts on a daemon thread so the
+        ~1s FastMCP+uvicorn import stays off the launch path (the startup-perf
+        fix); the cost is that anything spawning an agent DURING launch races
+        it, and losing that race is silent — `agent_config_path()` returns ""
+        while the port is 0, so the agent simply comes up with no
+        `wait_for_agent` and no browser tools.
+
+        Two callers arm this, and they are not variations of one thing: the
+        `SYMMETRIA_IDE_SPAWN_AGENT` smoke spawn, and a reload's
+        `restore_session`. The second was found racing the same edge after the
+        first had been fixed, which is why the gate holds arbitrary work rather
+        than a spawn request.
+
+        Polls rather than waits on a signal because `BrowserMcpServer` is a
+        plain object, not a QObject: adding Qt to it to carry one launch-time
+        edge would put a cross-thread emit on the starter thread (gotcha #10
+        territory) for no other caller's benefit. The poll is a single-shot
+        QTimer chain on the GUI thread — `start()` returns immediately either
+        way, so normal startup is never blocked.
+
+        Terminates on THREE conditions, in order: ready (run with config),
+        settled-but-not-ready (the server declined or failed — waiting longer
+        cannot help), or the budget expiring (run anyway, logging the
+        degradation; a smoke run with an un-configured agent still exercises
+        the spawn→bridge→activity pipeline, and is strictly better than none).
+        """
+        pending = self._pending_launch_work
+        if pending is None:
+            return
+        server = self._browser_mcp_server
+        ready = server.ready
+        settled = server.start_settled
+        expired = self._launch_work_wait_ms >= self._MCP_SMOKE_WAIT_BUDGET_MS
+        if not (ready or settled or expired):
+            self._launch_work_wait_ms += self._MCP_SMOKE_WAIT_STEP_MS
+            QTimer.singleShot(
+                self._MCP_SMOKE_WAIT_STEP_MS, self._run_launch_work_when_mcp_ready
+            )
+            return
+        # Clear BEFORE running — the work can re-enter the event loop, and a
+        # surviving pending entry would let a queued tick run it twice.
+        self._pending_launch_work = None
+        label, work = pending
+        if not ready:
+            log.warning(
+                "%s: MCP server not ready after %dms (settled=%s) — "
+                "proceeding without MCP config",
+                label,
+                self._launch_work_wait_ms,
+                settled,
+            )
+        work()
 
     @Property(bool)  # imperative read in Main.qml's onClosing — never bound
     def quitAuthorized(self) -> bool:
@@ -7874,8 +8065,9 @@ class AppController(QObject):
         self._agent_bridge.stop()
         # Stop the agent-events socket server (joins its accept worker, unlinks
         # the socket). The agents' own processes are reaped with their KSessions
-        # on engine teardown, so any in-flight reporter just fails its fast
-        # connect — nothing to coordinate here.
+        # when `_finalize_qml_engine` destroys the engine after app.exec()
+        # returns, so any in-flight reporter just fails its fast connect —
+        # nothing to coordinate here.
         self._agent_events.stop()
         # Drop our cross-IDE routing entry so peers stop routing to a dead
         # socket (reap_dead would clean it eventually, but a clean exit is tidy).
@@ -7935,10 +8127,14 @@ class AppController(QObject):
         self._gh_pr_controller.stop()
         # Ask nvim to quit GRACEFULLY over the RPC socket (`_backend.stop()`
         # sends `qa!` + closes the client) so it writes shada/swap cleanly.
-        # The terminal widgets (editor nvim + shell) are owned by their
-        # QMLTermSessions (KSession); their child processes are reaped when the
-        # QML engine tears down on app quit, so there is no Python-side killpg
-        # backstop to run here anymore.
+        # The terminal widgets (editor nvim + shell) and every agent pane are
+        # owned by their QMLTermSessions (KSession); their child processes go
+        # with the engine teardown `run()` performs after app.exec() returns
+        # (`_finalize_qml_engine`), so there is no Python-side killpg backstop
+        # to run here. Note that under the tmux substrate the KSession child is
+        # a tmux CLIENT — the agent CLI survives in the tmux server on purpose
+        # (see that docstring's measurement table), and nothing here should try
+        # to chase it down.
         self._backend.stop()
         # Clean up the temporary directory that held the nvim socket.
         # The socket file itself is gone when nvim exits; the directory
@@ -8675,6 +8871,75 @@ def _reload_env() -> dict[str, str]:
     return env
 
 
+def _destroy_engine(engine: QQmlApplicationEngine) -> None:
+    """Force the QML engine's C++ destructor to run, synchronously.
+
+    Extracted purely so `_finalize_qml_engine`'s ORDERING is reachable from a
+    deterministic test (which substitutes this function) — `shiboken6.delete`
+    on a real engine needs a live QGuiApplication and cannot be exercised in
+    the suite. Imported lazily: shiboken6 ships with PySide6, but nothing else
+    in this module needs it.
+    """
+    import shiboken6
+
+    shiboken6.delete(engine)
+
+
+def _finalize_qml_engine(
+    engine: QQmlApplicationEngine, controller: AppController
+) -> tuple[list[str], dict[str, str]] | None:
+    """Destroy the QML engine after `app.exec()` returns — on EVERY exit path.
+
+    Returns the ``(argv, env)`` a reload should re-exec with, or ``None`` for a
+    normal quit.
+
+    Destroying the engine is what runs the KSession dtors — SIGHUP, `closePty`,
+    then the SIGKILL escalation — and what releases the persistent
+    WebEngineProfile's Chromium SingletonLock. The reload path has always
+    needed it explicitly: a re-exec must inherit neither a live agent (double
+    resume) nor a held profile lock, and `gc.freeze()` (immediately before
+    `app.exec()`) makes a plain return an unreliable way to get there.
+
+    ⚠ It runs unconditionally since 2026-08-05 for DETERMINISM, not to fix an
+    orphan. A review reported that a normal quit leaks agent processes — that
+    a `SYMMETRIA_IDE_SPAWN_AGENT=fresh:pi` probe left `pi` alive >60s after the
+    IDE exited, and that claude only looked clean because it self-exits on PTY
+    hangup. Re-measured 2026-08-05, four live runs, SIGTERM to a tracked dev
+    pid, agent located by its `SYMMETRIA_AGENT_ID` env:
+
+    - `fresh:pi`, **tmux substrate on**: pi survives — BY DESIGN. The KSession
+      child is a tmux CLIENT (killing it detaches); the CLI lives under the
+      tmux server so a restarted IDE re-attaches it (`new-session -A`). The
+      engine teardown ran (the escalation warning names the client) and cannot
+      change this. Claude behaves identically here.
+    - `fresh:pi`, direct PTY: gone 1s after exit.
+    - `fresh:pi`, direct PTY, **with this unconditional call reverted**: also
+      gone 1s after exit, and the KSession escalation still logged — the engine
+      is destroyed at interpreter teardown anyway on this path.
+    - `fresh` (claude), direct PTY: gone 1s after exit.
+
+    So the reported leak reproduces only in the configuration where survival is
+    the documented feature, and this call is not what ends an agent today. What
+    it does buy is that the dtors run at a KNOWN point — before interpreter
+    finalization, on the same path the reload case already depends on — rather
+    than at whatever ordering refcounting happens to produce. Keep it for that;
+    do not re-attach the orphan story to it, and do not "fix" the tmux case by
+    killing agents at shutdown (that would defeat the substrate outright).
+
+    Ordering is load-bearing: the reload argv/env are captured BEFORE the
+    delete, because `controller.displayedRoot` reads state we must not touch
+    post-teardown.
+    """
+    reload_plan: tuple[list[str], dict[str, str]] | None = None
+    if controller.reload_requested:
+        reload_plan = (
+            [sys.executable, "-m", "symmetria_ide", controller.displayedRoot],
+            _reload_env(),
+        )
+    _destroy_engine(engine)
+    return reload_plan
+
+
 def run() -> int:
     trace("run_entered")
     configure_logging()
@@ -8839,29 +9104,13 @@ def run() -> int:
     trace("exec_entered")
     exit_code = app.exec()
     trace("exec_returned")
-    # Reload-in-place: a Ctrl+Shift+R (or any reload teardown) set this latch
-    # before quitting. app.exec() returning is NOT enough to re-exec safely —
-    # the KSession terminal children (the live `claude`/shell/nvim PTYs) and the
-    # persistent WebEngineProfile's Chromium SingletonLock are released only
-    # when the QML engine is DESTROYED, and gc.freeze() above froze the
-    # engine↔controller↔app reference cycle so a plain return would not reliably
-    # refcount-collect it. shiboken6.delete forces a synchronous engine dtor
-    # (scene teardown → KSession dtors reap the children → WebEngine lock
-    # released), so the re-exec'd process never inherits a live claude (double
-    # resume) or trips a held profile lock. See AppController.save_session /
-    # restore_session and _reload_env.
-    if controller.reload_requested:
-        # Capture argv + env BEFORE deleting the engine (displayedRoot reads
-        # controller state we don't want to touch post-teardown), then delete
-        # and re-exec. Guard execvpe: a failed exec (e.g. a missing interpreter)
-        # must degrade to a clean exit, not an uncaught traceback out of run()
-        # with the engine already gone.
-        reload_argv = [sys.executable, "-m", "symmetria_ide", controller.displayedRoot]
-        reload_env = _reload_env()
+    reload_plan = _finalize_qml_engine(engine, controller)
+    if reload_plan is not None:
+        reload_argv, reload_env = reload_plan
         log.info("reload: re-exec %s into %s", sys.executable, reload_argv[-1])
-        import shiboken6
-
-        shiboken6.delete(engine)
+        # Guard execvpe: a failed exec (e.g. a missing interpreter) must
+        # degrade to a clean exit, not an uncaught traceback out of run() with
+        # the engine already gone.
         try:
             os.execvpe(sys.executable, reload_argv, reload_env)
         except OSError:
