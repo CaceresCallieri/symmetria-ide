@@ -228,6 +228,34 @@ The embedded QtWebEngine surface was retired 2026-07-27 — the browser is now a
 Chrome process the IDE spawns, pinned to the IDE's workspace by a Hyprland rule.
 See CLAUDE.md "The browser panes" for the model; this section is how to exercise it.
 
+- **⚠ The nested compositor decides the WHOLE IDE's keyboard layout.** Qt leaks
+  the nested seat's keymap into the host window's key translation, and its
+  default is US — see CLAUDE.md's agentic-browser section. `keyboard_layout.py`
+  resolves the host layout automatically; the escape hatch, for when detection
+  is wrong or you are off Hyprland, is:
+
+  ```
+  SYMMETRIA_IDE_KEYMAP_LAYOUT=latam      # required for the override to apply at all
+  SYMMETRIA_IDE_KEYMAP_VARIANT=          # optional
+  SYMMETRIA_IDE_KEYMAP_OPTIONS=          # optional, e.g. caps:escape
+  SYMMETRIA_IDE_KEYMAP_RULES=            # optional
+  SYMMETRIA_IDE_KEYMAP_MODEL=            # optional
+  ```
+
+  The override is **all-or-nothing**: unset fields become empty rather than
+  falling through to the detected values, so setting only `LAYOUT` drops the
+  host's real `options`. To verify what a running IDE actually serves (the
+  socket exists only while one is up; get the pid from
+  `ls /run/user/$UID/symmetria-browser-*`, never `pgrep -f`):
+
+  ```sh
+  timeout 2 env WAYLAND_DISPLAY=symmetria-browser-<ide-pid> \
+    xkbcli interactive-wayland --verbose 2>&1 | grep -m1 xkb_symbols
+  ```
+
+  It blocks, hence the `timeout`. A name like `pc_latam_us_2_inet` is a PASS —
+  Qt appends a stray unreachable second `us` group; only a bare `pc_us_inet`
+  (on a non-US host) means the pin was lost.
 - **The suite can never spawn Chrome.** `tests/conftest.py` sets
   `SYMMETRIA_IDE_CHROME_BIN` to a nonexistent path (`_isolate_browser_host`), so
   `chrome_executable()` returns `""`. Tests that need browser behaviour inject

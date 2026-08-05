@@ -1,11 +1,11 @@
 ---
 name: nested-compositor-hijacks-host-keymap
 description: "A nested QWaylandCompositor makes the WHOLE host app translate keys with ITS seat keymap — Qt's default US — so the browser pane silently switched the IDE to a US keyboard"
-metadata: 
+metadata:
   node_type: memory
   type: reference
   originSessionId: cbb70dc8-2141-4107-8ea7-a38b45169bf0
-  modified: 2026-08-05T00:02:26.256Z
+  modified: 2026-08-05T01:44:55.234Z
 ---
 
 Constructing a `QWaylandCompositor` **anywhere in the process** makes the HOST
@@ -62,18 +62,24 @@ this at any time.
 ## The fix
 
 [`src/symmetria_ide/keyboard_layout.py`](../../../../src/symmetria_ide/keyboard_layout.py)
-resolves the host's RMLVO tuple (Hyprland session > `XKB_DEFAULT_*` > empty),
-`app.py` exposes it as the `hostKeymap` context property, and
-`qml/browser/BrowserPane.qml` assigns it onto `defaultSeat.keymap` in
-`Component.onCompleted` — imperatively, because `defaultSeat` is a read-only
-object property and `defaultSeat.keymap.layout: x` is not a legal binding
-target.
+resolves the host's RMLVO tuple — rules/model/layout/variant/options —
+(`SYMMETRIA_IDE_KEYMAP_*` override > Hyprland session > `XKB_DEFAULT_*` >
+empty), `app.py` exposes it as the `hostKeymap` context property, and
+`qml/browser/BrowserPane.qml` takes it as a `required property` and assigns it
+onto `defaultSeat.keymap` in `Component.onCompleted` — imperatively, because
+`defaultSeat` is a read-only object property and `defaultSeat.keymap.layout: x`
+is not a legal binding target.
 
-It pins rather than repairs: the host still ignores keymap CHANGES, which only
-matters for virtual-keyboard tools that upload their own keymap. The compiled
-result keeps a stray unreachable second `us` group (`pc_latam_us_2_inet`) that
-is Qt's doing, not the assignment style's. A true fix means moving the nested
-compositor out of the IDE's process.
+For a multi-group config (`kb_layout = us,latam`) the layout list is rotated so
+the group active at startup lands first, since xkb has no active-group setter
+and order is the only lever.
+
+It pins rather than repairs: the host still ignores keymap CHANGES, so neither
+a virtual keyboard's uploaded keymap nor a post-startup group switch is
+followed. The compiled result keeps a stray unreachable second `us` group
+(`pc_latam_us_2_inet`) that is Qt's doing, not the assignment style's — that
+name is a PASS, not a regression. A true fix means moving the nested compositor
+out of the IDE's process.
 
 Related: [nested-compositor-pointer-input](./nested_compositor_pointer_input.md),
 [nested-compositor-output-mode](./nested_compositor_output_mode.md) — same

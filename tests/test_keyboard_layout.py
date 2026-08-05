@@ -9,6 +9,11 @@ empty tuple rather than a guessed layout.
 
 from __future__ import annotations
 
+import subprocess
+
+import pytest
+
+from symmetria_ide import keyboard_layout
 from symmetria_ide.keyboard_layout import (
     XKB_FIELDS,
     empty_keymap,
@@ -84,6 +89,57 @@ class TestKeymapFromHyprlandDevices:
             assert keymap_from_hyprland_devices(junk) is None
 
 
+class TestActiveGroupRotation:
+    """A multi-group config must pin the group the user is ACTUALLY on.
+
+    xkb exposes no active-group setter, so order is the only lever: the active
+    entry has to become group 1. Getting this wrong reproduces the very bug
+    this module exists to fix, just for `kb_layout = us,latam` users.
+    """
+
+    def test_rotates_layout_and_variant_to_the_active_group(self):
+        payload = _devices(
+            _kbd(
+                "kbd",
+                "us,latam",
+                main=True,
+                variant="intl,",
+                active_layout_index=1,
+                options="grp:alt_shift_toggle",
+            )
+        )
+        resolved = keymap_from_hyprland_devices(payload)
+        assert resolved is not None
+        assert resolved["layout"] == "latam,us"
+        assert resolved["variant"] == ",intl"
+
+    def test_group_zero_is_left_untouched(self):
+        payload = _devices(
+            _kbd("kbd", "us,latam", main=True, variant="intl,", active_layout_index=0)
+        )
+        resolved = keymap_from_hyprland_devices(payload)
+        assert resolved is not None
+        assert resolved["layout"] == "us,latam"
+        assert resolved["variant"] == "intl,"
+
+    def test_single_layout_is_a_no_op_at_any_index(self):
+        # The common case, and the one running in production — an
+        # out-of-range index must never mangle it.
+        payload = _devices(_kbd("kbd", "latam", main=True, active_layout_index=3))
+        resolved = keymap_from_hyprland_devices(payload)
+        assert resolved is not None
+        assert resolved["layout"] == "latam"
+
+    def test_junk_index_degrades_to_group_zero(self):
+        for junk in ("two", None, [], {}):
+            payload = _devices(
+                _kbd("kbd", "us,latam", main=True, active_layout_index=junk)
+            )
+            resolved = keymap_from_hyprland_devices(payload)
+            assert resolved is not None
+            assert resolved["layout"] == "us,latam"
+
+
 class TestResolveHostKeymap:
     def test_explicit_override_wins(self):
         env = {
@@ -120,15 +176,22 @@ class TestResolveHostKeymap:
         assert resolve_host_keymap({}, devices_reader=lambda: None) == empty_keymap()
 
     def test_never_raises_when_the_reader_explodes(self):
+        # Load-bearing: this runs inside _build_engine, which nothing above
+        # guards, so a leaked exception stops the IDE from starting at all.
         def boom():
             raise RuntimeError("hyprctl is on fire")
 
-        try:
-            resolve_host_keymap({}, devices_reader=boom)
-        except RuntimeError:
-            # The reader owns its own error handling; if it ever leaks, startup
-            # must not be what discovers that.
-            pass
+        assert resolve_host_keymap({}, devices_reader=boom) == empty_keymap()
+
+    def test_a_multi_group_session_reaches_the_caller_rotated(self):
+        # End-to-end through the public entry point, not just the parser.
+        resolved = resolve_host_keymap(
+            {},
+            devices_reader=lambda: _devices(
+                _kbd("k", "us,latam", main=True, active_layout_index=1)
+            ),
+        )
+        assert resolved["layout"] == "latam,us"
 
     def test_always_returns_every_field(self):
         # BrowserPane assigns all five onto QWaylandKeymap unconditionally.
@@ -140,3 +203,59 @@ class TestResolveHostKeymap:
         ):
             assert set(resolved) == set(XKB_FIELDS)
             assert all(isinstance(v, str) for v in resolved.values())
+
+
+class TestReadHyprlandDevices:
+    """The subprocess boundary — the piece most likely to break on a Hyprland
+    CLI or schema change, and the one that must degrade to None rather than
+    raise, because nothing above `_build_engine` guards it."""
+
+    @pytest.fixture(autouse=True)
+    def _hyprland_session(self, monkeypatch):
+        monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "test-signature")
+
+    def test_returns_none_without_running_anything_off_hyprland(self, monkeypatch):
+        monkeypatch.delenv("HYPRLAND_INSTANCE_SIGNATURE", raising=False)
+
+        def explode(*args, **kwargs):
+            raise AssertionError("must not shell out off a Hyprland session")
+
+        monkeypatch.setattr(keyboard_layout.subprocess, "run", explode)
+        assert keyboard_layout._read_hyprland_devices() is None
+
+    def _run_returning(self, monkeypatch, *, stdout="", returncode=0):
+        completed = subprocess.CompletedProcess(
+            args=["hyprctl"], returncode=returncode, stdout=stdout, stderr=""
+        )
+        monkeypatch.setattr(
+            keyboard_layout.subprocess, "run", lambda *a, **k: completed
+        )
+
+    def test_parses_valid_json(self, monkeypatch):
+        self._run_returning(monkeypatch, stdout='{"keyboards": []}')
+        assert keyboard_layout._read_hyprland_devices() == {"keyboards": []}
+
+    def test_non_zero_exit_is_none(self, monkeypatch):
+        self._run_returning(monkeypatch, stdout='{"keyboards": []}', returncode=1)
+        assert keyboard_layout._read_hyprland_devices() is None
+
+    def test_non_json_stdout_is_none(self, monkeypatch):
+        self._run_returning(monkeypatch, stdout="not json at all")
+        assert keyboard_layout._read_hyprland_devices() is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            subprocess.TimeoutExpired(cmd="hyprctl", timeout=0.5),
+            FileNotFoundError("hyprctl"),
+            # text=True decodes inside the call, so a hardware string with a
+            # non-UTF-8 byte raises this — a ValueError, NOT a SubprocessError.
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+        ],
+    )
+    def test_subprocess_failures_degrade_to_none(self, monkeypatch, error):
+        def raise_it(*args, **kwargs):
+            raise error
+
+        monkeypatch.setattr(keyboard_layout.subprocess, "run", raise_it)
+        assert keyboard_layout._read_hyprland_devices() is None

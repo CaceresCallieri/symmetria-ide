@@ -1366,9 +1366,12 @@ Window {
                 // ⚠ `active` is TRUE FOREVER — never bind it to visibility.
                 // The compositor owns Chrome's Wayland connection, so
                 // deactivating this Loader would kill the browser process's
-                // display. `visible` is the only gate, and hiding is genuinely
-                // free (measured: full 60Hz and ~60ms screenshots while hidden
-                // AND off-workspace). The Loader exists solely to CONTAIN a
+                // display. `visible` is the only gate, and hiding is free ONLY
+                // because SymmetriaOutput drives frame callbacks itself when
+                // the host stops rendering. ⚠ The "measured 60Hz while hidden"
+                // claim this comment used to carry was re-run 2026-07-28 as
+                // 0 rAF ticks in 1007ms and is RETRACTED — see CLAUDE.md's
+                // frame-starvation bullet. The Loader exists solely to CONTAIN a
                 // load failure: BrowserPane imports the Symmetria.Compositor
                 // package, and QML has no conditional imports, so without the
                 // Loader a machine missing that package would fail Main.qml

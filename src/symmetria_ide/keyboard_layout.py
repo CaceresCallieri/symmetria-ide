@@ -28,7 +28,7 @@ host client's key translation. The probe above is the way to re-check: if the
 "+ WaylandCompositor (empty)" row starts honouring the injected keymap, the
 defect is gone.
 
-Two things this does NOT fix, both deliberate:
+Three things this does NOT fix, all deliberate:
 
 * The host still ignores keymap CHANGES pushed by the real compositor — it is
   pinned to whatever we resolved at startup. In practice that only shows up for
@@ -37,6 +37,10 @@ Two things this does NOT fix, both deliberate:
   translated with the host layout instead of theirs. A physical keyboard, and a
   layout change made the ordinary way, are both unaffected. Fixing this
   properly means moving the nested compositor out of the IDE's process.
+* For the same reason, a multi-group config's GROUP SWITCH is not followed
+  either. We rotate the layout list so the group that is active at startup
+  lands first (see `_rotate_to_active`), but toggling groups afterwards does
+  not move the pinned keymap.
 * The resulting keymap compiles as e.g. `pc_latam_us_2_inet` — Qt keeps a
   second, unreachable "us" group of its own. Group 1 is ours and is the active
   one, so it types correctly; the stray group is cosmetic. Confirmed identical
@@ -45,12 +49,22 @@ Two things this does NOT fix, both deliberate:
 
 Precedence, most authoritative first:
 
-1. `SYMMETRIA_IDE_KEYMAP_*` — explicit override / test hook.
+1. `SYMMETRIA_IDE_KEYMAP_*` — explicit override / test hook. **All-or-nothing:**
+   unset fields become empty, they do NOT fall through to the next source. So
+   overriding only the layout drops the host's `options` (a `caps:escape` remap
+   included) — set the whole tuple, or none of it.
 2. The running Hyprland session, via `hyprctl -j devices`. This is the ONLY
    source that reports what the user is actually typing on right now.
 3. `XKB_DEFAULT_*` — the standard xkb env contract, for non-Hyprland hosts.
-4. Empty strings, which reproduce today's (broken, US) behaviour rather than
-   guessing a layout we have no evidence for.
+   Redundant in effect (Qt forwards unset fields to `xkb_keymap_new_from_names`
+   as empty strings, and libxkbcommon substitutes `XKB_DEFAULT_*` for those
+   itself), but kept explicit so the resolved tuple is inspectable and testable
+   rather than resolved invisibly inside xkb.
+4. Empty strings, which reproduce today's behaviour — US unless `XKB_DEFAULT_*`
+   says otherwise — rather than guessing a layout we have no evidence for.
+
+The full derivation, the forensics that found it and the re-check one-liner
+live in `.claude/memory/reference/qt-pyside/nested_compositor_hijacks_host_keymap.md`.
 """
 
 from __future__ import annotations
@@ -59,7 +73,7 @@ import json
 import logging
 import os
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +83,11 @@ XKB_FIELDS = ("rules", "model", "layout", "variant", "options")
 
 _EMPTY_KEYMAP: dict[str, str] = dict.fromkeys(XKB_FIELDS, "")
 
-_HYPRCTL_TIMEOUT_SEC = 2.0
+# This subprocess runs on the GUI thread, before the window exists, on EVERY
+# launch — browser project or not. Measured at ~7ms, so the cap exists only to
+# bound a wedged compositor: something that has not answered in half a second
+# is not going to, and a frozen startup buys nothing.
+_HYPRCTL_TIMEOUT_SEC = 0.5
 
 
 def empty_keymap() -> dict[str, str]:
@@ -93,6 +111,29 @@ def _named_keymap(source: Mapping[str, object], prefix: str) -> dict[str, str] |
     return found
 
 
+def _active_layout_index(entry: Mapping[str, object]) -> int:
+    """The keyboard's active group, or 0 when absent or unparseable."""
+    try:
+        index = int(str(entry.get("active_layout_index") or 0))
+    except (TypeError, ValueError):
+        return 0
+    return max(index, 0)
+
+
+def _rotate_to_active(value: str, index: int) -> str:
+    """Rotate a comma-separated RMLVO list so the active entry lands first.
+
+    Rotation rather than a swap, so the remaining groups keep their relative
+    order. A short or empty list (a `variant` of "" against a two-layout
+    `layout`) is returned untouched — there is nothing to reorder, and xkb
+    pads missing variants itself.
+    """
+    parts = value.split(",")
+    if index <= 0 or index >= len(parts):
+        return value
+    return ",".join(parts[index:] + parts[:index])
+
+
 def keymap_from_hyprland_devices(payload: object) -> dict[str, str] | None:
     """Pick the active keyboard's RMLVO tuple out of `hyprctl -j devices` output.
 
@@ -112,17 +153,40 @@ def keymap_from_hyprland_devices(payload: object) -> dict[str, str] | None:
         if not isinstance(entry, Mapping):
             return None
         found = {field: str(entry.get(field) or "").strip() for field in XKB_FIELDS}
-        return found if found["layout"] else None
+        if not found["layout"]:
+            return None
+        # A multi-group config (`kb_layout = us,latam`) can be sitting on any
+        # group. xkb exposes no "active group" knob on a keymap, so the only
+        # lever is ORDER: rotate the active entry to the front and it becomes
+        # group 1, which is the group Qt's seat starts on.
+        active = _active_layout_index(entry)
+        if active:
+            found["layout"] = _rotate_to_active(found["layout"], active)
+            found["variant"] = _rotate_to_active(found["variant"], active)
+        return found
 
     fallback: dict[str, str] | None = None
+    candidates: list[tuple[str, str]] = []
     for entry in keyboards:
         parsed = _tuple_for(entry)
         if parsed is None:
             continue
-        if isinstance(entry, Mapping) and entry.get("main") is True:
-            return parsed
+        if isinstance(entry, Mapping):
+            candidates.append((str(entry.get("name") or "?"), parsed["layout"]))
+            if entry.get("main") is True:
+                return parsed
         if fallback is None:
             fallback = parsed
+
+    # No keyboard claimed `main`. Picking the first is arbitrary, and harmless
+    # only while every device agrees — so say so when they do not, rather than
+    # letting an arbitrary keyboard's layout become the whole IDE's silently.
+    if fallback is not None and len({layout for _, layout in candidates}) > 1:
+        log.warning(
+            "no main keyboard reported and layouts disagree %r — using %r",
+            candidates,
+            fallback["layout"],
+        )
     return fallback
 
 
@@ -144,7 +208,11 @@ def _read_hyprland_devices() -> object | None:
             timeout=_HYPRCTL_TIMEOUT_SEC,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    # ValueError is in the tuple for `text=True`: it decodes stdout inside the
+    # call, and a device name carrying a non-UTF-8 byte (they come from
+    # hardware USB strings) raises UnicodeDecodeError, which is a ValueError
+    # and NOT a SubprocessError.
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         log.debug("hyprctl devices failed: %s", exc)
         return None
     if completed.returncode != 0:
@@ -159,12 +227,15 @@ def _read_hyprland_devices() -> object | None:
 
 def resolve_host_keymap(
     environ: Mapping[str, str] | None = None,
-    devices_reader=_read_hyprland_devices,
+    devices_reader: Callable[[], object] = _read_hyprland_devices,
 ) -> dict[str, str]:
     """Return the RMLVO tuple the nested compositor should be configured with.
 
     Never raises and never returns None — an unknown layout degrades to
-    `empty_keymap()`, which is exactly today's behaviour.
+    `empty_keymap()`, which is exactly today's behaviour. That contract is
+    load-bearing: this runs inside `_build_engine`, which nothing above
+    guards, so an escaping exception would stop the IDE from starting at all
+    over a keyboard-layout nicety.
     """
     env = os.environ if environ is None else environ
 
@@ -172,7 +243,15 @@ def resolve_host_keymap(
     if override is not None:
         return override
 
-    from_session = keymap_from_hyprland_devices(devices_reader())
+    # Blanket except, deliberately: the reader is injectable, so its failure
+    # modes are open-ended, and the docstring above promises this cannot throw.
+    try:
+        devices = devices_reader()
+    except Exception as exc:  # noqa: BLE001 — see comment above
+        log.debug("keymap device reader failed: %s", exc)
+        devices = None
+
+    from_session = keymap_from_hyprland_devices(devices)
     if from_session is not None:
         return from_session
 
