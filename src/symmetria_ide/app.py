@@ -91,6 +91,7 @@ from .git_controller import (
 )
 from .git_log_controller import GitLogController, GitLogListModel
 from .git_ops_controller import GitOpsController
+from .keyboard_layout import resolve_host_keymap
 from .minimap_model import MinimapModel
 from .minimap_view import MinimapView  # import also registers the @QmlElement type
 from .mount_manager import SshfsMount
@@ -8226,6 +8227,13 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # — the compositor has to be listening long before then, since Chrome
     # cannot connect to a socket that does not exist yet.
     ctx.setContextProperty("browserWaylandSocket", browser_identity(os.getpid()))
+
+    # The host session's keyboard layout, which BrowserPane pins onto the nested
+    # compositor's seat. This is NOT about what Chrome types — it is what keeps
+    # the WHOLE IDE on the user's own layout: a nested QWaylandCompositor
+    # hijacks the host window's key translation and, left at Qt's default,
+    # silently forces US. See keyboard_layout.py for the measurement.
+    ctx.setContextProperty("hostKeymap", resolve_host_keymap())
     trace("engine_ctx_ready")
 
     qml_root = QML_DIR / "Main.qml"

@@ -54,6 +54,12 @@ Item {
     // `chrome_host.chrome_env()`. Comes from the `browserWaylandSocket`
     // context property, which derives it from the IDE's pid.
     required property string socketName
+    // The HOST session's keyboard layout, as an RMLVO map resolved by
+    // `keyboard_layout.resolve_host_keymap()`. Injected rather than read off
+    // the context property so the compositor block below stays qualified.
+    // Load-bearing for the WHOLE IDE, not just the browser — see the
+    // Component.onCompleted on the compositor.
+    required property var hostKeymap
 
     property int currentIndex: 0
 
@@ -188,6 +194,34 @@ Item {
     SymmetriaCompositor {
         id: browserCompositor
         socketName: pane.socketName
+
+        // WORKAROUND: pin the nested seat to the HOST's keyboard layout.
+        //
+        // This looks like it only concerns Chrome. It does not — it is what
+        // keeps the ENTIRE IDE typing on the user's own layout. Constructing a
+        // QWaylandCompositor makes the host window translate keys with THIS
+        // seat's keymap instead of the one the real compositor sent, and Qt's
+        // default is the xkb default, i.e. US. So on a latam (or any
+        // non-US) keyboard, merely loading this pane silently switched every
+        // terminal, agent and editor pane to US.
+        //
+        // Measured 2026-08-04: an EMPTY WaylandCompositor is already enough,
+        // and the same window types correctly right up to the instant the
+        // compositor is constructed — so lazy-loading the pane is not a fix.
+        // The full probe, its numbers and the removal criterion are in
+        // src/symmetria_ide/keyboard_layout.py.
+        //
+        // Assigned imperatively rather than bound: `defaultSeat` is a
+        // read-only object property, so `defaultSeat.keymap.layout: x` is not
+        // a legal binding target.
+        Component.onCompleted: {
+            const km = browserCompositor.defaultSeat.keymap;
+            km.rules = pane.hostKeymap.rules;
+            km.model = pane.hostKeymap.model;
+            km.layout = pane.hostKeymap.layout;
+            km.variant = pane.hostKeymap.variant;
+            km.options = pane.hostKeymap.options;
+        }
 
         // Ours, not Qt's stock `WaylandOutput`: only a C++ subclass can set the
         // output's resolution, and this output must describe the PANE rather
