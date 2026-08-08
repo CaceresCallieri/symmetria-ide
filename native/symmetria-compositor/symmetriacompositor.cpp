@@ -4,6 +4,7 @@
 
 #include "symmetriacompositor.h"
 
+#include "symmetriahostkeys.h"
 #include "symmetriatrace.h"
 
 #include <QtCore/QCryptographicHash>
@@ -69,10 +70,25 @@ SymmetriaCompositor::SymmetriaCompositor(QObject *parent)
     // the bridge possible.
     setRetainedSelectionEnabled(true);
 
+    // Must happen HERE and not later: the base constructor has, moments ago,
+    // installed Qt's own handler over every key event in the process, and the
+    // slot it lives in is first-wins. Constructing this displaces it. Nothing
+    // about it is browser-local — it is what keeps the terminals, the editor
+    // and the IDE chords reading the keyboard the host compositor describes.
+    m_hostKeys = new SymmetriaHostKeyHandler(this);
+
     if (QClipboard *clipboard = QGuiApplication::clipboard()) {
         connect(clipboard, &QClipboard::dataChanged, this,
                 &SymmetriaCompositor::pushHostSelectionToClients);
     }
+}
+
+SymmetriaCompositor::~SymmetriaCompositor()
+{
+    // Before ~QWaylandCompositor runs, so the handler it hands the slot back to
+    // is still alive.
+    delete m_hostKeys;
+    m_hostKeys = nullptr;
 }
 
 void SymmetriaCompositor::pushSelectionText(const QString &text)

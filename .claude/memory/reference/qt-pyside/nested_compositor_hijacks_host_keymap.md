@@ -1,11 +1,11 @@
 ---
 name: nested-compositor-hijacks-host-keymap
-description: "A nested QWaylandCompositor makes the WHOLE host app translate keys with ITS seat keymap — Qt's default US — so the browser pane silently switched the IDE to a US keyboard"
+description: "A nested QWaylandCompositor installs a PROCESS-WIDE key handler that rewrites every key from its own dead-reckoned xkb state — causing both the US-keyboard hijack and phantom stuck modifiers"
 metadata:
   node_type: memory
   type: reference
   originSessionId: cbb70dc8-2141-4107-8ea7-a38b45169bf0
-  modified: 2026-08-05T01:44:55.234Z
+  modified: 2026-08-08T09:36:15.890Z
 ---
 
 Constructing a `QWaylandCompositor` **anywhere in the process** makes the HOST
@@ -59,7 +59,66 @@ printed `Compiling xkb_symbols "pc_us_inet(evdev)"` while the host session
 printed `pc_latam_inet(evdev)`. That one-liner is the fastest way to re-check
 this at any time.
 
-## The fix
+## The mechanism (found 2026-08-08, from the qtwayland source)
+
+The 2026-08-04 entry above stopped at *what* happens. The *how* is one function,
+and it explains a second bug as well.
+
+`QWaylandCompositorPrivate`'s **constructor** calls
+`QWindowSystemInterfacePrivate::installWindowSystemEventHandler` with
+`QtWayland::WindowSystemEventHandler` (qtwayland 6.11.1,
+`src/compositor/compositor_api/qwaylandcompositor.cpp`). That slot is a single
+pointer with **first-wins** semantics — no chain, no second handler — and the
+handler sees **every key event in the process**, then rewrites it:
+
+    ke->key = qtkey;  ke->modifiers = modifiers;  ke->unicode = text;
+    ke->nativeVirtualKey = sym;  ke->nativeModifiers = keyb->xkbModsMask();
+
+all computed from `keyb->xkbState()`, the **nested seat's** state. That state is
+**dead-reckoned**: `updateModifierState(code, state)` moves it only when a press
+or release is delivered to this app. The host compositor's authoritative
+`wl_keyboard.modifiers` — which the Wayland *client* plugin keeps correct, and
+which Hyprland resends on every focus `enter` — is discarded. Nothing
+reconciles them. This is why no other app on the system can desync.
+
+Two consequences, both reported as system-wide faults:
+
+1. **Wrong layout** — the 2026-08-04 report above.
+2. **Phantom stuck modifiers** (reported 2026-08-08). Hold Shift, change
+   Hyprland workspace while holding it — with kanata home-row mods that is the
+   ordinary way to move — and release it while the IDE is unfocused. The
+   release never reaches this process, so Shift stays depressed in the nested
+   state and every later key carries a phantom `Qt::ShiftModifier`: `Ctrl+U`
+   fires the `Ctrl+Shift+U` VPS toggle, `Ctrl+V` fires `Ctrl+Shift+V`. Only
+   this app, because only this app has a nested compositor.
+
+The discriminating observation was the user's own repair: **a fresh Shift
+press+release clears it, while merely switching windows does not.** A focus
+change is what would trigger Qt's own safety net
+(`QWaylandCompositor::applicationStateChanged` → `resetKeyboardState()` on
+`Qt::ApplicationInactive`), so that net demonstrably does not cover this path;
+a balanced release is what a dead-reckoned state needs. Why the net misses is
+still unknown and deliberately not relied on.
+
+Also latent in Qt's handler: it `return`s early when the compositor has no
+default seat and **never delivers the event**, so keys pressed before seat
+initialisation are swallowed.
+
+## The real fix (2026-08-08)
+
+[`native/symmetria-compositor/symmetriahostkeys.h`](../../../../native/symmetria-compositor/symmetriahostkeys.h)
+— `SymmetriaHostKeyHandler`, constructed by `SymmetriaCompositor`'s constructor
+(the only moment Qt's handler is already installed and we still run). It
+displaces Qt's handler and keeps only the necessary half: mirror presses and
+releases into the nested seat, so Chrome still receives `wl_keyboard.modifiers`,
+and leave the host's `QKeyEvent` exactly as the client plugin translated it.
+Nested clients lose nothing — Wayland delivers scan codes plus a modifier mask
+and each client applies its own keymap, so the rewritten `key`/`unicode` were
+never part of what Chrome sees. Chrome's own state gets better: Qt's
+`checkAndRepairModifierState` (called from `QWaylandSeat::sendFullKeyEvent`)
+reads `event->modifiers()`, which is now truthful.
+
+## The keymap pin (2026-08-04) — still required, now narrower
 
 [`src/symmetria_ide/keyboard_layout.py`](../../../../src/symmetria_ide/keyboard_layout.py)
 resolves the host's RMLVO tuple — rules/model/layout/variant/options —
@@ -74,12 +133,19 @@ For a multi-group config (`kb_layout = us,latam`) the layout list is rotated so
 the group active at startup lands first, since xkb has no active-group setter
 and order is the only lever.
 
-It pins rather than repairs: the host still ignores keymap CHANGES, so neither
-a virtual keyboard's uploaded keymap nor a post-startup group switch is
-followed. The compiled result keeps a stray unreachable second `us` group
+The compiled result keeps a stray unreachable second `us` group
 (`pc_latam_us_2_inet`) that is Qt's doing, not the assignment style's — that
-name is a PASS, not a regression. A true fix means moving the nested compositor
-out of the IDE's process.
+name is a PASS, not a regression.
+
+⚠ Its SCOPE changed on 2026-08-08 and the two halves are easy to confuse. It is
+no longer what keeps the IDE typing correctly — `SymmetriaHostKeyHandler` cut
+that dependency off at the source. What it still does, and must keep doing, is
+give **Chrome** the user's layout, because the nested seat's keymap is the one
+Chrome compiles. Keep both; neither substitutes for the other.
+
+The whole apparatus disappears when the nested compositor moves OUT of the
+IDE's process — Qt's handler would then never see the host's keys, and the
+nested seat's keymap would be that other process's business.
 
 Related: [nested-compositor-pointer-input](./nested_compositor_pointer_input.md),
 [nested-compositor-output-mode](./nested_compositor_output_mode.md) — same

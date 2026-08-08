@@ -58,6 +58,8 @@ QT_BEGIN_NAMESPACE
 class QMimeData;
 QT_END_NAMESPACE
 
+class SymmetriaHostKeyHandler;
+
 class SymmetriaCompositor : public QWaylandQuickCompositor
 {
     Q_OBJECT
@@ -68,6 +70,7 @@ class SymmetriaCompositor : public QWaylandQuickCompositor
 
 public:
     explicit SymmetriaCompositor(QObject *parent = nullptr);
+    ~SymmetriaCompositor() override;
 
     // Pushes `text` into the nested clients' selection directly. A DIAGNOSTIC
     // with no production caller — it exists to test the host→client half in
@@ -109,6 +112,12 @@ private:
     // guard would have been cleared. Observed live before this existed: one
     // copy produced 49 full round trips of a 5-format payload.
     QByteArray m_lastBridged;
+
+    // Undoes Qt's process-wide hijack of every key event in the application.
+    // Held by raw pointer with only a forward declaration so this header does
+    // not drag Qt's private QPA headers into everything that includes it; see
+    // symmetriahostkeys.h for what it does and why it has to exist.
+    SymmetriaHostKeyHandler *m_hostKeys = nullptr;
 
     static qsizetype extensionCount(
         QQmlListProperty<QWaylandCompositorExtension> *list);

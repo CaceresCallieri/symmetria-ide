@@ -65,7 +65,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Nested-compositor frame starvation](reference/qt-pyside/nested_compositor_frame_starvation.md) — host stops rendering → client stalls forever; needs a watchdog
 - [Nested-compositor clipboard](reference/qt-pyside/nested_compositor_clipboard.md) — bridge SHIPPED; nested→host works unfocused, host→nested needs IDE focus (self-heals)
 - [Nested-compositor has no dmabuf](reference/qt-pyside/nested_compositor_no_dmabuf.md) — Qt 6.11 implements the protocol nowhere; the EGL warning names the wrong layer
-- [Nested compositor hijacks the host keymap](reference/qt-pyside/nested_compositor_hijacks_host_keymap.md) — its seat keymap (Qt default: us) translates the WHOLE app's keys; pin it to the host layout
+- [Nested compositor hijacks the host keyboard](reference/qt-pyside/nested_compositor_hijacks_host_keymap.md) — Qt installs a process-wide key handler rewriting every key from a dead-reckoned state: US layout + phantom stuck Shift
 - [Why the suite dies "intermittently"](reference/qt-pyside/processevents_shared_app_segv.md) — two causes: pumping the session app, and leaked AppControllers
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)

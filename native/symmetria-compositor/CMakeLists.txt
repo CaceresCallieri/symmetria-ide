@@ -7,7 +7,7 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS
     # Requested as COMPONENTS, not just linked: the `Private` targets do not
     # come along with their public counterparts. See target_link_libraries for
     # the one call that needs them.
-    CorePrivate WaylandCompositorPrivate
+    CorePrivate GuiPrivate WaylandCompositorPrivate
 )
 
 qt_standard_project_setup(REQUIRES 6.5)
@@ -33,6 +33,8 @@ qt_add_qml_module(symmetriacompositor
         symmetriatrace.h
         symmetriacompositor.h
         symmetriacompositor.cpp
+        symmetriahostkeys.h
+        symmetriahostkeys.cpp
         symmetriaoutput.h
         symmetriaoutput.cpp
         symmetriashellsurfaceitem.h
@@ -45,10 +47,14 @@ target_link_libraries(symmetriacompositor PRIVATE
     Qt6::Quick
     Qt6::WaylandCompositor
     # The `Private` targets are what put Qt's private headers on the include
-    # path. Needed for exactly one thing — `wl_pointer.send_frame`, which has
-    # no public equivalent and which Chromium requires before it will dispatch
-    # a scroll. The reasoning, and what would let us drop this, is in
-    # symmetriashellsurfaceitem.cpp::sendPointerFrame.
+    # path. Needed for two things:
+    #   * `wl_pointer.send_frame`, which has no public equivalent and which
+    #     Chromium requires before it will dispatch a scroll — reasoning, and
+    #     what would let us drop it, in
+    #     symmetriashellsurfaceitem.cpp::sendPointerFrame;
+    #   * `QWindowSystemEventHandler` (GuiPrivate) plus `QWaylandKeyboardPrivate`,
+    #     to displace the process-wide key handler Qt's compositor installs over
+    #     the whole application — see symmetriahostkeys.h.
     #
     # ⚠ Private headers carry no source or binary compatibility promise, so a
     # Qt patch release can break this build. That is the intended failure mode:
@@ -56,6 +62,7 @@ target_link_libraries(symmetriacompositor PRIVATE
     # rebuild and any breakage is a LOUD compile error rather than a browser
     # that silently stops scrolling.
     Qt6::CorePrivate
+    Qt6::GuiPrivate
     Qt6::WaylandCompositorPrivate
 )
 

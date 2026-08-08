@@ -200,20 +200,23 @@ Item {
         id: browserCompositor
         socketName: pane.socketName
 
-        // WORKAROUND: pin the nested seat to the HOST's keyboard layout.
+        // Pin the nested seat to the HOST's keyboard layout, so Chrome
+        // compiles the user's layout rather than Qt's xkb default (`us`).
         //
-        // This looks like it only concerns Chrome. It does not — it is what
-        // keeps the ENTIRE IDE typing on the user's own layout. Constructing a
-        // QWaylandCompositor makes the host window translate keys with THIS
-        // seat's keymap instead of the one the real compositor sent, and Qt's
-        // default is the xkb default, i.e. US. So on a latam (or any
-        // non-US) keyboard, merely loading this pane silently switched every
-        // terminal, agent and editor pane to US.
+        // ⚠ THIS USED TO BE LOAD-BEARING FOR THE WHOLE IDE, AND NO LONGER IS —
+        // do not conclude from an older comment that it can now be deleted, and
+        // do not conclude from its narrowed scope that the host is unprotected.
+        // Constructing a QWaylandCompositor made the HOST window translate keys
+        // with this seat's keymap too, so on a latam session merely loading this
+        // pane switched every terminal, agent and editor pane to US (measured
+        // 2026-08-04; an EMPTY compositor was already enough, so lazy-loading
+        // the pane was never a fix). That hijack is now cut off at its source by
+        // native/symmetria-compositor/symmetriahostkeys.h, which displaces the
+        // process-wide key handler Qt's compositor installs — read that header
+        // before touching either piece. What remains here is the nested seat's
+        // OWN keymap, which Chrome still needs.
         //
-        // Measured 2026-08-04: an EMPTY WaylandCompositor is already enough,
-        // and the same window types correctly right up to the instant the
-        // compositor is constructed — so lazy-loading the pane is not a fix.
-        // The full probe, its numbers and the removal criterion are in
+        // The 2026-08-04 probe, its numbers and the removal criterion are in
         // src/symmetria_ide/keyboard_layout.py.
         //
         // Assigned imperatively rather than bound: `defaultSeat` is a
@@ -222,12 +225,12 @@ Item {
         Component.onCompleted: {
             // Guarded because the failure would otherwise be inaudible: a
             // TypeError here aborts the handler at its first line, the pane
-            // still loads, and the ONLY symptom is a US keyboard plus one
-            // warning in a noisy log. That is the exact shape of
-            // .claude/rules/qml_property_must_exist_on_type.md.
+            // still loads, and the ONLY symptom is a US keyboard in the
+            // BROWSER plus one warning in a noisy log. That is the exact shape
+            // of .claude/rules/qml_property_must_exist_on_type.md.
             if (!pane.hostKeymap) {
                 console.warn("hostKeymap missing — nested seat left on Qt's "
-                             + "US default, so the WHOLE IDE will type US");
+                             + "US default, so Chrome will type US");
                 return;
             }
             const km = browserCompositor.defaultSeat.keymap;
