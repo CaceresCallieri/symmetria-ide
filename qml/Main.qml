@@ -1691,6 +1691,29 @@ Window {
                 // the ~50-100ms reconstruction cost is also acceptable
                 // for a binding that fires on user keypress, not in any
                 // hot path.
+                // Opaque backing for the FM pane.
+                //
+                // The FM module paints no root background of its own: inside
+                // the IDE its root is a transparent Item, and the only thing
+                // that ever fills behind it is `windowBackdrop`, which ONLY the
+                // standalone FM host applies. So without this the FM's margins,
+                // column gaps, path bar and button row showed the WALLPAPER
+                // through the transparent Window root, landing several
+                // lightness units above the IDE's own bars — the FM read as a
+                // lighter panel bolted onto the chrome. Measured before this:
+                // #1d1e1f around the columns against #0f0f10 on both bars.
+                //
+                // Deliberately NOT applied to the terminal/editor surfaces,
+                // whose transparency is the documented Q2-d topology decision
+                // (they share the wallpaper's ambient tint with Ghostty). The
+                // FM is dense chrome rather than a text surface, so it wants an
+                // opaque ground; the terminal does not. Do not "unify" these.
+                Rectangle {
+                    anchors.fill: parent
+                    color: Theme.color.bg.chrome
+                    visible: controller.fmVisible
+                }
+
                 Loader {
                     id: fmPaneLoader
                     anchors.fill: parent

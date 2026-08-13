@@ -36,8 +36,8 @@
   },
   "qml/Main.qml": {
     "import": 11,
-    "missing-property": 66,
-    "unqualified": 269,
+    "missing-property": 67,
+    "unqualified": 270,
     "unresolved-type": 7,
     "unused-imports": 2
   },
