@@ -185,9 +185,22 @@ QtObject {
         // every layer of chrome around it is a step lighter:
         //
         //     canvas  #0f0f10   editor, terminal, agents, git, FM
-        //     chrome  #131316   side panel, framed cards, detail views
-        //     bar     #17171a   top bar, status bar, window root
+        //     chrome  #131316   framed cards and detail views ON the canvas
+        //     bar     #17171a   top bar, status bar, side panel, window root
         //     raised  #1e1e22   popups and modals, which must clear `bar`
+        //
+        // ⚠ The SIDE PANEL is on `bar`, not on `chrome`, and that is a
+        // correction rather than an inconsistency (2026-08-13, from the first
+        // look on a real seat). It sat on `chrome` on the principle that a
+        // rung follows what a surface BELONGS to — the panel is a panel — and
+        // it looked wrong: the panel column meets both bars along its top and
+        // bottom edges, so a one-rung step there draws a visible border out of
+        // nothing at exactly the seam that should read as continuous. The
+        // full-width hairline had been hiding it. What survives on `chrome` is
+        // the narrower and more defensible case: a panel that floats ON the
+        // canvas and needs to lift off it (the git surface's detail views,
+        // PillSurface's default). Two chrome surfaces that TOUCH share a rung;
+        // a rung step is for chrome against content.
         //
         // This is Zed's convention, and it is Zed's rather than a guess:
         // measured across all six of its dark themes (One Dark, Ayu Dark,
@@ -218,12 +231,15 @@ QtObject {
             // `surfaceContainerLowest` (#0F0D13) is the one role that sits
             // BELOW `surface`, which keeps the six rungs strictly increasing.
             readonly property color canvas: theme._c("surfaceContainerLowest", "#0f0f10")
-            // Panels and framed cards: the side panel, the git surface's
-            // columns, the detail views. One step out from the content.
+            // Framed cards and detail views that float ON the canvas — the git
+            // surface's columns, PillSurface's default fill. One step out from
+            // the content, which is what lifts them off it. NOT the side panel
+            // (see the correction in the ladder note above).
             readonly property color chrome: theme._c("surface", "#131316")
-            // The two chrome BARS (AgentTopBar, StatusBar) and the window
-            // root behind everything. The outermost rung, so the bars read as
-            // a frame around the content rather than as part of it.
+            // The two chrome BARS (AgentTopBar, StatusBar), the SIDE PANEL
+            // they bracket, and the window root behind everything. The
+            // outermost rung, so the chrome reads as one frame around the
+            // content rather than as parts of it.
             readonly property color bar: theme._c("surfaceContainerLow", "#17171a")
             // Popups, modals and any surface that must read as sitting ABOVE
             // the chrome. Replaces the drop shadow that used to say so. Note

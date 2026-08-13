@@ -209,6 +209,15 @@ experiment (collapsing the surface switcher). Everything else earns its place.
   full height past the point where the canvas had already curved away, leaving
   a vertical tick beside the corner wedge; it is now inset by the radius at
   both ends.
+- **The ladder lost a rung where two chrome surfaces touch.** With the
+  hairline gone, the side panel's `chrome` against the bars' `bar` read as a
+  border drawn out of nothing — the hairline had been covering it. The whole
+  side-panel column (matte, location header, GitStatusPanel) moved to `bg.bar`.
+  What survives on `chrome` is the narrower case that still earns a step: a
+  panel floating ON the canvas (the git surface's detail views). Rule: two
+  chrome surfaces that TOUCH share a rung; a rung step is for chrome against
+  content. Free consequence — the corner wedges are now colour-exact at all
+  four corners instead of approximate at the two on the panel side.
 - Two corrections fell out of it. `pragma ComponentBehavior: Bound` removes
   the nine `unqualified` findings in `SegmentedControl.qml` that a comment in
   that file called unfixable — the claim was wrong and the comment is gone.

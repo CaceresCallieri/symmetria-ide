@@ -1924,17 +1924,20 @@ Window {
                 // radius cannot be asked of a QMLTermWidget or of the nested
                 // compositor, and why this costs four Bézier paths.
                 //
-                // The wedges take `bg.bar`, the rung of the two full-width
-                // chrome bars this surface is wedged between, so each corner
-                // reads as the bar tucking around the canvas. That is exact at
-                // the two LEFT corners, where the bar and the window ground
-                // are the same colour. At the two RIGHT ones the wedge also
-                // touches the side panel, which is `bg.chrome` — one rung and
-                // about four lightness units off. Accepted rather than solved:
-                // no single colour is correct for a wedge that straddles two
-                // neighbours, the 1px separator already marks that seam, and
-                // the alternative (per-corner colours) only moves the same
-                // mismatch from the wedge's side edge to its top edge.
+                // The wedges take `bg.bar`, so each corner reads as the chrome
+                // tucking around the canvas. Every neighbour a wedge touches
+                // is now on that same rung — the two bars, the window ground
+                // AND the side panel — so the colour is exact at all four
+                // corners rather than approximate at two.
+                //
+                // It was approximate at the right-hand pair while the side
+                // panel sat on `bg.chrome`: a wedge straddles two neighbours
+                // there, and no single colour is right for one that does. That
+                // was written down as accepted, and then the panel moved onto
+                // `bg.bar` for its OWN reasons (the seam it made against the
+                // bars) and took the problem with it. Should the panel ever
+                // move back, this is approximate again — and the fix is still
+                // not per-corner colours, which only relocate the mismatch.
                 CanvasCorners {
                     anchors.fill: parent
                     z: 50
@@ -2013,15 +2016,20 @@ Window {
                 // (not each child) so the spacing gap between GitStatusPanel
                 // and FileTreeView — and any future sub-panels — inherits the
                 // background without the desktop wallpaper bleeding through.
-                // Uses `Theme.color.bg.chrome`, the same token GitStatusPanel
-                // uses for its own framed background, so the two panels read
-                // as one continuous column. That token is the PANEL rung of
-                // the surface ladder (one step out from the content, one step
-                // in from the bars) — the side panel is a panel, so it takes
-                // it; the bars do not. (§3 P1: chrome → Theme.*)
+                //
+                // `bg.bar`, the SAME rung as AgentTopBar and StatusBar, which
+                // this column meets along its whole top and bottom edge. It
+                // was `bg.chrome` (one rung darker) on the principle that the
+                // rung follows what a surface belongs to, and that lost to
+                // what it looked like: a one-rung step between two chrome
+                // surfaces that touch draws a border out of nothing, and the
+                // now-removed full-width hairline was the only reason it had
+                // not been obvious. GitStatusPanel matches this deliberately —
+                // the two must move together or the column splits in half.
+                // (§3 P1: chrome → Theme.*)
                 Rectangle {
                     anchors.fill: parent
-                    color: Theme.color.bg.chrome
+                    color: Theme.color.bg.bar
                 }
 
                 // Whole-side-panel focus border removed — replaced by
@@ -2087,20 +2095,17 @@ Window {
                     // at the compositor level. See docs/vision.md "Modes of
                     // inhabiting the IDE" for the framing this surface
                     // operationalizes.
-                    // Stays on `bg.chrome`, NOT `bg.bar`, and the choice is
-                    // deliberate rather than an oversight of the 2026-08-13
-                    // split. It is bar-SHAPED (statusBarHeight, full width of
-                    // its column) and sits directly under AgentTopBar, which
-                    // did move to `bg.bar` — so a step is now visible at that
-                    // seam. But the rung follows what a surface BELONGS to,
-                    // not what it looks like: this header is the top of the
-                    // side-panel column, and the column is a panel. Only the
-                    // two full-width chrome bars took `bg.bar`.
+                    // On `bg.bar`, with the rest of the side-panel column.
+                    // This header was the single most visible casualty of the
+                    // old split: it is bar-SHAPED (statusBarHeight, full width
+                    // of its column) and sits directly under AgentTopBar, so a
+                    // one-rung step ran horizontally right where the eye reads
+                    // one continuous bar. That seam is what got reported first.
                     Rectangle {
                         id: locationHeader
                         Layout.fillWidth: true
                         Layout.preferredHeight: Theme.size.statusBarHeight
-                        color: Theme.color.bg.chrome
+                        color: Theme.color.bg.bar
 
                         RowLayout {
                             anchors.fill: parent

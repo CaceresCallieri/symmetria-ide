@@ -27,14 +27,13 @@
 // expand/collapse state via the FM's built-in handler.
 //
 // Visual hierarchy: the chrome wrapper uses the IDE's Theme palette
-// (`Theme.color.bg.chrome`, hairline border) — the PANEL rung of the
-// surface ladder, one step out from the content and one step in from the
-// bars, so this panel and the file tree below it read as one column. (It
-// used to say "continuous with the status bar"; the bars moved to
-// `bg.bar` on 2026-08-13, so that reason is no longer the right one even
-// though the token still is.) Per-row visuals come from the
-// FM's FmTheme — the same palette the main file tree uses, so the two
-// trees are visually unified by construction.
+// (`Theme.color.bg.bar`, hairline border) — the rung the whole side-panel
+// column shares with the two chrome bars, so this panel and the file tree
+// below it read as one column and the column reads as one piece of chrome.
+// It sat on `bg.chrome` until 2026-08-13; the reason it moved is recorded
+// once, in the ladder note in `qml/design/Theme.qml`. Per-row visuals come
+// from the FM's FmTheme — the same palette the main file tree uses, so the
+// two trees are visually unified by construction.
 //
 // Keyboard navigation: sub-pane parity with the main FileTreeView.
 //
@@ -320,12 +319,16 @@ FocusScope {
         onActivated: root.scope = root.scope === "agent" ? "all" : "agent"
     }
 
-    // Chrome — same matte tone the status bar and which-key overlay use.
-    // Drops slightly darker than the (transparent) main file tree below
-    // to separate visually.
+    // `bg.bar`, matching the side-panel column this sits in — see the matte
+    // on `treeScope` in Main.qml for why the whole column shares the bars'
+    // rung. The two must move together; a rung between them splits the column
+    // in half. The fill is therefore NOT what separates this panel from the
+    // tree below (an older comment claimed it "drops slightly darker", which
+    // stopped being true once both took the column's matte) — the hairline
+    // border is, and it is the only thing that is.
     Rectangle {
         anchors.fill: parent
-        color: Theme.color.bg.chrome
+        color: Theme.color.bg.bar
         border.width: 1
         border.color: Theme.color.border.hairline
     }
