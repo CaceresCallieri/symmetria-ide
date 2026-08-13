@@ -64,6 +64,31 @@ Append one entry per phase as it lands, newest last. Hashes are on the
     comment that stated a WRONG fill token was fixed; the terminology sweep
     happens in Phase 5, when the components it names are deleted.
 
+**Phase 3 — a flat state grammar, extracted once. DONE (IDE only).**
+- IDE `<this commit>`. The FM's `TabBar` was NOT converted — see below.
+- New `qml/SegmentedControl.qml` replaces four hand-rolled copies: the location
+  toggle and surface switcher in `AgentTopBar`, the scope switcher in
+  `GitStatusPanel`, and the tab header in `GitHistoryView`. Net −101 lines, and
+  the lint baseline fell 1653 → 1598 because four copies of the same
+  unresolvable-`Theme` warnings collapsed into one file's worth.
+- State grammar without depth: active = filled + hairline border + `text.strong`
+  bold; inactive = transparent fill AND border + `text.dim` medium. All three
+  move together, because with the shadow gone no single one carries the signal.
+- Segment corners came off the capsule (`height / 2`) to `radius.md`. This is
+  the shape observation from Phase 1 finally applied: a generous corner was
+  what made an extruded chip read as physical, and on a flat fill it reads as a
+  dated pill.
+- `bg.raisedSelected` added and wired to the seven selection surfaces that sit
+  INSIDE a PillCard or a raised popup (both session pickers, ConfirmDialog's
+  buttons, the completion popup, and the three git detail cards). This closes
+  the contrast finding Phase 2 deferred. List rows in the git columns keep
+  plain `bg.selected` — those columns paint chrome, not raised.
+- Deliberately NOT done: the FM's own `TabBar` still hand-rolls the same
+  control. It lives in the shared `Symmetria.FileManager.UI` module, so
+  converting it means either duplicating `SegmentedControl` into that module or
+  making the FM depend on the IDE's QML — a toolkit-layering decision, not a
+  styling one. Left for a deliberate call rather than settled by momentum.
+
 ## Decisions already taken
 
 | Question | Answer |

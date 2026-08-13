@@ -160,7 +160,7 @@ ModalOverlay {
                     // transparent ghost. The elevation + fill ARE the active
                     // cue; the border stays a constant hairline on both so no
                     // accent glow competes with the depth.
-                    color: button.highlighted ? Theme.color.bg.selected : "transparent"
+                    color: button.highlighted ? Theme.color.bg.raisedSelected : "transparent"
                     borderColor: Theme.color.border.hairline
                 }
 

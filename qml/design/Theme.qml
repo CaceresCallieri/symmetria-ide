@@ -136,6 +136,14 @@ QtObject {
             // the chrome. Replaces the drop shadow that used to say so.
             readonly property color raised: theme._c("surfaceContainer", "#161618")
             readonly property color selected: theme._c("surfaceContainerHigh", "#1c1c1f")
+            // The `selected` twin for anything sitting ON a raised surface (a
+            // PillCard modal, a picker, a detail card). `selected` is only a
+            // few lightness units above `raised`, so the same token used
+            // inside a card reads at about half the strength it has on chrome.
+            // Consumers pick between the two; nothing derives one from the
+            // other, because the step that reads correctly over `chrome` is
+            // not the step that reads correctly over `raised`.
+            readonly property color raisedSelected: theme._c("surfaceContainerHighest", "#26262b")
             // Modal backdrop (AgentSpawnMenu). Black @ 45% — dims the
             // surface enough to read "modal" without hiding context;
             // sits over the already-translucent terminal panes, so a

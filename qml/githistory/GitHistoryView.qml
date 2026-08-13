@@ -222,66 +222,41 @@ FocusScope {
         anchors.margins: Theme.spacing.sm
         spacing: Theme.spacing.sm
 
-        // --- Tab header (clay two-segment switcher) ----------------------
-        // Same active-tab idiom as AgentTopBar's surface switcher: the active
-        // sub-view raises into a clay capsule, the inactive one stays flat. The
-        // "changes" segment carries a live file count so the scope of
-        // uncommitted work reads at a glance without entering the view.
-        Row {
+        // --- Tab header ---------------------------------------------
+        // Tab cycles the sub-views and is the primary path; the clicks are
+        // parity. Each label carries a live count or ref so the scope of each
+        // sub-view reads without entering it.
+        //
+        // The counts are composed into `label` HERE rather than inside the
+        // control: a formatting function passed as a property would be a
+        // function call in a binding, which QML does not re-evaluate (gotcha
+        // #3), so the counts would freeze at their first value. Rebuilding
+        // this array on a count change re-creates three Text delegates, which
+        // costs nothing.
+        SegmentedControl {
             id: tabHeader
             Layout.preferredHeight: Theme.size.modeBadgeHeight
-            spacing: Theme.spacing.sm
 
-            Repeater {
-                model: [
-                    { mode: "changes", label: "changes" },
-                    { mode: "history", label: "history" },
-                    { mode: "prs", label: "PRs" },
-                ]
-
-                delegate: Item {
-                    id: seg
-                    required property var modelData
-                    readonly property bool isCurrent: root.mode === seg.modelData.mode
-
-                    height: Theme.size.modeBadgeHeight
-                    implicitWidth: segLabel.implicitWidth + Theme.spacing.md * 2
-
-                    PillSurface {
-                        anchors.fill: parent
-                        radius: height / 2
-                        elevated: seg.isCurrent
-                        color: seg.isCurrent ? Theme.color.bg.selected : "transparent"
-                        borderColor: seg.isCurrent ? Theme.color.border.hairline : "transparent"
-                    }
-
-                    Text {
-                        id: segLabel
-                        anchors.centerIn: parent
-                        text: seg.modelData.label
-                              + (seg.modelData.mode === "changes" && root.hasPendingChanges
-                                 ? " · " + root.statusModel.count : "")
-                              + (seg.modelData.mode === "history" && root.logController
-                                 && root.logController.currentRef.length > 0
-                                 ? " · " + root.logController.currentRef : "")
-                              + (seg.modelData.mode === "prs" && root.prModel
-                                 && root.prModel.count > 0
-                                 ? " · " + root.prModel.count : "")
-                        color: seg.isCurrent ? Theme.color.text.strong : Theme.color.text.dim
-                        font.family: Theme.font.family
-                        font.pixelSize: Theme.font.size.xs
-                        font.weight: seg.isCurrent ? Theme.font.weight.bold : Theme.font.weight.medium
-                        font.letterSpacing: 0.6
-                        renderType: Text.NativeRendering
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.setMode(seg.modelData.mode)
-                    }
-                }
-            }
+            segments: [
+                {
+                    key: "changes",
+                    label: "changes" + (root.hasPendingChanges
+                                        ? " · " + root.statusModel.count : "")
+                },
+                {
+                    key: "history",
+                    label: "history" + (root.logController
+                                        && root.logController.currentRef.length > 0
+                                        ? " · " + root.logController.currentRef : "")
+                },
+                {
+                    key: "prs",
+                    label: "PRs" + (root.prModel && root.prModel.count > 0
+                                    ? " · " + root.prModel.count : "")
+                },
+            ]
+            current: root.mode
+            onActivated: key => root.setMode(key)
         }
 
         // --- "changes": uncommitted working tree ------------------------

@@ -176,7 +176,7 @@ ModalOverlay {
             width: sessionList.width
             height: rowText.implicitHeight + Theme.spacing.sm
             radius: Theme.radius.sm
-            color: selected ? Theme.color.bg.selected : "transparent"
+            color: selected ? Theme.color.bg.raisedSelected : "transparent"
 
             Row {
                 id: rowText

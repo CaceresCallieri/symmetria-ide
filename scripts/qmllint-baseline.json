@@ -12,7 +12,7 @@
     "unqualified": 6
   },
   "qml/AgentTopBar.qml": {
-    "missing-property": 64,
+    "missing-property": 42,
     "unqualified": 21
   },
   "qml/CommandLine.qml": {
@@ -31,8 +31,8 @@
     "unqualified": 1
   },
   "qml/GitStatusPanel.qml": {
-    "missing-property": 57,
-    "unqualified": 7
+    "missing-property": 47,
+    "unqualified": 5
   },
   "qml/Main.qml": {
     "import": 11,
@@ -57,6 +57,10 @@
   },
   "qml/RemoteSessionPicker.qml": {
     "missing-property": 26,
+    "unqualified": 6
+  },
+  "qml/SegmentedControl.qml": {
+    "missing-property": 16,
     "unqualified": 6
   },
   "qml/SessionsMenu.qml": {
@@ -116,8 +120,7 @@
     "unqualified": 1
   },
   "qml/githistory/GitHistoryView.qml": {
-    "missing-property": 36,
-    "unqualified": 10
+    "missing-property": 25
   },
   "qml/githistory/PrDetailView.qml": {
     "missing-property": 69,

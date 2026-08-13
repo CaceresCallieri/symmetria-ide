@@ -172,7 +172,7 @@ Item {
                     id: delegateRow
                     width: popupList.width
                     height: root.rowHeight
-                    color: ListView.isCurrentItem ? Theme.color.bg.selected : "transparent"
+                    color: ListView.isCurrentItem ? Theme.color.bg.raisedSelected : "transparent"
                     radius: Theme.radius.sm
 
                     Text {

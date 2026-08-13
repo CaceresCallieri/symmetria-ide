@@ -207,7 +207,7 @@ Rectangle {
                 implicitHeight: headerCol.implicitHeight + Theme.spacing.md * 2
                 radius: Theme.radius.md
                 elevated: true
-                color: Theme.color.bg.selected
+                color: Theme.color.bg.raisedSelected
 
                 Column {
                     id: headerCol

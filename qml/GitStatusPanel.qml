@@ -364,67 +364,19 @@ FocusScope {
                     font.pixelSize: Theme.font.size.xs
                 }
 
-                // Scope switcher — clay two-segment control (same idiom as
-                // GitHistoryView's tab header / AgentTopBar's surface switcher):
-                // the ACTIVE scope raises into a clay capsule, the inactive
-                // stays flat. Reads as a proper toggle at a glance. Keyboard:
-                // Ctrl+Shift+D (global) or `a` in-panel; the clicks are parity.
-                Row {
+                // Scope switcher. Keyboard is primary — Ctrl+Shift+D (global)
+                // or `a` while the panel is focused; the clicks are parity.
+                SegmentedControl {
                     Layout.alignment: Qt.AlignVCenter
-                    // Right margin gives the rightmost segment's clay shadow room
-                    // to render inside the panel's `clip: true` root — PillSurface
-                    // shadows paint OUTSIDE the pill, so a flush edge would slice
-                    // the active "this agent" segment's convex shadow (see the
-                    // PillSurface header gotcha).
                     Layout.rightMargin: Theme.spacing.xs
-                    spacing: Theme.spacing.xxs
+                    horizontalPadding: Theme.spacing.sm
 
-                    Repeater {
-                        model: [
-                            {scope: "all", label: "all"},
-                            {scope: "agent", label: "this agent"},
-                        ]
-                        delegate: Item {
-                            id: seg
-                            required property var modelData
-                            readonly property bool isCurrent: root.scope === seg.modelData.scope
-
-                            height: Theme.size.modeBadgeHeight
-                            implicitWidth: segLabel.implicitWidth + Theme.spacing.sm * 2
-
-                            PillSurface {
-                                anchors.fill: parent
-                                radius: height / 2
-                                elevated: seg.isCurrent
-                                color: seg.isCurrent ? Theme.color.bg.selected : "transparent"
-                                borderColor: seg.isCurrent
-                                    ? Theme.color.border.hairline
-                                    : "transparent"
-                            }
-
-                            Text {
-                                id: segLabel
-                                anchors.centerIn: parent
-                                text: seg.modelData.label
-                                color: seg.isCurrent
-                                    ? Theme.color.text.strong
-                                    : Theme.color.text.dim
-                                font.family: Theme.font.family
-                                font.pixelSize: Theme.font.size.xs
-                                font.weight: seg.isCurrent
-                                    ? Theme.font.weight.bold
-                                    : Theme.font.weight.medium
-                                font.letterSpacing: 0.6
-                                renderType: Text.NativeRendering
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.scope = seg.modelData.scope
-                            }
-                        }
-                    }
+                    segments: [
+                        { key: "all", label: "all" },
+                        { key: "agent", label: "this agent" },
+                    ]
+                    current: root.scope
+                    onActivated: key => root.scope = key
                 }
             }
 

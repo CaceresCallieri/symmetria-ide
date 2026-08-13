@@ -62,57 +62,20 @@ Rectangle {
     // to this edge: the centered chip strip could reach the toggle only
     // with many long-titled chips on a narrow window — verify visually
     // if that combination ever ships.
-    Row {
+    SegmentedControl {
         id: locationToggle
         anchors.right: root.right
         anchors.rightMargin: Theme.spacing.md
         anchors.verticalCenter: root.verticalCenter
-        spacing: Theme.spacing.sm
         z: 1
         visible: controller.vpsAvailable || controller.location === "vps"
 
-        Repeater {
-            model: [
-                { location: "local", label: "local" },
-                { location: "vps", label: "vps" },
-            ]
-
-            delegate: Item {
-                id: locationSegment
-
-                required property var modelData
-                readonly property bool isCurrent: controller.location === locationSegment.modelData.location
-
-                height: Theme.size.modeBadgeHeight
-                implicitWidth: locationSegmentLabel.implicitWidth + Theme.spacing.md * 2
-
-                PillSurface {
-                    anchors.fill: parent
-                    radius: height / 2
-                    elevated: locationSegment.isCurrent
-                    color: locationSegment.isCurrent ? Theme.color.bg.selected : "transparent"
-                    borderColor: locationSegment.isCurrent ? Theme.color.border.hairline : "transparent"
-                }
-
-                Text {
-                    id: locationSegmentLabel
-                    anchors.centerIn: parent
-                    text: locationSegment.modelData.label
-                    color: locationSegment.isCurrent ? Theme.color.text.strong : Theme.color.text.dim
-                    font.family: Theme.font.family
-                    font.pixelSize: Theme.font.size.xs
-                    font.weight: locationSegment.isCurrent ? Theme.font.weight.bold : Theme.font.weight.medium
-                    font.letterSpacing: 0.6
-                    renderType: Text.NativeRendering
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: controller.set_location(locationSegment.modelData.location)
-                }
-            }
-        }
+        segments: [
+            { key: "local", label: "local" },
+            { key: "vps", label: "vps" },
+        ]
+        current: controller.location
+        onActivated: key => controller.set_location(key)
     }
 
     // Surface switcher — terminal / editor / agents, pinned at the bar's
@@ -127,77 +90,34 @@ Rectangle {
     // the pool grows past 5 or titles get long. Clicking is a
     // convenience; the chords (Ctrl+Shift+E toggle, Ctrl+1..5 agent
     // focus) remain primary.
-    Row {
+    SegmentedControl {
         id: surfaceSwitcher
         anchors.left: root.left
         anchors.leftMargin: Theme.spacing.md
         anchors.verticalCenter: root.verticalCenter
-        spacing: Theme.spacing.sm
         z: 1
 
-        Repeater {
-            // `surface` is the controller's centralSurface value (the
-            // wire name stays singular "agent"); `label` is display-only.
-            model: [
-                { surface: "terminal", label: "terminal" },
-                { surface: "editor", label: "editor" },
-                { surface: "agent", label: "agents" },
-                // "git" not "history": the surface is now dual-mode (a
-                // Tab-toggled "changes" working-tree view + the commit log),
-                // and it opens on changes — labelling it "history" would
-                // mis-name where the chip lands.
-                { surface: "git", label: "git" },
-                // NB: no "browser" segment, though there COULD be one now — the
-                // browser became a real central surface again when Chrome moved
-                // into the IDE's nested compositor. It is left out because the
-                // browser is agent-owned: you reach it through the agent that
-                // opened it (the globe on that agent's chip, below) or with
-                // Ctrl+Shift+B. Adding a segment here is a product call, not an
-                // impossibility — which is what this note used to claim.
-            ]
-
-            delegate: Item {
-                id: segment
-
-                required property var modelData
-                readonly property bool isCurrent: controller.centralSurface === segment.modelData.surface
-
-                height: Theme.size.modeBadgeHeight
-                implicitWidth: segmentLabel.implicitWidth + Theme.spacing.md * 2
-
-                // The current surface raises into a clay capsule (matte fill +
-                // hairline border + convex depth); inactive segments stay
-                // fully flat — transparent fill AND border, no shadow — so
-                // only the active surface reads as a raised chip. This is the
-                // FM TabBar active-tab pattern; `elevated` gates the depth and
-                // the whole transition eases via PillSurface's quick fades.
-                PillSurface {
-                    anchors.fill: parent
-                    radius: height / 2
-                    elevated: segment.isCurrent
-                    color: segment.isCurrent ? Theme.color.bg.selected : "transparent"
-                    borderColor: segment.isCurrent ? Theme.color.border.hairline : "transparent"
-                }
-
-                Text {
-                    id: segmentLabel
-                    anchors.centerIn: parent
-                    text: segment.modelData.label
-                    color: segment.isCurrent ? Theme.color.text.strong : Theme.color.text.dim
-                    font.family: Theme.font.family
-                    font.pixelSize: Theme.font.size.xs
-                    font.weight: segment.isCurrent ? Theme.font.weight.bold : Theme.font.weight.medium
-                    font.letterSpacing: 0.6
-                    renderType: Text.NativeRendering
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: controller.set_central_surface(segment.modelData.surface)
-                }
-            }
-        }
+        // `key` is the controller's centralSurface value (the wire name stays
+        // singular "agent"); `label` is display-only.
+        segments: [
+            { key: "terminal", label: "terminal" },
+            { key: "editor", label: "editor" },
+            { key: "agent", label: "agents" },
+            // "git" not "history": the surface is dual-mode (a Tab-toggled
+            // "changes" working-tree view + the commit log), and it opens on
+            // changes — labelling it "history" would mis-name where the chip
+            // lands.
+            { key: "git", label: "git" },
+            // NB: no "browser" segment, though there COULD be one now — the
+            // browser became a real central surface again when Chrome moved
+            // into the IDE's nested compositor. It is left out because the
+            // browser is agent-owned: you reach it through the agent that
+            // opened it (the globe on that agent's chip, below) or with
+            // Ctrl+Shift+B. Adding a segment here is a product call, not an
+            // impossibility — which is what this note used to claim.
+        ]
+        current: controller.centralSurface
+        onActivated: key => controller.set_central_surface(key)
     }
 
     RowLayout {
