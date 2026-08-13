@@ -130,11 +130,19 @@ Decided and shipped:
    the state you are IN is never the one inferred from a glyph.
 
    ⚠ Codicon codepoints do not follow their names in any guessable order.
-   Three of five first guesses drew the wrong picture — `cod-server` is
-   ``, not the plausible ``, and `cod-device_desktop` renders a
-   circuit board. Read them out of the font by GLYPH NAME (fontTools
-   `getBestCmap()`); a wrong codepoint renders silently as a different icon,
-   never as a missing glyph, so nothing warns you.
+   **Five of the seven** taken from a chart drew a different picture than
+   their name promised: `cod-server` is `U+EB50`, not the plausible-looking
+   `U+EB9F` (an unrelated struck-through mark); `cod-device_desktop` renders
+   a circuit board; `cod-home` renders a plus sign. Read them out of the
+   font BY GLYPH NAME (fontTools `getBestCmap()`); a wrong codepoint renders
+   silently as a different icon, never as a missing glyph, so nothing warns
+   you — the only way to catch it is to render the candidates and look.
+
+   Codepoints are written here as `U+XXXX`, never as the glyph itself. This
+   paragraph first embedded the two characters raw, which is exactly the
+   failure it warns about one sentence earlier: invisible in review, tofu
+   without the exact font, and silently destroyable by any edit pipeline
+   that does not preserve non-ASCII bytes.
 
 Decided and deliberately NOT changed:
 

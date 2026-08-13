@@ -61,7 +61,10 @@ Rectangle {
     // twin. Same accepted-overlap caveat as the switcher's comment below,
     // mirrored to this edge: the centered chip strip could reach the toggle
     // only with many long-titled chips on a narrow window — verify visually
-    // if that combination ever ships.
+    // if that combination ever ships. ⚠ Since the icon treatment landed this
+    // control has TWO widths, not one — icon+"Local" and icon+"VPS" differ by
+    // two characters — so that visual check must cover BOTH states; the wider
+    // one is what decides whether the strip collides.
     SegmentedControl {
         id: locationToggle
         anchors.right: root.right
