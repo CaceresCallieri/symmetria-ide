@@ -799,11 +799,14 @@ QtObject {
         // would have invited controls to reach for it.
         //
         // The value is Hyprland's `decoration:rounding` (24 as of 2026-08-13),
-        // copied rather than read — nothing in the IDE can query the
-        // compositor's decoration settings, and the point is that the canvas
-        // corner ECHOES the window corner the compositor already draws around
-        // the IDE. If Hyprland's rounding changes, this drifts silently and
-        // the only symptom is the two corners disagreeing. Painted by
+        // copied rather than read. `hyprctl getoption decoration:rounding -j`
+        // would return it, so this is a choice, not an impossibility: that is
+        // a subprocess on the startup path, for a value that changes about
+        // once a year, which would also have to answer for a non-Hyprland
+        // session. The point of matching it is that the canvas corner ECHOES
+        // the window corner the compositor already draws around the IDE. If
+        // Hyprland's rounding changes, this drifts silently and the only
+        // symptom is the two corners disagreeing. Painted by
         // `qml/CanvasCorners.qml`, which explains why a corner here costs four
         // paths instead of one `radius:` property.
         readonly property int canvas: 24

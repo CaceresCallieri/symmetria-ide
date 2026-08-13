@@ -38,12 +38,25 @@ def _without_comments(source: str) -> str:
     Every scan below therefore runs on stripped source, and the brace counter
     needs it too: a `{` inside a comment would throw the depth off. Replacing
     with spaces rather than deleting keeps offsets aligned with the real file.
+
+    ⚠ Known limitation: `//` is blanked unconditionally, INCLUDING inside a
+    string literal. No QML file here contains a `://` today, so this is
+    latent; if one gains a url, the rest of that line disappears and the brace
+    counter can go out of balance. `_main_content_span` names this in its
+    failure message rather than guessing, because a lookbehind that skips
+    `://` would still miss the general case (any `//` in any string).
     """
     return re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), source)
 
 
 _MAIN = _without_comments((_QML / "Main.qml").read_text(encoding="utf-8"))
+# Raw and stripped. Every scan for CODE must use the stripped copy: the
+# component carries a ~45-line comment header that quotes its own code, so a
+# raw search can match the explanation instead of the thing explained — the
+# same trap `_without_comments` exists for. The raw copy is only for the
+# pragma check, which is positional.
 _CORNERS = (_QML / "CanvasCorners.qml").read_text(encoding="utf-8")
+_CORNERS_CODE = _without_comments(_CORNERS)
 
 
 def _main_content_span() -> tuple[int, int]:
@@ -64,7 +77,11 @@ def _main_content_span() -> tuple[int, int]:
             depth -= 1
             if depth == 0:
                 return start, i + 1
-    raise AssertionError("mainContent block is unbalanced")
+    raise AssertionError(
+        "mainContent block is unbalanced — the likely cause is a `//` inside a "
+        "string literal (a url) that `_without_comments` blanked along with the "
+        "rest of its line; see that function's known limitation"
+    )
 
 
 def _main_content_block() -> str:
@@ -84,45 +101,75 @@ def test_overlay_is_mounted_inside_main_content() -> None:
 
 def test_overlay_outranks_every_sibling_z() -> None:
     block = _main_content_block()
-    corners_at = block.index("CanvasCorners {")
-    # `z:` values declared anywhere in mainContent, including inside the panes.
-    # A nested item's z only orders it among ITS siblings, so comparing against
-    # all of them is stricter than needed — deliberately, because the cheap
-    # over-approximation costs nothing and a nested z that climbs above this
-    # overlay is a sign the pane is being restructured anyway.
-    others = [int(m.group(1)) for m in re.finditer(r"\bz:\s*(\d+)", block[:corners_at])]
     overlay = re.search(r"CanvasCorners \{[^}]*?\bz:\s*(\d+)", block, re.S)
     assert overlay is not None, "the CanvasCorners overlay declares no z"
     overlay_z = int(overlay.group(1))
-    assert others, "expected sibling z values in mainContent"
-    assert overlay_z > max(others), (
+
+    # Every `z:` in mainContent EXCEPT the overlay's own — the whole block, not
+    # just what precedes the mount. Scanning only the prefix would miss a pane
+    # appended after it, which is the natural place to add one and therefore
+    # the regression this test exists for.
+    #
+    # A nested item's z orders it only among ITS siblings, so including the
+    # nested ones over-approximates. That is deliberate and cheap: the two here
+    # (the minimap's 10, and WhichKeyOverlay's 20 inside the editor) are both
+    # below 50 anyway, and a nested z climbing past this overlay means the pane
+    # is being restructured — worth a look either way.
+    span = overlay.span()
+    others = [
+        int(m.group(1))
+        for m in re.finditer(r"\bz:\s*(\d+)", block)
+        if not (span[0] <= m.start() < span[1])
+    ]
+    # `default` rather than an `assert others`: the two z declarations are both
+    # removable by a legitimate refactor (the minimap is already gated off), and
+    # a missing precondition should not read as a failure of this contract.
+    highest = max(others, default=-1)
+    assert overlay_z > highest, (
         f"CanvasCorners z={overlay_z} does not out-rank every sibling "
-        f"(highest is {max(others)}); the wedges will hide behind that pane"
+        f"(highest is {highest}); the wedges will hide behind that pane"
     )
 
 
 def test_overlay_binds_theme_tokens_not_literals() -> None:
-    entry = re.search(r"CanvasCorners \{.*?\n {16}\}", _main_content_block(), re.S)
+    # `[^{}]*` rather than a `\n {16}\}` terminator: the mount body holds no
+    # nested braces, and pinning the indentation would turn a re-indent — or
+    # wrapping the mount in a Loader — into a failure whose message points at
+    # this test instead of at the change.
+    entry = re.search(r"CanvasCorners \{[^{}]*\}", _main_content_block(), re.S)
     assert entry is not None, "could not isolate the CanvasCorners entry"
     body = entry.group(0)
     assert "cornerRadius: Theme.radius.canvas" in body
-    # `bg.bar` is the rung of the two chrome bars the canvas sits between —
-    # see the comment at the mount site for why the right-hand corners are
-    # knowingly one rung off against the side panel.
+    # `bg.bar` is the rung of the two chrome bars the canvas sits between, and
+    # since 2026-08-13 of the side panel too — so the wedge colour is exact at
+    # all four corners. See the comment at the mount site.
     assert "cornerColor: Theme.color.bg.bar" in body
 
 
 def test_four_wedges_one_rotated_shape() -> None:
-    assert re.search(r"Repeater\s*\{\s*model:\s*4", _CORNERS) is not None
-    assert "rotation: wedge.index * 90" in _CORNERS
+    assert re.search(r"Repeater\s*\{\s*model:\s*4", _CORNERS_CODE) is not None
+    assert "rotation: wedge.index * 90" in _CORNERS_CODE
 
 
 def test_arc_uses_the_quarter_circle_handle() -> None:
     """4/3 * (sqrt(2) - 1), the constant Qt's own rounded rects use."""
-    match = re.search(r"handle:\s*([0-9.]+)", _CORNERS)
+    match = re.search(r"handle:\s*([0-9.]+)", _CORNERS_CODE)
     assert match is not None, "the Bézier handle constant is gone"
     expected = 4.0 / 3.0 * (2.0**0.5 - 1.0)
     assert abs(float(match.group(1)) - expected) < 1e-9
+
+
+def test_overlay_is_inert() -> None:
+    """`enabled: false` — the overlay must never take input.
+
+    It covers the corners of EVERY central surface, one of which is the nested
+    Wayland compositor hosting real Chrome. Pointer delivery into that surface
+    already depends on three non-default things (hover acceptance, wheel
+    re-quantisation, a manual `wl_pointer.frame` — see CLAUDE.md), so an
+    overlay that accepted hover on top of it would break Chrome's pointer
+    handling in a way that reads as a compositor bug, not as a corner.
+    """
+    assert "enabled: false" in _CORNERS_CODE
 
 
 def test_no_full_width_hairline_brackets_the_content() -> None:
@@ -136,15 +183,21 @@ def test_no_full_width_hairline_brackets_the_content() -> None:
     """
     for name in ("AgentTopBar.qml", "StatusBar.qml"):
         source = _without_comments((_QML / name).read_text(encoding="utf-8"))
-        # The removed pair was `width: root.width` + `height: 1`. Matching that
-        # exact shape keeps the assertion narrow: 1px accents that are NOT
-        # full-width (a focus bar, an underline under one control) stay legal.
-        offenders = re.findall(
-            r"width:\s*root\.width[^}]*?height:\s*1\b|height:\s*1\b[^}]*?width:\s*root\.width",
-            source,
-            re.S,
+        # Any `height: 1`, not the removed shape specifically. The first cut of
+        # this test matched `width: root.width` AND `height: 1` together, on the
+        # reasoning that a narrow pattern leaves non-full-width 1px accents
+        # legal — but neither file contains `root.width` any more, so the
+        # assertion could not fire for ANY reason. It passed by being
+        # unfalsifiable, which is the same defect as an assertion that matches
+        # its own comment. Both files now hold zero `height: 1`, so the blunt
+        # form is enforceable and cannot go quietly true.
+        offenders = re.findall(r"\bheight:\s*1\b", source)
+        assert not offenders, (
+            f"{name} grew a 1px divider. If it is genuinely NOT full-width "
+            f"(an accent under one control), write it as `implicitHeight: 1` "
+            f"to say so deliberately; a full-width one cuts the canvas's "
+            f"rounded corners and must not come back."
         )
-        assert not offenders, f"{name} grew a full-width 1px divider again"
 
 
 def test_sidebar_separator_stops_at_the_corner() -> None:

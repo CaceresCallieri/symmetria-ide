@@ -1918,11 +1918,20 @@ Window {
                 }
 
                 // Rounds the central surface. LAST child and z above every
-                // sibling (the highest in this Item is the minimap's 20),
-                // because it works by painting over the panes rather than by
-                // clipping them — see `qml/CanvasCorners.qml` for why a
-                // radius cannot be asked of a QMLTermWidget or of the nested
+                // sibling, because it works by painting over the panes rather
+                // than by clipping them — see `qml/CanvasCorners.qml` for why
+                // a radius cannot be asked of a QMLTermWidget or of the nested
                 // compositor, and why this costs four Bézier paths.
+                //
+                // The highest sibling z here is the minimap's 10. The only
+                // higher number in this subtree is WhichKeyOverlay's 20, and
+                // that one is a CHILD of the editor pane (itself at the
+                // default 0), so it is already below this overlay — z orders
+                // an item among its own siblings, not across the tree. The 50
+                // is likewise local to `mainContent` and unrelated to the
+                // Window-root layering vocabulary further down this file,
+                // where 40 and 50 mean modals and toasts; those are siblings
+                // of the whole ColumnLayout and still paint above all of this.
                 //
                 // The wedges take `bg.bar`, so each corner reads as the chrome
                 // tucking around the canvas. Every neighbour a wedge touches

@@ -59,8 +59,11 @@ Item {
             height: Math.max(root.cmdBoxMinHeight, cmdRow.implicitHeight + root.cmdBoxPaddingVertical)
             radius: Theme.radius.md
             // `bg.raised`: the cmdline box floats over the status bar, which
-            // paints `bg.chrome`. Before the flat move a drop shadow separated
-            // them; now the fill step is the only cue.
+            // paints `bg.bar`. Before the flat move a drop shadow separated
+            // them; now the fill step is the only cue — which is exactly why
+            // `raised` is tuned to clear `bar` rather than `chrome` (see the
+            // ladder note in design/Theme.qml). This comment named `bg.chrome`
+            // until 2026-08-13, when the bars took their own rung.
             color: Theme.color.bg.raised
             border.color: Theme.color.border.hairline
             border.width: 1

@@ -13,8 +13,8 @@ pragma ComponentBehavior: Bound
 // engine, editor + shell + agents), the nested Wayland compositor hosting real
 // Chrome, and the FM's QML module. None of them can be persuaded to draw a
 // rounded outline.
-//   • `clip: true` is a RECTANGULAR scissor in Qt Quick. It cannot follow a
-//     radius, so it does nothing here.
+//   • `clip: true` is a RECTANGULAR scissor in Qt Quick. It clips, but only to
+//     a rectangle — it cannot produce this shape at all.
 //   • `layer.enabled` + an OpacityMask would work, but it routes every frame of
 //     the terminal AND of the nested compositor's ShellSurfaceItem through an
 //     offscreen FBO. That is the one part of this app where frame delivery is
@@ -26,9 +26,27 @@ pragma ComponentBehavior: Bound
 // So: a path. Four of them, static, tiny.
 //
 // ONE SHAPE, ROTATED FOUR TIMES. The wedge is drawn once in the top-left of a
-// square box; `rotation: index * 90` about the box centre maps it onto each of
-// the other three corners, and x/y place the box. Writing four hand-mirrored
-// paths would be four chances to get a control point backwards.
+// square box; `rotation: wedge.index * 90` about the box centre maps it onto
+// each of the other three corners, and x/y place the box. Writing four
+// hand-mirrored paths would be four chances to get a control point backwards.
+//
+// WHAT THE WEDGES COVER. They paint over the outer `cornerRadius` square of
+// every central pane, so anything a pane draws there is hidden. Measured, per
+// pane, at `Theme.radius.canvas` = 24:
+//   • The QMLTermWidget panes (editor, shell, agents) are unaffected — the
+//     `Theme.size.terminalPadding` of 16 keeps the first cell's origin inside
+//     the disc. That is a COUPLING: drop the padding far below 8 and glyphs
+//     start disappearing into the corner.
+//   • The browser pane (real Chrome) and the FM module paint to the edge and
+//     knowingly lose their corner 24px. Accepted — it is the same thing the
+//     compositor does to the IDE's own window.
+//   • The which-key overlay is anchored to the editor's bottom edge, so its
+//     bottom corners coincide exactly with two wedges. VERIFIED by rendering
+//     with a menu open: it reads as the panel being clipped by the rounded
+//     canvas, which is what should happen to content inside a rounded
+//     surface. Its own 8px corner sits entirely inside the covered region, so
+//     there is no double curve and no half-cut border. Do NOT "fix" it by
+//     inset margins — that would make the panel narrower for no visual gain.
 //
 // The arc is a cubic Bézier, not `PathArc`, on purpose. Two endpoints one
 // radius apart admit two candidate centres and two sweep directions, so a
@@ -48,7 +66,10 @@ Item {
     property int cornerRadius: 0
 
     // The colour AROUND the rounded surface, not the surface's own. The wedge
-    // has to continue whatever the surface is inset from.
+    // has to continue whatever the surface is inset from, so there is
+    // deliberately no useful default — no colour is right for an arbitrary
+    // host. ⚠ Leaving it unset is a SILENT no-op: the four Shapes are still
+    // built and still rendered, they just paint nothing.
     property color cornerColor: "transparent"
 
     visible: root.cornerRadius > 0

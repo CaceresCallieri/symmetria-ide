@@ -195,10 +195,17 @@ experiment (collapsing the surface switcher). Everything else earns its place.
   nested compositor's surface through an FBO, which is the one place in this
   app where frame delivery is already fragile. So four Bézier wedges in the
   surrounding colour, drawn on top.
-- Verified by measurement, not by eye: the arc's profile at the top-left corner
-  runs x=24 at the first canvas row down to x=0 twenty-four rows later, which
-  is a circle. The soft 7px ramp along the first row is the arc being TANGENT
-  to that edge, not antialiasing slop.
+- Verified by measurement, not by eye. Each corner's edge was traced per row
+  from a headless screenshot (the 50%-coverage crossing between the two known
+  flat colours) and compared against `r − sqrt(r² − (r−y)²)`: **92 samples
+  across all four corners, max deviation 1.41px**, and that worst case sits at
+  y=2 where the arc is nearly horizontal, so one row of quantisation maps to
+  several pixels of x. The soft ~7px ramp along the first row is the arc being
+  TANGENT to that edge, not antialiasing slop.
+- The lint baseline gained +4 `missing-property` on `Main.qml` (two at the
+  mount, two on the separator's margins). All four are `Theme.*` reads —
+  `Theme` is a QObject context property and unresolvable to qmllint by
+  construction, the noise class the baseline already carries 77 of.
 - **Corollary, found on the first real seat: no straight line may cross a
   rounded corner.** Three separate complaints turned out to be two artefacts.
   A 1px hairline ran the FULL width under AgentTopBar and over StatusBar, so

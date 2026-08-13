@@ -58,10 +58,12 @@
 // opposite of the agent/terminal pane Repeaters, where delegate churn kills a
 // running process; the rule there does not transfer to three Text items.)
 
-// `ComponentBehavior: Bound` binds each delegate to the context it was created
-// in, which is what lets the Repeater's delegate read the outer `root` id at
-// all as far as tooling is concerned. Without it every `root.*` read inside
-// the delegate is reported `unqualified` — nine of them here — because qmllint
+// `ComponentBehavior: Bound` binds each component to the context it is DEFINED
+// in, rather than letting it pick up the context it is instantiated in — which
+// is what lets the linter resolve the outer `root` id from inside the
+// Repeater's delegate. The read already worked at runtime either way; only the
+// static resolution changes. Without the pragma every `root.*` read inside the
+// delegate is reported `unqualified` — nine of them here — because qmllint
 // will not resolve an outer id across a Component boundary. An earlier comment
 // in this file asserted those nine were unfixable short of injecting a
 // `required property` per read; that was wrong, and the linter's own hint
