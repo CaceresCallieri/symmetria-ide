@@ -31,18 +31,32 @@ if [[ ! -d "$FM_WORKTREE/qml" ]]; then
 fi
 
 export SYMMETRIA_IDE_FM_QML_PATH="$FM_WORKTREE/qml"
-export PYTHONPATH="$IDE_WORKTREE/src"
+# PREPEND rather than overwrite, matching ~/.local/bin/symmetria-ide: a caller
+# who already has PYTHONPATH set should keep it.
+export PYTHONPATH="$IDE_WORKTREE/src${PYTHONPATH:+:$PYTHONPATH}"
 
 # Match the production launchers: the EMPTY string is deliberately distinct
 # from unset — it means "resolve QMLTermWidget from the installed pacman
 # package" rather than from the fork's checkout build dir.
 export SYMMETRIA_IDE_QMLTERMWIDGET_PATH=""
 
-if [[ "${1:-}" == "--shot" ]]; then
-  export SYMMETRIA_IDE_SCREENSHOT="${2:?usage: --shot <output.png>}"
-  export SYMMETRIA_IDE_WARMUP_MS="${SYMMETRIA_IDE_WARMUP_MS:-3000}"
-  export SYMMETRIA_IDE_USAGE_POLL=0
-fi
+case "${1:-}" in
+  --shot)
+    # Resolve BEFORE the cd below, so a relative path lands where the caller
+    # ran the script rather than inside the worktree. `-m` so a not-yet-created
+    # file still resolves.
+    export SYMMETRIA_IDE_SCREENSHOT="$(realpath -m "${2:?usage: --shot <output.png>}")"
+    export SYMMETRIA_IDE_WARMUP_MS="${SYMMETRIA_IDE_WARMUP_MS:-3000}"
+    export SYMMETRIA_IDE_USAGE_POLL=0
+    ;;
+  "")
+    ;;
+  *)
+    echo "unknown argument: $1" >&2
+    echo "usage: $(basename "$0") [--shot <output.png>]" >&2
+    exit 1
+    ;;
+esac
 
 cd "$IDE_WORKTREE"
 exec python -m symmetria_ide
