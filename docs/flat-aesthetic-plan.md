@@ -65,7 +65,7 @@ Append one entry per phase as it lands, newest last. Hashes are on the
     happens in Phase 5, when the components it names are deleted.
 
 **Phase 3 — a flat state grammar, extracted once. DONE (IDE only).**
-- IDE `<this commit>`. The FM's `TabBar` was NOT converted — see below.
+- IDE `4bbc6c3` + `c68b90e`. The FM's `TabBar` was NOT converted — see below.
 - New `qml/SegmentedControl.qml` replaces four hand-rolled copies: the location
   toggle and surface switcher in `AgentTopBar`, the scope switcher in
   `GitStatusPanel`, and the tab header in `GitHistoryView`. Net −101 lines, and
@@ -88,6 +88,34 @@ Append one entry per phase as it lands, newest last. Hashes are on the
   converting it means either duplicating `SegmentedControl` into that module or
   making the FM depend on the IDE's QML — a toolkit-layering decision, not a
   styling one. Left for a deliberate call rather than settled by momentum.
+
+**Phase 4 — reduce the toggles. BLOCKED ON A DECISION, inventory ready.**
+
+This phase's own entry below says it is a product conversation and must not
+start before Phases 1–3 are visible on screen. They now are — to the tooling,
+not yet to the user. Every control keeps its keyboard binding regardless; the
+question per row is only whether the VISIBLE affordance earns its space.
+
+| Control | Where | Always visible? | Recommendation |
+|---|---|---|---|
+| `local` `vps` | AgentTopBar, right | Only on paired projects | **Keep.** The one control whose visibility is already earned — it hides itself on the projects where it means nothing. |
+| `terminal` `editor` `agents` `git` | AgentTopBar, left | Always | **Keep, but it is the biggest single block of chrome text in the IDE** — four words, permanently. The alternative is showing only the ACTIVE surface and revealing the rest on hover, which trades a glance for a motion. Worth trying once the palette settles; not obviously better. |
+| `all` `this agent` | GitStatusPanel header | Whenever the panel shows | **Reduce.** This is the clearest candidate: a two-segment control in the narrowest column in the IDE, duplicating a global chord (`Ctrl+Shift+D`) and an in-panel key (`a`). Collapsing it to a single label that NAMES the current scope and toggles on click halves its width and removes a segmented control from a panel that has no room for one. |
+| `changes` `history` `PRs` | GitHistoryView tab header | On the git surface | **Keep.** This is the surface's primary navigation, and each label carries a live count that is worth reading. |
+| browser MCP | McpMenu popup | Only inside the popup | **Keep.** Costs nothing when closed. |
+
+So the concrete proposal is ONE change (the changes-panel scope) plus one
+experiment (collapsing the surface switcher). Everything else earns its place.
+
+**Phase 5 — delete the machinery. DELIBERATELY NOT STARTED.**
+
+Held on purpose, per this plan's own reasoning: `PillSurface` / `PillCard` /
+`Theme.depth` are the single place where the whole look retunes in one edit,
+and the user has not seen the result yet. Deleting the seam before the first
+round of adjustments removes exactly the lever those adjustments need. It is
+also the right moment for the `clay` terminology sweep (~50 references across
+15 IDE QML files), since the components those comments name die in the same
+change. Start it after the aesthetic is settled, not before.
 
 ## Decisions already taken
 
