@@ -601,66 +601,66 @@ QtObject {
         readonly property int quick: 150
     }
 
-    // ─── Depth (claymorphism) ────────────────────────────────────
-    // The "clay" recipe — the Symmetria toolkit's shared depth language,
-    // ported from the File Manager / Symmetria Shell `PillSurface`. A matte
-    // fill + hairline border is raised off the surface by TWO opposing outer
-    // shadows (a dark SE drop + a light NW lift) plus a top rim-highlight
-    // gradient. Together they fake an overhead light so the surface reads as
-    // a physically extruded chip rather than a flat rect — the same look the
-    // Shell's bar pills and the FM's active tab / dialogs use.
+    // ─── Depth (claymorphism — NEUTRALIZED) ──────────────────────
+    // ⚠ EVERY ALPHA IN THIS BLOCK IS DELIBERATELY 0. The IDE and the File
+    // Manager are moving to a flat aesthetic (Zed-like: flat fills, hairline
+    // separation, state expressed by fill + text weight rather than by
+    // extrusion). See `docs/flat-aesthetic-plan.md`. Do NOT "restore" these
+    // to their historical values — the flatness is the intent, not a bug.
+    //
+    // What this block used to do: a matte fill + hairline border was raised
+    // off the surface by TWO opposing outer shadows (a dark SE drop + a light
+    // NW lift) plus a top rim-highlight gradient, faking an overhead light so
+    // the surface read as a physically extruded chip. Zeroing the alphas is
+    // the whole kill switch — it flattens all 14 consuming files without
+    // touching one of them, because `PillSurface`/`PillCard` are the only
+    // readers and every consumer takes their defaults.
+    //
+    // The OFFSETS and BLURS are left at their historical values on purpose.
+    // They are inert while the alphas are 0 (a fully transparent shadow paints
+    // nothing regardless of geometry), and keeping them makes the whole clay
+    // look recoverable by editing four numbers if the flat direction is
+    // reversed mid-flight. Phase 5 of the plan deletes this block, both
+    // components, and the `RectangularShadow` machinery outright — at which
+    // point the geometry goes with it.
     //
     // Consumed ONLY by `qml/PillSurface.qml` (chip preset) and
     // `qml/PillCard.qml` (card preset). Surfaces bind those components, never
-    // these constants directly — the recipe stays in one place so a retune
-    // here propagates to every clay surface at once.
-    //
-    // Provenance: symmetria-file-manager/.../components/PillSurface.qml
-    // (chip defaults) + PillCard.qml (card overrides). Offsets/blur are
-    // nudged ~tighter than the FM's because most IDE clay sits on compact
-    // 24px chrome bars (see the typography "~20% smaller" note above), where
-    // the FM's wider blur would bleed past the bar's margins; the FM's own
-    // values are roomier surfaces.
+    // these constants directly.
     readonly property QtObject depth: QtObject {
         // Top rim highlight — the "lit-from-above" warmth shared by both
-        // presets. White at low alpha along the top edge, fading out by
-        // mid-height. The single cue that most distinguishes clay from a
-        // flat matte capsule.
-        readonly property real highlightAlpha: 0.08
+        // presets. Was 0.08; the single cue that most distinguished clay from
+        // a flat matte capsule, so it is the first thing to go.
+        readonly property real highlightAlpha: 0.0
 
-        // Chip preset — raised capsules on compact chrome: the surface
-        // switcher segment, the agent bubbles, the dialog buttons. Tight
-        // offsets + modest blur so the shadow stays mostly within a 24px
-        // bar's vertical margins instead of bleeding onto the content below.
+        // Chip preset — compact chrome capsules: the surface switcher
+        // segments, the agent bubbles, the dialog buttons. Alphas were
+        // dark 0.40 / light 0.10.
         readonly property QtObject chip: QtObject {
             readonly property real darkOffsetX: 1
             readonly property real darkOffsetY: 2
             readonly property real darkBlur: 8
-            readonly property real darkAlpha: 0.40
+            readonly property real darkAlpha: 0.0
             readonly property real lightOffsetX: -1
             readonly property real lightOffsetY: -1
             readonly property real lightBlur: 6
-            readonly property real lightAlpha: 0.10
-            // Bottom inner-shadow off for chips (a heavy bottom-inner band
-            // makes a small chip feel dated); cards turn it on.
+            readonly property real lightAlpha: 0.0
             readonly property real innerShadowAlpha: 0.0
         }
 
         // Card preset — framed surfaces: the modal panels (agent spawn menu,
-        // session picker, close-confirm dialog). Wider, softer shadows for
-        // an "embedded panel" feel + a faint bottom inner-shadow. Modals are
-        // centered in the full window with ample room around them, so the
-        // larger blur reads as depth rather than bleeding into neighbours.
+        // session picker, close-confirm dialog, usage detail popup). Alphas
+        // were dark 0.28 / light 0.07 / inner 0.03.
         readonly property QtObject card: QtObject {
             readonly property real darkOffsetX: 2
             readonly property real darkOffsetY: 4
             readonly property real darkBlur: 14
-            readonly property real darkAlpha: 0.28
+            readonly property real darkAlpha: 0.0
             readonly property real lightOffsetX: -2
             readonly property real lightOffsetY: -3
             readonly property real lightBlur: 11
-            readonly property real lightAlpha: 0.07
-            readonly property real innerShadowAlpha: 0.03
+            readonly property real lightAlpha: 0.0
+            readonly property real innerShadowAlpha: 0.0
         }
     }
 
