@@ -110,6 +110,7 @@ from .session_models import (  # importing also registers this @QmlElement type
 )
 from .trace import trace
 from .tree_state_cache import load_expanded, save_expanded
+from .ui_scheme import load_scheme
 from .usage_poller import UsagePoller
 from .usage_providers import (
     CLAUDE as _USAGE_CLAUDE,
@@ -8466,6 +8467,19 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # Ghostty. The fork's `fallbackFamilies` Q_PROPERTY (modification #9)
     # re-composes the cascade inside setVTFont.
     ctx.setContextProperty("editorFontFallbacks", _resolved_font.families()[1:])
+
+    # Shared Symmetria-toolkit colour scheme. `Theme.qml` reads this map to
+    # override its built-in dark literals, and the File Manager's FmTheme reads
+    # the SAME file through its own FileWatcher — so one file re-skins the IDE's
+    # chrome and the FM's panels together. See `ui_scheme.py` for the resolution
+    # order and the format; the file is optional and normally absent.
+    #
+    # Set BEFORE `engine.load()`, so the Theme singleton sees it the moment it
+    # instantiates. This is a load-once snapshot, NOT a live binding: Theme.qml
+    # reads it through a function call, which QML does not re-evaluate (gotcha
+    # #3). That is correct here precisely because the value never changes after
+    # startup — the FM side, which DOES hot-reload, owns the live path.
+    ctx.setContextProperty("uiScheme", load_scheme())
 
     # Editor nvim launch spec, consumed by the QMLTermSession inside Main.qml.
     # nvim is now spawned by the terminal widget (Konsole KSession), NOT by a

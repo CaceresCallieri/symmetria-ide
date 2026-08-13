@@ -86,12 +86,51 @@ QtObject {
         // uses, so one mark means one thing across the IDE.
     }
 
+    // ─── Optional shared palette override ────────────────────────
+    // `uiScheme` is a context property set in `app.py::_build_engine` from
+    // `ui_scheme.py`, which reads an OPTIONAL toolkit file at
+    // `~/.config/symmetria/ui/color-scheme.json`. The File Manager's FmTheme
+    // reads the same file, so one edit re-skins the IDE's chrome and the FM's
+    // panels together. The file is normally ABSENT — the literals below are the
+    // real default; the scheme only overrides what it declares.
+    //
+    // Guarded with `typeof` so this file still loads in a plain qmlscene or
+    // static-analysis context, where no context property exists.
+    //
+    // ⚠ Do NOT write the linter's name as a bare word in a .qml comment: it
+    // treats ANY comment containing that token as a lint directive and turns
+    // every following word into an unknown category. The `list<real>` note
+    // further down already costs the baseline 17 findings that way.
+    //
+    // Only the neutral SURFACE, BORDER and TEXT rungs read from the scheme.
+    // Accents (`mode.*`, `usage.*`, `diff.*`, `agent.*`) stay literal on
+    // purpose: they carry semantics tied to the wine_theme colorscheme, and a
+    // palette swap should re-skin the chrome without recolouring what "error"
+    // or "insert mode" means.
+    readonly property var _scheme: (typeof uiScheme !== "undefined" && uiScheme) ? uiScheme : ({})
+
+    // Look up a Material-3 role name, falling back to a literal.
+    // NOT a live binding: a function call in a binding does not re-evaluate
+    // (gotcha #3). Correct here because `uiScheme` is a load-once snapshot set
+    // before `engine.load()` and never mutated. Do NOT extend this to anything
+    // that changes at runtime.
+    function _c(role: string, fallback: string): string {
+        const value = theme._scheme[role];
+        return (typeof value === "string" && value.length > 0) ? value : fallback;
+    }
+
     // ─── Color ───────────────────────────────────────────────────
     readonly property QtObject color: QtObject {
-        // Backgrounds — matte pill palette.
+        // Backgrounds. Near-black base with small lightness steps between
+        // rungs: with the clay depth gone, the step in FILL plus the hairline
+        // border below are the only separation cues left, so the rungs are
+        // deliberately close together and the border does the edge work.
         readonly property QtObject bg: QtObject {
-            readonly property color chrome: "#201F1F"      // mattePill(m3surfaceContainerHigh, 0.3)
-            readonly property color selected: "#282728"    // mattePill(m3surfaceContainerHigh, 0.7)
+            readonly property color chrome: theme._c("surface", "#0f0f10")
+            // Popups, modals and any surface that must read as sitting ABOVE
+            // the chrome. Replaces the drop shadow that used to say so.
+            readonly property color raised: theme._c("surfaceContainer", "#161618")
+            readonly property color selected: theme._c("surfaceContainerHigh", "#1c1c1f")
             // Modal backdrop (AgentSpawnMenu). Black @ 45% — dims the
             // surface enough to read "modal" without hiding context;
             // sits over the already-translucent terminal panes, so a
@@ -101,18 +140,24 @@ QtObject {
 
         // Borders.
         readonly property QtObject border: QtObject {
-            readonly property color hairline: "#1fffffff"  // white @ 12% alpha — matte pill border
+            // White @ 8% alpha. Dropped from 12% with the flat move: the
+            // border is now the primary separation cue, and at 12% over a
+            // near-black base it reads as a drawn outline rather than an edge.
+            // Mirrors FmTheme's `_mattePill` border alpha — keep the two equal.
+            readonly property color hairline: "#14ffffff"
         }
 
         // Neutral text ramp. Five rungs cover the useful range from
         // "almost invisible" (dim) to "selected row foreground"
         // (selected). Most chrome text uses `normal` or `strong`.
+        // Slightly cooler and less bright than the pre-flat ramp: the darker
+        // base raises every rung's contrast, so the old values read as glare.
         readonly property QtObject text: QtObject {
-            readonly property color dim: "#7a7a7a"
-            readonly property color normal: "#b0b0b0"
-            readonly property color strong: "#e0e0e0"
-            readonly property color emphasis: "#e8e8e8"
-            readonly property color selected: "#f5f5f5"
+            readonly property color dim: theme._c("outline", "#6e6e73")
+            readonly property color normal: theme._c("onSurfaceVariant", "#a8a8ae")
+            readonly property color strong: theme._c("onSurface", "#d4d4d8")
+            readonly property color emphasis: theme._c("onPrimaryContainer", "#e4e4e8")
+            readonly property color selected: "#f0f0f2"
         }
 
         // Warm accents. `primary` and `bright` derive from wine_theme
@@ -564,14 +609,19 @@ QtObject {
         readonly property int md: 5
         // Floating popup panels (agent spawn menu, session picker,
         // which-key overlay). Mirrors the File Manager's
-        // `FmTheme.rounding.lg` (== 16, in
+        // `FmTheme.rounding.lg` (in
         // symmetria-file-manager/.../services/FmTheme.qml) so the IDE's
-        // modal surfaces carry the same soft corner the FM uses for its
+        // modal surfaces carry the same corner the FM uses for its
         // Miller columns + dialogs — one shared popup-corner language
         // across the Symmetria toolkit. Thin input chrome (the cmdline
         // box) deliberately stays at `md` — `lg` reads as a pill on a
         // ~34px-tall bar.
-        readonly property int lg: 16
+        //
+        // Came down from 16 with the flat move: a generous corner is what made
+        // an extruded clay card read as a soft physical object, and with the
+        // depth gone the same 16px reads as a dated rounded widget on a large
+        // panel. Change this and FmTheme.rounding.lg together.
+        readonly property int lg: 8
         // Badge pills use `radius: height / 2` directly — no token needed.
     }
 

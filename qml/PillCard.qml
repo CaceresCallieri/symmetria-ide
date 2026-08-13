@@ -1,16 +1,20 @@
-// CLAYMORPHISM card — the content-framing variant of PillSurface (IDE port of
-// the Shell / FM PillCard). Same recipe (matte fill + hairline border + convex
-// two-shadow depth + rim highlight), but tuned for FRAMING content rather than
-// being a chip:
+// Framed card — the content-framing variant of PillSurface (IDE port of the
+// Shell / FM PillCard), tuned for FRAMING content rather than being a chip:
 //   - rounded `lg` corners instead of a tight chip radius
-//   - softer, WIDER shadows (more "embedded panel" than "raised chip")
-//   - a faint bottom inner-shadow (innerShadowAlpha) for the recessed feel
+//   - a RAISED fill, one lightness rung above the chrome
 //
-// Implemented as a thin PillSurface with the `Theme.depth.card` preset, so the
-// depth recipe lives in exactly ONE place (PillSurface). It inherits
-// PillSurface's `default property alias content`, so `PillCard { SomeChild {} }`
-// reparents children into the body — which is how ModalOverlay drops its content
-// Column straight into the card.
+// ⚠ The depth is switched off. This was a claymorphism card (wider, softer
+// shadows plus a bottom inner-shadow for an "embedded panel" feel); the
+// flat-aesthetic move zeroed every alpha in `Theme.depth.card`, so what used to
+// say "this floats above the chrome" is now the FILL alone. That is why
+// `color` is pinned to `bg.raised` here rather than inheriting PillSurface's
+// `bg.chrome` default — without it a modal would be the exact colour of the bar
+// behind it and would lose its edge entirely. See docs/flat-aesthetic-plan.md.
+//
+// Implemented as a thin PillSurface so the (now inert) depth recipe still lives
+// in exactly ONE place. It inherits PillSurface's `default property alias
+// content`, so `PillCard { SomeChild {} }` reparents children into the body —
+// which is how ModalOverlay drops its content Column straight into the card.
 //
 // Use it for popups / dialogs / any framed surface. For capsule chips (the
 // surface switcher, agent bubbles, dialog buttons) use PillSurface directly.
@@ -21,6 +25,7 @@ PillSurface {
     id: root
 
     radius: Theme.radius.lg
+    color: Theme.color.bg.raised
 
     darkShadowOffsetX: Theme.depth.card.darkOffsetX
     darkShadowOffsetY: Theme.depth.card.darkOffsetY

@@ -10,6 +10,41 @@ Branch `feat/flat-aesthetic` in both repos:
 - `~/projects/symmetria-ide-wt/flat-aesthetic` (off `dev`)
 - `~/projects/symmetria-file-manager-wt/flat-aesthetic` (off `main`)
 
+## Progress log
+
+Append one entry per phase as it lands, newest last. Hashes are on the
+`feat/flat-aesthetic` branch of each repo.
+
+**Phase 1 — kill the clay. DONE.**
+- FM `78b3bcc` + `0e9d263` + `9be6ee9`; IDE `3a3b55d` + `7e01f51`.
+- Every depth alpha is 0 in both repos; offsets and blurs kept, inert.
+- Review caught two things worth keeping: a zero-alpha `RectangularShadow`
+  still runs its blur shader every frame (both repos now gate it on
+  `visible: <token> > 0`), and the consumer count was off by one (13, not 14).
+- Prediction that did NOT hold: the active state did not become illegible
+  between Phase 1 and Phase 3. `elevated` only ever gated the DEPTH — fill and
+  border always painted — so the segmented controls still read correctly. What
+  the flat pass actually exposed was SHAPE, not state: capsule radii and the
+  16px panel corners, both handled in Phase 2.
+
+**Phase 2 — the palette. DONE.**
+- FM `<see log>`; IDE `<see log>`.
+- Base is `#0F0F10` in both apps. Radii down to 8. Hairline border down to 8%.
+- The scheme file mechanism shipped, but INVERTED from what this plan first
+  described: the dark palette is the built-in DEFAULT in both apps, and the
+  file is an optional override. The shell's `color-scheme.json` was dropped
+  from the chain entirely rather than kept as a fallback — the whole point is
+  that these two apps no longer follow the shell. New IDE module:
+  `src/symmetria_ide/ui_scheme.py`, exposed to QML as the `uiScheme` context
+  property; FM repoints its existing `FileWatcher` to the same path.
+- Two things this plan did not anticipate, both found by implementing:
+  - `FmTheme._mattePill()` derives pill lightness from a HARDCODED formula and
+    takes only hue/saturation from the palette. Darkening the scheme therefore
+    could not darken a single pill; the formula itself had to come down.
+  - `overlay.subtle` was doing two jobs at one alpha — zebra row FILL and panel
+    BORDER. At 6% over a near-black base the border reads right and the fill
+    reads as a stripe, so the fill moved to a new `overlay.zebra` token at 3%.
+
 ## Decisions already taken
 
 | Question | Answer |
