@@ -27,8 +27,12 @@
 // expand/collapse state via the FM's built-in handler.
 //
 // Visual hierarchy: the chrome wrapper uses the IDE's Theme palette
-// (`Theme.color.bg.chrome`, hairline border) so it reads continuous with
-// the status bar and other chrome panes. Per-row visuals come from the
+// (`Theme.color.bg.chrome`, hairline border) — the PANEL rung of the
+// surface ladder, one step out from the content and one step in from the
+// bars, so this panel and the file tree below it read as one column. (It
+// used to say "continuous with the status bar"; the bars moved to
+// `bg.bar` on 2026-08-13, so that reason is no longer the right one even
+// though the token still is.) Per-row visuals come from the
 // FM's FmTheme — the same palette the main file tree uses, so the two
 // trees are visually unified by construction.
 //

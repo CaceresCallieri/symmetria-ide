@@ -53,7 +53,13 @@ import "design"
 Rectangle {
     id: root
 
-    color: Theme.color.bg.chrome
+    // `canvas`, like every other CENTRAL surface: this pane mounts in
+    // `mainContent` in the same XOR cluster as editor/terminal/agent/git/FM.
+    // It read `bg.chrome` until 2026-08-13 and so sat a rung lighter than its
+    // siblings — invisible to the verification pass because the pane is
+    // env-gated behind SYMMETRIA_IDE_SDK_PANE=1, which is exactly why it
+    // would have stayed wrong.
+    color: Theme.color.bg.canvas
 
     // Generous outer padding — full-window mode earns more breathing
     // room than the previous side-panel did. Still rhythm-tied to

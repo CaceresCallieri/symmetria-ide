@@ -34,13 +34,21 @@ cost before starting; a restart is the supported path today.
 Format (identical to the shell's, so one can be copied as a starting point):
 values are hex WITHOUT the leading ``#``, nested under ``colours``::
 
-    {"colours": {"surface": "0f0f10", "onSurface": "d4d4d8"}}
+    {"colours": {"surface": "131316", "onSurface": "d4d4d8"}}
 
 Key names are Material-3 role names. FmTheme applies only the keys its own
 palette already declares; ``Theme.qml`` maps the subset it cares about. When
 adding a key, add it on both sides — the two mappings are independent by design
 (the IDE's chrome and the FM's panels want different roles), so a key added here
 alone changes nothing.
+
+⚠ ``surface`` names the PANEL rung, not the content one. It meant "the one
+background colour" until the 2026-08-13 surface ladder split the IDE's chrome
+into canvas / panel / bar; the content rung is now ``surfaceContainerLowest``.
+A scheme file written before that split and setting ``surface`` to the old
+near-black would now paint the PANELS the content colour and collapse two
+rungs — re-check any existing file rather than assuming it still means what it
+did when it was written.
 """
 
 from __future__ import annotations

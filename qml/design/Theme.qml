@@ -208,7 +208,16 @@ QtObject {
         readonly property QtObject bg: QtObject {
             // The CENTRAL surface's ground: editor, terminal, agents, git and
             // FM. The DARKEST rung — see the ladder note above.
-            readonly property color canvas: theme._c("surfaceDim", "#0f0f10")
+            //
+            // `surfaceContainerLowest`, NOT the more obvious `surfaceDim`:
+            // Material 3 gives `surfaceDim` and `surface` the SAME value in a
+            // dark scheme (#141218 in the reference palette), so mapping the
+            // content rung onto it would collapse `canvas` and `chrome` into
+            // one colour for any user scheme that supplies a real M3 role set
+            // — silently erasing the distinction this ladder exists to make.
+            // `surfaceContainerLowest` (#0F0D13) is the one role that sits
+            // BELOW `surface`, which keeps the six rungs strictly increasing.
+            readonly property color canvas: theme._c("surfaceContainerLowest", "#0f0f10")
             // Panels and framed cards: the side panel, the git surface's
             // columns, the detail views. One step out from the content.
             readonly property color chrome: theme._c("surface", "#131316")
@@ -229,7 +238,11 @@ QtObject {
             // Consumers pick between the two; nothing derives one from the
             // other, because the step that reads correctly over `chrome` is
             // not the step that reads correctly over `raised`.
-            readonly property color raisedSelected: theme._c("surfaceContainerHighest", "#303038")
+            // #303036, not #303038: blue-minus-red across the rungs runs
+            // +1, +3, +3, +4, +5, so a +8 top rung took roughly double the
+            // per-step cool shift of everything below it and read as bluer
+            // rather than simply lighter. Same lightness, skew back on trend.
+            readonly property color raisedSelected: theme._c("surfaceContainerHighest", "#303036")
             // Modal backdrop (AgentSpawnMenu). Black @ 45% — dims the
             // surface enough to read "modal" without hiding context;
             // sits over the already-translucent terminal panes, so a
@@ -670,11 +683,20 @@ QtObject {
         }
 
         readonly property QtObject terminal: QtObject {
-            // Background: transparent so the wallpaper ambient tint
-            // shows through. The editor + shell QMLTermWidget panes sit
-            // as siblings in `Main.qml::mainContent`, sharing the same
-            // transparent wallpaper-blend surface contract.
-            readonly property color background: "transparent"
+            // The terminal's background IS the canvas. Zed's six dark themes
+            // set `terminal.background == editor.background` without
+            // exception, and the QMLTermWidget panes are the editor surface
+            // here, so one value serves both.
+            //
+            // ⚠ This token has NO QML consumer — the panes take their colours
+            // from the fork's `Symmetria.colorscheme`, a file in a different
+            // repo shipped as a pacman package. So nothing here can enforce
+            // the equality; the fork must be edited and `makepkg -sif` run for
+            // a change to reach a launcher-started IDE. Keep the two in step
+            // by hand. (It read "transparent" until 2026-08-13, describing a
+            // wallpaper-blend contract that had already been retired — the
+            // hazard of a declared canonical source that nothing reads.)
+            readonly property color background: theme.color.bg.canvas
             // Foreground deliberately BRIGHTER than text.normal (#b0b0b0):
             // the quiet-gray ramp is a CHROME aesthetic (labels, badges,
             // status fields), but terminal foreground is CONTENT the user
@@ -756,15 +778,6 @@ QtObject {
         // Badge pills use `radius: height / 2` directly — no token needed.
     }
 
-    // ─── Animation ───────────────────────────────────────────────
-    // Popup entrance motion — mirrors the File Manager's `Anim` component
-    // + scale-pop (FmTheme.animDuration / animCurveStandard, plus the
-    // Easing.OutBack overshoot FuzzyFinderPopup/ZoxidePopup use). Shared so
-    // EVERY IDE popup gets the same signature "pop in": a quick scale from
-    // small with a slight overshoot, paired with an opacity fade on the
-    // standard curve. New popup surfaces should bind these rather than
-    // hand-rolling per-component durations — keeps the toolkit's motion
-    // language coherent with the FM.
     // ─── Window transparency ─────────────────────────────────────
     // OFF by default (user decision 2026-08-13). One switch, because the
     // effect was never scoped to the terminal even though that is the only
@@ -784,16 +797,39 @@ QtObject {
     // Kept as a switch rather than deleted: the wallpaper blend may come back
     // deliberately, and if it does it must be scoped to the TERMINAL surface
     // alone -- an opaque window plus a translucent terminal pane, never a
-    // translucent window. Flipping `enabled` back to true restores the old
-    // behaviour exactly, including its defects; it is not a supported mode.
+    // translucent window.
+    //
+    // ⚠ Flipping `enabled` back to true does NOT restore the old look, and an
+    // earlier version of this note wrongly claimed it restored it "exactly".
+    // It cannot: the central-surface grounds (`mainContent`'s `bg.canvas`
+    // Rectangle and GitHistoryView's) are UNCONDITIONAL, so the panes would
+    // blend at 0.6 over an opaque canvas rather than over the wallpaper.
+    // That is deliberate and is the scoping the paragraph above asks for —
+    // the switch gives a translucent PANE over an opaque window, which is the
+    // supported shape. Restoring the full wallpaper blend would additionally
+    // mean gating those two grounds, and re-introducing every defect listed
+    // above; do not do it by reflex when the switch "looks broken".
     readonly property QtObject transparency: QtObject {
         readonly property bool enabled: false
         // Applied to the QMLTermWidget panes via `backgroundOpacity` when
-        // enabled. Matches the 0.6 baked into the fork's `Symmetria`
-        // colorscheme, which this property overrides at runtime.
+        // enabled. Deliberately a SECOND copy of the 0.6 baked into the fork's
+        // `Symmetria` colorscheme (a different repo), with no drift detection:
+        // this property is unread while `enabled` is false, so a drift could
+        // only ever surface when someone flips the switch, and a test would
+        // have to reach into a sibling checkout that is not guaranteed to
+        // exist. Accepted risk, recorded rather than guarded.
         readonly property real terminalOpacity: 0.6
     }
 
+    // ─── Animation ───────────────────────────────────────────────
+    // Popup entrance motion — mirrors the File Manager's `Anim` component
+    // + scale-pop (FmTheme.animDuration / animCurveStandard, plus the
+    // Easing.OutBack overshoot FuzzyFinderPopup/ZoxidePopup use). Shared so
+    // EVERY IDE popup gets the same signature "pop in": a quick scale from
+    // small with a slight overshoot, paired with an opacity fade on the
+    // standard curve. New popup surfaces should bind these rather than
+    // hand-rolling per-component durations — keeps the toolkit's motion
+    // language coherent with the FM.
     readonly property QtObject anim: QtObject {
         readonly property int duration: 400                                // == FmTheme.animDuration
         // `var`, not `list<real>`: a typed `list<real>` literal here crashes

@@ -27,11 +27,22 @@ Append one entry per phase as it lands, newest last. Hashes are on the
   the flat pass actually exposed was SHAPE, not state: capsule radii and the
   16px panel corners, both handled in Phase 2.
 
-**Phase 2 — the palette. DONE.**
+**Phase 2 — the palette. DONE, then SUPERSEDED on 2026-08-13.**
+
+> ⚠ **Every rung value in this phase's notes and in the table further down is
+> stale.** Phase 2 shipped a single-rung model — one `chrome` colour for bars,
+> panels and the content area alike. The 2026-08-13 surface ladder replaced it
+> with four rungs (`canvas` < `chrome` < `bar` < `raised`) and moved
+> `selected` and `raisedSelected` up with them. **The authoritative values and
+> the reasoning live in the ladder note in `qml/design/Theme.qml`, not here.**
+> This section is kept for the reasoning trail of how the flat palette was
+> arrived at; do not read a colour out of it.
+
 - FM `0ca0ec8`; IDE `4ce260c`. Review fixes in the commits that follow each.
 - Base is `#0F0F10` in both apps. Radii down to 8. Hairline border down to 8%.
   The `selected` rung shipped at `#1c1c1f`, not the `#1F1F22` this plan's table
-  below proposes — the table is the proposal, the code is the record.
+  below proposes — the table is the proposal, the code is the record. (Both
+  numbers are now historical; see the banner above.)
 - The scheme file mechanism shipped, but INVERTED from what this plan first
   described: the dark palette is the built-in DEFAULT in both apps, and the
   file is an optional override. The shell's `color-scheme.json` was dropped

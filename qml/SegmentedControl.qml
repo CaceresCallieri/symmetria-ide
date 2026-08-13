@@ -20,6 +20,15 @@
 // `bg.selected` would sit only a few lightness units above its own background
 // and the active segment would read at about half strength. Set it there.
 //
+// The choice is binary but there are now THREE base rungs under this control,
+// and `bg.selected` is tuned for the darker two. Measured step from the base
+// to the active fill: over `canvas` 0x17, over `chrome` 0x13, over `bar` 0x0f
+// — so the two bar-mounted switchers (the surface switcher and local|vps) get
+// the weakest active-state signal of the three. If that ever reads too faint
+// on a real seat, the fix is a THIRD value, not a brighter `bg.selected`:
+// raising the shared token would over-drive the git surface's consumers,
+// which sit on the darker rungs and already read correctly.
+//
 // Keyboard is NOT this component's business. Every one of these switchers has a
 // chord that is the primary path (Ctrl+Shift+E/T/A, Ctrl+Shift+U, Ctrl+Shift+D,
 // Tab) and the click is the convenience twin — a non-negotiable of the IDE, so

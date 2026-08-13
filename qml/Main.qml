@@ -820,15 +820,13 @@ Window {
                 // paints siblings in declaration order, so every pane below
                 // draws on top of this.
                 //
-                // Redundant against the opaque Window while `bg.canvas` and
-                // `bg.chrome` resolve to the same colour — and deliberately
-                // kept anyway, for two reasons. It is the seam where the
-                // content area can be given its own tone (see `bg.canvas`),
-                // which is a live design question; and it makes the central
-                // area's colour a property of the central area rather than
-                // something inherited from the window, so a pane that leaves
-                // a gap shows a decision instead of whatever is behind the
-                // app.
+                // Load-bearing, not decorative: the central area is the
+                // `canvas` rung and the Window root is `bar`, two steps
+                // lighter. Without this Rectangle every seam and margin
+                // between panes would show `bar` — the outermost chrome
+                // colour bleeding into the innermost content area, which is
+                // the ladder read backwards. See the ladder note in
+                // `qml/design/Theme.qml`.
                 Rectangle {
                     anchors.fill: parent
                     color: Theme.color.bg.canvas
@@ -860,8 +858,17 @@ Window {
 
                     // `backgroundOpacity` OVERRIDES the 0.6 baked into the
                     // fork's Symmetria colorscheme, and 1.0 is what makes the
-                    // pane opaque — see `Theme.transparency`. The other two
-                    // lines stay as they are: useFBORendering MUST remain
+                    // pane opaque — see `Theme.transparency`.
+                    //
+                    // ⚠ It MUST stay BELOW `colorScheme`. The fork's
+                    // `setColorScheme` applies the scheme's own parsed opacity
+                    // (that is upstream defect #2, which the fork exists to
+                    // fix), so swapping these two lines silently re-imposes
+                    // the baked 0.6 and returns all four panes to translucent.
+                    // Nothing tests this and no warning fires — an
+                    // alphabetising or reformatting pass would do it quietly.
+                    //
+                    // The other two lines stay as they are: useFBORendering MUST remain
                     // false (the FBO path has no alpha, so re-enabling the
                     // switch would silently do nothing), and `fillColor`
                     // transparent now reveals the canvas ground below rather
@@ -998,8 +1005,9 @@ Window {
                     focus: visible
 
                     colorScheme: "Symmetria"
-                    // Opaque unless the transparency switch is on;
-                    // see the editor pane above and Theme.transparency.
+                    // Opaque unless the transparency switch is on; see the
+                    // editor pane above and Theme.transparency. Order matters
+                    // — this must stay below `colorScheme`.
                     backgroundOpacity: Theme.transparency.enabled
                                        ? Theme.transparency.terminalOpacity : 1.0
                     useFBORendering: false
@@ -1104,8 +1112,9 @@ Window {
                         id: remoteTerminalView
 
                         colorScheme: "Symmetria"
-                        // Opaque unless the transparency switch is on;
-                        // see the editor pane above and Theme.transparency.
+                        // Opaque unless the transparency switch is on; see
+                        // the editor pane above and Theme.transparency. Order
+                        // matters — this must stay below `colorScheme`.
                         backgroundOpacity: Theme.transparency.enabled
                                            ? Theme.transparency.terminalOpacity : 1.0
                         useFBORendering: false
@@ -1329,7 +1338,9 @@ Window {
                                 // three in sync.
                                 colorScheme: "Symmetria"
                                 // Opaque unless the transparency switch is on;
-                                // see the editor pane above and Theme.transparency.
+                                // see the editor pane above and
+                                // Theme.transparency. Order matters — this
+                                // must stay below `colorScheme`.
                                 backgroundOpacity: Theme.transparency.enabled
                                                    ? Theme.transparency.terminalOpacity : 1.0
                                 useFBORendering: false
@@ -1968,7 +1979,10 @@ Window {
                 // background without the desktop wallpaper bleeding through.
                 // Uses `Theme.color.bg.chrome`, the same token GitStatusPanel
                 // uses for its own framed background, so the two panels read
-                // as one continuous dark column. (§3 P1: chrome → Theme.*)
+                // as one continuous column. That token is the PANEL rung of
+                // the surface ladder (one step out from the content, one step
+                // in from the bars) — the side panel is a panel, so it takes
+                // it; the bars do not. (§3 P1: chrome → Theme.*)
                 Rectangle {
                     anchors.fill: parent
                     color: Theme.color.bg.chrome
@@ -2037,6 +2051,15 @@ Window {
                     // at the compositor level. See docs/vision.md "Modes of
                     // inhabiting the IDE" for the framing this surface
                     // operationalizes.
+                    // Stays on `bg.chrome`, NOT `bg.bar`, and the choice is
+                    // deliberate rather than an oversight of the 2026-08-13
+                    // split. It is bar-SHAPED (statusBarHeight, full width of
+                    // its column) and sits directly under AgentTopBar, which
+                    // did move to `bg.bar` — so a step is now visible at that
+                    // seam. But the rung follows what a surface BELONGS to,
+                    // not what it looks like: this header is the top of the
+                    // side-panel column, and the column is a panel. Only the
+                    // two full-width chrome bars took `bg.bar`.
                     Rectangle {
                         id: locationHeader
                         Layout.fillWidth: true

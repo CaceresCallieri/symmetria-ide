@@ -9072,6 +9072,14 @@ def run() -> int:
     # spins up the QPA plugin. Without this, Wayland (and X) hand us an
     # opaque framebuffer and `color: "transparent"` in QML has no effect —
     # the compositor composites against black. Must precede app creation.
+    #
+    # ⚠ KEPT DELIBERATELY even though the window is opaque today. Nothing in
+    # the running app consumes it, so a cleanup pass reading this file alone
+    # would correctly conclude it is dead and delete it — that is the trap.
+    # It is the precondition for `Theme.transparency` in
+    # `qml/design/Theme.qml`: removing it turns a reversible switch into a
+    # one-way door, silently, because the switch would then flip and do
+    # nothing. Do not remove without retiring that switch on purpose.
     fmt = QSurfaceFormat.defaultFormat()
     fmt.setAlphaBufferSize(8)
     QSurfaceFormat.setDefaultFormat(fmt)
