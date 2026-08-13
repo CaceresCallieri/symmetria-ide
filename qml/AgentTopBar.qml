@@ -39,15 +39,18 @@ Rectangle {
     id: root
     color: Theme.color.bg.bar
 
-    // Hairline divider between the bar and the main content area below.
-    // Mirrors StatusBar's top-anchored divider — together they bracket
-    // the content with matched 1px chrome edges.
-    Rectangle {
-        width: root.width
-        height: 1
-        color: Theme.color.border.hairline
-        anchors.bottom: root.bottom
-    }
+    // NO hairline along the bottom edge, and none along StatusBar's top
+    // either. There used to be a matched 1px pair bracketing the content,
+    // from when every surface was ONE colour and a line was the only thing
+    // that could mark the boundary. The surface ladder does that work now —
+    // `bg.bar` here against `bg.canvas` below is a real step — so the line
+    // became a second, redundant answer to a question already answered.
+    //
+    // Removing it is what the rounded canvas corner needs, not just tidying:
+    // the hairline ran the FULL width, so it cut straight across the arc at
+    // the exact row where the corner starts to curve, and struck the side
+    // panel as a hard tick where the bar should simply become the panel. Put
+    // one back and both corners read as damaged again.
 
     // Location toggle — Local ↔ VPS context for THIS project. Renders only
     // when the pairing probe found the repo on a registered remote server

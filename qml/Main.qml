@@ -1947,8 +1947,19 @@ Window {
             // Visibility tracks `treeVisible`, so the pixel is reclaimed
             // cleanly whenever the sidebar hides — via the responsive
             // width gate or the Ctrl+S toggle (controller.toggle_tree).
+            //
+            // Inset by the canvas corner at BOTH ends. It is the brightest
+            // line on this seam (`outlineVariant`, well above either surface
+            // it divides), so at full height it ran straight down past the
+            // point where the canvas has already curved away and stood alone
+            // beside the corner wedge — a hard vertical tick in a corner
+            // whose whole purpose is to be soft. Stopping it where the arc
+            // starts is the same rule the removed hairlines now follow: no
+            // straight line crosses a rounded corner.
             Rectangle {
                 Layout.fillHeight: true
+                Layout.topMargin: Theme.radius.canvas
+                Layout.bottomMargin: Theme.radius.canvas
                 implicitWidth: 1
                 visible: controller.treeVisible
                 color: FmUi.FmTheme.palette.outlineVariant

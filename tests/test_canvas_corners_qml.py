@@ -13,7 +13,12 @@ two things fragile in ways a screenshot review would not catch:
     the failure is a curve that no longer matches a `Rectangle { radius }` of
     the same size beside it — invisible on its own, wrong next to Hyprland's.
 
-Neither is expressible as a comment somebody must remember to read.
+It also pins the corollary the corners forced: NO straight line may cross one.
+That retired the full-width hairline under AgentTopBar and over StatusBar, and
+inset the canvas/sidebar separator by the radius. Each looks like an omission
+to a future reader adding "definition" back to a boundary.
+
+None of it is expressible as a comment somebody must remember to read.
 """
 
 from __future__ import annotations
@@ -22,16 +27,32 @@ import re
 from pathlib import Path
 
 _QML = Path(__file__).resolve().parent.parent / "qml"
-_MAIN = (_QML / "Main.qml").read_text(encoding="utf-8")
+
+
+def _without_comments(source: str) -> str:
+    """Blank out `//` comments, keeping every line and column position.
+
+    Not cosmetic. `Main.qml` documents a retired overlay as "Was a Window-root
+    Loader at z:100", and a raw scan reads that prose as a live declaration —
+    which failed the z test on its first run against code that was correct.
+    Every scan below therefore runs on stripped source, and the brace counter
+    needs it too: a `{` inside a comment would throw the depth off. Replacing
+    with spaces rather than deleting keeps offsets aligned with the real file.
+    """
+    return re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), source)
+
+
+_MAIN = _without_comments((_QML / "Main.qml").read_text(encoding="utf-8"))
 _CORNERS = (_QML / "CanvasCorners.qml").read_text(encoding="utf-8")
 
 
-def _main_content_block() -> str:
-    """Return the source of `Main.qml`'s `Item { id: mainContent ... }`.
+def _main_content_span() -> tuple[int, int]:
+    """Return the `[start, end)` offsets of `Item { id: mainContent ... }`.
 
-    Brace-counted from the `Item {` that opens it rather than regex-matched:
-    the block is ~1100 lines and contains every central surface, so any
-    non-counting extraction stops at the first nested closing brace.
+    Offsets rather than the substring, because one test needs what comes AFTER
+    the block (the sidebar separator is its sibling). Brace-counted rather than
+    regex-matched: the block is ~1100 lines and holds every central surface, so
+    any non-counting extraction stops at the first nested closing brace.
     """
     marker = _MAIN.index("id: mainContent")
     start = _MAIN.rindex("Item {", 0, marker)
@@ -42,8 +63,13 @@ def _main_content_block() -> str:
         elif _MAIN[i] == "}":
             depth -= 1
             if depth == 0:
-                return _MAIN[start : i + 1]
+                return start, i + 1
     raise AssertionError("mainContent block is unbalanced")
+
+
+def _main_content_block() -> str:
+    start, end = _main_content_span()
+    return _MAIN[start:end]
 
 
 def test_overlay_is_mounted_inside_main_content() -> None:
@@ -56,20 +82,8 @@ def test_overlay_is_mounted_inside_main_content() -> None:
     assert "CanvasCorners {" in _main_content_block()
 
 
-def _without_comments(source: str) -> str:
-    """Blank out `//` comments, keeping every line and column position.
-
-    Not cosmetic: `Main.qml` documents a retired overlay as "Was a Window-root
-    Loader at z:100", and a raw scan reads that prose as a live declaration —
-    which failed this test on the first run against code that was correct.
-    Replacing with spaces rather than deleting keeps the reported offsets
-    usable if this ever grows a line number in its message.
-    """
-    return re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), source)
-
-
 def test_overlay_outranks_every_sibling_z() -> None:
-    block = _without_comments(_main_content_block())
+    block = _main_content_block()
     corners_at = block.index("CanvasCorners {")
     # `z:` values declared anywhere in mainContent, including inside the panes.
     # A nested item's z only orders it among ITS siblings, so comparing against
@@ -109,6 +123,45 @@ def test_arc_uses_the_quarter_circle_handle() -> None:
     assert match is not None, "the Bézier handle constant is gone"
     expected = 4.0 / 3.0 * (2.0**0.5 - 1.0)
     assert abs(float(match.group(1)) - expected) < 1e-9
+
+
+def test_no_full_width_hairline_brackets_the_content() -> None:
+    """The bars carry no 1px divider along the edge they share with the canvas.
+
+    A full-width line cuts across both of the arcs it passes, and strikes the
+    side panel as a hard tick exactly where the bar should just become the
+    panel. The surface ladder's lightness step already marks that boundary, so
+    the line was a second answer to an answered question. "Add a divider back
+    for definition" is the instinct this guards against.
+    """
+    for name in ("AgentTopBar.qml", "StatusBar.qml"):
+        source = _without_comments((_QML / name).read_text(encoding="utf-8"))
+        # The removed pair was `width: root.width` + `height: 1`. Matching that
+        # exact shape keeps the assertion narrow: 1px accents that are NOT
+        # full-width (a focus bar, an underline under one control) stay legal.
+        offenders = re.findall(
+            r"width:\s*root\.width[^}]*?height:\s*1\b|height:\s*1\b[^}]*?width:\s*root\.width",
+            source,
+            re.S,
+        )
+        assert not offenders, f"{name} grew a full-width 1px divider again"
+
+
+def test_sidebar_separator_stops_at_the_corner() -> None:
+    """The canvas/sidebar rule is inset by the corner radius at both ends.
+
+    It is the brightest line on that seam (`outlineVariant`, above both
+    surfaces it divides), so at full height it runs past the point where the
+    canvas has curved away and stands alone beside the corner wedge.
+    """
+    # The separator is the sibling AFTER mainContent, so search past the block
+    # rather than inside it.
+    tail = _MAIN[_main_content_span()[1] :]
+    separator = re.search(r"Rectangle \{[^}]*?implicitWidth:\s*1\b[^}]*?\}", tail, re.S)
+    assert separator is not None, "could not find the 1px sidebar separator"
+    body = separator.group(0)
+    assert "Layout.topMargin: Theme.radius.canvas" in body
+    assert "Layout.bottomMargin: Theme.radius.canvas" in body
 
 
 def test_delegate_context_is_bound() -> None:

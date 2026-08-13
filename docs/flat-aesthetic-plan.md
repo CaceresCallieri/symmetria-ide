@@ -199,6 +199,16 @@ experiment (collapsing the surface switcher). Everything else earns its place.
   runs x=24 at the first canvas row down to x=0 twenty-four rows later, which
   is a circle. The soft 7px ramp along the first row is the arc being TANGENT
   to that edge, not antialiasing slop.
+- **Corollary, found on the first real seat: no straight line may cross a
+  rounded corner.** Three separate complaints turned out to be two artefacts.
+  A 1px hairline ran the FULL width under AgentTopBar and over StatusBar, so
+  it cut across both arcs it passed and struck the side panel as a hard tick;
+  both are gone, and the ladder's lightness step marks those boundaries now —
+  the line was a leftover from the single-rung palette, where nothing else
+  could. The canvas/sidebar separator (the brightest line on that seam) ran
+  full height past the point where the canvas had already curved away, leaving
+  a vertical tick beside the corner wedge; it is now inset by the radius at
+  both ends.
 - Two corrections fell out of it. `pragma ComponentBehavior: Bound` removes
   the nine `unqualified` findings in `SegmentedControl.qml` that a comment in
   that file called unfixable — the claim was wrong and the comment is gone.

@@ -17,13 +17,10 @@ Rectangle {
     id: root
     color: Theme.color.bg.bar
 
-    // Hairline divider between editor and status bar.
-    Rectangle {
-        width: root.width
-        height: 1
-        color: Theme.color.border.hairline
-        anchors.top: root.top
-    }
+    // NO hairline along the top edge — see the note at the same place in
+    // AgentTopBar.qml, which carried the other half of the removed pair. In
+    // short: the surface ladder's step replaced it, and a full-width line
+    // cuts across the canvas's rounded corners.
 
     // Wine_theme mode → color mapping (sources in Theme.color.mode):
     //   NORMAL   → keyword             (#C28B12)

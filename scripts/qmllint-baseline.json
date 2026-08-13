@@ -12,7 +12,7 @@
     "unqualified": 6
   },
   "qml/AgentTopBar.qml": {
-    "missing-property": 48,
+    "missing-property": 47,
     "unqualified": 21
   },
   "qml/CommandLine.qml": {
@@ -36,7 +36,7 @@
   },
   "qml/Main.qml": {
     "import": 11,
-    "missing-property": 79,
+    "missing-property": 81,
     "unqualified": 269,
     "unresolved-type": 7,
     "unused-imports": 2
@@ -67,7 +67,7 @@
     "unqualified": 9
   },
   "qml/StatusBar.qml": {
-    "missing-property": 71,
+    "missing-property": 70,
     "unqualified": 50
   },
   "qml/Toast.qml": {
