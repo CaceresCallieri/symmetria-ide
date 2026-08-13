@@ -82,11 +82,18 @@ def configure_headless_mode(
     without compositor capture permissions).
     `SYMMETRIA_IDE_TEST_KEYS=<keys>` — injects a keycode string before
     the screenshot is taken.
-    `SYMMETRIA_IDE_INITIAL_SURFACE=<terminal|editor|agent|git>` — switches
-    the central surface during warmup, so the screenshot harness can capture
-    a surface other than the first-launch terminal (e.g. the git-history
-    viewer). No effect unless set; routes through the validating
+    `SYMMETRIA_IDE_INITIAL_SURFACE=<terminal|editor|agent|git|browser|fm>` —
+    switches the central surface during warmup, so the screenshot harness can
+    capture a surface other than the first-launch terminal (e.g. the
+    git-history viewer). No effect unless set; routes through the validating
     `set_central_surface` slot.
+
+    `fm` is the ONE value that is not a central surface: the file manager is an
+    OVERLAY (`show_fm`), so `set_central_surface` rejects it and the harness
+    would silently capture the terminal instead. It is special-cased here
+    because the FM's Miller columns are otherwise unreachable headlessly — the
+    only other way to see them is launching the standalone FM binary, which
+    opens a real window on the user's desktop.
     `SYMMETRIA_IDE_WARMUP_MS` / `SYMMETRIA_IDE_SETTLE_MS` — tune timing.
     """
     warmup_ms = int(os.environ.get("SYMMETRIA_IDE_WARMUP_MS", "1500"))
@@ -94,7 +101,10 @@ def configure_headless_mode(
 
     def _send_keys() -> None:
         initial_surface = os.environ.get("SYMMETRIA_IDE_INITIAL_SURFACE", "").strip()
-        if initial_surface:
+        if initial_surface == "fm":
+            log.info("opening the file-manager overlay for the screenshot")
+            controller.show_fm()
+        elif initial_surface:
             log.info("setting initial central surface: %r", initial_surface)
             controller.set_central_surface(initial_surface)
         if test_keys:
