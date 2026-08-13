@@ -34,6 +34,28 @@ def state_dir(subfolder: str) -> Path:
     return out
 
 
+def config_home() -> Path:
+    """Resolve the XDG config root (``$XDG_CONFIG_HOME``, else ``~/.config``).
+
+    Unlike :func:`state_dir` this creates nothing and appends no subfolder —
+    callers own their own layout under it (``server_registry`` puts its file in
+    ``symmetria-ide/``, ``ui_scheme`` in ``symmetria/ui/``).
+
+    A RELATIVE ``$XDG_CONFIG_HOME`` is ignored, per the XDG base directory
+    spec, and the ``~/.config`` fallback applies instead. That is not
+    pedantry here: the IDE runs many concurrent windows with different working
+    directories, so honouring a relative value would silently resolve config
+    to a different file per window. ``app.py``'s ``_scratch_dir`` applies the
+    same rule for the runtime dir.
+    """
+    base = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    if base:
+        candidate = Path(base).expanduser()
+        if candidate.is_absolute():
+            return candidate
+    return Path.home() / ".config"
+
+
 def repo_hash(repo_root: str) -> str:
     """Stable filename digest for a project root path.
 

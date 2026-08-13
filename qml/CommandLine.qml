@@ -58,7 +58,10 @@ Item {
             width: stack.width
             height: Math.max(root.cmdBoxMinHeight, cmdRow.implicitHeight + root.cmdBoxPaddingVertical)
             radius: Theme.radius.md
-            color: Theme.color.bg.chrome
+            // `bg.raised`: the cmdline box floats over the status bar, which
+            // paints `bg.chrome`. Before the flat move a drop shadow separated
+            // them; now the fill step is the only cue.
+            color: Theme.color.bg.raised
             border.color: Theme.color.border.hairline
             border.width: 1
 
@@ -145,7 +148,9 @@ Item {
             width: stack.width
             height: Math.min(root.maxPopupRows, popupList.count) * root.rowHeight + 2 * root.popupInset
             radius: Theme.radius.md
-            color: Theme.color.bg.chrome
+            // Same raised rung as the cmdline box above — this popup floats
+            // over the same chrome.
+            color: Theme.color.bg.raised
             border.color: Theme.color.border.hairline
             border.width: 1
             clip: true

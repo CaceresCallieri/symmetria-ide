@@ -94,7 +94,7 @@
   },
   "qml/design/Theme.qml": {
     "invalid-lint-directive": 17,
-    "missing-property": 25,
+    "missing-property": 26,
     "unqualified": 3
   },
   "qml/design/UsageFormat.qml": {

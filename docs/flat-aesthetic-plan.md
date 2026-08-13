@@ -28,8 +28,10 @@ Append one entry per phase as it lands, newest last. Hashes are on the
   16px panel corners, both handled in Phase 2.
 
 **Phase 2 — the palette. DONE.**
-- FM `<see log>`; IDE `<see log>`.
+- FM `0ca0ec8`; IDE `4ce260c`. Review fixes in the commits that follow each.
 - Base is `#0F0F10` in both apps. Radii down to 8. Hairline border down to 8%.
+  The `selected` rung shipped at `#1c1c1f`, not the `#1F1F22` this plan's table
+  below proposes — the table is the proposal, the code is the record.
 - The scheme file mechanism shipped, but INVERTED from what this plan first
   described: the dark palette is the built-in DEFAULT in both apps, and the
   file is an optional override. The shell's `color-scheme.json` was dropped
@@ -37,13 +39,30 @@ Append one entry per phase as it lands, newest last. Hashes are on the
   that these two apps no longer follow the shell. New IDE module:
   `src/symmetria_ide/ui_scheme.py`, exposed to QML as the `uiScheme` context
   property; FM repoints its existing `FileWatcher` to the same path.
-- Two things this plan did not anticipate, both found by implementing:
+- Two things this plan did not anticipate, both found by implementing, both
+  in the FM:
   - `FmTheme._mattePill()` derives pill lightness from a HARDCODED formula and
     takes only hue/saturation from the palette. Darkening the scheme therefore
     could not darken a single pill; the formula itself had to come down.
   - `overlay.subtle` was doing two jobs at one alpha — zebra row FILL and panel
     BORDER. At 6% over a near-black base the border reads right and the fill
     reads as a stripe, so the fill moved to a new `overlay.zebra` token at 3%.
+- Review found, and the fixes commit addressed: no value validation in
+  `ui_scheme.py` (a bad hex would BLANK a token rather than fall back, because
+  QML lands an unconvertible string on Qt's default, not on the property's);
+  three hand-copied mirrors of the text ramp left a rung behind (`diff.contextFg`
+  now binds instead of mirroring; the minimap's ramp and its Python twin were
+  re-derived); and the IDE's floating surfaces (which-key, cmdline, completion
+  popup) were still painting `bg.chrome`, i.e. the exact colour of the chrome
+  they float over.
+- Carried into Phase 3, deliberately:
+  - `bg.selected` (#1c1c1f) sits only ~6 lightness units above `bg.raised`
+    (#161618), so a selected row inside a modal or picker reads about half as
+    strongly as the same token does on chrome. Wants a `bg.raisedSelected`
+    rung — which is state grammar, so it belongs with the segmented control.
+  - The word "clay" appears ~50 times across 15 IDE QML files. Only the one
+    comment that stated a WRONG fill token was fixed; the terminology sweep
+    happens in Phase 5, when the components it names are deleted.
 
 ## Decisions already taken
 
@@ -55,6 +74,13 @@ Append one entry per phase as it lands, newest last. Hashes are on the
 | Base colour | `#0F0F10` — near black. |
 
 ## The two palettes (why this is not one edit)
+
+> **SUPERSEDED in part by the Phase 2 log entry above.** This section describes
+> the design as first proposed. What shipped drops Symmetria Shell's
+> `color-scheme.json` from the resolution chain ENTIRELY — there are two steps,
+> not the three listed below — and makes the dark palette the built-in default
+> rather than something the file supplies. Read it for the reasoning; do not
+> implement from it.
 
 The IDE renders chrome from two independent palettes:
 

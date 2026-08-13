@@ -91,10 +91,19 @@ _INDENT_RGBA: tuple[tuple[int, int, int], ...] = (
     # not chrome). Phase 6's off-viewport syntax-highlight pipeline
     # will eventually replace this fixed ramp with per-row colors
     # from the editor's actual treesitter highlights.
-    (0xE8, 0xE8, 0xE8),  # level 0 — text.emphasis (brightest)
-    (0xB0, 0xB0, 0xB0),  # level 1 — text.normal
-    (0x88, 0x88, 0x88),  # level 2 — mid-tone
-    (0x5A, 0x5A, 0x5A),  # level 3 — deep nesting (quietest)
+    # Re-derived with the flat-aesthetic palette move: Theme.text.* came down
+    # a rung, so these followed to keep the annotations honest.
+    #
+    # ⚠ These track the text ramp's LUMINANCE, not its exact hex. The flat
+    # palette's text rungs carry a slight cool tint (text.normal is #a8a8ae),
+    # while this ramp must stay strictly R == G == B — the Phase 4.5 decision
+    # that the silhouette reads as text rather than as tinted chrome, enforced
+    # by `test_indent_palette_is_neutral_gray`. So each rung is its text
+    # counterpart with the tint removed, not a copy of it.
+    (0xE4, 0xE4, 0xE4),  # level 0 — text.emphasis luminance (brightest)
+    (0xA8, 0xA8, 0xA8),  # level 1 — text.normal luminance
+    (0x7E, 0x7E, 0x7E),  # level 2 — mid-tone
+    (0x52, 0x52, 0x52),  # level 3 — deep nesting (quietest)
 )
 
 # Memoized indent QColors. Module-level construction so the paint loop
@@ -144,7 +153,11 @@ _DIAGNOSTIC_RGBA: tuple[tuple[int, int, int], ...] = (
     (0xD2, 0x60, 0x2D),  # error — Theme.mode.replace (wine_theme.error_red)
     (0xC2, 0x8B, 0x12),  # warn  — Theme.mode.normal  (wine_theme.keyword)
     (0x6D, 0x94, 0xE9),  # info  — Theme.mode.command (wine_theme.accent_blue)
-    (0x7A, 0x7A, 0x7A),  # hint  — Theme.text.dim
+    # `hint` is the one entry aliasing a NEUTRAL token rather than an accent,
+    # so it is the one that moved with the flat-aesthetic palette (text.dim
+    # #7a7a7a -> #6e6e73). The three accent rows above are wine_theme-derived
+    # and deliberately did not move.
+    (0x6E, 0x6E, 0x73),  # hint  — Theme.text.dim
 )
 
 # Map wire-format severity string to its index in `_DIAGNOSTIC_RGBA`.

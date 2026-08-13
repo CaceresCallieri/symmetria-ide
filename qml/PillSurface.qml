@@ -1,3 +1,11 @@
+// ⚠ THE DEPTH IS SWITCHED OFF. Every alpha in `Theme.depth` is 0 — the
+// flat-aesthetic move (see `docs/flat-aesthetic-plan.md`). Everything this
+// header says about shadows and rim highlights is HISTORICAL, kept so the
+// recipe stays legible if the direction is reversed; the two shadow items
+// below now skip their blur pass entirely. What the component still does is
+// fill + hairline border. The "clay" wording throughout the IDE's QML is
+// retired wholesale in the plan's last phase, together with this file.
+//
 // CLAYMORPHISM pill primitive — the IDE's port of the File Manager /
 // Symmetria Shell `PillSurface`, so the IDE speaks the same toolkit-wide
 // "clay" visual language (clay pills are everywhere in the Shell's bars and

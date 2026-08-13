@@ -904,15 +904,20 @@ def test_gutter_renders_independently_of_viewport_state():
 
 
 def test_indent_palette_is_neutral_gray():
-    """Phase 4.5 shifted from warm-amber to neutral gray. The brightest
-    rung must equal Theme.text.emphasis (#E8E8E8); the dimmest rung (#5A5A5A) steps slightly
-    below text.dim (#7A7A7A) intentionally — it remains perceptible
-    against the semi-transparent minimap background.
+    """Phase 4.5 shifted from warm-amber to neutral gray. The brightest rung
+    tracks Theme.text.emphasis's LUMINANCE (#E4E4E4); the dimmest rung
+    (#525252) steps slightly below text.dim (#6E6E73) intentionally — it
+    remains perceptible against the semi-transparent minimap background.
+
+    Luminance, not the hex itself: the flat-aesthetic palette gave the text
+    rungs a slight cool tint (text.emphasis is #E4E4E8), and this ramp must
+    stay strictly R == G == B, which is what the loop below enforces. So the
+    level-0 pin is the neutral of the ramp, never a copy of it.
     """
     from symmetria_ide.minimap_view import _INDENT_RGBA
 
     # Level 0 = brightest.
-    assert _INDENT_RGBA[0] == (0xE8, 0xE8, 0xE8)
+    assert _INDENT_RGBA[0] == (0xE4, 0xE4, 0xE4)
     # Monotonically decreasing brightness (R == G == B at every level,
     # gray ramp — no warm/cool bias).
     for r, g, b in _INDENT_RGBA:

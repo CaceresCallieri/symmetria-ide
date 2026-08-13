@@ -19,9 +19,12 @@
 // grid's resolved primary family without drift.
 //
 // Color provenance:
-//   - Chrome bg/border: Symmetria Shell mattePill() at intensity 0.3
-//     ("subtle" — the canonical value used by the shell's bar pills).
-//     Source: `~/.config/quickshell/symmetria/services/Colours.qml`.
+//   - Chrome bg/border: the flat-aesthetic near-black set, defined as literals
+//     below and overridable through the shared toolkit scheme file that
+//     `src/symmetria_ide/ui_scheme.py` resolves. These NO LONGER derive from
+//     Symmetria Shell's `mattePill()` — the shell took its own metallic
+//     direction that the IDE and the File Manager deliberately do not follow.
+//     Rationale + the full phase plan: `docs/flat-aesthetic-plan.md`.
 //   - Mode badges + accents: user's wine_theme nvim colorscheme, from
 //     `~/.config/nvim/lua/jc/plugins/theme/wine_theme/lua/lush_theme/
 //     wine_theme.lua`. Badge label color is `wine_theme.bg_primary`
@@ -102,11 +105,13 @@ QtObject {
     // every following word into an unknown category. The `list<real>` note
     // further down already costs the baseline 17 findings that way.
     //
-    // Only the neutral SURFACE, BORDER and TEXT rungs read from the scheme.
-    // Accents (`mode.*`, `usage.*`, `diff.*`, `agent.*`) stay literal on
-    // purpose: they carry semantics tied to the wine_theme colorscheme, and a
-    // palette swap should re-skin the chrome without recolouring what "error"
-    // or "insert mode" means.
+    // Only the neutral SURFACE and TEXT rungs read from the scheme. Accents
+    // (`mode.*`, `usage.*`, `diff.*`, `agent.*`) stay literal on purpose: they
+    // carry semantics tied to the wine_theme colorscheme, and a palette swap
+    // should re-skin the chrome without recolouring what "error" or "insert
+    // mode" means. `border.hairline` is literal too, for a different reason
+    // given at that token: it is an alpha-white overlay, and M3 has no role
+    // for one.
     readonly property var _scheme: (typeof uiScheme !== "undefined" && uiScheme) ? uiScheme : ({})
 
     // Look up a Material-3 role name, falling back to a literal.
@@ -144,6 +149,12 @@ QtObject {
             // border is now the primary separation cue, and at 12% over a
             // near-black base it reads as a drawn outline rather than an edge.
             // Mirrors FmTheme's `_mattePill` border alpha — keep the two equal.
+            //
+            // NOT scheme-driven, unlike the surface and text rungs. This is a
+            // translucent white overlay that has to work over whatever surface
+            // it lands on, and M3 has no role for that — `outlineVariant` is
+            // an opaque colour and would stop the border adapting. A palette
+            // swap therefore leaves the edge alpha alone, which is correct.
             readonly property color hairline: "#14ffffff"
         }
 
@@ -156,7 +167,15 @@ QtObject {
             readonly property color dim: theme._c("outline", "#6e6e73")
             readonly property color normal: theme._c("onSurfaceVariant", "#a8a8ae")
             readonly property color strong: theme._c("onSurface", "#d4d4d8")
-            readonly property color emphasis: theme._c("onPrimaryContainer", "#e4e4e8")
+            // `emphasis` and `selected` stay LITERAL: M3 has no neutral role
+            // above `onSurface`, and the nearest candidates are accent-derived
+            // (`onPrimaryContainer`) or inverted (`inverseSurface`). Reading
+            // either would let a scheme tint the top of a ramp the block
+            // comment above declares neutral — the exact outcome that comment
+            // rules out. They therefore ride `strong`'s scheme value visually
+            // rather than tracking it literally; if a swap makes them collide,
+            // raise them here rather than routing them.
+            readonly property color emphasis: "#e4e4e8"
             readonly property color selected: "#f0f0f2"
         }
 
@@ -348,7 +367,10 @@ QtObject {
             readonly property color addedFg: "#a8e088"
             readonly property color removedFg: "#f0a285"
             readonly property color hunkFg: "#c8a37a"        // accent.primary
-            readonly property color contextFg: "#b0b0b0"     // text.normal
+            // BOUND, not mirrored: this was a hand-copied "#b0b0b0 // text.normal"
+            // and the flat-aesthetic palette move left it a rung behind the
+            // ramp it claimed to follow. Binding removes the drift class.
+            readonly property color contextFg: theme.color.text.normal
         }
 
         // Terminal pane palette — the canonical source mirrored by the
@@ -449,10 +471,14 @@ QtObject {
                 // Mirrored on the Python side as
                 // `minimap_view.py::_INDENT_RGBA`. Drift detection in
                 // `tests/test_minimap_view.py::test_indent_palette_matches_theme_qml`.
-                readonly property color level0: "#e8e8e8"    // text.emphasis — top-level, brightest
-                readonly property color level1: "#b0b0b0"    // text.normal   — function-body level
-                readonly property color level2: "#888888"    // mid-tone between normal and dim
-                readonly property color level3: "#5a5a5a"    // deep nesting — quietest, slightly darker than text.dim (#7a7a7a)
+                // Strictly neutral (R == G == B), tracking the text ramp's
+                // LUMINANCE rather than its exact hex — the flat palette's
+                // text rungs carry a slight cool tint, and this silhouette
+                // must not. Mirrored in `minimap_view.py::_INDENT_RGBA`.
+                readonly property color level0: "#e4e4e4"    // text.emphasis luminance — top-level, brightest
+                readonly property color level1: "#a8a8a8"    // text.normal luminance   — function-body level
+                readonly property color level2: "#7e7e7e"    // mid-tone between normal and dim
+                readonly property color level3: "#525252"    // deep nesting — quietest, just under text.dim (#6e6e73)
             }
 
             // Viewport indicator — Phase 3 of docs/minimap-prd.md.
@@ -464,9 +490,13 @@ QtObject {
             //     `accent.focus` semantic ("focus / where attention
             //     is") at ~10% alpha — bright enough to perceive
             //     the boundary, dim enough that indent silhouette
-            //     reads through it. The matte-pill border at 12%
-            //     alpha is the upper bound; viewport fill goes
-            //     just under so frame + fill don't fight.
+            //     reads through it. The bound was once stated as
+            //     "just under the matte-pill border's 12% alpha";
+            //     that border is now 8% (the flat move), and this
+            //     fill deliberately did NOT follow it down. The two
+            //     are unrelated surfaces: the border separates chrome
+            //     from chrome, while this fill sits over the minimap's
+            //     own darker background, where 10% is still quiet.
             //
             //   - viewportFrame: 1-px hairline drawn at the top
             //     AND bottom edges of the spotlight, ~40% white.
@@ -554,8 +584,9 @@ QtObject {
             // Foreground deliberately BRIGHTER than text.normal (#b0b0b0):
             // the quiet-gray ramp is a CHROME aesthetic (labels, badges,
             // status fields), but terminal foreground is CONTENT the user
-            // reads all day — at #b0b0b0 over the 0.6-alpha dark blend it
-            // read washed-out/thin next to a reference terminal (Ghostty's
+            // reads all day — at the chrome ramp's `text.normal` over the
+            // 0.6-alpha dark blend it read washed-out/thin next to a
+            // reference terminal (Ghostty's
             // Material Darker fg is #eeffff). #dcdcdc keeps Symmetria's
             // restraint (no pure white) while restoring legibility.
             readonly property color foreground: "#dcdcdc"
@@ -613,14 +644,20 @@ QtObject {
         // symmetria-file-manager/.../services/FmTheme.qml) so the IDE's
         // modal surfaces carry the same corner the FM uses for its
         // Miller columns + dialogs — one shared popup-corner language
-        // across the Symmetria toolkit. Thin input chrome (the cmdline
-        // box) deliberately stays at `md` — `lg` reads as a pill on a
-        // ~34px-tall bar.
+        // across the Symmetria toolkit.
         //
         // Came down from 16 with the flat move: a generous corner is what made
         // an extruded clay card read as a soft physical object, and with the
         // depth gone the same 16px reads as a dated rounded widget on a large
         // panel. Change this and FmTheme.rounding.lg together.
+        //
+        // That left `md` (5) and `lg` (8) only 3px apart, so the old argument
+        // for the split — "`lg` reads as a pill on a ~34px-tall bar, so thin
+        // input chrome stays at `md`" — no longer carries it. They stay
+        // separate for a weaker but real reason: `lg` is the PANEL corner and
+        // `md` the CONTROL corner, and keeping the two nameable lets one move
+        // without the other. If a future pass finds them still converging,
+        // collapsing them into one token is the right call.
         readonly property int lg: 8
         // Badge pills use `radius: height / 2` directly — no token needed.
     }

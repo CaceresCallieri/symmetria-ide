@@ -26,7 +26,10 @@ import "design"
 Rectangle {
     id: root
 
-    color: Theme.color.bg.chrome
+    // `bg.raised`, not `bg.chrome`: this floats over the editor and the status
+    // bar, and since the flat move removed the drop shadow the fill step is
+    // what says so. Same reason PillCard pins the raised rung.
+    color: Theme.color.bg.raised
     border.color: Theme.color.border.hairline
     border.width: 1
     radius: Theme.radius.lg

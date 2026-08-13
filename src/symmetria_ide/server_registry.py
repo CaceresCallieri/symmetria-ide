@@ -33,9 +33,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from .state_paths import config_home
 
 log = logging.getLogger(__name__)
 
@@ -65,10 +66,13 @@ class RemoteServer:
 
 
 def config_path() -> Path:
-    """Resolve the registry file path (XDG config, ``~/.config`` fallback)."""
-    base = os.environ.get("XDG_CONFIG_HOME", "")
-    root = Path(base) if base else Path.home() / ".config"
-    return root / _CONFIG_RELPATH
+    """Resolve the registry file path (XDG config, ``~/.config`` fallback).
+
+    The XDG math lives in ``state_paths.config_home`` — shared with
+    ``ui_scheme``, which needs the identical resolution, and which is also
+    where the "ignore a relative ``$XDG_CONFIG_HOME``" rule is documented.
+    """
+    return config_home() / _CONFIG_RELPATH
 
 
 def _server_from_entry(entry: object) -> RemoteServer | None:

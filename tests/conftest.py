@@ -52,8 +52,14 @@ def _isolate_xdg_config(monkeypatch, tmp_path_factory):
     ``$XDG_CONFIG_HOME/symmetria-ide/servers.json`` and every
     ``AppController()`` construction probes VPS pairing through it — with the
     developer's real registry in scope the suite would fire live ssh probes
-    on each construction. Same override semantics as the fixtures below."""
+    on each construction. Same override semantics as the fixtures below.
+
+    Also DELETES ``SYMMETRIA_UI_SCHEME``. That var points ``ui_scheme`` at an
+    explicit palette file and OUTRANKS ``XDG_CONFIG_HOME``, so redirecting the
+    XDG root alone would not isolate it — a developer previewing a palette in
+    one worktree would silently feed it to the whole suite."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg_config")))
+    monkeypatch.delenv("SYMMETRIA_UI_SCHEME", raising=False)
 
 
 @pytest.fixture(autouse=True)

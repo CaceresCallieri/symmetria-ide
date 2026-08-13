@@ -139,14 +139,17 @@ Item {
         opacity: 0
     }
 
-    // Claymorphism panel — matte fill + hairline border + convex depth (two
-    // shadows + rim highlight + faint bottom inner-shadow), the FM/Shell
-    // dialog language, via the shared PillCard primitive. fill/border/radius
-    // come from PillCard's defaults (bg.chrome / hairline / radius.lg) — the
-    // same values the old inline Rectangle set, now sourced from the one clay
-    // recipe so a toolkit-wide retune carries through here for free. The
-    // shadows ride the scale-pop below (they're children of `panel`), so the
-    // whole clay card inflates on entrance.
+    // Framed panel — raised fill + hairline border, via the shared PillCard
+    // primitive. fill/border/radius come from PillCard's defaults
+    // (bg.RAISED / hairline / radius.lg), sourced from the one place so a
+    // toolkit-wide retune carries through here for free.
+    //
+    // This used to describe a claymorphism panel whose depth (two shadows +
+    // rim highlight + a bottom inner-shadow) is what made it read as floating.
+    // The flat-aesthetic move zeroed that depth, so the RAISED FILL is now the
+    // only thing separating this panel from the surface behind it — which is
+    // why PillCard pins `bg.raised` rather than inheriting `bg.chrome`, and
+    // why this comment names the token explicitly.
     PillCard {
         id: panel
         anchors.centerIn: parent
