@@ -1916,6 +1916,31 @@ Window {
                         }
                     }
                 }
+
+                // Rounds the central surface. LAST child and z above every
+                // sibling (the highest in this Item is the minimap's 20),
+                // because it works by painting over the panes rather than by
+                // clipping them — see `qml/CanvasCorners.qml` for why a
+                // radius cannot be asked of a QMLTermWidget or of the nested
+                // compositor, and why this costs four Bézier paths.
+                //
+                // The wedges take `bg.bar`, the rung of the two full-width
+                // chrome bars this surface is wedged between, so each corner
+                // reads as the bar tucking around the canvas. That is exact at
+                // the two LEFT corners, where the bar and the window ground
+                // are the same colour. At the two RIGHT ones the wedge also
+                // touches the side panel, which is `bg.chrome` — one rung and
+                // about four lightness units off. Accepted rather than solved:
+                // no single colour is correct for a wedge that straddles two
+                // neighbours, the 1px separator already marks that seam, and
+                // the alternative (per-corner colours) only moves the same
+                // mismatch from the wedge's side edge to its top edge.
+                CanvasCorners {
+                    anchors.fill: parent
+                    z: 50
+                    cornerRadius: Theme.radius.canvas
+                    cornerColor: Theme.color.bg.bar
+                }
             }
 
             // 1px vertical separator between editor and sidebar.

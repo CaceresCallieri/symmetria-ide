@@ -36,7 +36,7 @@
   },
   "qml/Main.qml": {
     "import": 11,
-    "missing-property": 77,
+    "missing-property": 79,
     "unqualified": 269,
     "unresolved-type": 7,
     "unused-imports": 2
@@ -60,8 +60,7 @@
     "unqualified": 6
   },
   "qml/SegmentedControl.qml": {
-    "missing-property": 24,
-    "unqualified": 9
+    "missing-property": 24
   },
   "qml/SessionsMenu.qml": {
     "missing-property": 15,

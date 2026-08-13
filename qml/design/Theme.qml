@@ -776,6 +776,21 @@ QtObject {
         // collapsing them into one token is the right call.
         readonly property int lg: 8
         // Badge pills use `radius: height / 2` directly — no token needed.
+
+        // The central surface's corner. Deliberately OFF the sm/md/lg scale:
+        // that scale sizes CONTROLS (a segment, a card, a popup), and this
+        // sizes a window-scale region, so a fourth rung on the control scale
+        // would have invited controls to reach for it.
+        //
+        // The value is Hyprland's `decoration:rounding` (24 as of 2026-08-13),
+        // copied rather than read — nothing in the IDE can query the
+        // compositor's decoration settings, and the point is that the canvas
+        // corner ECHOES the window corner the compositor already draws around
+        // the IDE. If Hyprland's rounding changes, this drifts silently and
+        // the only symptom is the two corners disagreeing. Painted by
+        // `qml/CanvasCorners.qml`, which explains why a corner here costs four
+        // paths instead of one `radius:` property.
+        readonly property int canvas: 24
     }
 
     // ─── Window transparency ─────────────────────────────────────

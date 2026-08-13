@@ -58,6 +58,23 @@
 // opposite of the agent/terminal pane Repeaters, where delegate churn kills a
 // running process; the rule there does not transfer to three Text items.)
 
+// `ComponentBehavior: Bound` binds each delegate to the context it was created
+// in, which is what lets the Repeater's delegate read the outer `root` id at
+// all as far as tooling is concerned. Without it every `root.*` read inside
+// the delegate is reported `unqualified` — nine of them here — because qmllint
+// will not resolve an outer id across a Component boundary. An earlier comment
+// in this file asserted those nine were unfixable short of injecting a
+// `required property` per read; that was wrong, and the linter's own hint
+// names this pragma as the remedy. Safe here because the delegate already
+// declares `required property var modelData` rather than relying on the
+// implicit context property, which is the one thing the pragma takes away.
+//
+// ⚠ Note the wording above: a comment line whose FIRST word after `//` is the
+// linter's name is parsed as a lint directive, and every following word is
+// read as a diagnostic category. Writing that name at the start of a line here
+// turned this paragraph into twelve `invalid-lint-directive` findings.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 
 import "design"
@@ -90,16 +107,6 @@ Row {
     // `Theme.font.family` IS `editorFontFamily` (Theme.qml resolves it), so
     // this is the same font by a declared route, and a consumer can override.
     //
-    // ⚠ It does NOT reduce this file's `unqualified` qmllint count, and no
-    // rearrangement will. EVERY `root.*` read from inside the Repeater's
-    // delegate is reported unqualified — qmllint does not resolve an outer id
-    // across a Component boundary — so the nine findings here are the id
-    // references (`root.current`, `root.segmentHeight`, `root.activated`, …),
-    // not a missed qualification. project-standards P0 prescribes exactly the
-    // remedy this file already applies (`id: root` at the outer item, then
-    // `root.foo`), so the category cannot go to zero short of converting every
-    // outer read into a `required property` injected per delegate. Do not
-    // spend time "fixing" these; the baseline records them deliberately.
     property string iconFontFamily: Theme.font.family
 
     // Does `current` name a segment that actually exists here? Normally yes,

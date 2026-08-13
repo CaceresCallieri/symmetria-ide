@@ -183,6 +183,29 @@ The inventory the decisions were taken from:
 So the concrete proposal is ONE change (the changes-panel scope) plus one
 experiment (collapsing the surface switcher). Everything else earns its place.
 
+**Phase 4.5 — round the canvas. DONE.**
+- `qml/CanvasCorners.qml` (new), mounted in `Main.qml`'s `mainContent`;
+  `Theme.radius.canvas` = 24, Hyprland's `decoration:rounding`.
+- The IDE's windows are not fullscreen, so Hyprland ALREADY rounds their outer
+  corners at 24. That is what settled which rectangle was meant: the window
+  corner was never square, the canvas corner was. The interior corner now
+  echoes the one the compositor draws.
+- Painted, not clipped. `clip` in Qt Quick is a rectangular scissor and cannot
+  follow a radius; a `layer` + mask would route every terminal frame AND the
+  nested compositor's surface through an FBO, which is the one place in this
+  app where frame delivery is already fragile. So four Bézier wedges in the
+  surrounding colour, drawn on top.
+- Verified by measurement, not by eye: the arc's profile at the top-left corner
+  runs x=24 at the first canvas row down to x=0 twenty-four rows later, which
+  is a circle. The soft 7px ramp along the first row is the arc being TANGENT
+  to that edge, not antialiasing slop.
+- Two corrections fell out of it. `pragma ComponentBehavior: Bound` removes
+  the nine `unqualified` findings in `SegmentedControl.qml` that a comment in
+  that file called unfixable — the claim was wrong and the comment is gone.
+  And a comment line whose first word after `//` is the linter's name is
+  parsed as a lint directive; writing one turned a paragraph into twelve
+  `invalid-lint-directive` findings.
+
 **Phase 5 — delete the machinery. DELIBERATELY NOT STARTED.**
 
 Held on purpose, per this plan's own reasoning: `PillSurface` / `PillCard` /
@@ -335,6 +358,24 @@ labels or reduces to the active surface's name alone.
 
 This phase is a product conversation, not a mechanical one. Do not start it
 before Phases 1–3 are visible on screen.
+
+### Phase 4.5 — round the canvas
+
+The central surface takes Hyprland's own corner (24px), so the interior of the
+window echoes the window's own outline instead of meeting it at a hard right
+angle.
+
+Implementation is `qml/CanvasCorners.qml` — four wedge paths drawn OVER the
+panes, because none of the things that live on this surface can be given a
+radius: QMLTermWidget paints Konsole's own opaque rectangle, the browser pane
+is a nested Wayland compositor hosting real Chrome, and the FM module paints
+its own. Read that file before changing the approach; it records why `clip`
+and `layer` are both wrong here.
+
+Open on a real seat: whether 24 is right for an INTERIOR corner. It is the
+compositor's value, chosen so the two corners agree, but Hyprland applies it to
+a whole window against a wallpaper while this one sits against a chrome bar four
+lightness units away. `Theme.radius.canvas` is the single lever.
 
 ### Phase 5 — delete the machinery
 
