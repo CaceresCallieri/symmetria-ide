@@ -218,7 +218,16 @@ def regressions(
 
 
 def check(paths: list[str]) -> int:
-    files = [Path(p) for p in paths if p.endswith(".qml")]
+    # No arguments means "check the whole tracked set", NOT "check nothing".
+    # pre-commit always passes filenames, so the empty case is only ever a
+    # human or an agent verifying by hand — and returning 0 there made the
+    # obvious command (`python3 scripts/qmllint_gate.py`) report success
+    # having inspected zero files. That false green hid a real regression for
+    # three commits: the bare invocation passed while the hook, given the same
+    # tree plus filenames, failed on +11 findings. Same shape as the Hyprland
+    # keyword trap in CLAUDE.md gotcha #4 — exit 0 is not evidence that the
+    # thing you asked for happened.
+    files = [Path(p) for p in paths if p.endswith(".qml")] or _tracked_qml_files()
     if not files:
         return 0
     # Named explicitly. qmllint reports a nonexistent path as an `import`

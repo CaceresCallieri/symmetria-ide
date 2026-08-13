@@ -70,9 +70,19 @@ Rectangle {
         z: 1
         visible: controller.vpsAvailable || controller.location === "vps"
 
+        // No icons here, unlike the surface switcher: this is a two-way
+        // control whose states have no mark a reader would guess, and both
+        // labels are one short word already. It stays fully labelled for the
+        // same reason the changes-scope switcher does.
+        //
+        // It stays SEGMENTED rather than collapsing to a cycling label
+        // (user decision 2026-08-13) because the axis is expected to grow
+        // past two: with several registered machines the right control is a
+        // dropdown, and a segmented row degrades into one far more naturally
+        // than a click-to-cycle label, which stops working entirely at N > 2.
         segments: [
-            { key: "local", label: "local" },
-            { key: "vps", label: "vps" },
+            { key: "local", label: "Local" },
+            { key: "vps", label: "VPS" },
         ]
         current: controller.location
         onActivated: key => controller.set_location(key)
@@ -98,16 +108,26 @@ Rectangle {
         z: 1
 
         // `key` is the controller's centralSurface value (the wire name stays
-        // singular "agent"); `label` is display-only.
+        // singular "agent"); `label` and `icon` are display-only.
+        //
+        // ICON + ACTIVE-ONLY LABEL (2026-08-13). This was four permanently
+        // drawn words, the largest single block of chrome text in the IDE.
+        // Now each surface keeps a mark and only the current one is named,
+        // which is where every editor with a comparable control landed
+        // independently (Zed, VS Code, JetBrains all show icons, none show a
+        // row of words) - so the switcher reads as navigation rather than as
+        // a settings row. A dropdown was considered and rejected here: this
+        // is the most-used control in the window, and a dropdown spends a
+        // click and a popup on every single use of it.
         segments: [
-            { key: "terminal", label: "terminal" },
-            { key: "editor", label: "editor" },
-            { key: "agent", label: "agents" },
+            { key: "terminal", label: "Terminal", icon: Theme.glyph.surface.terminal },
+            { key: "editor", label: "Editor", icon: Theme.glyph.surface.editor },
+            { key: "agent", label: "Agents", icon: Theme.glyph.surface.agent },
             // "git" not "history": the surface is dual-mode (a Tab-toggled
             // "changes" working-tree view + the commit log), and it opens on
             // changes — labelling it "history" would mis-name where the chip
             // lands.
-            { key: "git", label: "git" },
+            { key: "git", label: "Git", icon: Theme.glyph.surface.git },
             // NB: no "browser" segment, though there COULD be one now — the
             // browser became a real central surface again when Chrome moved
             // into the IDE's nested compositor. It is left out because the

@@ -33,9 +33,20 @@ def main_qml() -> str:
 
 
 def test_prs_mode_in_cycle_and_header(git_history_view: str):
-    """Tab cycles through "prs" and the tab header renders its segment."""
+    """Tab cycles through "prs" and the tab header renders its segment.
+
+    Asserted as two independent substrings rather than one whole-line match.
+    The original form pinned the exact source line -- `{ mode: "prs", label:
+    "PRs" }` -- and broke the moment the four hand-rolled tab headers were
+    folded into the shared `SegmentedControl` (`mode:` became `key:`, the
+    entry went multi-line, and the label gained a live PR count). That was a
+    formatting change with no behavioural content, so the failure carried no
+    information. Keep assertions here at the level of "the segment exists and
+    is spelled this way", never the surrounding punctuation.
+    """
     assert '"changes", "history", "prs"' in git_history_view
-    assert '{ mode: "prs", label: "PRs" }' in git_history_view
+    assert 'key: "prs"' in git_history_view
+    assert '"PRs"' in git_history_view
 
 
 def test_pr_controllers_injected_as_properties(git_history_view: str):

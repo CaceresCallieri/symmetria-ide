@@ -81,6 +81,33 @@ QtObject {
         // changes panel (a repo the focused agent changed OTHER than the
         // displayed one). Escape, never the literal PUA char (Theme rule).
         readonly property string repo: "\uf401"
+
+        // The four central surfaces, as the AgentTopBar switcher draws them.
+        // ONE icon family on purpose (Codicons, VS Code's set) plus a bare
+        // shell prompt: every mark here is MONOLINE, drawn with a single
+        // stroke weight. Filled candidates were rejected on measurement, not
+        // taste: a solid mark (nf-md-robot for agents, the boxed terminal
+        // variants) carries more ink than the flat `bg.selected` fill behind
+        // the ACTIVE segment, so an inactive surface pulled the eye harder
+        // than the current one and inverted the control's whole signal.
+        // Keep any replacement monoline for the same reason.
+        readonly property QtObject surface: QtObject {
+            // nf-fa-terminal: a bare `>_`, no enclosing box. The boxed
+            // variants (nf-cod-terminal, nf-oct-terminal) read heavier than
+            // the pencil and sparkle beside them.
+            readonly property string terminal: "\uf120"
+            // nf-cod-edit: pencil.
+            readonly property string editor: "\uea73"
+            // nf-cod-sparkle: the same sparkle idiom the agent chips use for
+            // activity, so one mark means "agent" across the whole IDE.
+            readonly property string agent: "\uec10"
+            // nf-cod-source_control. Deliberately NOT `worktree` (\uf418)
+            // above: that glyph is a per-agent STATE badge ("this agent lives
+            // in a worktree"), and one codepoint carrying both a state and a
+            // destination is how a badge stops being readable as a badge.
+            readonly property string git: "\uea68"
+        }
+
         // NOTE: the subscription-usage panel deliberately takes NO glyph from
         // here. Nerd-Font marks (nf-fa-asterisk / nf-fa-code) were the first
         // cut and read as generic symbols rather than as Anthropic and OpenAI;

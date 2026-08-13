@@ -237,15 +237,21 @@ FocusScope {
             id: tabHeader
             Layout.preferredHeight: Theme.size.modeBadgeHeight
 
+            // Deliberately NOT icon + active-only label, unlike the AgentTopBar
+            // surface switcher. Every segment here carries live data in its
+            // label — a pending-change count, the checked-out ref, an open-PR
+            // count — and the whole point of that data is to be readable
+            // WITHOUT switching to the tab. Hiding an inactive label to save
+            // width would throw away the reason the label exists.
             segments: [
                 {
                     key: "changes",
-                    label: "changes" + (root.hasPendingChanges
+                    label: "Changes" + (root.hasPendingChanges
                                         ? " · " + root.statusModel.count : "")
                 },
                 {
                     key: "history",
-                    label: "history" + (root.logController
+                    label: "History" + (root.logController
                                         && root.logController.currentRef.length > 0
                                         ? " · " + root.logController.currentRef : "")
                 },

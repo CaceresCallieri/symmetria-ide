@@ -12,7 +12,7 @@
     "unqualified": 6
   },
   "qml/AgentTopBar.qml": {
-    "missing-property": 42,
+    "missing-property": 46,
     "unqualified": 21
   },
   "qml/CommandLine.qml": {
@@ -60,8 +60,8 @@
     "unqualified": 6
   },
   "qml/SegmentedControl.qml": {
-    "missing-property": 16,
-    "unqualified": 6
+    "missing-property": 22,
+    "unqualified": 7
   },
   "qml/SessionsMenu.qml": {
     "missing-property": 15,

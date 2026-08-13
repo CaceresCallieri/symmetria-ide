@@ -366,18 +366,39 @@ FocusScope {
 
                 // Scope switcher. Keyboard is primary — Ctrl+Shift+D (global)
                 // or `a` while the panel is focused; the clicks are parity.
+                //
+                // Drawn ONLY when it can mean something (2026-08-13): with no
+                // focused agent it offers to filter the repo down to nobody,
+                // so it was a permanent two-segment control in the narrowest
+                // column in the IDE that was inert most of the time. The
+                // `scope === "agent"` clause is the way BACK — the same
+                // defensive shape the location toggle uses at the top bar:
+                // the pool can empty while the scope is still "agent" (a
+                // closed agent, an emptied pool), and a control that vanishes
+                // while its non-default state is active would strand the
+                // panel showing an empty agent view with no visible way out.
+                //
+                // Both chords stay unconditional on purpose. Flipping to
+                // agent scope with no agent is not an error state to be
+                // blocked; it lands on the panel's own "No focused agent"
+                // empty text, which ANSWERS the question the user just asked.
+                //
+                // No icons here, unlike the surface switcher: "all" and "this
+                // agent" have no mark a reader would guess (see the note in
+                // SegmentedControl's header).
                 SegmentedControl {
                     Layout.alignment: Qt.AlignVCenter
                     Layout.rightMargin: Theme.spacing.xs
+                    visible: root.focusedAgentSlot > 0 || root.scope === "agent"
                     // Tighter than the component's default on both axes: this
                     // sits in the narrow side panel, where the top bar's
-                    // roomier rhythm pushes "this agent" against the edge.
+                    // roomier rhythm pushes "This agent" against the edge.
                     horizontalPadding: Theme.spacing.sm
                     spacing: Theme.spacing.xxs
 
                     segments: [
-                        { key: "all", label: "all" },
-                        { key: "agent", label: "this agent" },
+                        { key: "all", label: "All" },
+                        { key: "agent", label: "This agent" },
                     ]
                     current: root.scope
                     onActivated: key => root.scope = key

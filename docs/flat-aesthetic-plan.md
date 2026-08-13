@@ -89,12 +89,53 @@ Append one entry per phase as it lands, newest last. Hashes are on the
   making the FM depend on the IDE's QML — a toolkit-layering decision, not a
   styling one. Left for a deliberate call rather than settled by momentum.
 
-**Phase 4 — reduce the toggles. BLOCKED ON A DECISION, inventory ready.**
+**Phase 4 — reduce the toggles. TWO OF FIVE ROWS DONE (2026-08-13).**
 
-This phase's own entry below says it is a product conversation and must not
-start before Phases 1–3 are visible on screen. They now are — to the tooling,
-not yet to the user. Every control keeps its keyboard binding regardless; the
-question per row is only whether the VISIBLE affordance earns its space.
+The product conversation happened. The user rejected the dropdown framing for
+binary controls and approved two changes; the table below is the inventory it
+was decided from, kept for the reasoning trail.
+
+Decided and shipped:
+
+1. **The changes-scope switcher hides when it is inert.** `visible:
+   focusedAgentSlot > 0 || scope === "agent"`. The second clause is the way
+   back: the pool can empty while the scope is still "agent", and a control
+   that vanished in its own non-default state would strand the panel on an
+   empty agent view. Both chords stay unconditional — flipping to agent scope
+   with no agent lands on the "No focused agent" empty text, which answers the
+   question rather than blocking it.
+2. **The surface switcher draws one icon per surface and names only the
+   active one.** `Theme.glyph.surface.*`, escapes not literals. Chosen against
+   a rendered comparison of three candidate sets at the real 11px on the real
+   background, not from a list of codepoint names: FILLED marks (nf-md-robot,
+   the boxed terminal glyphs) carry more ink than the flat `bg.selected` fill
+   behind the ACTIVE segment, so an inactive surface outweighed the current
+   one and inverted the control's signal. Everything here is monoline for that
+   reason. Cost accepted and commented in `SegmentedControl.qml`: the active
+   segment is wider, so switching re-flows the glyphs after it — eased and
+   clipped into a reveal, not removed.
+3. Labels capitalised across all four switchers (user preference).
+
+Decided and deliberately NOT changed:
+
+- **`local | vps` stays segmented.** Not a cycling label: the axis is expected
+  to grow past two machines, where a dropdown is right and a click-to-cycle
+  label stops working entirely. A segmented row degrades into a dropdown far
+  more naturally.
+- **The git tab header keeps every label.** Each carries live data — pending
+  count, checked-out ref, open-PR count — whose entire purpose is to be
+  readable WITHOUT switching tabs. Active-only labelling would trade the data
+  for width.
+
+Not from this phase, but found by it: **Phase 2 broke
+`test_pr_tab_qml.py::test_prs_mode_in_cycle_and_header` and three seal runs
+did not catch it.** The assertion pinned an exact source line (`{ mode: "prs",
+label: "PRs" }`) that the SegmentedControl extraction reformatted. The seal's
+reviewers read diffs; none of them runs the suite. Fixed, and rewritten to
+assert the segment's existence rather than its punctuation. **Run the suite
+once per phase from here on — a find-only reviewer is not a substitute.**
+
+The inventory the decisions were taken from:
 
 | Control | Where | Always visible? | Recommendation |
 |---|---|---|---|

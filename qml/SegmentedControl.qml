@@ -25,7 +25,22 @@
 // Tab) and the click is the convenience twin — a non-negotiable of the IDE, so
 // a consumer that adds a segment here must also give it a key.
 //
-// `segments` is an array of `{key, label}`. Compose a dynamic label (a count, a
+// ICONS AND THE ACTIVE-ONLY LABEL. A segment may carry an optional `icon` (a
+// Nerd Font glyph, from `Theme.glyph.*`). When it does, the icon draws always
+// and the label draws ONLY while that segment is current — so the control
+// costs one word plus N-1 glyphs instead of N words. Segments without an
+// `icon` keep the plain always-labelled rendering, which is what the narrow
+// two-way switchers still want: a lone glyph has to be guessable, and "all"
+// vs "this agent" has no icon anybody would read correctly.
+//
+// The cost is real and deliberate: the active segment is WIDER than the rest,
+// so switching re-flows every segment after it and the glyphs do not hold
+// fixed screen positions. Accepted because the chords are the primary path
+// and clicking is the twin; `Behavior on implicitWidth` + `clip` turn the
+// re-flow into a reveal rather than a jump. If position memory ever matters
+// more than width, the fix is a fixed per-segment width, not a wider label.
+//
+// `segments` is an array of `{key, label, icon?}`. Compose a dynamic label (a count, a
 // current ref) into `label` at the CALL SITE rather than passing a formatting
 // function: a function call in a QML binding does not re-evaluate (CLAUDE.md
 // gotcha #3), so a `labelFor(key)` property would silently freeze the first
@@ -41,7 +56,8 @@ import "design"
 Row {
     id: root
 
-    // [{key: string, label: string}]
+    // [{key: string, label: string, icon?: string}] — see the header note on
+    // `icon` and the active-only label.
     property var segments: []
 
     // The `key` of the active segment.
@@ -70,9 +86,25 @@ Row {
 
             required property var modelData
             readonly property bool isCurrent: root.current === segment.modelData.key
+            // Absent `icon` reads as undefined; coerce to "" so the two
+            // renderings below are a plain string test rather than a
+            // truthiness test on a possibly-missing key.
+            readonly property string iconGlyph: segment.modelData.icon || ""
+            // No icon means the label is the only content, so it must always
+            // draw. With an icon, the label is the CURRENT segment's alone.
+            readonly property bool showLabel:
+                segment.iconGlyph === "" || segment.isCurrent
 
             height: root.segmentHeight
-            implicitWidth: segmentLabel.implicitWidth + root.horizontalPadding * 2
+            implicitWidth: segmentContent.implicitWidth + root.horizontalPadding * 2
+
+            // The label appearing/disappearing changes this segment's width.
+            // Ease it, and clip so the label is REVEALED by the growing pill
+            // instead of spilling past its edge for the length of the ease.
+            clip: true
+            Behavior on implicitWidth {
+                NumberAnimation { duration: Theme.anim.quick }
+            }
 
             Rectangle {
                 anchors.fill: parent
@@ -98,19 +130,52 @@ Row {
                 }
             }
 
-            Text {
-                id: segmentLabel
+            // Row, not two anchored Texts: a positioner drops invisible
+            // children from the layout AND drops the spacing that would
+            // precede them, so the icon re-centres on its own the moment the
+            // label hides. Hand-anchoring would need a width:0 dance.
+            Row {
+                id: segmentContent
                 anchors.centerIn: parent
-                text: segment.modelData.label
-                color: segment.isCurrent ? Theme.color.text.strong : Theme.color.text.dim
-                font.family: Theme.font.family
-                font.pixelSize: Theme.font.size.xs
-                font.weight: segment.isCurrent ? Theme.font.weight.bold : Theme.font.weight.medium
-                font.letterSpacing: 0.6
-                renderType: Text.NativeRendering
+                spacing: Theme.spacing.xs
 
-                Behavior on color {
-                    ColorAnimation { duration: Theme.anim.quick }
+                Text {
+                    id: segmentIcon
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: segment.iconGlyph !== ""
+                    text: segment.iconGlyph
+                    // editorFontFamily, not Theme.font.family: the chrome UI
+                    // font has no private-use-area glyphs, so the mark would
+                    // render as a tofu box. Same reason the agent chips'
+                    // globe and worktree marks take this family.
+                    font.family: editorFontFamily
+                    // A rung above the label. Icons carry their weight over an
+                    // area rather than a stem, so matching the label's 9px
+                    // makes them read smaller than the text beside them.
+                    font.pixelSize: Theme.font.size.md
+                    color: segment.isCurrent ? Theme.color.text.strong : Theme.color.text.dim
+                    renderType: Text.NativeRendering
+
+                    Behavior on color {
+                        ColorAnimation { duration: Theme.anim.quick }
+                    }
+                }
+
+                Text {
+                    id: segmentLabel
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: segment.showLabel
+                    text: segment.modelData.label
+                    color: segment.isCurrent ? Theme.color.text.strong : Theme.color.text.dim
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                    font.weight: segment.isCurrent ? Theme.font.weight.bold : Theme.font.weight.medium
+                    font.letterSpacing: 0.6
+                    renderType: Text.NativeRendering
+
+                    Behavior on color {
+                        ColorAnimation { duration: Theme.anim.quick }
+                    }
                 }
             }
 
