@@ -308,6 +308,55 @@ Once the flat look is settled: remove `PillSurface.qml`, `PillCard.qml`, the
 with plain `Rectangle` or the new `SegmentedControl`. This is deliberately last
 — the components stay as the seam while the aesthetic is still moving.
 
+## Deferred past this branch
+
+### Delete the per-agent change filter entirely (decided 2026-08-13)
+
+**Not in this branch.** Sequence: finish the aesthetic work, merge it to `dev`,
+then remove the feature there. It is recorded here because the decision was
+taken during this branch's Phase 4 conversation, and because Phase 4 just spent
+work on the control that fronts it.
+
+**The decision.** Remove the "all | this agent" changes scope and the whole
+provenance machinery under it — not just the switcher.
+
+**The user's reasoning**, which is the part worth keeping: attributing a working-
+tree change to a specific agent is hard to infer *reliably*, and the complexity
+of trying is not worth its maintenance. The problem it addresses is better
+solved upstream by git hygiene — one worktree or one branch per agent — which
+makes the attribution structural instead of inferred. The v2 Bash-attribution
+caveats already in CLAUDE.md are evidence for this rather than against it: a
+snapshot diff around a Bash command races the reporter, so fast writes are
+missed and the feature is honestly approximate at its core.
+
+**⚠ The one thing that must NOT be deleted with it.** `_on_agent_hook` writes
+`work_root` and `touched` from the SAME write-tool branch, a few lines apart:
+
+  * `touched` — the provenance set. This feature. Goes.
+  * `work_root` — the worktree follow, which re-roots the tree and every git
+    surface onto the focused agent's live worktree. **Stays**, and is precisely
+    the mechanism this decision leans harder on.
+
+Deleting the write-tool branch wholesale would remove the replacement along
+with the thing being replaced. The cut is inside that branch, not around it.
+
+**Rough surface of the removal** (verify before trusting; this is a map, not an
+inventory): `GitStatusPanel.qml`'s scope switcher, agent-scope sections and
+foreign-repo Repeater; `GitChangeSectionHeader.qml` and Main.qml's
+`gitForeignProviderAdapter` if nothing else claims them; `agent_bash_attribution.py`
+whole; `git_controller._fold_agent_changes` / `changed_path_set_for`;
+AppController's `focusedAgentChanges*` / `focusedAgentForeignChanges` properties,
+`_partition_foreign_touched`, `_refresh_foreign_changes`, the `bash-attrib` and
+`foreign-status` thread pools and their `_foreign_probe_inflight` bookkeeping;
+the `Ctrl+Shift+D` chord and the panel's `a` key; `tests/test_agent_changes_filter.py`,
+`test_agent_changes_e2e.py`, `test_agent_foreign_changes.py`, and the two
+scope-switcher tests in `test_chrome_toggle_reduction_qml.py`; and the
+"Per-agent change filter" paragraph in CLAUDE.md.
+
+Phase 4's `visible:` gate on the switcher is not wasted work in the meantime —
+it keeps the control out of sight on every project without a focused agent
+until the removal lands.
+
 ## Open questions
 
 - **Popup motion.** `Theme.anim` currently defines a 400 ms scale-pop with an
