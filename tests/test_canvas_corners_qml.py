@@ -218,9 +218,25 @@ def test_sidebar_separator_stops_at_the_corner() -> None:
 
 
 def test_delegate_context_is_bound() -> None:
-    """`ComponentBehavior: Bound` is what lets the delegate read the outer id.
+    """`ComponentBehavior: Bound` is what resolves the delegate's outer ids.
 
-    Dropping it does not break rendering — it re-introduces five `unqualified`
-    findings that the lint baseline would then absorb as new debt.
+    Both files whose Repeater delegates read an outer `root` carry it, and the
+    counts are known: dropping it costs 5 `unqualified` findings in
+    CanvasCorners and 9 in SegmentedControl. Neither breaks rendering, which is
+    the point — the loss is silent.
+
+    The lint ratchet also catches it, and that is NOT a reason to skip this.
+    `scripts/qmllint_gate.py --update` exists precisely so a deliberate
+    increase can be recorded, so the gate makes a regression VISIBLE once
+    rather than preventing it. A test says "this was a decision", not "this is
+    debt somebody accepted at 2am".
     """
-    assert _CORNERS.lstrip().startswith("pragma ComponentBehavior: Bound")
+    for name in ("CanvasCorners.qml", "SegmentedControl.qml"):
+        source = (_QML / name).read_text(encoding="utf-8")
+        # Line-anchored, not `startswith`: SegmentedControl puts the pragma
+        # after its header comment (legal — a pragma need only precede the
+        # imports), so anchoring to the top of the file would pass for one
+        # file and fail for the other.
+        assert re.search(r"^pragma ComponentBehavior: Bound$", source, re.M), (
+            f"{name} lost `pragma ComponentBehavior: Bound`"
+        )
