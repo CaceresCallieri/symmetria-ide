@@ -55,7 +55,7 @@ QuickShell `FileWatcher` available.
 Contained, in both repos. No module consumer defines its own shadow.
 
 **IDE** — `Theme.depth` (the `chip` and `card` presets plus `highlightAlpha`),
-consumed only by `qml/PillSurface.qml` and `qml/PillCard.qml`. 14 files use
+consumed only by `qml/PillSurface.qml` and `qml/PillCard.qml`. 13 files use
 those two components: `AgentTopBar`, `GitStatusPanel`, `ModalOverlay`,
 `ConfirmDialog`, `Toast`, `UsageDetailPopup`, and 7 files under `qml/githistory/`.
 

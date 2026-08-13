@@ -97,6 +97,15 @@ Item {
 
     // Dark shadow (bottom-right) — declared FIRST so it renders furthest back
     // (paint order is declaration order for items without explicit z).
+    //
+    // `visible` gates on the TOKEN, not on `elevated`. A zero-alpha
+    // RectangularShadow is NOT free: it still runs its blur shader over the
+    // offset+blurred area every frame, once per instance, and the flat
+    // aesthetic leaves every alpha at 0. Gating on the token skips the pass
+    // entirely while the preset is flat. It must stay STATIC (the token never
+    // changes at runtime) — binding it to `elevated` instead would make the
+    // item pop in and out and cut the eased raise/settle below off mid-fade.
+    // Same idiom as the rim-highlight layer further down.
     RectangularShadow {
         anchors.fill: pillBody
         radius: pillBody.radius
@@ -104,6 +113,7 @@ Item {
         spread: 0
         offset.x: root.darkShadowOffsetX
         offset.y: root.darkShadowOffsetY
+        visible: root.darkShadowAlpha > 0
         color: Qt.rgba(0, 0, 0, root.elevated ? root.darkShadowAlpha : 0)
 
         // Ease the raise/settle as `elevated` toggles (state-transition
@@ -113,7 +123,7 @@ Item {
         }
     }
 
-    // Light shadow (top-left).
+    // Light shadow (top-left). Same static token gate — see above.
     RectangularShadow {
         anchors.fill: pillBody
         radius: pillBody.radius
@@ -121,6 +131,7 @@ Item {
         spread: 0
         offset.x: root.lightShadowOffsetX
         offset.y: root.lightShadowOffsetY
+        visible: root.lightShadowAlpha > 0
         color: Qt.rgba(1, 1, 1, root.elevated ? root.lightShadowAlpha : 0)
 
         Behavior on color {

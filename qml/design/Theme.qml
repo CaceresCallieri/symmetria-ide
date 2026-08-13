@@ -612,7 +612,7 @@ QtObject {
     // off the surface by TWO opposing outer shadows (a dark SE drop + a light
     // NW lift) plus a top rim-highlight gradient, faking an overhead light so
     // the surface read as a physically extruded chip. Zeroing the alphas is
-    // the whole kill switch — it flattens all 14 consuming files without
+    // the whole kill switch — it flattens all 13 consuming files without
     // touching one of them, because `PillSurface`/`PillCard` are the only
     // readers and every consumer takes their defaults.
     //
