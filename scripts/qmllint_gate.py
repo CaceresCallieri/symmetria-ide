@@ -145,12 +145,23 @@ def _tracked_qml_files() -> list[Path]:
     # `-z`, because plain `split()` breaks on any path containing a space (and
     # `git ls-files` would additionally quote it) — and this is the path that
     # WRITES the ledger, so a mangled name here corrupts the baseline itself.
-    listing = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "*.qml"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    #
+    # Reachable from `check()` since the no-argument fallback landed, not just
+    # from `--update`. A raw traceback out of a pre-commit hook reads as "the
+    # hook is broken" and invites --no-verify, which is the same argument the
+    # FileNotFoundError handling above makes for qmllint itself.
+    try:
+        listing = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "*.qml"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        raise SystemExit(
+            f"could not list tracked .qml files ({exc}).\n"
+            "Is this a git checkout, and is git on PATH?"
+        ) from None
     return [REPO_ROOT / name for name in listing.stdout.split("\0") if name]
 
 
@@ -227,7 +238,26 @@ def check(paths: list[str]) -> int:
     # tree plus filenames, failed on +11 findings. Same shape as the Hyprland
     # keyword trap in CLAUDE.md gotcha #4 — exit 0 is not evidence that the
     # thing you asked for happened.
-    files = [Path(p) for p in paths if p.endswith(".qml")] or _tracked_qml_files()
+    #
+    # The two empty cases are NOT the same and must not collapse into one
+    # `or`. "No arguments at all" is the manual invocation and gets the whole
+    # set; "arguments given, none of them .qml" is a typo (`… qml/Main.qm`),
+    # and answering it with a whole-tree scan that passes would be the same
+    # false green one layer along -- the caller asked about one file and would
+    # be told about all 36.
+    files = [Path(p) for p in paths if p.endswith(".qml")]
+    if paths and not files:
+        raise SystemExit("no .qml files among the arguments: " + ", ".join(paths))
+    if not paths:
+        # Scans the git INDEX, so a brand-new .qml that has never been staged
+        # is invisible here. Harmless in the hook path (pre-commit names the
+        # file once it is staged), but it does mean a bare run is "the tracked
+        # set", not "the tree".
+        files = _tracked_qml_files()
+        # A file deleted in the working tree is still in the index for one
+        # commit. Drop those rather than letting the explicit-argument typo
+        # guard below report a dirty tree as "no such file".
+        files = [f for f in files if f.exists()]
     if not files:
         return 0
     # Named explicitly. qmllint reports a nonexistent path as an `import`

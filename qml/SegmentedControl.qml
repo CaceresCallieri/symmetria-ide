@@ -74,6 +74,49 @@ Row {
     // the old look. `md` keeps it soft without rounding into a lozenge.
     property int segmentRadius: Theme.radius.md
 
+    // The family the icon glyphs render in. Declared here rather than reading
+    // the `editorFontFamily` context property inside the delegate, so that a
+    // SHARED component states its own dependency instead of requiring whatever
+    // engine instantiates it to have set a particular Python context property.
+    // `Theme.font.family` IS `editorFontFamily` (Theme.qml resolves it), so
+    // this is the same font by a declared route, and a consumer can override.
+    //
+    // ⚠ It does NOT reduce this file's `unqualified` qmllint count, and no
+    // rearrangement will. EVERY `root.*` read from inside the Repeater's
+    // delegate is reported unqualified — qmllint does not resolve an outer id
+    // across a Component boundary — so the nine findings here are the id
+    // references (`root.current`, `root.segmentHeight`, `root.activated`, …),
+    // not a missed qualification. project-standards P0 prescribes exactly the
+    // remedy this file already applies (`id: root` at the outer item, then
+    // `root.foo`), so the category cannot go to zero short of converting every
+    // outer read into a `required property` injected per delegate. Do not
+    // spend time "fixing" these; the baseline records them deliberately.
+    property string iconFontFamily: Theme.font.family
+
+    // Does `current` name a segment that actually exists here? Normally yes,
+    // but `centralSurface` has a FIFTH value, "browser", that the surface
+    // switcher deliberately carries no segment for. With no match, every
+    // segment would be non-current — so an icon-bearing control would render
+    // as a row of bare glyphs with no label and no highlight, saying nothing
+    // at all. Falling back to "label everything" there restores what the
+    // fully-labelled control used to show in that state.
+    //
+    // Written as a binding BLOCK, not `segments.some(...)`: a function call in
+    // a binding does not re-evaluate (gotcha #3), and `.some` additionally
+    // assumes a real JS array, which a QVariantList arriving from Python is
+    // not. The loop reads `root.segments` and `root.current` directly, so it
+    // re-evaluates when either changes and works for both shapes.
+    readonly property bool hasCurrentSegment: {
+        const list = root.segments;
+        if (!list)
+            return false;
+        for (let i = 0; i < list.length; ++i) {
+            if (list[i].key === root.current)
+                return true;
+        }
+        return false;
+    }
+
     signal activated(string key)
 
     spacing: Theme.spacing.sm
@@ -90,20 +133,35 @@ Row {
             // renderings below are a plain string test rather than a
             // truthiness test on a possibly-missing key.
             readonly property string iconGlyph: segment.modelData.icon || ""
+            // `label` is documented as required, but an absent one would assign
+            // `undefined` to Text.text (runtime warning) and a present-but-empty
+            // one would leave a zero-width VISIBLE Text, which still earns the
+            // Row's spacing and pads the pill with nothing.
+            readonly property string labelText: segment.modelData.label || ""
             // No icon means the label is the only content, so it must always
-            // draw. With an icon, the label is the CURRENT segment's alone.
+            // draw. With an icon, the label is the CURRENT segment's alone --
+            // unless nothing is current at all, when every label returns (see
+            // `hasCurrentSegment`).
             readonly property bool showLabel:
-                segment.iconGlyph === "" || segment.isCurrent
+                segment.iconGlyph === "" || segment.isCurrent || !root.hasCurrentSegment
 
             height: root.segmentHeight
             implicitWidth: segmentContent.implicitWidth + root.horizontalPadding * 2
 
-            // The label appearing/disappearing changes this segment's width.
-            // Ease it, and clip so the label is REVEALED by the growing pill
-            // instead of spilling past its edge for the length of the ease.
-            clip: true
+            // Only the icon-bearing controls ever change width, so only they
+            // pay for the ease and the clip -- a scissor node per delegate is
+            // wasted on a control whose `showLabel` is constant. (In
+            // GitHistoryView it would be wasted twice: its `segments` array is
+            // rebuilt whenever a count changes, which recreates the delegates,
+            // so a Behavior there could never run to begin with.)
+            clip: segment.iconGlyph !== ""
             Behavior on implicitWidth {
-                NumberAnimation { duration: Theme.anim.quick }
+                enabled: segment.iconGlyph !== ""
+                NumberAnimation {
+                    duration: Theme.anim.quick
+                    easing.type: Easing.Bezier
+                    easing.bezierCurve: Theme.anim.standardCurve
+                }
             }
 
             Rectangle {
@@ -134,9 +192,19 @@ Row {
             // children from the layout AND drops the spacing that would
             // precede them, so the icon re-centres on its own the moment the
             // label hides. Hand-anchoring would need a width:0 dance.
+            // LEADING-edge anchored, not centred. Centring looks equivalent at
+            // rest (the pill is exactly content + 2x padding) but breaks during
+            // the width ease: the content jumps to its full implicit width in
+            // one frame while the pill eases up behind it, so a CENTRED row
+            // overflows on BOTH sides and the clip cuts the icon's left edge
+            // for the length of the animation. Anchored left, the overflow is
+            // entirely on the trailing edge, which is what makes the clip read
+            // as the label being revealed rather than as the icon being eaten.
             Row {
                 id: segmentContent
-                anchors.centerIn: parent
+                anchors.left: parent.left
+                anchors.leftMargin: root.horizontalPadding
+                anchors.verticalCenter: parent.verticalCenter
                 spacing: Theme.spacing.xs
 
                 Text {
@@ -144,11 +212,14 @@ Row {
                     anchors.verticalCenter: parent.verticalCenter
                     visible: segment.iconGlyph !== ""
                     text: segment.iconGlyph
-                    // editorFontFamily, not Theme.font.family: the chrome UI
-                    // font has no private-use-area glyphs, so the mark would
-                    // render as a tofu box. Same reason the agent chips'
-                    // globe and worktree marks take this family.
-                    font.family: editorFontFamily
+                    // The glyphs are private-use-area codepoints, so this must
+                    // stay a Nerd Font family or every mark renders as a tofu
+                    // box. `iconFontFamily` defaults to `Theme.font.family`,
+                    // which IS the resolved Nerd Font -- an earlier version of
+                    // this comment claimed the two differed and named that as
+                    // the reason for reaching past Theme, which was simply
+                    // wrong (see Theme.qml's typography block).
+                    font.family: root.iconFontFamily
                     // A rung above the label. Icons carry their weight over an
                     // area rather than a stem, so matching the label's 9px
                     // makes them read smaller than the text beside them.
@@ -164,8 +235,8 @@ Row {
                 Text {
                     id: segmentLabel
                     anchors.verticalCenter: parent.verticalCenter
-                    visible: segment.showLabel
-                    text: segment.modelData.label
+                    visible: segment.showLabel && segment.labelText !== ""
+                    text: segment.labelText
                     color: segment.isCurrent ? Theme.color.text.strong : Theme.color.text.dim
                     font.family: Theme.font.family
                     font.pixelSize: Theme.font.size.xs

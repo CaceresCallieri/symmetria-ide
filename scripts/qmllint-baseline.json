@@ -60,8 +60,8 @@
     "unqualified": 6
   },
   "qml/SegmentedControl.qml": {
-    "missing-property": 22,
-    "unqualified": 7
+    "missing-property": 24,
+    "unqualified": 9
   },
   "qml/SessionsMenu.qml": {
     "missing-property": 15,
