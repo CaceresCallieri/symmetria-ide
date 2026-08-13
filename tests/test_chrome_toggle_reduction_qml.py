@@ -8,8 +8,8 @@ What they protect is a set of DECISIONS, not an implementation. Each one looks
 like an inconsistency to a future reader tidying the chrome, which is exactly
 why an assertion is cheaper than a comment alone:
 
-  * the surface switcher shows an icon per surface and names only the current
-    one, while its three sibling SegmentedControls stay fully labelled;
+  * the surface switcher and the location toggle show an icon per segment and
+    name only the current one; their two siblings stay fully labelled;
   * the changes-scope switcher is drawn only when a focused agent exists, or
     when the scope is already "agent" so the way back survives;
   * the git tab header keeps every label, because each carries a live count.
@@ -116,28 +116,40 @@ def test_surface_glyph_tokens_are_escapes_not_literal_pua(theme: str):
     scan repo-wide would fail on existing code rather than protect anything.
     Those are candidates for migration INTO Theme, not for this assertion.
     """
-    for token in ("\\uf120", "\\uea73", "\\uec10", "\\uea68"):
+    for token in (
+        # surfaces: terminal, editor, agents, git
+        "\\uf120",
+        "\\uea73",
+        "\\uec10",
+        "\\uea68",
+        # locations: local, vps
+        "\\uea7a",
+        "\\ueb50",
+    ):
         assert token in theme
 
     pua = _literal_pua(theme)
     assert not pua, f"literal private-use-area characters in Theme.qml: {pua}"
 
 
-def test_location_toggle_stays_fully_labelled(agent_top_bar: str):
-    """local/vps keeps both words — no icon a reader would guess, and it is
-    the seed of a future N-machine dropdown rather than a cycling label.
+def test_location_toggle_takes_the_switcher_treatment(agent_top_bar: str):
+    """local/vps carries icons and names only the active half, like the
+    surface switcher — and stays SEGMENTED rather than becoming a cycling
+    label, because the axis is expected to grow past two machines (where a
+    dropdown wins and a click-to-cycle label cannot go at all).
 
-    The `icon:` negative is asserted inside the matched ENTRY, not against the
-    whole file — AgentTopBar legitimately contains four of them, in the other
-    control. (An earlier draft sliced the file between the two controls' `id`s
-    to prove the same negative, which would have raised IndexError the day
-    someone reordered them — the brittleness this module argues against.)
+    Both halves keep a `label` even though only one is drawn at a time: the
+    active one must always be spelled out, so a glyph never has to carry the
+    answer to "where do my commands run".
     """
-    for key, label in (("local", "Local"), ("vps", "VPS")):
+    for key, label, token in (
+        ("local", "Local", "Theme.glyph.location.local"),
+        ("vps", "VPS", "Theme.glyph.location.vps"),
+    ):
         entry = _segment_entry(agent_top_bar, key)
         assert entry is not None, f"no segment entry for {key!r}"
         assert re.search(rf'label:\s*"{label}"', entry)
-        assert "icon:" not in entry
+        assert re.search(rf"icon:\s*{re.escape(token)}", entry)
 
 
 # ---------------------------------------------------------------------------

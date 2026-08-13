@@ -70,19 +70,25 @@ Rectangle {
         z: 1
         visible: controller.vpsAvailable || controller.location === "vps"
 
-        // No icons here, unlike the surface switcher: this is a two-way
-        // control whose states have no mark a reader would guess, and both
-        // labels are one short word already. It stays fully labelled for the
-        // same reason the changes-scope switcher does.
+        // Icon + active-only label, matching the surface switcher (user
+        // decision 2026-08-13, reversing this control's first cut). The
+        // earlier argument for keeping both words was that the saving is
+        // small (two short words) while the cost of misreading which
+        // location your commands run in is not -- a wrong surface is
+        // obvious immediately, a wrong location only after you run
+        // something. The counter-argument that won: the ACTIVE half is
+        // still spelled out in words, so the state you are in is never the
+        // one you have to infer from a glyph; only the state you are not in
+        // is, and that one is named the instant you move to it.
         //
         // It stays SEGMENTED rather than collapsing to a cycling label
-        // (user decision 2026-08-13) because the axis is expected to grow
-        // past two: with several registered machines the right control is a
-        // dropdown, and a segmented row degrades into one far more naturally
-        // than a click-to-cycle label, which stops working entirely at N > 2.
+        // because the axis is expected to grow past two: with several
+        // registered machines the right control is a dropdown, and a
+        // segmented row degrades into one far more naturally than a
+        // click-to-cycle label, which stops working entirely at N > 2.
         segments: [
-            { key: "local", label: "Local" },
-            { key: "vps", label: "VPS" },
+            { key: "local", label: "Local", icon: Theme.glyph.location.local },
+            { key: "vps", label: "VPS", icon: Theme.glyph.location.vps },
         ]
         current: controller.location
         onActivated: key => controller.set_location(key)

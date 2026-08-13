@@ -108,6 +108,27 @@ QtObject {
             readonly property string git: "\uea68"
         }
 
+        // The execution LOCATION (AgentTopBar's Local/VPS control). Same
+        // monoline Codicon family and the same active-only-label treatment as
+        // the surfaces above.
+        //
+        // Codicon codepoints do NOT follow their names in any guessable order:
+        // `cod-server` is \ueb50, while \ueb9f -- a plausible-looking guess --
+        // is an unrelated struck-through mark, and `cod-device_desktop` draws
+        // a circuit board. Read the codepoint out of the font BY GLYPH NAME
+        // (fontTools `getBestCmap()`) instead of taking one from a chart: a
+        // wrong guess here renders silently as the wrong picture, never as a
+        // missing glyph, so nothing warns you.
+        readonly property QtObject location: QtObject {
+            // nf-cod-vm: a monitor outline. Reads as "this machine".
+            readonly property string local: "\uea7a"
+            // nf-cod-server: a stacked rack. Distinct in SHAPE from the
+            // monitor, which is what makes the pair readable at 11px. The
+            // rejected alternative (nf-cod-vm_connect, \ueba9) was a monitor
+            // with a small badge, so the two states looked nearly identical.
+            readonly property string vps: "\ueb50"
+        }
+
         // NOTE: the subscription-usage panel deliberately takes NO glyph from
         // here. Nerd-Font marks (nf-fa-asterisk / nf-fa-code) were the first
         // cut and read as generic symbols rather than as Anthropic and OpenAI;

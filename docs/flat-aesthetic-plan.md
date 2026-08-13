@@ -116,12 +116,28 @@ Decided and shipped:
    clipped into a reveal, not removed.
 3. Labels capitalised across all four switchers (user preference).
 
+4. **`local | vps` takes the same icon + active-only-label treatment**
+   (decided after seeing 1–3 on screen; reverses this control's first cut).
+   `Theme.glyph.location.*`: a monitor outline for local, a stacked rack for
+   vps — chosen for SHAPE contrast at 11px, which is why `cod-vm_connect`
+   lost (a monitor with a badge, near-identical to the local monitor). It
+   stays SEGMENTED, not a cycling label: the axis grows past two machines,
+   where a dropdown is right and a click-to-cycle label cannot go at all.
+
+   The first cut kept both words on the argument that a wrong LOCATION is
+   discovered later than a wrong surface — you find out when you run
+   something. What overturned it: the active half is still spelled out, so
+   the state you are IN is never the one inferred from a glyph.
+
+   ⚠ Codicon codepoints do not follow their names in any guessable order.
+   Three of five first guesses drew the wrong picture — `cod-server` is
+   ``, not the plausible ``, and `cod-device_desktop` renders a
+   circuit board. Read them out of the font by GLYPH NAME (fontTools
+   `getBestCmap()`); a wrong codepoint renders silently as a different icon,
+   never as a missing glyph, so nothing warns you.
+
 Decided and deliberately NOT changed:
 
-- **`local | vps` stays segmented.** Not a cycling label: the axis is expected
-  to grow past two machines, where a dropdown is right and a click-to-cycle
-  label stops working entirely. A segmented row degrades into a dropdown far
-  more naturally.
 - **The git tab header keeps every label.** Each carries live data — pending
   count, checked-out ref, open-PR count — whose entire purpose is to be
   readable WITHOUT switching tabs. Active-only labelling would trade the data

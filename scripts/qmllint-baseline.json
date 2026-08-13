@@ -12,7 +12,7 @@
     "unqualified": 6
   },
   "qml/AgentTopBar.qml": {
-    "missing-property": 46,
+    "missing-property": 48,
     "unqualified": 21
   },
   "qml/CommandLine.qml": {
