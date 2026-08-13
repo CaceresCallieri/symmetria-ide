@@ -178,24 +178,50 @@ QtObject {
         // rungs: with the clay depth gone, the step in FILL plus the hairline
         // border below are the only separation cues left, so the rungs are
         // deliberately close together and the border does the edge work.
+        //
+        // ─── THE SURFACE LADDER (2026-08-13) ─────────────────────────
+        // Lightness increases with DISTANCE FROM THE CONTENT, not with
+        // "height". The content area is the darkest thing in the window and
+        // every layer of chrome around it is a step lighter:
+        //
+        //     canvas  #0f0f10   editor, terminal, agents, git, FM
+        //     chrome  #131316   side panel, framed cards, detail views
+        //     bar     #17171a   top bar, status bar, window root
+        //     raised  #1e1e22   popups and modals, which must clear `bar`
+        //
+        // This is Zed's convention, and it is Zed's rather than a guess:
+        // measured across all six of its dark themes (One Dark, Ayu Dark,
+        // Ayu Mirage, Gruvbox Dark/Hard/Soft), `editor.background` is the
+        // darkest surface in every one, `panel.background` sits above it and
+        // `background`/`title_bar`/`status_bar` above that. The same six also
+        // set `terminal.background` == `editor.background` WITHOUT EXCEPTION,
+        // which is why `canvas` is also what the QMLTermWidget panes paint
+        // (via the fork's Symmetria colorscheme — keep the two in step, and
+        // remember the fork needs `makepkg -sif` for a scheme change to reach
+        // a launcher-started IDE).
+        //
+        // ⚠ The intuition this replaced was that the content area should be
+        // LIGHTER than the chrome, like a lit page. That is a real convention
+        // — JetBrains and Xcode do it — but it is the opposite of Zed's, and
+        // Zed is what this project's aesthetic targets and may adopt as its
+        // editor. Do not "fix" the direction without re-measuring.
         readonly property QtObject bg: QtObject {
-            readonly property color chrome: theme._c("surface", "#0f0f10")
-            // The CENTRAL surface's ground -- the area the editor, terminal,
-            // agents, git and FM panes sit on, as opposed to the bars and the
-            // side panel, which use `chrome`.
-            //
-            // It is its own token even though it currently RESOLVES to the
-            // same value, because it is the single lever for one open design
-            // question: whether the content area should sit a step above the
-            // chrome (`raised`) so the bars read as a frame around it, the way
-            // Zed separates its editor from its dock, or stay uniform so the
-            // whole window reads as one surface. Point it at `raised` to try
-            // that; nothing else needs to change.
-            readonly property color canvas: theme.color.bg.chrome
+            // The CENTRAL surface's ground: editor, terminal, agents, git and
+            // FM. The DARKEST rung — see the ladder note above.
+            readonly property color canvas: theme._c("surfaceDim", "#0f0f10")
+            // Panels and framed cards: the side panel, the git surface's
+            // columns, the detail views. One step out from the content.
+            readonly property color chrome: theme._c("surface", "#131316")
+            // The two chrome BARS (AgentTopBar, StatusBar) and the window
+            // root behind everything. The outermost rung, so the bars read as
+            // a frame around the content rather than as part of it.
+            readonly property color bar: theme._c("surfaceContainerLow", "#17171a")
             // Popups, modals and any surface that must read as sitting ABOVE
-            // the chrome. Replaces the drop shadow that used to say so.
-            readonly property color raised: theme._c("surfaceContainer", "#161618")
-            readonly property color selected: theme._c("surfaceContainerHigh", "#1c1c1f")
+            // the chrome. Replaces the drop shadow that used to say so. Note
+            // it must clear `bar`, not `chrome` — a popup usually opens over
+            // the bars, which are the lightest chrome.
+            readonly property color raised: theme._c("surfaceContainer", "#1e1e22")
+            readonly property color selected: theme._c("surfaceContainerHigh", "#26262b")
             // The `selected` twin for anything sitting ON a raised surface (a
             // PillCard modal, a picker, a detail card). `selected` is only a
             // few lightness units above `raised`, so the same token used
@@ -203,7 +229,7 @@ QtObject {
             // Consumers pick between the two; nothing derives one from the
             // other, because the step that reads correctly over `chrome` is
             // not the step that reads correctly over `raised`.
-            readonly property color raisedSelected: theme._c("surfaceContainerHighest", "#26262b")
+            readonly property color raisedSelected: theme._c("surfaceContainerHighest", "#303038")
             // Modal backdrop (AgentSpawnMenu). Black @ 45% — dims the
             // surface enough to read "modal" without hiding context;
             // sits over the already-translucent terminal panes, so a

@@ -37,7 +37,7 @@ import "design"
 
 Rectangle {
     id: root
-    color: Theme.color.bg.chrome
+    color: Theme.color.bg.bar
 
     // Hairline divider between the bar and the main content area below.
     // Mirrors StatusBar's top-anchored divider — together they bracket
@@ -242,7 +242,7 @@ Rectangle {
                         radius: width / 2
                         color: Theme.color.mode.command
                         border.width: 1
-                        border.color: Theme.color.bg.chrome
+                        border.color: Theme.color.bg.bar
                         anchors.right: parent.right
                         anchors.top: parent.top
                         anchors.rightMargin: -Math.round(width * 0.2)
@@ -408,7 +408,7 @@ Rectangle {
                                 radius: width / 2
                                 color: Theme.color.accent.primary
                                 border.width: 1
-                                border.color: Theme.color.bg.chrome
+                                border.color: Theme.color.bg.bar
                                 anchors.right: browserGlyph.right
                                 anchors.top: browserGlyph.top
                                 anchors.rightMargin: -Math.round(width * 0.25)

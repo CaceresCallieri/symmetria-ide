@@ -15,7 +15,7 @@ import "design"
 
 Rectangle {
     id: root
-    color: Theme.color.bg.chrome
+    color: Theme.color.bg.bar
 
     // Hairline divider between editor and status bar.
     Rectangle {

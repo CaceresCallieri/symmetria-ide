@@ -38,7 +38,7 @@ Window {
     // stays. It costs nothing while this is opaque and is a precondition for
     // the switch working at all, so removing it would quietly turn a togglable
     // decision into a one-way door.
-    color: Theme.transparency.enabled ? "transparent" : Theme.color.bg.chrome
+    color: Theme.transparency.enabled ? "transparent" : Theme.color.bg.bar
     minimumWidth: 800
     minimumHeight: 400
 
