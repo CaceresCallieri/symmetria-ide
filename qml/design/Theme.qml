@@ -180,6 +180,18 @@ QtObject {
         // deliberately close together and the border does the edge work.
         readonly property QtObject bg: QtObject {
             readonly property color chrome: theme._c("surface", "#0f0f10")
+            // The CENTRAL surface's ground -- the area the editor, terminal,
+            // agents, git and FM panes sit on, as opposed to the bars and the
+            // side panel, which use `chrome`.
+            //
+            // It is its own token even though it currently RESOLVES to the
+            // same value, because it is the single lever for one open design
+            // question: whether the content area should sit a step above the
+            // chrome (`raised`) so the bars read as a frame around it, the way
+            // Zed separates its editor from its dock, or stay uniform so the
+            // whole window reads as one surface. Point it at `raised` to try
+            // that; nothing else needs to change.
+            readonly property color canvas: theme.color.bg.chrome
             // Popups, modals and any surface that must read as sitting ABOVE
             // the chrome. Replaces the drop shadow that used to say so.
             readonly property color raised: theme._c("surfaceContainer", "#161618")
@@ -727,6 +739,35 @@ QtObject {
     // standard curve. New popup surfaces should bind these rather than
     // hand-rolling per-component durations — keeps the toolkit's motion
     // language coherent with the FM.
+    // ─── Window transparency ─────────────────────────────────────
+    // OFF by default (user decision 2026-08-13). One switch, because the
+    // effect was never scoped to the terminal even though that is the only
+    // place it was wanted: it came from the WINDOW being transparent
+    // (`Main.qml`'s root `color`), so every surface that does not paint its
+    // own opaque ground inherited it. What that actually looked like:
+    //
+    //   • the git surface's tab strip showed the wallpaper's bright sky as a
+    //     pale band across the top, because GitHistoryView is a bare
+    //     FocusScope with no background of its own;
+    //   • OpenCode drew ITS own background inside an agent pane, which did
+    //     not match, leaving a halo around the block. Claude looked fine only
+    //     because it happens to paint a background we agree with -- that was
+    //     luck, not design;
+    //   • every seam and margin between panes leaked the desktop.
+    //
+    // Kept as a switch rather than deleted: the wallpaper blend may come back
+    // deliberately, and if it does it must be scoped to the TERMINAL surface
+    // alone -- an opaque window plus a translucent terminal pane, never a
+    // translucent window. Flipping `enabled` back to true restores the old
+    // behaviour exactly, including its defects; it is not a supported mode.
+    readonly property QtObject transparency: QtObject {
+        readonly property bool enabled: false
+        // Applied to the QMLTermWidget panes via `backgroundOpacity` when
+        // enabled. Matches the 0.6 baked into the fork's `Symmetria`
+        // colorscheme, which this property overrides at runtime.
+        readonly property real terminalOpacity: 0.6
+    }
+
     readonly property QtObject anim: QtObject {
         readonly property int duration: 400                                // == FmTheme.animDuration
         // `var`, not `list<real>`: a typed `list<real>` literal here crashes

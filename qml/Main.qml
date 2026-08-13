@@ -26,12 +26,19 @@ Window {
     height: 720
     visible: true
     title: "Symmetria IDE"
-    // Transparent clear so the compositor shows the wallpaper through
-    // the editor viewport (matches Ghostty + other transparent terminals
-    // on Hyprland). The status bar and cmdline overlay are opaque —
-    // they paint `Theme.color.bg.chrome` (Symmetria Shell matte-pill)
-    // on top. See `qml/design/Theme.qml` for the palette source.
-    color: "transparent"
+    // OPAQUE (user decision 2026-08-13). This one line is what the whole
+    // "the IDE is transparent in places it should not be" problem came down
+    // to: a transparent WINDOW is inherited by every surface that does not
+    // paint its own ground, so the effect was never confined to the terminal
+    // it was chosen for. The catalogue of what leaked, and the terms on which
+    // the blend could return, are in `Theme.transparency` — one switch, still
+    // flippable, deliberately off.
+    //
+    // The alpha buffer request in `app.py::run` (`setAlphaBufferSize(8)`)
+    // stays. It costs nothing while this is opaque and is a precondition for
+    // the switch working at all, so removing it would quietly turn a togglable
+    // decision into a one-way door.
+    color: Theme.transparency.enabled ? "transparent" : Theme.color.bg.chrome
     minimumWidth: 800
     minimumHeight: 400
 
@@ -809,6 +816,24 @@ Window {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
 
+                // The central surface's ground. FIRST child on purpose: QML
+                // paints siblings in declaration order, so every pane below
+                // draws on top of this.
+                //
+                // Redundant against the opaque Window while `bg.canvas` and
+                // `bg.chrome` resolve to the same colour — and deliberately
+                // kept anyway, for two reasons. It is the seam where the
+                // content area can be given its own tone (see `bg.canvas`),
+                // which is a live design question; and it makes the central
+                // area's colour a property of the central area rather than
+                // something inherited from the window, so a pane that leaves
+                // a gap shows a decision instead of whatever is behind the
+                // app.
+                Rectangle {
+                    anchors.fill: parent
+                    color: Theme.color.bg.canvas
+                }
+
                 // Editor surface: a QMLTermWidget (our fork of Konsole's VT
                 // engine, see /home/jc/projects/symmetria-qmltermwidget) hosting
                 // `nvim --listen` as a TUI. nvim renders its grid here via the
@@ -833,13 +858,17 @@ Window {
                     visible: !controller.agentVisible && !controller.fmVisible && controller.editorVisible
                     focus: visible
 
-                    // Transparency: useFBORendering MUST be false (the FBO path
-                    // has no alpha → opaque); the image path is still C++-fast.
-                    // colorScheme "Symmetria" applies our 0.6 background opacity
-                    // (the fork's parse+apply fix). fillColor transparent + the
-                    // Window's transparent clear = wallpaper blend on Hyprland.
-                    // Retune live via the `backgroundOpacity` Q_PROPERTY.
+                    // `backgroundOpacity` OVERRIDES the 0.6 baked into the
+                    // fork's Symmetria colorscheme, and 1.0 is what makes the
+                    // pane opaque — see `Theme.transparency`. The other two
+                    // lines stay as they are: useFBORendering MUST remain
+                    // false (the FBO path has no alpha, so re-enabling the
+                    // switch would silently do nothing), and `fillColor`
+                    // transparent now reveals the canvas ground below rather
+                    // than the desktop, since the Window itself is opaque.
                     colorScheme: "Symmetria"
+                    backgroundOpacity: Theme.transparency.enabled
+                                       ? Theme.transparency.terminalOpacity : 1.0
                     useFBORendering: false
                     fillColor: "transparent"
                     blinkingCursor: true
@@ -969,6 +998,10 @@ Window {
                     focus: visible
 
                     colorScheme: "Symmetria"
+                    // Opaque unless the transparency switch is on;
+                    // see the editor pane above and Theme.transparency.
+                    backgroundOpacity: Theme.transparency.enabled
+                                       ? Theme.transparency.terminalOpacity : 1.0
                     useFBORendering: false
                     fillColor: "transparent"
                     blinkingCursor: true
@@ -1071,6 +1104,10 @@ Window {
                         id: remoteTerminalView
 
                         colorScheme: "Symmetria"
+                        // Opaque unless the transparency switch is on;
+                        // see the editor pane above and Theme.transparency.
+                        backgroundOpacity: Theme.transparency.enabled
+                                           ? Theme.transparency.terminalOpacity : 1.0
                         useFBORendering: false
                         fillColor: "transparent"
                         blinkingCursor: true
@@ -1291,6 +1328,10 @@ Window {
                                 // padding, font cascade + hinting) — keep the
                                 // three in sync.
                                 colorScheme: "Symmetria"
+                                // Opaque unless the transparency switch is on;
+                                // see the editor pane above and Theme.transparency.
+                                backgroundOpacity: Theme.transparency.enabled
+                                                   ? Theme.transparency.terminalOpacity : 1.0
                                 useFBORendering: false
                                 fillColor: "transparent"
                                 blinkingCursor: true
@@ -1691,28 +1732,21 @@ Window {
                 // the ~50-100ms reconstruction cost is also acceptable
                 // for a binding that fires on user keypress, not in any
                 // hot path.
-                // Opaque backing for the FM pane.
+                // (The FM-only opaque ground that used to sit here is gone —
+                // the `bg.canvas` Rectangle at the top of `mainContent` now
+                // covers every central surface, this one included. The FM
+                // still paints no root background of its own inside the IDE
+                // (`windowBackdrop` is applied only by the standalone FM
+                // host), so it does still need a ground; it is simply no
+                // longer a special case.
                 //
-                // The FM module paints no root background of its own: inside
-                // the IDE its root is a transparent Item, and the only thing
-                // that ever fills behind it is `windowBackdrop`, which ONLY the
-                // standalone FM host applies. So without this the FM's margins,
-                // column gaps, path bar and button row showed the WALLPAPER
-                // through the transparent Window root, landing several
-                // lightness units above the IDE's own bars — the FM read as a
-                // lighter panel bolted onto the chrome. Measured before this:
-                // #1d1e1f around the columns against #0f0f10 on both bars.
-                //
-                // Deliberately NOT applied to the terminal/editor surfaces,
-                // whose transparency is the documented Q2-d topology decision
-                // (they share the wallpaper's ambient tint with Ghostty). The
-                // FM is dense chrome rather than a text surface, so it wants an
-                // opaque ground; the terminal does not. Do not "unify" these.
-                Rectangle {
-                    anchors.fill: parent
-                    color: Theme.color.bg.chrome
-                    visible: controller.fmVisible
-                }
+                // That comment ALSO said not to unify this with the terminal
+                // and editor, because their transparency was a deliberate
+                // topology decision. That decision was reversed on 2026-08-13:
+                // the transparency was never scoped to the terminal in the
+                // first place, and unifying is now the point. See
+                // `Theme.transparency` for what it broke and the terms on
+                // which it could return.)
 
                 Loader {
                     id: fmPaneLoader

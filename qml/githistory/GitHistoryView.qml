@@ -217,6 +217,25 @@ FocusScope {
     // closed through the single `_requestCurrentDiff` path — no separate
     // reset-Connection needed (and re-adding one would double-request).
 
+    // This surface's own ground, declared first so everything paints on top.
+    //
+    // It had none until 2026-08-13, and the root here is a bare FocusScope, so
+    // the only thing behind the tab strip and the gap between the two columns
+    // was the Window — which was transparent. The visible result was the
+    // wallpaper's bright sky showing as a pale band across the top of the git
+    // surface while the framed panels below stayed dark, so the surface read
+    // as broken in half.
+    //
+    // The host now paints a `bg.canvas` ground across the whole central area,
+    // which alone would fix the symptom. This stays because the subtree is
+    // meant to extract into a `Symmetria.Git.UI` module (see the mount comment
+    // in Main.qml): a component that only looks right because of what its
+    // current host happens to paint would arrive in that module broken again.
+    Rectangle {
+        anchors.fill: parent
+        color: Theme.color.bg.canvas
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: Theme.spacing.sm
