@@ -31,7 +31,7 @@
     "unqualified": 1
   },
   "qml/GitStatusPanel.qml": {
-    "missing-property": 47,
+    "missing-property": 48,
     "unqualified": 5
   },
   "qml/Main.qml": {

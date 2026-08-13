@@ -1,7 +1,7 @@
 // Git viewer — root of the "git" central surface.
 //
 // Three keyboard-first master/detail comprehension sub-views, cycled with Tab
-// (and the clay tab header at the top-left):
+// (and the tab header at the top-left):
 //
 //   - "changes"  — the UNCOMMITTED working tree. WorkingFileTreeView (left)
 //                  drives WorkingFileDetailView (right): j/k walk the changed
@@ -153,7 +153,7 @@ FocusScope {
     }
 
     // Set the active sub-view and re-home focus onto its list. Used by both the
-    // Tab toggle and the clay tab-header clicks. Re-focusing even on a no-op
+    // Tab toggle and the tab-header clicks. Re-focusing even on a no-op
     // mode set means a tab click always lands keyboard focus on the list.
     function setMode(next: string): void {
         if (next !== root.mode)

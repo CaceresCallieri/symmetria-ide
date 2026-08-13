@@ -369,7 +369,11 @@ FocusScope {
                 SegmentedControl {
                     Layout.alignment: Qt.AlignVCenter
                     Layout.rightMargin: Theme.spacing.xs
+                    // Tighter than the component's default on both axes: this
+                    // sits in the narrow side panel, where the top bar's
+                    // roomier rhythm pushes "this agent" against the edge.
                     horizontalPadding: Theme.spacing.sm
+                    spacing: Theme.spacing.xxs
 
                     segments: [
                         { key: "all", label: "all" },

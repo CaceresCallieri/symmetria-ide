@@ -56,11 +56,11 @@ Rectangle {
     // (user decision 2026-07-12 — it was briefly leftmost, which crowded
     // the surface switcher and muddled the two controls' reading order;
     // right-aligned it mirrors StatusBar's trailing ⇅ server badge, so
-    // both location cues live on the right rail). Same clay-segment
-    // anatomy as the switcher; Ctrl+Shift+U is the chord twin. Same
-    // accepted-overlap caveat as the switcher's comment below, mirrored
-    // to this edge: the centered chip strip could reach the toggle only
-    // with many long-titled chips on a narrow window — verify visually
+    // both location cues live on the right rail). Shares the flat
+    // SegmentedControl with the surface switcher; Ctrl+Shift+U is the chord
+    // twin. Same accepted-overlap caveat as the switcher's comment below,
+    // mirrored to this edge: the centered chip strip could reach the toggle
+    // only with many long-titled chips on a narrow window — verify visually
     // if that combination ever ships.
     SegmentedControl {
         id: locationToggle
