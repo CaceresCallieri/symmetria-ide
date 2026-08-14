@@ -607,6 +607,18 @@ class BrowserMcpServer:
             "npx",
             "-y",
             f"chrome-devtools-mcp@{_CHROME_DEVTOOLS_MCP_VERSION}",
+            # Opting out of Google's usage statistics is a MEMORY decision, not a
+            # privacy one: with telemetry on, the server forks a second Node
+            # process (build/src/telemetry/watchdog/main.js) that was measured at
+            # 182 MiB per browsing agent on 2026-08-08 — against 294 MiB for the
+            # MCP server itself. That overhead is what pushes the agent's cgroup
+            # over the line where earlyoom (`--sort-by-rss`) picks the agent CLI
+            # as its victim and SIGTERMs it mid-task; the flag removes the
+            # watchdog process entirely. Verified present in 1.3.0's option
+            # parser — re-check on a version bump, since an unknown flag makes
+            # the stdio server fail to start and the agent silently loses every
+            # chrome-devtools tool.
+            "--no-usage-statistics",
             "--browserUrl",
             f"http://127.0.0.1:{cdp_port}",
         ]
