@@ -2068,6 +2068,12 @@ def test_write_tool_path_in_worktree_follows(controller, worktree_env):
     assert controller.displayedRoot == wt
     assert controller.displayingWorktree == "feature-x"
     assert controller.agentWorktree[0] == "feature-x"
+    # The removal invariant, made executable. A per-agent change filter wrote a
+    # `touched` provenance set from this SAME branch until 2026-08-13; only that
+    # half went. This pins the split in both directions — re-adding provenance
+    # here fails, and so does deleting the `work_root` write above as a
+    # supposed leftover. See the ⚠ comment at that site in app.py.
+    assert "touched" not in controller._term_agents[1]
 
 
 def test_read_tool_path_does_not_follow(controller, worktree_env):

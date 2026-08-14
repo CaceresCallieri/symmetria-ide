@@ -45,7 +45,7 @@ and `SYMMETRIA_IDE_MCP_CONFIG` alike. A nested process therefore carries a
 perfectly valid-looking id belonging to its parent's slot, and any guard built
 only on the presence of that env, on a module-global latch, or on the root
 session directory (§2.3) will let it report under a slot it does not own,
-polluting activity and touched-file attribution. So the env id is a hint and
+polluting activity and the worktree follow. So the env id is a hint and
 **not authoritative**: the reporter sends its own `session_id` and real `cwd`
 (§2), and the IDE resolves ownership through
 `agent_registry.resolve_slot_for_event`, which is authoritative.
@@ -124,7 +124,7 @@ from §2's table below is **not** — those are load-bearing.
 | `"session_id"` | `ctx.sessionManager.getSessionId()`. This is what the IDE persists for `--session` restore, so it must be the resumable id, not a display name. |
 | `"cwd"` | `ctx.cwd`. Slot attribution falls back to this when the id is untrustworthy. |
 | `"tool_name"` | Normalised per §2.2. `""` for non-tool events. |
-| `"tool_path"` | **Absolute.** `resolve(ctx.cwd, args.path)` — Pi's write tools take `path`, relative *or* absolute. The IDE realpaths it for the worktree follow and the per-agent change filter; a relative path silently matches nothing. `""` when the event has no file target. |
+| `"tool_path"` | **Absolute.** `resolve(ctx.cwd, args.path)` — Pi's write tools take `path`, relative *or* absolute. The IDE resolves it to a repo root for the worktree follow; a relative path silently matches nothing. `""` when the event has no file target. |
 | `"event_ts_ns"` | `CLOCK_REALTIME` nanoseconds. Used for out-of-order logging only. |
 
 ### 2.1 Event mapping
@@ -151,8 +151,8 @@ normalises so **neither** IDE table needs an entry for Pi:
 
 | Pi tool | Reported as | Note |
 |---|---|---|
-| `bash` | `Bash` | Triggers the IDE's Bash dirty-diff attribution window. |
-| `edit` | `Edit` | Write tool — drives worktree follow + the touched set. |
+| `bash` | `Bash` | Drives the chip's activity state only. The IDE diffed the repo's dirty set around each Bash command until 2026-08-13; that attribution is gone. |
+| `edit` | `Edit` | Write tool — drives the worktree follow. |
 | `write` | `Write` | Write tool. |
 | `read` | `Read` | Deliberately *not* a write tool: exploration must never yank the chrome. |
 | `grep` | `Grep` | |

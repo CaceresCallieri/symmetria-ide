@@ -27,7 +27,7 @@
     "missing-property": 1
   },
   "qml/GitStatusPanel.qml": {
-    "missing-property": 32
+    "missing-property": 31
   },
   "qml/Main.qml": {
     "import": 11,

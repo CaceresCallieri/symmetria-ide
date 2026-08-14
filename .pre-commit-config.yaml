@@ -64,12 +64,14 @@ repos:
 
       # pyright runs in REPORT-ONLY mode — it never blocks a commit.
       #
-      # Baseline: 85 errors, measured 2026-08-04 against the `[tool.pyright]`
+      # Baseline: 82 errors, measured 2026-08-13 against the `[tool.pyright]`
       # scope in pyproject.toml (which is what took it down from 608; read the
-      # comment there before touching this). The number this comment used to
-      # claim, ~39, was stale AND measured against no config at all — the same
-      # class of drift as the missing ruff config, so verify it rather than
-      # trusting it. `pyright | tail -1` is the check.
+      # comment there before touching this). Was 85 on 2026-08-04; the drop was
+      # NOT attributed to a specific change — only the total was re-measured.
+      # The number this comment used to claim, ~39, was stale AND measured
+      # against no config at all — the same class of drift as the missing ruff
+      # config, so verify it rather than trusting it. `pyright | tail -1` is the
+      # check.
       #
       # ONLY THE SUMMARY LINE is printed. Piping the full output meant 608 lines
       # on every single commit, which is not a report anybody reads — it is how

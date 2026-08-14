@@ -1,11 +1,12 @@
 // Flat segmented control — the IDE's ONE two-or-more-way switcher.
 //
-// Four surfaces hand-rolled this same control before it existed: AgentTopBar's
+// Three surfaces hand-rolled this same control before it existed: AgentTopBar's
 // location toggle (local|vps) and surface switcher (terminal|editor|agents|git),
-// GitStatusPanel's changes-scope switcher (all|this agent), and GitHistoryView's
-// tab header (changes|history|PRs). They were copies of each other down to the
-// letter spacing, which is why the IDE read as having more toggles than it has
-// ideas — five identical-looking controls in unrelated contexts.
+// and GitHistoryView's tab header (changes|history|PRs). They were copies of
+// each other down to the letter spacing, which is why the IDE read as having
+// more toggles than it has ideas — four identical-looking controls in unrelated
+// contexts. GitStatusPanel's changes-scope switcher was a fourth consumer until
+// 2026-08-13, when the per-agent change filter behind it was removed.
 //
 // THE STATE GRAMMAR (what replaced the claymorphism):
 //   active   — filled `bg.selected` + hairline border + `text.strong`, bold
@@ -30,17 +31,17 @@
 // which sit on the darker rungs and already read correctly.
 //
 // Keyboard is NOT this component's business. Every one of these switchers has a
-// chord that is the primary path (Ctrl+Shift+E/T/A, Ctrl+Shift+U, Ctrl+Shift+D,
-// Tab) and the click is the convenience twin — a non-negotiable of the IDE, so
+// chord that is the primary path (Ctrl+Shift+E/T/A, Ctrl+Shift+U, Tab) and the
+// click is the convenience twin — a non-negotiable of the IDE, so
 // a consumer that adds a segment here must also give it a key.
 //
 // ICONS AND THE ACTIVE-ONLY LABEL. A segment may carry an optional `icon` (a
 // Nerd Font glyph, from `Theme.glyph.*`). When it does, the icon draws always
 // and the label draws ONLY while that segment is current — so the control
 // costs one word plus N-1 glyphs instead of N words. Segments without an
-// `icon` keep the plain always-labelled rendering, which is what the narrow
-// two-way switchers still want: a lone glyph has to be guessable, and "all"
-// vs "this agent" has no icon anybody would read correctly.
+// `icon` keep the plain always-labelled rendering, which is what a narrow
+// two-way switcher still wants: a lone glyph has to be guessable, and a pair
+// like "changes" vs "history" has no mark anybody would read correctly.
 //
 // The cost is real and deliberate: the active segment is WIDER than the rest,
 // so switching re-flows every segment after it and the glyphs do not hold

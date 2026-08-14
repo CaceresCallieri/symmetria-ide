@@ -2751,11 +2751,9 @@ Window {
         // the FM standalone's `_gitStatusObj` so both surfaces render git status
         // identically; `state` is retained on the payload only for the tooltip.
         //
-        // PUBLIC (no leading underscore) because a second, root-parameterised
-        // provider reused this exact char→colour mapping while the panel showed
-        // per-agent foreign-repo sections. That provider is gone (2026-08-13),
-        // so this is the sole caller again; the name is kept public in case a
-        // future surface needs the same one-source-of-truth grammar.
+        // Kept PUBLIC (no leading underscore): a second provider shared this
+        // grammar until 2026-08-13, and the next surface needing it should
+        // reuse it rather than restate the mapping.
         function colorForOperation(char) {
             switch (char) {
             case "M":            // modified

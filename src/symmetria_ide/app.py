@@ -5957,15 +5957,12 @@ class AppController(QObject):
             and os.path.isabs(tool_path)
             and payload.get("tool_name") in _AGENT_WRITE_TOOLS
         ):
-            # NOTE: a per-agent change filter once also recorded the CONCRETE
-            # file path here (a `touched` set beside `work_root`, folded against
-            # the git dirty set to scope the side panel to one agent). It was
-            # removed on 2026-08-13 — attributing a working-tree change to an
-            # agent could not be inferred reliably, and git hygiene (one
-            # worktree or branch per agent) makes the attribution structural
-            # instead. `work_root` below is the mechanism that replaced it, so
-            # do NOT delete this branch when pruning the leftovers: the two
-            # lived a few lines apart and only the `touched` half went.
+            # ⚠ A per-agent change filter wrote a `touched` set here, beside
+            # `work_root`, until 2026-08-13. Only that half was removed. This
+            # branch is the WORKTREE FOLLOW and is live — do NOT delete it as a
+            # leftover of the filter. Rationale: CLAUDE.md "Per-agent change
+            # filter — REMOVED"; the guard test is
+            # test_write_tool_path_in_worktree_follows.
             work_root = resolve_project_root(tool_path)
             if work_root and rec.get("work_root") != work_root:
                 rec["work_root"] = work_root

@@ -235,17 +235,12 @@ FocusScope {
             Layout.fillWidth: true
             spacing: Theme.spacing.xxs
 
-            RowLayout {
+            Text {
                 Layout.fillWidth: true
-                spacing: Theme.spacing.sm
-
-                Text {
-                    Layout.fillWidth: true
-                    text: "Changes · " + (root.model ? root.model.count : 0)
-                    color: Theme.color.text.dim
-                    font.family: Theme.font.family
-                    font.pixelSize: Theme.font.size.xs
-                }
+                text: "Changes · " + (root.model ? root.model.count : 0)
+                color: Theme.color.text.dim
+                font.family: Theme.font.family
+                font.pixelSize: Theme.font.size.xs
             }
 
             Repeater {
