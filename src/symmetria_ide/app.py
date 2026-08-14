@@ -6607,9 +6607,8 @@ class AppController(QObject):
             new = {
                 "state": outcome.state,
                 "tool": outcome.tool,
-                # The reporter runs for claude only; agentType from the slot's
-                # harness keeps a (future) opencode chip from flashing the claude
-                # glyph and matches the bridge path's fallback.
+                # The local reporters are harness-agnostic; retain the slot's
+                # harness identity for the chip glyph and bridge publication.
                 "agentType": self._term_agents[slot]["harness"],
             }
             if self._term_agent_activity.get(slot) != new:
@@ -6842,8 +6841,8 @@ class AppController(QObject):
             old_activity = self._term_agent_activity
             self._term_agent_activity = new_activity
             self.agentActivityChanged.emit()
-            # Coordination edge taps for BRIDGE-driven slots (opencode — its
-            # activity has no local reporter yet). Locally-captured slots get
+            # Coordination edge taps for legacy BRIDGE-driven slots. Locally-
+            # captured slots (Claude, OpenCode, Pi) get
             # their edges in _on_agent_hook / _clear_interrupted_agent.
             for slot in old_activity.keys() - new_activity.keys():
                 if slot not in self._locally_captured_agents:
