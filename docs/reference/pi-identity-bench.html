@@ -1,0 +1,1187 @@
+<title>Pi — banco de identidad visual</title>
+
+<style>
+  :root {
+    --ground: #0c0f13; --panel: #12161c; --panel-2: #161b22;
+    --line: #1e242c; --line-soft: #171d24;
+    --ink: #dfe6ee; --ink-dim: #8b97a6; --ink-faint: #5b6675;
+    --ui-accent: #7fb0c8; --ui-accent-soft: rgba(127, 176, 200, 0.14);
+    --stage: #090c10; --warn: #c9a06f; --ok: #7fc8a0; --still: #c9a06f;
+
+    --mono: ui-monospace, "Cascadia Code", "CaskaydiaCove NFM", "JetBrains Mono",
+            "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+
+    --step-0: 0.75rem; --step-1: 0.8125rem; --step-2: 0.9375rem; --step-5: 2.5rem;
+    --stage-h: 190px;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --ground: #f4f6f8; --panel: #ffffff; --panel-2: #eef1f5;
+      --line: #dde3ea; --line-soft: #e8ecf1;
+      --ink: #10151b; --ink-dim: #55606d; --ink-faint: #8b97a6;
+      --ui-accent: #2c7a96; --ui-accent-soft: rgba(44, 122, 150, 0.12);
+      --warn: #8a6428; --ok: #2f7c56; --still: #8a6428;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0c0f13; --panel: #12161c; --panel-2: #161b22;
+    --line: #1e242c; --line-soft: #171d24;
+    --ink: #dfe6ee; --ink-dim: #8b97a6; --ink-faint: #5b6675;
+    --ui-accent: #7fb0c8; --ui-accent-soft: rgba(127, 176, 200, 0.14);
+    --warn: #c9a06f; --ok: #7fc8a0; --still: #c9a06f;
+  }
+
+  :root[data-theme="light"] {
+    --ground: #f4f6f8; --panel: #ffffff; --panel-2: #eef1f5;
+    --line: #dde3ea; --line-soft: #e8ecf1;
+    --ink: #10151b; --ink-dim: #55606d; --ink-faint: #8b97a6;
+    --ui-accent: #2c7a96; --ui-accent-soft: rgba(44, 122, 150, 0.12);
+    --warn: #8a6428; --ok: #2f7c56; --still: #8a6428;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: var(--step-2); line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1160px; margin: 0 auto; padding: clamp(1.5rem,4vw,3.5rem) clamp(1rem,3vw,2rem) 5rem; }
+
+  .masthead { display: flex; flex-direction: column; gap: 0.9rem; margin-bottom: 2rem; }
+
+  .eyebrow {
+    font-family: var(--mono); font-size: var(--step-0); letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--ink-faint); margin: 0;
+  }
+
+  h1 {
+    font-family: var(--mono); font-size: clamp(1.6rem,4.5vw,var(--step-5));
+    font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; margin: 0; text-wrap: balance;
+  }
+
+  .lede { max-width: 64ch; color: var(--ink-dim); margin: 0; }
+  .lede strong { color: var(--ink); font-weight: 600; }
+
+  code, .mono { font-family: var(--mono); font-size: 0.92em; }
+  code { background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: 3px; padding: 0.05em 0.35em; }
+
+  .locked {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.25rem;
+    padding: 0.7rem 1rem; border: 1px solid var(--line); border-left: 2px solid var(--ok);
+    border-radius: 6px; background: var(--panel); margin-bottom: 0.75rem;
+  }
+  .locked .tag { font-family: var(--mono); font-size: var(--step-0); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ok); }
+  .locked .item { font-family: var(--mono); font-size: var(--step-1); color: var(--ink-dim); }
+  .locked .item b { color: var(--ink); font-weight: 600; }
+  .locked.frozen { margin-bottom: 1.5rem; }
+
+  .controls {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.5rem;
+    padding: 0.85rem 1rem; margin: 0 0 1.5rem;
+    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    backdrop-filter: blur(12px); border: 1px solid var(--line); border-radius: 8px;
+  }
+
+  .ctrl { display: flex; align-items: center; gap: 0.6rem; }
+  .ctrl-label {
+    font-family: var(--mono); font-size: var(--step-0); letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--ink-faint); white-space: nowrap;
+  }
+
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+  .seg button {
+    font-family: var(--mono); font-size: var(--step-0); letter-spacing: 0.04em;
+    padding: 0.32rem 0.6rem; background: transparent; color: var(--ink-dim);
+    border: 0; border-right: 1px solid var(--line); cursor: pointer;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .seg button:last-child { border-right: 0; }
+  .seg button:hover { background: var(--panel-2); color: var(--ink); }
+  .seg button[aria-pressed="true"] { background: var(--ui-accent-soft); color: var(--ui-accent); }
+  .seg button:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: -2px; }
+
+  input[type="range"] { width: 100px; accent-color: var(--ui-accent); }
+  input[type="range"]:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
+
+  .rm-note { font-family: var(--mono); font-size: var(--step-0); color: var(--warn); display: none; }
+  .rm-on .rm-note { display: block; }
+
+  .strip-block { margin-bottom: 2.5rem; }
+
+  .section-head { display: flex; align-items: baseline; gap: 0.85rem; flex-wrap: wrap; margin-bottom: 0.65rem; }
+
+  h2 {
+    font-family: var(--mono); font-size: var(--step-1); font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase; margin: 0;
+  }
+
+  .section-note { font-size: var(--step-1); color: var(--ink-dim); margin: 0; max-width: 72ch; }
+
+  .group { margin-top: 2.5rem; }
+  .group:first-of-type { margin-top: 0; }
+
+  .topbar-sim {
+    display: flex; align-items: center; background: var(--stage);
+    border: 1px solid var(--line); border-radius: 8px; padding: 0.55rem 0.75rem; overflow-x: auto;
+  }
+
+  .sim-label {
+    font-family: var(--mono); font-size: var(--step-0); color: var(--ink-faint);
+    padding-right: 0.9rem; margin-right: 0.35rem; border-right: 1px solid #1c232b; white-space: nowrap;
+  }
+
+  .chip {
+    display: flex; align-items: center; gap: 0.4rem; padding: 0.25rem 0.55rem;
+    border-radius: 999px; white-space: nowrap; cursor: pointer;
+    background: transparent; border: 1px solid transparent;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  .chip:hover, .chip:focus-visible { background: #10151b; border-color: #212a33; }
+  .chip:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 1px; }
+  .chip-name { font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.03em; color: #7d8896; }
+
+  .grid { display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+
+  .card {
+    display: flex; flex-direction: column; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+  }
+  .card.is-still { border-left: 2px solid var(--still); }
+  .card.is-locked { border-left: 2px solid var(--ok); }
+
+  .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 0.9rem 1rem 0.75rem; }
+  .card-title { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+  .card-name { font-family: var(--mono); font-size: var(--step-2); font-weight: 600; letter-spacing: 0.02em; margin: 0; }
+
+  .pills { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+  .pill {
+    font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.06em;
+    padding: 0.12rem 0.45rem; border-radius: 3px;
+    background: var(--ui-accent-soft); color: var(--ui-accent); white-space: nowrap;
+  }
+  .pill.ghost { background: transparent; color: var(--ink-faint); border: 1px solid var(--line); }
+  .pill.fix { background: transparent; color: var(--ui-accent); border: 1px solid color-mix(in srgb, var(--ui-accent) 40%, transparent); }
+  .pill.still { background: transparent; color: var(--still); border: 1px solid color-mix(in srgb, var(--still) 40%, transparent); }
+  .pill.lock { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+
+  .true-size { display: flex; flex-direction: column; align-items: center; gap: 0.3rem; flex-shrink: 0; }
+  .true-size span { font-family: var(--mono); font-size: 0.625rem; letter-spacing: 0.06em; color: var(--ink-faint); }
+  .true-size-row {
+    display: flex; align-items: center; gap: 0.5rem; background: var(--stage);
+    border: 1px solid var(--line); border-radius: 5px; padding: 0.35rem 0.5rem;
+  }
+
+  .stage { background: var(--stage); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); height: var(--stage-h); }
+  .stage canvas { display: block; width: 100%; height: 100%; }
+
+  .card-foot { padding: 0.8rem 1rem 1rem; }
+  .card-desc { font-size: var(--step-1); color: var(--ink-dim); margin: 0; }
+  .card-desc + .card-desc { margin-top: 0.5rem; }
+  .card-desc b { color: var(--ink); font-weight: 600; }
+
+  .notes {
+    margin-top: 3rem; padding-top: 2rem; border-top: 1px solid var(--line);
+    display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  }
+  .note h3 {
+    font-family: var(--mono); font-size: var(--step-1); font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase; margin: 0 0 0.5rem;
+  }
+  .note p { margin: 0 0 0.7rem; font-size: var(--step-1); color: var(--ink-dim); }
+  .note p:last-child { margin-bottom: 0; }
+  .note b { color: var(--ink); font-weight: 600; }
+
+  .roles { width: 100%; border-collapse: collapse; font-size: var(--step-1); }
+  .roles th, .roles td { text-align: left; padding: 0.3rem 0.6rem 0.3rem 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  .roles th {
+    font-family: var(--mono); font-size: var(--step-0); letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--ink-faint); font-weight: 500;
+  }
+  .roles td { color: var(--ink-dim); }
+  .roles td.n { font-family: var(--mono); color: var(--ink); white-space: nowrap; }
+  .roles tr.gap td { border-bottom: 0; padding-top: 0.7rem; }
+  .roles td.open { color: var(--ink-faint); font-style: italic; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">Symmetria · identidad de agente · OWN-39 · rev. 9 · cerrada</p>
+    <h1>Pi — banco de identidad visual</h1>
+    <p class="lede">
+      Once animaciones sobre una única primitiva: <strong>cinco líneas</strong>, una fase continua
+      y una función por índice. Ordenadas por el recorrido real de un run, más los dos estados de
+      dictado, que son ortogonales a todo.
+    </p>
+  </header>
+
+  <div class="locked">
+    <span class="tag">decidido</span>
+    <span class="item">metal <b>cromo</b></span>
+    <span class="item">tinte <b>mercurio</b></span>
+    <span class="item">grosor <b>fino</b></span>
+    <span class="item">velocidad <b>×1.5</b></span>
+    <span class="item">quieto = <b>te toca a vos</b></span>
+  </div>
+
+  <div class="locked frozen">
+    <span class="tag">congelado</span>
+    <span class="item"><b>Los once.</b></span>
+    <span class="item" style="color:var(--ink-faint)">Esta página es ahora la especificación visual: lo que se porte a QML tiene que verse así.</span>
+  </div>
+
+  <div class="controls" id="controls">
+    <div class="ctrl">
+      <span class="ctrl-label">Metal</span>
+      <div class="seg" role="group" aria-label="Tratamiento metálico" id="seg-metal">
+        <button type="button" data-v="flat" aria-pressed="false">plano</button>
+        <button type="button" data-v="spec" aria-pressed="false">specular</button>
+        <button type="button" data-v="chrome" aria-pressed="true">cromo</button>
+      </div>
+    </div>
+
+    <div class="ctrl">
+      <span class="ctrl-label">Tinte</span>
+      <div class="seg" role="group" aria-label="Tinte del metal" id="seg-tint">
+        <button type="button" data-v="mercurio" aria-pressed="true">mercurio</button>
+        <button type="button" data-v="titanio" aria-pressed="false">titanio</button>
+      </div>
+    </div>
+
+    <div class="ctrl">
+      <span class="ctrl-label">Escena</span>
+      <div class="seg" role="group" aria-label="Tamaño de escena" id="seg-stage">
+        <button type="button" data-v="110" aria-pressed="false">chica</button>
+        <button type="button" data-v="190" aria-pressed="true">media</button>
+        <button type="button" data-v="300" aria-pressed="false">grande</button>
+      </div>
+    </div>
+
+    <div class="ctrl">
+      <span class="ctrl-label">Grosor</span>
+      <input type="range" id="weight" min="0.45" max="2.2" step="0.05" value="0.75" aria-label="Grosor de línea">
+    </div>
+
+    <div class="ctrl">
+      <span class="ctrl-label">Velocidad</span>
+      <input type="range" id="speed" min="0" max="3" step="0.05" value="1.5" aria-label="Velocidad">
+    </div>
+
+    <p class="rm-note">Movimiento reducido activo — cuadro fijo.</p>
+  </div>
+
+  <section class="strip-block">
+    <div class="section-head">
+      <h2>Tamaño real</h2>
+      <p class="section-note">Los once a 16&nbsp;px sobre una barra simulada. Click en uno para saltar a su ficha.</p>
+    </div>
+    <div class="topbar-sim" id="strip">
+      <span class="sim-label">agent top bar</span>
+    </div>
+  </section>
+
+  <div id="groups"></div>
+
+  <section class="notes">
+    <div class="note">
+      <h3>La quietud es la señal — y el vacío también</h3>
+      <p>
+        <b>Quieto quiere decir que te toca a vos.</b> Todo lo que fluye es la máquina trabajando;
+        todo lo que se detiene está esperando una decisión humana. Los dos estáticos se distinguen
+        por <b>cómo</b> están quietos: <b>Índice</b> resuelto (renglones ordenados, «esto terminó,
+        leelo»), <b>Reposo</b> detenido (diagonales rectas en mate, «esto se frenó»).
+      </p>
+      <p>
+        <b>Corolario, y es una regla del sistema más que un pulido:</b> ninguna animación con
+        principio y final puede dejar el cuadro vacío. Vacío es el grado extremo de quieto, así que
+        un hueco de 300&nbsp;ms en <code>commit</code> no es una imperfección estética — es una frase
+        que dice lo contrario de lo que está pasando.
+      </p>
+      <p>
+        De ahí que Convergencia y Alineación corran <b>dos tandas solapadas</b> en vez de una sola en
+        bucle. Cualquier animación futura con entrada y salida necesita lo mismo.
+      </p>
+    </div>
+
+    <div class="note">
+      <h3>Las cuentas, y por qué sólo salían en lo tenue</h3>
+      <p>
+        Cada segmento es un <code>stroke()</code> propio con punta redonda, así que en cada unión se
+        superponen dos puntas. Compuesto con alfa <code>a</code>, ese solape queda en
+        <code>1−(1−a)²</code> — más brillante que el trazo alrededor. Con <code>a = 1</code> es
+        invisible; con <code>a = 0.16</code>, la hebra más tenue, cada unión es una perla.
+      </p>
+      <p>
+        <b>La profundidad que hizo legible a la trenza fue exactamente lo que produjo las cuentas.</b>
+        Un arreglo causó el otro.
+      </p>
+      <p>
+        La salida: no usar alfa. El color se mezcla contra el fondo de la escena y se dibuja
+        <b>opaco</b>. Sobre un fondo plano y conocido el resultado es idéntico, pero los solapes
+        dejan de acumular. Y de yapa las hebras se <b>ocluyen</b> en vez de mezclarse, que es como se
+        comportan las cintas reales.
+      </p>
+    </div>
+
+    <div class="note">
+      <h3>El mismo error, tres veces</h3>
+      <p>
+        La cantidad de puntos de un trazo salía del <b>tamaño en píxeles</b>. Eso es correcto sólo
+        para una recta, y en tres ocasiones distintas produjo el mismo tipo de falla:
+      </p>
+      <p>
+        <b>1 · La espiral era un hexágono</b> a 16&nbsp;px. Una curva necesita puntos según el
+        <b>ángulo</b> que recorre — un círculo se ve hexagonal con seis segmentos, mida 16&nbsp;px o
+        300.
+      </p>
+      <p>
+        <b>2 · La trenza era un zigzag.</b> Lleva 2.5 ciclos y se muestreaba 6 veces: <b>2.4 muestras
+        por ciclo contra un límite de Nyquist de 2</b>. No era una curva mal dibujada — era una curva
+        imposible de reconstruir con esos puntos. Una onda necesita puntos según los <b>ciclos</b> que
+        contiene.
+      </p>
+      <p>
+        <b>3 · La cola del vórtice se cortaba</b>, porque el afinado la llevaba a 0.131&nbsp;px — un
+        cuarto de píxel real — y Canvas eso lo dibuja como nada.
+      </p>
+      <p>
+        Ahora hay tres presupuestos separados —recta, curva, onda— más un piso de grosor. Los tres
+        defectos sólo existían al tamaño del chip: a escena grande todo se veía correcto, que es
+        justamente por qué la fila de 16&nbsp;px está arriba de todo.
+      </p>
+    </div>
+
+    <div class="note">
+      <h3>Cobertura de nodos</h3>
+      <table class="roles">
+        <thead><tr><th>Nodo</th><th>Concepto</th></tr></thead>
+        <tbody>
+          <tr><td class="n">discourse · explore</td><td>Deriva <span style="color:var(--ok)">·&nbsp;congelado</span></td></tr>
+          <tr><td class="n">plan</td><td>Caracol <i>o</i> Vórtice — a elegir</td></tr>
+          <tr><td class="n">implement</td><td>Trenza</td></tr>
+          <tr><td class="n">verify · checks</td><td>Alineación <span style="color:var(--ok)">·&nbsp;congelado</span></td></tr>
+          <tr><td class="n">review · triage</td><td>Órbitas</td></tr>
+          <tr><td class="n">commit · integrate</td><td>Convergencia <span style="color:var(--ok)">·&nbsp;congelado</span></td></tr>
+          <tr><td class="n">gate:plan-review</td><td>Índice <span style="color:var(--ok)">·&nbsp;congelado</span></td></tr>
+          <tr><td class="n">gate:mid · gate:end</td><td>Reposo</td></tr>
+          <tr class="gap"><td class="n">decompose</td><td class="open">sin asignar</td></tr>
+          <tr><td class="n">test-authoring</td><td class="open">sin asignar</td></tr>
+          <tr><td class="n">discover-checks</td><td class="open">sin asignar</td></tr>
+          <tr><td class="n">regression</td><td class="open">sin asignar</td></tr>
+          <tr><td class="n">phase-advance · explain</td><td class="open">sin asignar</td></tr>
+        </tbody>
+      </table>
+      <p style="margin-top:0.7rem">
+        Si el caracol perdedor no se descarta sino que se reasigna, <code>decompose</code> es su
+        destino natural — es el pariente más cercano de <code>plan</code>.
+      </p>
+    </div>
+  </section>
+
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const TINTS = {
+    mercurio: { deep: "#232a31", base: "#8e9aa6", spec: "#f4f9ff", matte: "#59626d" },
+    titanio:  { deep: "#211c2e", base: "#8a86b8", spec: "#efebff", matte: "#565372" }
+  };
+
+  const state = {
+    metal: "chrome",
+    tint: "mercurio",
+    weight: 0.75,
+    speed: 1.5,
+    reduced: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  };
+
+  /* ---------- metal along the arc ---------- */
+
+  const RGB_CACHE = {};
+  function rgb(hex) {
+    if (RGB_CACHE[hex]) return RGB_CACHE[hex];
+    const n = parseInt(hex.slice(1), 16);
+    return (RGB_CACHE[hex] = [(n >> 16) & 255, (n >> 8) & 255, n & 255]);
+  }
+
+  function mix(a, b, k) {
+    return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+  }
+
+  function smoothstep(e0, e1, x) {
+    const k = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+    return k * k * (3 - 2 * k);
+  }
+
+  function clamp01(x) { return Math.max(0, Math.min(1, x)); }
+
+  // Cyclic distance — this is what lets the specular wrap at the seam instead of
+  // popping when the phase crosses 1 → 0.
+  function cyc(a, b) {
+    const d = Math.abs(a - b) % 1;
+    return Math.min(d, 1 - d);
+  }
+
+  function bandAt(u, centre, width) {
+    const d = cyc(u, centre) / width;
+    return Math.exp(-d * d);
+  }
+
+  // The stage background, as RGB. Always this colour in both themes — the stage
+  // deliberately does not follow the page theme.
+  const STAGE_RGB = [9, 12, 16];
+
+  /**
+   * A colour pre-composited against the stage, returned FULLY OPAQUE.
+   *
+   * This is the fix for the beading. Each segment is its own `stroke()` with a
+   * round cap, so consecutive segments overlap at every joint; composited with
+   * alpha `a`, that overlap lands at 1−(1−a)² — brighter than the stroke around
+   * it. Invisible at a = 1, and a string of pearls at a = 0.16, which is why only
+   * the dim strands beaded. Blending toward the background here instead is
+   * visually identical over a flat ground and makes overlaps free.
+   *
+   * Bonus, and it is the reason not to reach for an offscreen buffer instead:
+   * opaque strokes OCCLUDE rather than blend, so a near strand covers a far one.
+   * That is how real ribbons behave and it sharpens the braid's depth reading.
+   */
+  function opaque(col, alpha) {
+    const c = alpha >= 0.999 ? col : mix(STAGE_RGB, col, alpha);
+    return `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+  }
+
+  /**
+   * Colour of the metal at arc position `u` (0..1 along the path).
+   *
+   * The body shading is FIXED along the path and only the specular travels. An
+   * earlier revision moved the body with the phase too, which made the whole
+   * stroke throb — visible immediately on the braid. Don't reintroduce it.
+   */
+  function metalAt(u, phase, opts) {
+    const t = TINTS[state.tint];
+    if (opts.matte) return opaque(rgb(t.matte), opts.alpha);
+    if (state.metal === "flat") return opaque(rgb(t.base), opts.alpha);
+
+    const body = opts.closed ? 0.92 : 0.42 + 0.58 * Math.pow(Math.sin(Math.PI * u), 0.55);
+    let col = mix(rgb(t.deep), rgb(t.base), body);
+
+    const p = ((phase % 1) + 1) % 1;
+    // A band narrower than a couple of segments lands on ONE segment and misses
+    // its neighbours, so the sheen reads as a bright speck beside a dull one
+    // rather than a gradient. Frame-by-frame analysis of a recording caught this
+    // as "uneven brightness / segment popping" on the spiral, where segment count
+    // is set by angle and can be low. `minBand` is opt-in: the frozen concepts
+    // never pass it, so their rendering is untouched.
+    const mb = opts.minBand || 0;
+    let lum = bandAt(u, p, Math.max(0.13, mb));
+    if (state.metal === "chrome") {
+      lum = Math.min(1, lum + 0.5 * bandAt(u, p + 0.5, Math.max(0.085, mb * 0.7)));
+    }
+    col = mix(col, rgb(t.spec), lum);
+
+    return opaque(col, opts.alpha);
+  }
+
+  // Floor for any stroke width, in CSS pixels. Below roughly half a device pixel
+  // Canvas fades a line to almost nothing, which reads as the stroke breaking up
+  // rather than as a thin line. Chosen so it never engages at stage sizes and
+  // only rescues the 16px chips.
+  const MIN_LINE_PX = 0.6;
+
+  /** Stroke a polyline with the metal running ALONG it. */
+  function strokeAlong(ctx, pts, phase, lw, opts = {}) {
+    const n = pts.length;
+    if (n < 2 || lw <= 0) return;
+    lw = Math.max(MIN_LINE_PX, lw);
+    const fade = !!opts.fade, tail = !!opts.tail, closed = !!opts.closed, taper = !!opts.taper;
+    const dim = opts.dim == null ? 1 : opts.dim;
+    if (dim <= 0.01) return;
+
+    ctx.lineWidth = lw;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+
+    if (state.metal === "flat" && !fade && !tail && !taper) {
+      ctx.strokeStyle = metalAt(0, 0, { alpha: dim, matte: opts.matte, closed });
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < n; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.stroke();
+      return;
+    }
+
+    const minBand = opts.smooth ? 2.5 / (n - 1) : 0;
+
+    for (let i = 0; i < n - 1; i++) {
+      const u = (i + 0.5) / (n - 1);
+      let alpha = dim;
+      if (fade) alpha *= smoothstep(0, 0.11, u) * smoothstep(0, 0.11, 1 - u);
+      if (tail) alpha *= smoothstep(0, 0.5, u); // the trailing end dissolves
+      if (alpha <= 0.015) continue;
+      // Fading alpha while the stroke keeps full width leaves the round caps of
+      // each segment visible as a row of beads that stops bluntly. Thinning the
+      // width alongside it is what makes the end read as a taper.
+      //
+      // MIN_LINE_PX is load-bearing at chip size. Measured: the vortex at 16px
+      // with the thin weight is a 0.504px stroke, and the taper took its tail to
+      // 0.131px — a quarter of a device pixel at dpr 2. Canvas renders that as
+      // nearly nothing, so the stroke appeared to break into disconnected pieces.
+      if (taper) ctx.lineWidth = Math.max(MIN_LINE_PX, lw * (0.26 + 0.74 * smoothstep(0, 0.55, u)));
+      ctx.strokeStyle = metalAt(u, phase, { alpha, matte: opts.matte, closed, minBand });
+      ctx.beginPath();
+      ctx.moveTo(pts[i][0], pts[i][1]);
+      ctx.lineTo(pts[i + 1][0], pts[i + 1][1]);
+      ctx.stroke();
+    }
+  }
+
+  // THREE detail budgets, and the distinction is the single most repeated bug in
+  // this file. Point count must come from what the SHAPE contains, not from how
+  // many pixels it happens to occupy:
+  //
+  //   straight  → pixels. Nothing to reconstruct.
+  //   curve     → the ANGLE it sweeps. A circle is a hexagon at six segments
+  //               whether it is 16px or 300px across.
+  //   wave      → the CYCLES it contains. The braid carries 2.5 cycles and was
+  //               sampled 6 times: 2.4 samples per cycle against a Nyquist limit
+  //               of 2. That is not a coarse curve, it is a curve that cannot be
+  //               reconstructed at all — hence the hard-cornered zigzag on the
+  //               chips. Twelve samples per cycle is the floor here.
+  function detailLine(s) { return Math.max(8, Math.min(48, Math.round(s / 6))); }
+  function detailCurve(s, turns) {
+    return Math.max(Math.ceil(26 * turns), Math.min(64, Math.round(s / 5)));
+  }
+  function detailWave(s, cycles) {
+    return Math.max(Math.ceil(12 * cycles), Math.min(56, Math.round(s / 5)));
+  }
+
+  /* ---------- concepts ---------- */
+
+  const LINES = 5;
+  const WEIGHTS = [0.32, 0.62, 1.0, 0.62, 0.32]; // Claude's 5-bar profile
+
+  /* ===== FROZEN — soundwave. Do not modify. ===== */
+  function soundwave(ctx, w, h, t, sub) {
+    const s = Math.min(w, h);
+    const cx = w / 2, cy = h / 2;
+    const span = s * 0.78;
+    const barW = (span / LINES) * 0.52 * state.weight;
+    const gap = (span - barW * LINES) / (LINES - 1);
+    const minH = s * 0.14, maxH = s * 0.86;
+    const centre = (LINES - 1) / 2;
+    const segs = detailLine(s);
+
+    for (let i = 0; i < LINES; i++) {
+      let hgt;
+      if (sub === "transcribe") {
+        const sweep = Math.min(((t * 0.9) % 1) * LINES, LINES - 0.001);
+        let d = Math.abs(i - sweep);
+        d = Math.min(d, LINES - d);
+        hgt = minH + (maxH - minH) * Math.exp(-(d * d) / 0.8);
+      } else {
+        const dist = Math.abs(i - centre);
+        const pulse = 0.5 + 0.5 * Math.sin(2 * Math.PI * t - dist * 1.1);
+        hgt = minH + (maxH - minH) * WEIGHTS[i] * pulse;
+      }
+      const x = cx - span / 2 + i * (barW + gap) + barW / 2;
+      const y0 = cy - hgt / 2 + barW / 2, y1 = cy + hgt / 2 - barW / 2;
+      // A capsule is a round-capped stroke of its own width — no roundRect needed,
+      // which keeps every concept on the one drawing primitive.
+      const pts = [];
+      for (let j = 0; j <= segs; j++) pts.push([x, y0 + (y1 - y0) * (j / segs)]);
+      strokeAlong(ctx, pts, t * 0.8 + i * 0.07, barW);
+    }
+  }
+
+  /* ===== FROZEN — deriva. Do not modify. ===== */
+  function deriva(ctx, w, h, t) {
+    const s = Math.min(w, h);
+    const lw = s * 0.05 * state.weight;
+    const diag = Math.hypot(w, h);
+    // ~1.1 cycles: the faster harmonic is sin(n·3.4) and n spans about ±1.
+    const segs = detailWave(diag, 1.1);
+
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+    ctx.rotate(-Math.PI / 4); // the reference's −45°
+    for (let k = 0; k < LINES; k++) {
+      const base = (k - (LINES - 1) / 2) * s * 0.17;
+      const pts = [];
+      for (let j = 0; j <= segs; j++) {
+        const u = j / segs;
+        const x = -diag / 2 + u * diag;
+        const n = x / s;
+        const y = base + s * (
+          0.11 * Math.sin(n * 2.1 + t * 1.5 + k * 0.5) +
+          0.06 * Math.sin(n * 3.4 - t * 0.9 + k * 0.9)
+        );
+        pts.push([x, y]);
+      }
+      strokeAlong(ctx, pts, t * 0.9 + k * 0.15, lw);
+    }
+    ctx.restore();
+  }
+
+  /* ===== FROZEN — índice. Do not modify. ===== */
+  function indice(ctx, w, h) {
+    const s = Math.min(w, h);
+    const lw = s * 0.055 * state.weight;
+    const span = s * 0.82;
+    const x0 = (w - span) / 2;
+    const gapY = s * 0.16;
+    const y0 = h / 2 - gapY * (LINES - 1) / 2;
+    // Irregular lengths read as written content rather than as a bar chart.
+    const LEN = [1.0, 0.68, 0.88, 0.55, 0.78];
+    const segs = detailLine(span);
+
+    for (let k = 0; k < LINES; k++) {
+      const len = span * LEN[k];
+      const y = y0 + k * gapY;
+      const pts = [];
+      for (let j = 0; j <= segs; j++) pts.push([x0 + (len * j) / segs, y]);
+      // Phase is fixed per row, not time-driven: the sheen sits still, so the
+      // shape is legible as a finished object rather than a running process.
+      strokeAlong(ctx, pts, 0.28 + k * 0.06, lw);
+    }
+  }
+
+  /* ===== OPEN ===== */
+
+  /**
+   * Caracol — the round, complete spiral.
+   *
+   * Constant rotation and a fixed inner radius: nothing has a life cycle, so
+   * there is no loop point to perceive. Fluidity here is structural, not tuned.
+   */
+  function caracol(ctx, w, h, t) {
+    const s = Math.min(w, h);
+    const cx = w / 2, cy = h / 2;
+    const R = s * 0.44;
+    const rIn = R * 0.22;   // raised: the tight inner turns were knotting the core
+    const lw = s * 0.045 * state.weight;
+    const ARMS = 5, turns = 0.78;  // fewer wraps — the arms were crossing themselves
+    const segs = detailCurve(s, turns);
+    const spin = t * 0.42;
+
+    for (let k = 0; k < ARMS; k++) {
+      const base = spin + (k / ARMS) * Math.PI * 2;
+      // A wave of presence sweeping around the arms. At 16px the rotation alone is
+      // almost unreadable — the silhouette barely changes — so the brightness
+      // distribution has to carry the motion instead. Deep on purpose: a shallow
+      // swell disappears at chip size, which is where it is needed most.
+      const swell = 0.5 + 0.5 * Math.cos(2 * Math.PI * (t * 0.26 - k / ARMS));
+      const pts = [];
+      for (let j = 0; j <= segs; j++) {
+        const u = j / segs;
+        // Eased radius: the arms open out near the centre so the middle stays clear.
+        const r = rIn + (R - rIn) * Math.pow(u, 0.7);
+        const th = base + u * turns * Math.PI * 2;
+        pts.push([cx + Math.cos(th) * r, cy + Math.sin(th) * r * 0.94]);
+      }
+      strokeAlong(ctx, pts, t * 0.5 + k * 0.06, lw, {
+        tail: true, taper: true, smooth: true, dim: 0.22 + 0.78 * swell
+      });
+    }
+  }
+
+  /**
+   * Vórtice — arms born small, growing outward, dying at the rim.
+   *
+   * The spin is DECOUPLED from the life cycle. Tying them together made every
+   * larger arm proportionally more rotated, so the nested arms chained into one
+   * apparent spiral — five objects that read as one. That, not a hard cut, was
+   * the repetition. Eight arms so the turnover never leaves a gap.
+   */
+  function vortice(ctx, w, h, t) {
+    const s = Math.min(w, h);
+    const cx = w / 2, cy = h / 2;
+    const R = s * 0.46;
+    const lw = s * 0.042 * state.weight;
+    const ARMS = 8, turns = 0.68;
+    const segs = detailCurve(s, turns);
+
+    for (let k = 0; k < ARMS; k++) {
+      const life = ((t * 0.19 + k / ARMS) % 1 + 1) % 1;
+      // Envelope with REAL zeros at both ends and long ramps. The previous
+      // `sin(π·life)^0.55` was the cause of the stutter: measured, it reaches 22%
+      // opacity by life 0.02 — an arm did not fade in, it appeared. An exponent
+      // above 1 is what turns that pop into an entrance (1.2% at the same point).
+      const alpha = smoothstep(0, 0.26, life) * (1 - smoothstep(0.7, 1, life));
+      if (alpha < 0.02) continue;
+      const scale = 0.16 + 0.92 * life;
+      // Constant rate and even spacing, plus a SMALL contribution from life so the
+      // arm swirls as it grows. Small on purpose: a full `life · turns · 2π` was
+      // what chained the nested arms into one apparent spiral.
+      const spin = t * 0.6 + (k / ARMS) * Math.PI * 2 + life * 0.7;
+
+      const pts = [];
+      for (let j = 0; j <= segs; j++) {
+        const u = j / segs;
+        const r = R * scale * (0.26 + 0.74 * u);
+        const th = spin + u * turns * Math.PI * 2;
+        pts.push([cx + Math.cos(th) * r, cy + Math.sin(th) * r * 0.94]);
+      }
+      strokeAlong(ctx, pts, t * 0.55 + k * 0.04, lw, {
+        dim: alpha, tail: true, taper: true, smooth: true
+      });
+    }
+  }
+
+  /**
+   * Trenza — braided strands with DEPTH.
+   *
+   * Equal presence across strands is what made this illegible: five identical
+   * ribbons crossing read as one tangle. Each strand now carries its own weight
+   * and width, and they are drawn back-to-front so the bright ones sit on top.
+   */
+  // Two strands carry the braid, three sit back. An even spread across five made
+  // every strand a co-star and the result read as noise; the eye needs a couple
+  // of threads it can actually follow through the crossings.
+  const BRAID_DEPTH = [1.0, 0.18, 0.72, 0.1, 0.34];
+
+  function trenza(ctx, w, h, t) {
+    const s = Math.min(w, h);
+    const cy = h / 2;
+    const amp = s * 0.2;
+    const lw = s * 0.05 * state.weight;
+    // 2.5 cycles — the higher of the two harmonics, `sin(u·π·5)`.
+    const segs = detailWave(Math.max(w, s), 2.5);
+
+    // Painter's order: dimmest first, so the near strands overlay the far ones.
+    // With opaque strokes this is no longer only about brightness — the near
+    // strands genuinely cover the far ones at every crossing.
+    const order = [0, 1, 2, 3, 4].sort((a, b) => BRAID_DEPTH[a] - BRAID_DEPTH[b]);
+
+    for (const k of order) {
+      const d = BRAID_DEPTH[k];
+      const pts = [];
+      const off = (k / LINES) * Math.PI * 2;
+      const rise = (k - (LINES - 1) / 2) * s * 0.055;
+      for (let j = 0; j <= segs; j++) {
+        const u = j / segs;
+        // Two harmonics per strand at different rates: the strands cross where the
+        // phases align, which is what reads as a braid rather than a stack. The
+        // second harmonic is lower than it was — it was adding tangle, not weave.
+        const y = cy + rise
+          + amp * Math.sin(u * Math.PI * 3 - t * 2 + off)
+          + amp * 0.3 * Math.sin(u * Math.PI * 5 + t * 1.3 - off);
+        pts.push([u * w, y]);
+      }
+      strokeAlong(ctx, pts, t * 1.1 + k * 0.18, lw * (0.58 + 0.55 * d), {
+        fade: true,
+        dim: 0.16 + 0.84 * d
+      });
+    }
+  }
+
+  /**
+   * Órbitas — rings that are DRAWN, not faded.
+   *
+   * The head of the stroke advances around the ellipse and the tail chases it,
+   * so a ring traces itself into being and then erases itself, both at full
+   * opacity. Fading them in and out read as a dissolve; this reads as drawing.
+   */
+  function orbitas(ctx, w, h, t) {
+    const s = Math.min(w, h);
+    const cx = w / 2, cy = h / 2;
+    const lw = s * 0.034 * state.weight;
+    const RINGS = 9;
+    const drift = t * 0.05;
+
+    for (let k = 0; k < RINGS; k++) {
+      const life = ((t * 0.17 + k / RINGS) % 1 + 1) % 1;
+      // Head runs ahead over the first 60%; tail follows over the last 60%. The
+      // overlap is what leaves a visible arc rather than a dot or a full ring.
+      const head = smoothstep(0, 1, clamp01(life / 0.6));
+      const tail = smoothstep(0, 1, clamp01((life - 0.4) / 0.6));
+      const arc = head - tail;
+      if (arc <= 0.004) continue;
+
+      const ang = drift + k * 2.399963; // golden angle: never a repeating rosette
+      const rx = s * 0.4 * (0.62 + 0.36 * ((k * 0.37) % 1));
+      const ry = rx * (0.17 + 0.2 * (0.5 + 0.5 * Math.sin(k * 1.7 + t * 0.4)));
+      const ca = Math.cos(ang), sa = Math.sin(ang);
+      const segs = detailCurve(s, Math.max(0.2, arc));
+
+      const pts = [];
+      for (let j = 0; j <= segs; j++) {
+        const u = tail + arc * (j / segs);
+        const a = u * Math.PI * 2;
+        const ex = Math.cos(a) * rx, ey = Math.sin(a) * ry;
+        pts.push([cx + ex * ca - ey * sa, cy + ex * sa + ey * ca]);
+      }
+      strokeAlong(ctx, pts, t * 0.6 + k * 0.11, lw, { closed: arc > 0.95, smooth: true });
+    }
+  }
+
+  /**
+   * Alineación — a registration line. Crooked stock arrives, is trued, leaves true.
+   *
+   * One batch: slides in from the left out of register, aligns while it sits at
+   * centre, brightens as it locks in, then slides out to the right STILL aligned.
+   */
+  function alineacionPass(ctx, w, h, t, offset) {
+    const s = Math.min(w, h);
+    const lw = s * 0.05 * state.weight;
+    const span = s * 0.84;
+    const gapY = s * 0.15;
+    const y0 = h / 2 - gapY * (LINES - 1) / 2;
+    const segs = detailLine(span);
+    const restX = (w - span) / 2;
+
+    const p = ((t * 0.22 + offset) % 1 + 1) % 1;
+    if (p > 0.74) return; // off-stage; the next batch is already arriving
+
+    const enter = smoothstep(0, 1, clamp01(p / 0.2));
+    const align = smoothstep(0, 1, clamp01((p - 0.2) / 0.24));
+    const exit = smoothstep(0, 1, clamp01((p - 0.52) / 0.2));
+
+    const travel = (restX - (span + w) * (1 - enter)) + exit * (w + span);
+
+    for (let k = 0; k < LINES; k++) {
+      const off = (1 - align) * s * 0.22 * Math.sin(k * 2.3 + 1.1);
+      const tilt = (1 - align) * 0.26 * Math.sin(k * 1.7);
+      const y = y0 + k * gapY;
+      const pts = [];
+      for (let j = 0; j <= segs; j++) {
+        const u = j / segs;
+        const x = travel + off + span * u;
+        pts.push([x, y + (u - 0.5) * span * tilt]);
+      }
+      // Aligned means verified: the whole batch brightens as it locks in.
+      strokeAlong(ctx, pts, t * 0.7 + k * 0.1, lw, { dim: 0.48 + 0.52 * align, fade: true });
+    }
+  }
+
+  function alineacion(ctx, w, h, t) {
+    // Two batches half a cycle apart, timed so the trued batch leaving to the
+    // right and the crooked batch arriving from the left happen AT THE SAME TIME
+    // (exit 0.52–0.72 against the other's entry 0.50–0.70). That simultaneity is
+    // the whole image: a line where what leaves is straight and what arrives is
+    // not. It also keeps the centre occupied, which in this grammar matters —
+    // an empty frame would say the run stopped for you.
+    alineacionPass(ctx, w, h, t, 0.5);
+    alineacionPass(ctx, w, h, t, 0);
+  }
+
+  /**
+   * Convergencia — slide in from the left, gather into one, leave to the right.
+   *
+   * The entrance matters as much as the exit: arriving from off-screen is what
+   * makes this a passage rather than a pulse.
+   */
+  function convergenciaPass(ctx, w, h, t, offset) {
+    const s = Math.min(w, h);
+    const lw = s * 0.05 * state.weight;
+    const span = s * 0.8;
+    const cy = h / 2;
+    const segs = detailLine(span);
+    const restX = (w - span) / 2;
+
+    const p = ((t * 0.2 + offset) % 1 + 1) % 1;
+    // Entrance and exit are deliberately brief; the gathered hold is where the
+    // time goes. A slow slide left an empty frame at both ends of the cycle, and
+    // in this grammar an empty icon means the run is waiting for you.
+    const enter = smoothstep(0, 1, clamp01(p / 0.13));
+    const gather = smoothstep(0, 1, clamp01((p - 0.15) / 0.27));
+    const exit = smoothstep(0, 1, clamp01((p - 0.6) / 0.12));
+    if (p > 0.73) return; // off-stage; the other pass is on by now
+
+    const x = (restX - (span + w) * (1 - enter)) + exit * (w + span);
+
+    for (let k = 0; k < LINES; k++) {
+      const spread = (k - (LINES - 1) / 2) * s * 0.15 * (1 - gather);
+      const pts = [];
+      for (let j = 0; j <= segs; j++) pts.push([x + span * (j / segs), cy + spread]);
+      strokeAlong(ctx, pts, t * 0.9 + k * 0.12, lw, { fade: true, dim: 1 - exit * 0.7 });
+    }
+  }
+
+  function convergencia(ctx, w, h, t) {
+    // TWO passes half a cycle apart. One group is always arriving while the other
+    // leaves, so the stage is never empty — which is the whole point: a blank
+    // chip would read as "stopped, needs you", the opposite of what commit means.
+    convergenciaPass(ctx, w, h, t, 0.5);
+    convergenciaPass(ctx, w, h, t, 0);
+  }
+
+  /** STILL. Straight parallel diagonals, matte — the metal has set. */
+  function reposo(ctx, w, h) {
+    const s = Math.min(w, h);
+    const lw = s * 0.05 * state.weight * 0.85;
+    const diag = Math.hypot(w, h) * 0.62;
+    const gap = s * 0.17;
+
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+    ctx.rotate(-Math.PI / 4);
+    for (let k = 0; k < LINES; k++) {
+      const y = (k - (LINES - 1) / 2) * gap;
+      strokeAlong(ctx, [[-diag / 2, y], [diag / 2, y]], 0, lw, { matte: true });
+    }
+    ctx.restore();
+  }
+
+  /* ---------- catalogue ---------- */
+
+  const GROUPS = [
+    {
+      title: "Ciclo de vida",
+      note: "En el orden real de un run. Todo acá fluye — la máquina está trabajando.",
+      items: [
+        {
+          id: "deriva", name: "Deriva", short: "deriva",
+          role: "discourse · explore", origin: "traducción literal", locked: true,
+          draw: (c, w, h, t) => deriva(c, w, h, t),
+          desc: "Cinco líneas a −45°, desplazadas por dos senos sumados, cada una desfasada. Sin cuantizar.",
+          desc2: "Barrido amplio y sin destino fijo — que es exactamente lo que es la investigación previa. <b>Congelada:</b> no se toca más."
+        },
+        {
+          id: "caracol", name: "Caracol", short: "caracol",
+          role: "plan", origin: "el redondo", locked: true,
+          draw: caracol,
+          desc: "La espiral redonda y completa, <b>sin el agujero que respiraba</b>. Rota a velocidad constante y ningún brazo nace ni muere, así que no hay ciclo perceptible.",
+          desc2: "<b>Ahora una onda de presencia barre los brazos</b>, bien profunda a propósito: a 16&nbsp;px la rotación sola es casi ilegible porque la silueta no cambia, así que el movimiento tiene que llevarlo el brillo."
+        },
+        {
+          id: "vortice", name: "Vórtice", short: "vórtice",
+          role: "plan · alternativa", origin: "el de brazos", locked: true,
+          draw: vortice,
+          desc: "Brazos que nacen chicos cerca del centro, giran mientras crecen y se acercan, y mueren en el borde con la cola disolviéndose atrás.",
+          desc2: "<b>El corte tenía dos causas, las dos sólo visibles a 16&nbsp;px:</b> la cola se afinaba hasta 0.131&nbsp;px (un cuarto de píxel real) y desaparecía, y la envolvente entraba al 22&nbsp;% de opacidad de golpe en vez de subir desde cero. Piso de grosor y envolvente con ceros reales."
+        },
+        {
+          id: "trenza", name: "Trenza", short: "trenza",
+          role: "implement", origin: "tu idea", locked: true,
+          draw: trenza,
+          desc: "Cinco hebras con dos armónicos cada una — dos llevan la trenza y tres quedan atrás. Con trazo opaco las cercanas <b>tapan</b> a las lejanas en cada cruce, en vez de mezclarse con ellas.",
+          desc2: "<b>Se fueron las cuentas y las esquinas.</b> Las cuentas eran las puntas redondas de segmentos vecinos superponiéndose bajo alfa; las esquinas, 2.4 muestras por ciclo contra un Nyquist de 2. Ahora el muestreo sale de los ciclos que contiene la onda, no del tamaño."
+        },
+        {
+          id: "alineacion", name: "Alineación", short: "alineación",
+          role: "verify · checks", origin: "nueva", locked: true,
+          draw: alineacion,
+          desc: "Una tanda entra desde la izquierda <b>fuera de registro</b>, se endereza en el centro, levanta brillo al quedar en verdad, y <b>sale hacia la derecha ya alineada</b>.",
+          desc2: "<b>Lo alineado que se va y lo desalineado que llega ocurren al mismo tiempo</b>, y ésa es la imagen entera: una línea de montaje donde lo que sale está derecho y lo que entra no. El centro nunca queda vacío."
+        },
+        {
+          id: "orbitas", name: "Órbitas", short: "órbitas",
+          role: "review · triage", origin: "tu idea", locked: true,
+          draw: orbitas,
+          desc: "<b>Ya no se desvanecen: se trazan.</b> La cabeza del trazo avanza sobre la elipse y la cola la persigue, así que cada anillo se dibuja y se borra en tiempo real, siempre a opacidad plena.",
+          desc2: "Los ángulos van por el ángulo áureo, así que nunca se arma una roseta repetida. Muchas hipótesis apareciendo y cerrándose — que es lo que hace una revisión."
+        },
+        {
+          id: "convergencia", name: "Convergencia", short: "convergencia",
+          role: "commit · integrate", origin: "nueva", locked: true,
+          draw: convergencia,
+          desc: "Las cinco líneas <b>entran deslizándose desde la izquierda</b>, convergen en una sola, y la única se va hacia la derecha. Entrada y salida breves; el tiempo está en el tramo ya convergido.",
+          desc2: "<b>Corren dos grupos a medio ciclo de distancia:</b> mientras uno se va, el otro ya está entrando por atrás, así que el cuadro nunca queda vacío — en esta gramática un ícono vacío diría «se frenó, te toca a vos». <b>Congelada:</b> no se toca más."
+        }
+      ]
+    },
+    {
+      title: "Estáticos — piden atención",
+      note: "Nada se mueve. La quietud es la señal: el run se detuvo y espera una decisión tuya.",
+      items: [
+        {
+          id: "indice", name: "Índice", short: "índice",
+          role: "gate:plan-review", origin: "nueva", locked: true, still: true,
+          draw: indice,
+          desc: "Renglones ordenados de largos desiguales, alineados a la izquierda. Completamente quieto — ni el brillo se mueve.",
+          desc2: "<b>Resuelto:</b> dice «esto terminó y está listo para que lo leas». Es el plan esperando tu aprobación. <b>Congelado:</b> no se toca más."
+        },
+        {
+          id: "reposo", name: "Reposo", short: "reposo",
+          role: "gate:mid · gate:end", origin: "nueva", still: true, locked: true,
+          draw: reposo,
+          desc: "<b>Diagonales rectas y paralelas</b>, iguales entre sí, en mate. El metal fraguó.",
+          desc2: "La versión anterior era la deriva congelada a mitad de onda — irregular, y no era lo pedido. Recto y quieto lee como descanso; ondulado y quieto leía como accidente."
+        }
+      ]
+    },
+    {
+      title: "Dictado",
+      note: "Ortogonal al ciclo de vida — el dictado puede ocurrir en cualquier nodo. Los dos congelados.",
+      items: [
+        {
+          id: "soundwave", name: "Soundwave", short: "soundwave",
+          role: "escuchando", origin: "referencia Claude", locked: true,
+          draw: (c, w, h, t) => soundwave(c, w, h, t, "pulse"),
+          desc: "Cinco barras, centro más alto, ripple que sale del centro. Idéntico al de Claude salvo por el material — cápsulas de metal en vez de sprite.",
+          desc2: "Los pesos son los suyos: <code>[0.32 0.62 1.0 0.62 0.32]</code>."
+        },
+        {
+          id: "transcribe", name: "Soundwave · barrido", short: "barrido",
+          role: "transcribiendo", origin: "referencia Claude", locked: true,
+          draw: (c, w, h, t) => soundwave(c, w, h, t, "transcribe"),
+          desc: "Una joroba alta recorre la fila y envuelve. Dice <b>procesando lo que capturé</b>, contra el latido que dice <b>escuchando</b>.",
+          desc2: "Comparten geometría y difieren sólo en la función de altura — un <code>if</code>, no un componente."
+        }
+      ]
+    }
+  ];
+
+  /* ---------- rendering ---------- */
+
+  const targets = [];
+
+  function makeCanvas(host, item, cssSize) {
+    const cv = document.createElement("canvas");
+    if (cssSize) { cv.style.width = cssSize + "px"; cv.style.height = cssSize + "px"; }
+    cv.setAttribute("role", "img");
+    cv.setAttribute("aria-label", item.name + " — " + item.role);
+    host.appendChild(cv);
+    targets.push({ cv, ctx: cv.getContext("2d"), item, w: 0, h: 0, dpr: 0 });
+  }
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    for (const r of targets) {
+      const rect = r.cv.getBoundingClientRect();
+      const w = Math.max(1, Math.round(rect.width));
+      const h = Math.max(1, Math.round(rect.height));
+      if (w !== r.w || h !== r.h || dpr !== r.dpr) {
+        r.w = w; r.h = h; r.dpr = dpr;
+        r.cv.width = Math.round(w * dpr);
+        r.cv.height = Math.round(h * dpr);
+      }
+    }
+  }
+
+  function frame(nowMs) {
+    const t = state.reduced ? 0.31 : (nowMs / 1000) * state.speed;
+    for (const r of targets) {
+      const { ctx, dpr, w, h } = r;
+      if (!w || !h) continue;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      r.item.draw(ctx, w, h, t);
+    }
+    if (!state.reduced) requestAnimationFrame(frame);
+  }
+
+  function redrawOnce() { requestAnimationFrame(frame); }
+
+  /* ---------- build ---------- */
+
+  const groupsHost = document.getElementById("groups");
+  const strip = document.getElementById("strip");
+
+  for (const g of GROUPS) {
+    const section = document.createElement("section");
+    section.className = "group";
+    const head = document.createElement("div");
+    head.className = "section-head";
+    head.innerHTML = `<h2>${g.title}</h2><p class="section-note">${g.note}</p>`;
+    section.appendChild(head);
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    section.appendChild(grid);
+    groupsHost.appendChild(section);
+
+    for (const c of g.items) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip";
+      chip.addEventListener("click", () => {
+        document.getElementById("card-" + c.id)
+          .scrollIntoView({ behavior: state.reduced ? "auto" : "smooth", block: "center" });
+      });
+      const chipHost = document.createElement("span");
+      chipHost.style.cssText = "display:block;width:16px;height:16px;flex:0 0 auto";
+      chip.appendChild(chipHost);
+      const nm = document.createElement("span");
+      nm.className = "chip-name";
+      nm.textContent = c.short;
+      chip.appendChild(nm);
+      strip.appendChild(chip);
+      makeCanvas(chipHost, c, 16);
+
+      const card = document.createElement("article");
+      card.className = "card" + (c.locked ? " is-locked" : c.still ? " is-still" : "");
+      card.id = "card-" + c.id;
+      const extras = [
+        c.locked ? '<span class="pill lock">congelado</span>' : "",
+        c.still && !c.locked ? '<span class="pill still">quieto</span>' : "",
+        c.fix ? `<span class="pill fix">${c.fix}</span>` : ""
+      ].join("");
+      card.innerHTML = `
+        <div class="card-head">
+          <div class="card-title">
+            <h3 class="card-name">${c.name}</h3>
+            <div class="pills">
+              <span class="pill">${c.role}</span>
+              <span class="pill ghost">${c.origin}</span>
+              ${extras}
+            </div>
+          </div>
+          <div class="true-size">
+            <span>16 / 28 px</span>
+            <div class="true-size-row"></div>
+          </div>
+        </div>
+        <div class="stage"></div>
+        <div class="card-foot">
+          <p class="card-desc">${c.desc}</p>
+          <p class="card-desc">${c.desc2}</p>
+        </div>`;
+      grid.appendChild(card);
+
+      const row = card.querySelector(".true-size-row");
+      makeCanvas(row, c, 16);
+      makeCanvas(row, c, 28);
+      makeCanvas(card.querySelector(".stage"), c, null);
+    }
+  }
+
+  /* ---------- controls ---------- */
+
+  function wireSeg(id, apply) {
+    const seg = document.getElementById(id);
+    seg.addEventListener("click", (e) => {
+      const btn = e.target.closest("button");
+      if (!btn) return;
+      apply(btn.dataset.v);
+      for (const b of seg.querySelectorAll("button")) {
+        b.setAttribute("aria-pressed", String(b === btn));
+      }
+      if (state.reduced) redrawOnce();
+    });
+  }
+
+  wireSeg("seg-metal", (v) => { state.metal = v; });
+  wireSeg("seg-tint", (v) => { state.tint = v; });
+  wireSeg("seg-stage", (v) => {
+    document.documentElement.style.setProperty("--stage-h", v + "px");
+    requestAnimationFrame(resize);
+  });
+
+  document.getElementById("weight").addEventListener("input", (e) => {
+    state.weight = parseFloat(e.target.value);
+    if (state.reduced) redrawOnce();
+  });
+
+  document.getElementById("speed").addEventListener("input", (e) => {
+    state.speed = parseFloat(e.target.value);
+    if (state.reduced) redrawOnce();
+  });
+
+  if (state.reduced) document.body.classList.add("rm-on");
+
+  window.addEventListener("resize", () => { resize(); if (state.reduced) redrawOnce(); });
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
