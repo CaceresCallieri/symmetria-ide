@@ -176,7 +176,7 @@ The inventory the decisions were taken from:
 |---|---|---|---|
 | `local` `vps` | AgentTopBar, right | Only on paired projects | **Keep.** The one control whose visibility is already earned — it hides itself on the projects where it means nothing. |
 | `terminal` `editor` `agents` `git` | AgentTopBar, left | Always | **Keep, but it is the biggest single block of chrome text in the IDE** — four words, permanently. The alternative is showing only the ACTIVE surface and revealing the rest on hover, which trades a glance for a motion. Worth trying once the palette settles; not obviously better. |
-| `all` `this agent` | GitStatusPanel header | Whenever the panel shows | **Reduce.** This is the clearest candidate: a two-segment control in the narrowest column in the IDE, duplicating a global chord (`Ctrl+Shift+D`) and an in-panel key (`a`). Collapsing it to a single label that NAMES the current scope and toggles on click halves its width and removes a segmented control from a panel that has no room for one. |
+| ~~`all` `this agent`~~ | ~~GitStatusPanel header~~ | — | **GONE (2026-08-13).** Read at the time as "reduce": a two-segment control in the narrowest column in the IDE, duplicating a global chord and an in-panel key. It was first hidden unless it could mean something (Phase 4), then removed outright along with the whole per-agent filter behind it — see "Deferred past this branch" below. The width question answered itself. |
 | `changes` `history` `PRs` | GitHistoryView tab header | On the git surface | **Keep.** This is the surface's primary navigation, and each label carries a live count that is worth reading. |
 | browser MCP | McpMenu popup | Only inside the popup | **Keep.** Costs nothing when closed. |
 
@@ -372,7 +372,6 @@ Inventory first, then cut. Known toggle-shaped controls in the IDE:
 |---|---|---|
 | local / vps | AgentTopBar, right rail | `Ctrl+Shift+U` |
 | terminal / editor / agents | AgentTopBar, left edge | `Ctrl+Shift+E`, `Ctrl+Shift+T`, `Ctrl+Shift+A` |
-| all / this agent | GitStatusPanel header | `Ctrl+Shift+D`, `a` in-panel |
 | changes / log / branches / PRs | GitHistoryView tab header | `Tab` |
 | per-project browser MCP | McpMenu popup | `Ctrl+Shift+M` → `w` |
 
@@ -412,14 +411,34 @@ with plain `Rectangle` or the new `SegmentedControl`. This is deliberately last
 
 ## Deferred past this branch
 
-### Delete the per-agent change filter entirely (decided 2026-08-13)
+### Delete the per-agent change filter entirely — DONE (2026-08-13)
 
-**Not in this branch.** Sequence: finish the aesthetic work, merge it to `dev`,
-then remove the feature there. It is recorded here because the decision was
-taken during this branch's Phase 4 conversation, and because Phase 4 just spent
-work on the control that fronts it.
+**Shipped on `dev`**, in the sequence this section planned: the aesthetic work
+merged first, then the removal landed on top of it.
 
-**The decision.** Remove the "all | this agent" changes scope and the whole
+**What went.** `agent_bash_attribution.py` and `GitChangeSectionHeader.qml`
+whole; `git_controller._fold_agent_changes` / `changed_path_set_for`;
+AppController's `focusedAgentChanges*` / `focusedAgentForeign*` surface,
+`_partition_foreign_touched`, `_refresh_foreign_changes`, both probe thread
+pools and their bookkeeping; GitStatusPanel's scope switcher, foreign Repeater
+and Flickable (the body is a single tree again, the shape it had before
+2026-07-21); Main.qml's `gitForeignProviderAdapter` and the `Ctrl+Shift+D`
+chord; four test files plus two blocks inside surviving ones.
+
+**Three things the map below did not have**, recorded because each would cost a
+future reader time:
+
+  * `tests/test_agent_bash_attribution.py` was a FOURTH test file, unnamed here.
+  * `Future`, `ThreadPoolExecutor` and `GitStatus` were left orphaned in
+    `app.py` — every one of their uses was inside the deleted code.
+  * `QtQuick.Controls` was left orphaned in `GitStatusPanel.qml` once the
+    Flickable's `ScrollBar` went.
+
+The trap below held exactly as written: `work_root` stayed, `touched` went, and
+the cut ran inside their shared branch. A comment now sits at that site saying
+so, because the surviving half reads like a leftover of the deleted one.
+
+**The decision was.** Remove the "all | this agent" changes scope and the whole
 provenance machinery under it — not just the switcher.
 
 **The user's reasoning**, which is the part worth keeping: attributing a working-

@@ -606,71 +606,6 @@ _SENTINEL_BACKSTOP_MIN_MS = 1000
 _SENTINEL_BACKSTOP_MAX_MS = 60_000
 
 
-def _fold_agent_changes(
-    status_map: dict[str, GitStatus],
-    resolved_root: str,
-    keep_real: set[str],
-) -> tuple[dict[str, bool], int]:
-    """Pure projection behind :meth:`GitController.changed_path_set_for`.
-
-    ``status_map`` is a repo-relative-path → :class:`GitStatus` map (the same
-    shape ``parse_porcelain_v2`` produces, with ``·`` ancestor-dir aggregates
-    synthesized by ``_add_directory_aggregates``). ``keep_real`` is the
-    caller's target files, ALREADY realpath-normalized. Returns
-    ``({absPath: True, ...}, leaf_count)`` covering every dirty LEAF (skipping
-    ``·`` aggregates) that ``keep_real`` names, plus each such leaf's ancestor
-    directories up to — and including — ``resolved_root``. That is exactly the
-    membership shape ``FileTreeView.pathFilter`` needs to render those files
-    and no others; ``leaf_count`` excludes the synthesized dirs.
-
-    Iterates the (small) ``keep_real`` set, NOT the (potentially large) dirty
-    tree: each touched file is mapped to its repo-relative key via
-    ``os.path.relpath`` and looked up in ``status_map`` — O(touched) dict
-    lookups with ZERO per-leaf ``realpath`` syscalls (the earlier forward form
-    realpath'd every dirty leaf in the repo on the GUI thread, which janked on
-    large changesets). ``resolved_root`` is realpath'd ONCE so the relpath
-    lands on the same footing as the already-canonical ``keep_real`` entries —
-    that is what lets a ``tool_path`` captured through a symlink still match
-    git's canonical rel key. The OUTPUT paths join back onto the ORIGINAL
-    ``resolved_root`` (what ``changedPathSet`` emits and the FM tree keys on),
-    so a symlinked root stays consistent with the rest of the panel.
-
-    No Qt, no lock: the caller snapshots ``_status_map``/``_resolved_root``
-    and realpath-normalizes ``keep`` first, so this stays a unit-testable pure
-    fold.
-    """
-    if not status_map or not resolved_root or not keep_real:
-        return {}, 0
-    root_real = os.path.realpath(resolved_root)
-    out: dict[str, bool] = {resolved_root: True}
-    count = 0
-    for real_path in keep_real:
-        rel = os.path.relpath(real_path, root_real)
-        # Outside the repo (a foreign-repo edit) → skip. Bare `.`/`..` or a
-        # `..`-prefixed rel all mean "not under root".
-        if rel == os.curdir or rel == os.pardir or rel.startswith(os.pardir + os.sep):
-            continue
-        status = status_map.get(rel)
-        if status is None or status.char == "·":
-            continue  # the touched file is clean, or the key is a dir aggregate
-        abs_leaf = os.path.join(resolved_root, rel)
-        if abs_leaf in out:
-            continue  # two touched paths resolved to the same leaf
-        out[abs_leaf] = True
-        count += 1
-        # Walk up to the repo root, adding each ancestor dir so the FM tree
-        # can expand down to the leaf. Stop at the root (already present) or
-        # the first ancestor already in `out` (shared prefix of an earlier
-        # leaf) — this bounds the walk to O(unique path segments).
-        parent = os.path.dirname(abs_leaf)
-        while parent and parent != resolved_root and parent not in out:
-            out[parent] = True
-            parent = os.path.dirname(parent)
-    # No touched-and-dirty leaf → collapse the lone root entry to an empty map
-    # so `focusedAgentChangesPathSet` reads as empty (drives the empty-state).
-    return (out, count) if count else ({}, 0)
-
-
 class GitController(QObject):
     """Async git-status provider + future git-operations surface.
 
@@ -1023,36 +958,6 @@ class GitController(QObject):
         for rel in m:
             out[str(root_path / rel)] = True
         return out
-
-    def changed_path_set_for(self, keep_abs: set[str]) -> tuple[dict, int]:
-        """Filtered twin of :attr:`changedPathSet` scoped to a caller-supplied
-        set of absolute file paths — the per-agent side-panel filter (v1).
-
-        ``keep_abs`` is the set of files an agent has edited via a write-tool
-        this session (its provenance). Returns ``({absPath: True}, file_count)``
-        for the INTERSECTION of those files with the git working-tree changes,
-        plus ancestor dirs + repo root — i.e. "the uncommitted changes this
-        agent is responsible for". A touched file that matches HEAD is dropped;
-        a dirty file the agent never touched is dropped. The heavy lifting is
-        the pure :func:`_fold_agent_changes`; this method just snapshots the
-        scan state under ``_lock`` and realpath-normalizes ``keep_abs`` once.
-
-        Exists so the ``_resolved_root`` path projection lives in ONE place
-        (AppController must not reach into ``_status_map``). Returns
-        ``({}, 0)`` on no repo / clean tree / empty keep set.
-        """
-        if not keep_abs:
-            return {}, 0
-        with self._lock:
-            m, root = self._status_map, self._resolved_root
-        if not m or not root:
-            return {}, 0
-        # The sole caller (AppController._focused_agent_changes) already stores
-        # realpath'd paths in `touched`, so this is idempotent belt-and-braces
-        # — cheap for the small touched set, and keeps the method correct if a
-        # future caller passes raw paths (the fold requires canonical input).
-        keep_real = {os.path.realpath(p) for p in keep_abs}
-        return _fold_agent_changes(m, root, keep_real)
 
     def set_repo_root(self, value: str) -> None:
         """Switch the repo being watched. Idempotent on equal values.

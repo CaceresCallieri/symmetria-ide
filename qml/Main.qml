@@ -174,19 +174,10 @@ Window {
         onActivated: controller.toggle_git_history()
     }
 
-    // Toggle the Active Changes scope: all ⇄ this agent (D = diff scope).
-    // The in-panel `a` key only fires when the changes sub-pane holds focus,
-    // which buried the per-agent view — this global chord flips it from ANY
-    // surface. "this agent" narrows the changeset to the FOCUSED agent's
-    // uncommitted work (its write-tool + Bash provenance ∩ git-dirty); "all"
-    // is the repo-wide default. No-op-ish when the panel is hidden (clean
-    // tree) — the scope still flips and applies once changes appear.
-    Shortcut {
-        sequences: ["Ctrl+Shift+D"]
-        context: Qt.ApplicationShortcut
-        onActivated: gitStatusPanel.scope =
-            gitStatusPanel.scope === "agent" ? "all" : "agent"
-    }
+    // Ctrl+Shift+D is FREE. It toggled the Active Changes panel between the
+    // whole repo and the focused agent's own changes until 2026-08-13, when
+    // that per-agent filter was removed (see GitStatusPanel.qml's header).
+    // Ctrl+U / Ctrl+D — UNshifted, half-page scroll — are unrelated and live.
 
     // Browser surface toggle — go watch what an agent is doing (or see the
     // page it left once idle; the window lives as long as the agent does).
@@ -2225,20 +2216,6 @@ Window {
                         repoRoot: gitController.repoRoot
                         statusProvider: gitProviderAdapter
                         pathFilter: gitController.changedPathSet
-                        // Per-agent scope: the focused agent's uncommitted
-                        // changes (touched ∩ git-dirty). The panel's "a" toggle
-                        // swaps its embedded tree between this and pathFilter.
-                        // `agentPathFilter`/`agentCount` are the DISPLAYED repo's
-                        // slice; the multi-root props below carry the FOREIGN
-                        // repos the agent also worked in (separate sections) and
-                        // the cross-repo TOTAL for the panel header + empty-state.
-                        agentPathFilter: controller.focusedAgentChangesPathSet
-                        agentCount: controller.focusedAgentChangesCount
-                        agentTotalCount: controller.focusedAgentChangesTotalCount
-                        foreignChanges: controller.focusedAgentForeignChanges
-                        foreignOverflow: controller.focusedAgentForeignOverflow
-                        foreignStatusProvider: gitForeignProviderAdapter
-                        focusedAgentSlot: controller.focusedAgent
                         // Same activation contract as the main FileTreeView:
                         // open the path in nvim and re-focus the editor so
                         // the user can immediately start editing. Routed
@@ -2774,10 +2751,11 @@ Window {
         // the FM standalone's `_gitStatusObj` so both surfaces render git status
         // identically; `state` is retained on the payload only for the tooltip.
         //
-        // PUBLIC (no leading underscore): the per-agent foreign-changes provider
-        // (`gitForeignProviderAdapter` below) reuses this exact char→colour
-        // mapping so foreign-repo badges match the displayed repo's — one source
-        // of truth for the operation-colour grammar.
+        // PUBLIC (no leading underscore) because a second, root-parameterised
+        // provider reused this exact char→colour mapping while the panel showed
+        // per-agent foreign-repo sections. That provider is gone (2026-08-13),
+        // so this is the sole caller again; the name is kept public in case a
+        // future surface needs the same one-source-of-truth grammar.
         function colorForOperation(char) {
             switch (char) {
             case "M":            // modified
@@ -2819,44 +2797,6 @@ Window {
         target: gitController
         function onStatusChanged(): void {
             gitProviderAdapter.statusChanged();
-        }
-    }
-
-    // Per-agent change filter, MULTI-ROOT (v2): the status provider for the
-    // FOREIGN-repo sections in GitStatusPanel's agent scope. Same shape as
-    // `gitProviderAdapter` but ROOT-PARAMETERISED — `statusForPath(root, abs)`
-    // takes the foreign repo root as its first arg (each section closes over
-    // its own root in a per-delegate shim; see GitStatusPanel). Backed by
-    // `controller.agentForeignStatusForPath`, which reads the IDE-side cache of
-    // that repo's probed `git status`. Reuses `gitProviderAdapter`'s
-    // `colorForOperation` so foreign badges match the displayed repo's.
-    QtObject {
-        id: gitForeignProviderAdapter
-
-        signal statusChanged
-
-        function statusForPath(root, absolutePath) {
-            var s = controller.agentForeignStatusForPath(root, absolutePath);
-            if (!s || !s.char)
-                return null;
-            return {
-                char: s.char,
-                color: gitProviderAdapter.colorForOperation(s.char),
-                tooltip: s.tooltip,
-                displayName: s.path,
-                adds: s.additions,
-                dels: s.deletions
-            };
-        }
-    }
-
-    // Re-emit on every foreign-changes edge so each section's FileTreeView
-    // invalidates its badge bindings when a foreign probe lands. Sibling (not
-    // child) of the QtObject for the same reason as gitProviderAdapter's.
-    Connections {
-        target: controller
-        function onFocusedAgentForeignChangesChanged(): void {
-            gitForeignProviderAdapter.statusChanged();
         }
     }
 

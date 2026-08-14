@@ -34,7 +34,6 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
 from typing import ClassVar, TypedDict
 
 from PySide6.QtCore import (
@@ -64,7 +63,6 @@ from . import (
 )
 from .account_usage_store import AccountUsageStore
 from .agent_activity import AgentActivityMachine
-from .agent_bash_attribution import bash_delta, probe_dirty_leaves, probe_status_map
 from .agent_bridge import AgentBridgeClient, emit_gc_safe
 from .agent_events import AgentEventsServer
 from .agent_interrupt import (
@@ -84,12 +82,7 @@ from .cmdline_models import (  # importing also registers these @QmlElement type
 from .editor_font import DEFAULT_FONT_POINT_SIZE, default_font
 from .gh_pr_controller import GhPrController, GhPrListModel, GhPrTimelineModel
 from .git_branch_controller import GitBranchController, GitBranchListModel
-from .git_controller import (
-    GitController,
-    GitStatus,
-    GitStatusListModel,
-    _fold_agent_changes,
-)
+from .git_controller import GitController, GitStatusListModel
 from .git_log_controller import GitLogController, GitLogListModel
 from .git_ops_controller import GitOpsController
 from .keyboard_layout import resolve_host_keymap
@@ -161,70 +154,6 @@ _AGENT_TMUX_CONF = _RUNTIME_DIR / "agent-tmux.conf"
 # (a Bash-tool `cd` changes the tool's persistent shell, not the session
 # process — diagnosed live on magistralia, 2026-07-13).
 _AGENT_WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
-
-# Per-agent change filter, multi-root (v2): cap how many FOREIGN-repo sections
-# the side panel renders so an agent that touched many repos can't grow the
-# panel unbounded. Sections beyond the cap collapse to a "+N repos" overflow
-# line; the header TOTAL still counts every foreign change (capping display,
-# never the count — the "no silent caps" rule). 4 covers every realistic
-# Symmetria-ecosystem multi-repo session (IDE + agents-ui + the fork).
-_FOREIGN_SECTION_CAP = 4
-
-# Per-root re-probe throttle for foreign `git status`. `_refresh_foreign_changes`
-# rides EVERY displayed-changes edge (200ms git scans during active editing), so
-# without this a foreign repo is re-probed continuously even when unchanged. A
-# root with a cached snapshot is re-probed at most once per this interval; the
-# cache serves in between. 1s keeps the section live without a subprocess storm.
-_FOREIGN_PROBE_THROTTLE_SEC = 1.0
-
-
-def _partition_foreign_touched(
-    touched: set[str],
-    displayed_real: str,
-    resolve_cache: dict[str, str] | None = None,
-) -> dict[str, set[str]]:
-    """Group an agent's ``touched`` paths by the git repo they live in,
-    EXCLUDING the currently-displayed repo.
-
-    Returns ``{repo_root: {paths}}`` for FOREIGN repos only — the displayed
-    repo's touched paths are dropped here because the existing displayed-repo
-    fold (``changed_path_set_for``) already covers them. A path under no git
-    repo is dropped (no "uncommitted" concept to show). The repo root is the
-    innermost ``.git`` ancestor (``resolve_project_root``), so a submodule /
-    nested repo counts as its OWN foreign group — which is correct: the parent
-    repo's status map lists a submodule as one entry, never its inner files, so
-    those files would never appear in the displayed fold anyway.
-
-    ``displayed_real`` is the realpath of the displayed repo root; each touched
-    path's resolved root is realpath-compared against it so a symlinked checkout
-    still classifies its own files as "displayed", not foreign.
-
-    ``resolve_project_root`` returns ``start`` itself (not "") when no ``.git``
-    ancestor exists, and also treats a bare ``.symmetria/`` dir as a root — so a
-    loose file under no git repo would otherwise group as its own "repo". We
-    require an actual ``.git`` at the resolved root to keep those out: a path
-    with no git repo has nothing uncommitted to show.
-
-    ``resolve_project_root`` stats UP the tree (O(depth) syscalls), and this runs
-    on the GUI thread on every displayed-changes edge, so ``resolve_cache`` (a
-    caller-owned ``path -> resolved_root`` dict) memoizes it: a path's repo root
-    doesn't move within a session, so a cache hit skips the walk entirely. Pass
-    ``None`` (tests) to bypass the cache.
-    """
-    groups: dict[str, set[str]] = {}
-    for p in touched:
-        if resolve_cache is not None and p in resolve_cache:
-            r = resolve_cache[p]
-        else:
-            r = resolve_project_root(p)
-            if resolve_cache is not None:
-                resolve_cache[p] = r
-        if not r or not os.path.exists(os.path.join(r, ".git")):
-            continue  # not inside a git repo → nothing uncommitted to show
-        if os.path.realpath(r) == displayed_real:
-            continue  # displayed repo — the main fold already owns these
-        groups.setdefault(r, set()).add(p)
-    return groups
 
 
 def _agent_tmux_enabled() -> bool:
@@ -604,42 +533,6 @@ class AppController(QObject):
     #     e.g. the user anchored to the same worktree path).
     agentWorktreeChanged = Signal()
     displayingWorktreeChanged = Signal()
-    # Focused-agent change attribution (v1 side-panel filter). The focused
-    # slot's uncommitted-changes view is derived from its write-tool
-    # provenance (`touched`) ∩ the git dirty set, so it must recompute on
-    # THREE unrelated edges — a git scan, a focus change, and the focused
-    # agent editing a new file. Its own signal (not termAgentsChanged / not
-    # statusChanged) so none of those re-evaluate the whole chip row or the
-    # main changes list; only the two per-agent properties re-bind.
-    focusedAgentChangesChanged = Signal()
-    # v2 Bash-write attribution: a pool worker probes the agent's git dirty set
-    # on each Bash edge and hands (slot, window-generation, "pre"|"post",
-    # leaf-set-or-None) back to the GUI thread (see _submit_bash_probe /
-    # _on_bash_probe_ready). The generation tags each command's window so a
-    # probe result that lands out of order (pool max_workers>1) or after the
-    # slot is reused is dropped, not mispaired. object carries a set[str] on
-    # success or None on probe failure; queued + GC-suspended (gotcha #10).
-    _bashProbeReady = Signal(int, int, str, object)
-    # Per-agent change filter, MULTI-ROOT (v2): the focused agent's changes in
-    # git repos OTHER than the displayed one, as collapsible side-panel sections
-    # (write-tool + Bash provenance ∩ each foreign repo's dirty set). Fires ONLY
-    # when the foreign SECTION LIST actually changes — a foreign probe lands with
-    # a fresh map, or a root is pruned. Deliberately NOT on every displayed edge:
-    # the QML foreign Repeater's `model` binds `focusedAgentForeignChanges`
-    # (notify = this signal), and a per-edge emit would rebuild the array
-    # reference every 200ms scan, churning the embedded FileTreeView delegates.
-    focusedAgentForeignChangesChanged = Signal()
-    # The focused agent's CROSS-REPO total count (displayed + foreign). A separate
-    # signal because the total moves on BOTH a displayed-changes edge AND a
-    # foreign-list change, and a @Property binds only ONE notify — both
-    # focusedAgentChangesChanged and focusedAgentForeignChangesChanged are wired
-    # to re-emit it (see __init__). This keeps the header total live without
-    # coupling the foreign Repeater's model to every displayed scan.
-    focusedAgentTotalCountChanged = Signal()
-    # A foreign-repo `git status` probe result (probe_status_map) hops the GUI
-    # thread here: (repo_root, status_map-or-None). None is a probe FAILURE (the
-    # cached snapshot is kept, not wiped). Queued + GC-suspended (gotcha #10).
-    _foreignProbeReady = Signal(str, object)
     # Internal cross-thread marshal for the coordination judge: the one-shot
     # judge worker thread emits (trigger_id, status, summary); a queued
     # connection delivers _on_judge_verdict on the GUI thread.
@@ -1304,78 +1197,6 @@ class AppController(QObject):
         # the panel's ListView. Auto-refreshes on the controller's
         # statusChanged via a queued connection (handled internally).
         self._git_status_list = GitStatusListModel(self._git_controller, self)
-        # Per-agent change attribution (v1 side-panel filter): the focused
-        # agent's "este agente" view is `touched ∩ git-dirty`, so re-emit
-        # focusedAgentChangesChanged on BOTH a new git scan and a focus edge
-        # (the third edge — the focused agent editing a new file — is emitted
-        # inline in _on_agent_hook). Signal-to-signal keeps the recompute lazy:
-        # the two @Property bodies run only when QML re-reads them. statusChanged
-        # fires on the git worker thread, so it hops the GUI thread via a queued
-        # connection (same discipline as GitStatusListModel's own connect).
-        # `_focused_agent_changes_cache` memoizes the (pathSet, count) tuple so
-        # the two properties don't each recompute the fold on one edge; the
-        # invalidation slot is connected FIRST so it runs before QML re-reads on
-        # the same signal (QML's read is lazy either way).
-        self._focused_agent_changes_cache: tuple[dict, int] | None = None
-        self.focusedAgentChangesChanged.connect(
-            self._invalidate_focused_agent_changes_cache
-        )
-        # queued: GitController worker → AppController GUI (§4 P2)
-        self._git_controller.statusChanged.connect(
-            self.focusedAgentChangesChanged,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        self.focusedAgentChanged.connect(self.focusedAgentChangesChanged)
-        # v2 Bash-write attribution: each Bash edge submits a `git status` probe
-        # (subprocess) to this pool, off the GUI thread; the leaf-set hops back
-        # via _bashProbeReady (queued) → _on_bash_probe_ready, which folds the
-        # PostToolUse − PreToolUse delta into the agent's `touched` set.
-        self._bash_probe_pool = ThreadPoolExecutor(
-            max_workers=3, thread_name_prefix="bash-attrib"
-        )
-        # queued: bash-attrib pool → AppController GUI (§4 P2)
-        self._bashProbeReady.connect(
-            self._on_bash_probe_ready, Qt.ConnectionType.QueuedConnection
-        )
-        # Per-agent change filter, MULTI-ROOT (v2): the focused agent's changes
-        # in FOREIGN repos (not the displayed one). `_foreign_status_cache` maps
-        # a foreign repo root → its last probed `git status` map; `_inflight`
-        # dedups overlapping probes for the same root; `_probe_last` throttles
-        # per-root re-probes (monotonic timestamps); `_resolve_root_cache`
-        # memoizes the up-the-tree `resolve_project_root` walk (roots don't move
-        # in a session); the `(list, total, overflow)` projection is memoized like
-        # the displayed one. A foreign refresh rides EVERY displayed-changes edge
-        # (focusedAgentChangesChanged → _refresh_foreign_changes), submitting
-        # throttled probes for touched foreign roots and pruning roots no longer
-        # touched. Self-limiting: the common case (no foreign work) partitions to
-        # an empty set → no probes, zero overhead. Probes run on their OWN pool
-        # (not the shared bash-attrib pool) so a foreign burst can't delay a
-        # timing-critical Bash pre/post attribution probe.
-        self._foreign_status_cache: dict[str, dict[str, GitStatus]] = {}
-        self._foreign_probe_inflight: set[str] = set()
-        self._foreign_probe_last: dict[str, float] = {}
-        self._foreign_wanted: set[str] = set()
-        self._resolve_root_cache: dict[str, str] = {}
-        self._focused_agent_foreign_cache: tuple[list, int, int] | None = None
-        self._foreign_probe_pool = ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="foreign-status"
-        )
-        self.focusedAgentForeignChangesChanged.connect(
-            self._invalidate_focused_agent_foreign_cache
-        )
-        self.focusedAgentChangesChanged.connect(self._refresh_foreign_changes)
-        # The cross-repo header total moves on EITHER a displayed edge or a
-        # foreign-list change; both re-emit its dedicated notify so the @Property
-        # stays live without binding the foreign Repeater's model to displayed
-        # scans (see focusedAgentTotalCountChanged).
-        self.focusedAgentChangesChanged.connect(self.focusedAgentTotalCountChanged)
-        self.focusedAgentForeignChangesChanged.connect(
-            self.focusedAgentTotalCountChanged
-        )
-        # queued: foreign-status pool → AppController GUI (§4 P2)
-        self._foreignProbeReady.connect(
-            self._on_foreign_probe_ready, Qt.ConnectionType.QueuedConnection
-        )
         # ----- Git HISTORY provider (read-only comprehension surface) ------
         # The read-only counterpart to GitController: where the status
         # controller answers "what is uncommitted right now", this answers
@@ -3633,385 +3454,6 @@ class AppController(QObject):
     def focusedAgent(self) -> int:
         """1-based focused slot; 0 = none (empty pool)."""
         return self._focused_term_agent
-
-    def _focused_agent_changes(self) -> tuple[dict, int]:
-        """`(pathSet, count)` for the FOCUSED agent's uncommitted changes.
-
-        The focused slot's write-tool provenance (`touched`) intersected with
-        the git dirty set via `GitController.changed_path_set_for`. Shared by
-        the two QML-facing properties below so the intersection is expressed
-        once, and memoized in `_focused_agent_changes_cache` (invalidated on
-        `focusedAgentChangesChanged`) so the two properties don't each run the
-        fold on a single recompute edge. `({}, 0)` when no agent is focused or
-        it has touched nothing."""
-        if self._focused_agent_changes_cache is not None:
-            return self._focused_agent_changes_cache
-        rec = self._term_agents.get(self._focused_term_agent)
-        touched = rec.get("touched") if rec else None
-        result = (
-            ({}, 0)
-            if not touched
-            else self._git_controller.changed_path_set_for(touched)
-        )
-        self._focused_agent_changes_cache = result
-        return result
-
-    @Slot()
-    def _invalidate_focused_agent_changes_cache(self) -> None:
-        """Clear the focused-agent changes memo. Connected to
-        focusedAgentChangesChanged first, so it runs before any QML re-read."""
-        self._focused_agent_changes_cache = None
-
-    def _submit_bash_probe(self, slot: int, rec: dict, hook_event: str) -> None:
-        """Probe the agent's git dirty set for one Bash edge, off the GUI thread.
-
-        Each command is a WINDOW tagged by a per-slot generation, captured at
-        PreToolUse and carried through to the result: a probe that lands after
-        the next command's Pre (pool reorder) or after the slot is reused is
-        dropped, not mispaired (see `_on_bash_probe_ready`). PostToolUse reuses
-        the Pre edge's cached root — `resolve_project_root` walks the filesystem
-        and can't change between the two edges of one command. Scoped to the
-        agent's live work root, same precedence as the worktree follow."""
-        phase = "pre" if hook_event == "PreToolUse" else "post"
-        if phase == "pre":
-            rec["_bash_gen"] = rec.get("_bash_gen", 0) + 1
-            rec["_bash_win"] = {}
-            rec["_bash_root"] = rec.get("work_root") or resolve_project_root(
-                rec.get("live_cwd") or rec.get("cwd", "")
-            )
-        gen = rec.get("_bash_gen", 0)
-        root = rec.get("_bash_root", "")
-        if not gen or not root:
-            return  # a Post with no preceding Pre this session, or no repo
-        future = self._bash_probe_pool.submit(probe_dirty_leaves, root)
-        future.add_done_callback(
-            lambda f, s=slot, g=gen, p=phase: self._emit_bash_probe(s, g, p, f)
-        )
-
-    def _emit_bash_probe(self, slot: int, gen: int, phase: str, future: Future) -> None:
-        """Pool-thread callback: hop the probe result onto the GUI thread.
-
-        GC suspended around the cross-thread emit per gotcha #10 (the set
-        payload allocates during queued marshalling)."""
-        if future.cancelled():
-            return  # app shutting down (cancel_futures) — not a real failure
-        try:
-            leaves = future.result()
-        except Exception:
-            log.exception("bash probe failed (slot %d, %s)", slot, phase)
-            return
-        emit_gc_safe(self._bashProbeReady, slot, gen, phase, leaves)
-
-    @Slot(int, int, str, object)
-    def _on_bash_probe_ready(
-        self, slot: int, gen: int, phase: str, leaves: object
-    ) -> None:
-        """GUI thread: store one Bash-window snapshot; when both edges are in,
-        fold the (post − pre) delta into the slot's `touched` set.
-
-        Drops results from a SUPERSEDED window — a probe-pool reorder landing
-        after the next command's Pre, or this slot reused by another agent
-        (fresh rec → fresh/absent generation). Order-independent within a
-        window: whichever of pre/post arrives second triggers the diff. A
-        `None` snapshot is a probe FAILURE (not a clean repo) and ABORTS the
-        window rather than over-attributing the whole dirty set (#2)."""
-        rec = self._term_agents.get(slot)
-        if rec is None or gen != rec.get("_bash_gen"):
-            return  # agent closed, or result from a superseded window
-        if leaves is None:
-            rec["_bash_win"] = {}  # probe failed → abort this window, don't fold
-            return
-        if not isinstance(leaves, set):
-            return
-        win = rec.setdefault("_bash_win", {})
-        win[phase] = leaves
-        if "pre" not in win or "post" not in win:
-            return  # window not complete yet
-        rec["_bash_win"] = {}
-        added = bash_delta(win["pre"], win["post"]) - rec.setdefault("touched", set())
-        if not added:
-            return
-        rec["touched"] |= added
-        if slot == self._focused_term_agent:
-            self.focusedAgentChangesChanged.emit()
-
-    @Property("QVariant", notify=focusedAgentChangesChanged)
-    def focusedAgentChangesPathSet(self) -> dict:
-        """`{absPath: True}` for the FM `pathFilter`, narrowed to the FOCUSED
-        agent's uncommitted changes: the write-tool files it touched this
-        session that are ALSO git-dirty, plus their ancestor dirs + repo root.
-
-        Drives the side panel's "este agente" scope. Empty when no agent is
-        focused, it has touched nothing, or nothing it touched is dirty.
-
-        This is the DISPLAYED repo's slice only. Changes the agent made in OTHER
-        repos are surfaced as separate sections via `focusedAgentForeignChanges`
-        (multi-root, v2); the header's "Changes · N" uses the cross-repo
-        `focusedAgentChangesTotalCount`, while this map feeds the displayed
-        repo's own section (and the whole body in the no-foreign-work case)."""
-        return self._focused_agent_changes()[0]
-
-    @Property(int, notify=focusedAgentChangesChanged)
-    def focusedAgentChangesCount(self) -> int:
-        """Leaf-file count behind `focusedAgentChangesPathSet` (dirs excluded) —
-        the DISPLAYED repo's per-agent file count. Labels the displayed-repo
-        section header when foreign sections exist; the panel's top-of-panel
-        total is `focusedAgentChangesTotalCount` (displayed + all foreign)."""
-        return self._focused_agent_changes()[1]
-
-    # ----- Per-agent change filter, MULTI-ROOT (v2) ----------------------
-    # The focused agent's changes in git repos OTHER than the displayed one,
-    # as collapsible side-panel sections. Data flow mirrors the displayed
-    # fold, only the status_map source differs: partition `touched` by repo,
-    # probe each foreign root's `git status` off-thread, fold each with the
-    # SAME pure `_fold_agent_changes`. See CLAUDE.md "Per-agent change filter".
-
-    @Slot()
-    def _invalidate_focused_agent_foreign_cache(self) -> None:
-        """Clear the foreign-changes projection memo. Connected to
-        focusedAgentForeignChangesChanged FIRST so it runs before any QML
-        re-read on the same emit (QML's read is lazy either way)."""
-        self._focused_agent_foreign_cache = None
-
-    def _displayed_repo_real(self) -> str:
-        """Realpath of the innermost git repo containing the displayed root, or
-        "" if none. The partition key that separates "displayed" from "foreign".
-
-        Uses `resolve_project_root(displayedRoot)` rather than the git
-        controller's resolved root so worktree-follow (which re-roots
-        `displayedRoot` to a linked worktree) classifies that worktree's own
-        files as displayed, and the MAIN checkout's files as foreign — the
-        symmetric, correct behaviour for either follow direction."""
-        root = resolve_project_root(self.displayedRoot or "")
-        return os.path.realpath(root) if root else ""
-
-    @Slot()
-    def _refresh_foreign_changes(self) -> None:
-        """Recompute the focused agent's foreign-repo groups and (re)probe them.
-
-        Rides EVERY `focusedAgentChangesChanged` edge (focus change, git scan,
-        the agent editing a new file). For each foreign root the focused agent
-        touched, submits a THROTTLED `git status` probe — skipped if one is in
-        flight, or if a cached snapshot was refreshed within
-        `_FOREIGN_PROBE_THROTTLE_SEC` — on the DEDICATED foreign pool (so a
-        foreign burst never delays a timing-critical Bash probe). Prunes
-        cache/in-flight/throttle state for roots no longer touched.
-
-        Emits `focusedAgentForeignChangesChanged` ONLY when the WANTED root set
-        changed (focus moved, a root entered/left) — NOT on every edge, because
-        that signal is the QML foreign Repeater's model notify and a per-scan
-        emit would rebuild its delegates every 200ms. A probe landing with a
-        genuinely new map emits from `_on_foreign_probe_ready`; the header total
-        tracks plain displayed edges via `focusedAgentTotalCountChanged`. Empty
-        groups (the common no-foreign case) submit nothing: zero overhead."""
-        rec = self._term_agents.get(self._focused_term_agent)
-        touched = rec.get("touched") if rec else None
-        groups = _partition_foreign_touched(
-            touched or set(), self._displayed_repo_real(), self._resolve_root_cache
-        )
-        wanted = set(groups)
-        # Drop cache + in-flight + throttle state for roots the focused agent no
-        # longer touches (focus moved to an agent working elsewhere, or the file
-        # was reverted). A prune shrinks the visible section list right away.
-        pruned = False
-        for stale in [r for r in self._foreign_status_cache if r not in wanted]:
-            del self._foreign_status_cache[stale]
-            pruned = True
-        self._foreign_probe_inflight &= wanted
-        for gone in [r for r in self._foreign_probe_last if r not in wanted]:
-            del self._foreign_probe_last[gone]
-        now = time.monotonic()
-        for root in wanted:
-            if root in self._foreign_probe_inflight:
-                continue  # a probe for this root is already running
-            # A root with a fresh-enough cached snapshot isn't re-probed; one
-            # with no snapshot yet always is (first discovery).
-            if (
-                root in self._foreign_status_cache
-                and (now - self._foreign_probe_last.get(root, 0.0))
-                < _FOREIGN_PROBE_THROTTLE_SEC
-            ):
-                continue
-            self._foreign_probe_inflight.add(root)
-            self._foreign_probe_last[root] = now
-            future = self._foreign_probe_pool.submit(probe_status_map, root)
-            future.add_done_callback(lambda f, r=root: self._emit_foreign_probe(r, f))
-        # Rebuild the projection now ONLY if the section composition can have
-        # changed here — the wanted set differs (focus moved, a cached-fresh root
-        # entered/left) or a cached root was just pruned. A same-agent editing
-        # burst keeps `wanted` stable with no prune, so it must NOT emit (that
-        # would churn the Repeater every 200ms); newly-probed roots emit from
-        # `_on_foreign_probe_ready` instead.
-        if pruned or wanted != self._foreign_wanted:
-            self._foreign_wanted = set(wanted)
-            self.focusedAgentForeignChangesChanged.emit()
-
-    def _emit_foreign_probe(self, root: str, future: Future) -> None:
-        """Pool-thread callback: hop a foreign `git status` result onto the GUI
-        thread. GC suspended around the emit per gotcha #10 (the map payload
-        allocates during queued marshalling)."""
-        if future.cancelled():
-            return  # app shutting down (cancel_futures) — not a real failure
-        try:
-            status_map = future.result()
-        except Exception:
-            # Report the FAILURE as a None result rather than swallowing it:
-            # `_on_foreign_probe_ready` is the only place that clears
-            # `_foreign_probe_inflight`, so a bare return here would strand this
-            # root in-flight forever and permanently block its re-probe.
-            log.exception("foreign status probe failed (%s)", root)
-            emit_gc_safe(self._foreignProbeReady, root, None)
-            return
-        emit_gc_safe(self._foreignProbeReady, root, status_map)
-
-    @Slot(str, object)
-    def _on_foreign_probe_ready(self, root: str, status_map: object) -> None:
-        """GUI thread: store one foreign repo's `git status` snapshot.
-
-        Drops the result if the focused agent no longer touches `root` (focus
-        moved between submit and return). A `None` map is a probe FAILURE — keep
-        any prior snapshot rather than wiping it, so a transient git error
-        doesn't make the foreign section flicker out. On a map that DIFFERS from
-        the cached one, store it and re-emit; an identical re-probe result skips
-        the emit so an unchanged foreign repo doesn't churn the Repeater."""
-        self._foreign_probe_inflight.discard(root)
-        rec = self._term_agents.get(self._focused_term_agent)
-        touched = rec.get("touched") if rec else None
-        groups = _partition_foreign_touched(
-            touched or set(), self._displayed_repo_real(), self._resolve_root_cache
-        )
-        if root not in groups:
-            self._foreign_status_cache.pop(root, None)
-            return  # no longer a foreign root for the focused agent
-        if status_map is None:
-            return  # probe failure — keep the prior snapshot, don't wipe
-        if self._foreign_status_cache.get(root) == status_map:
-            return  # unchanged since the last probe — no projection change
-        self._foreign_status_cache[root] = status_map
-        self.focusedAgentForeignChangesChanged.emit()
-
-    def _focused_agent_foreign(self) -> tuple[list, int, int]:
-        """`(sections, total_foreign_count, overflow)` for the focused agent.
-
-        `sections` is the capped list of `{root, label, pathFilter, count}`
-        section descriptors (one per foreign repo WITH changes back from its
-        probe); `total_foreign_count` sums EVERY foreign repo (uncapped, so the
-        header total stays honest); `overflow` is how many sections the cap hid.
-        Memoized in `_focused_agent_foreign_cache` (invalidated on
-        focusedAgentForeignChangesChanged) so the three QML-facing properties
-        below share one fold pass per edge.
-
-        `total_foreign_count` counts only repos whose probe has ALREADY landed,
-        so on first entry to a foreign-heavy agent the header total ticks UPWARD
-        as probes arrive (a brief progressive count, not a bug) — each landing
-        emits focusedAgentForeignChangesChanged and re-folds."""
-        if self._focused_agent_foreign_cache is not None:
-            return self._focused_agent_foreign_cache
-        rec = self._term_agents.get(self._focused_term_agent)
-        touched = rec.get("touched") if rec else None
-        groups = _partition_foreign_touched(
-            touched or set(), self._displayed_repo_real(), self._resolve_root_cache
-        )
-        sections: list[dict] = []
-        total = 0
-        for root in sorted(groups):
-            status_map = self._foreign_status_cache.get(root)
-            if not status_map:
-                continue  # probe not back yet (or empty/clean repo)
-            path_filter, count = _fold_agent_changes(status_map, root, groups[root])
-            if count == 0:
-                continue  # the agent's touches in this repo are all clean now
-            total += count
-            sections.append(
-                {
-                    "root": root,
-                    "label": os.path.basename(root),
-                    "pathFilter": path_filter,
-                    "count": count,
-                }
-            )
-        overflow = 0
-        if len(sections) > _FOREIGN_SECTION_CAP:
-            overflow = len(sections) - _FOREIGN_SECTION_CAP
-            log.info(
-                "agent foreign changes: %d repos with changes, showing %d "
-                "(+%d hidden by cap)",
-                len(sections),
-                _FOREIGN_SECTION_CAP,
-                overflow,
-            )
-            sections = sections[:_FOREIGN_SECTION_CAP]
-        result = (sections, total, overflow)
-        self._focused_agent_foreign_cache = result
-        return result
-
-    @Property("QVariantList", notify=focusedAgentForeignChangesChanged)
-    def focusedAgentForeignChanges(self) -> list:
-        """Collapsible per-repo section descriptors for the focused agent's
-        changes OUTSIDE the displayed repo: `[{root, label, pathFilter, count}]`,
-        capped at `_FOREIGN_SECTION_CAP`. Each drives one embedded FileTreeView
-        (rooted at `root`, narrowed by `pathFilter`) in GitStatusPanel's agent
-        scope. Empty in the common single-repo case."""
-        return self._focused_agent_foreign()[0]
-
-    @Property(int, notify=focusedAgentForeignChangesChanged)
-    def focusedAgentForeignOverflow(self) -> int:
-        """How many foreign-repo sections the display cap hid (0 when under the
-        cap) — drives the panel's "+N repos más" overflow line. The hidden
-        sections' file counts still land in `focusedAgentChangesTotalCount`."""
-        return self._focused_agent_foreign()[2]
-
-    @Property(int, notify=focusedAgentTotalCountChanged)
-    def focusedAgentChangesTotalCount(self) -> int:
-        """The focused agent's TOTAL uncommitted file count across ALL repos —
-        displayed + every foreign repo (uncapped). The panel's top-of-panel
-        "Changes · N" and its agent-scope empty-state both key on this.
-
-        Notifies on its own `focusedAgentTotalCountChanged`, which BOTH
-        `focusedAgentChangesChanged` (displayed delta) and
-        `focusedAgentForeignChangesChanged` (foreign delta) are wired to re-emit
-        (see __init__) — a @Property binds only one notify signal, and this keeps
-        the total live on either delta WITHOUT coupling the foreign Repeater's
-        model to every displayed scan."""
-        return self._focused_agent_changes()[1] + self._focused_agent_foreign()[1]
-
-    @Slot(str, str, result="QVariantMap")
-    def agentForeignStatusForPath(self, root: str, absolute_path: str) -> dict:
-        """A foreign repo's git status for one absolute path — the multi-root
-        twin of `GitController.statusForPath`, backing each foreign section's
-        FileTreeView status badges.
-
-        `root` selects the cached foreign status map; the path is made
-        repo-relative (the porcelain key footing) to look it up. Returns the
-        same `{char, state, tooltip, path, additions, deletions, origPath?}`
-        shape the displayed provider returns, or `{}` for a clean/unknown path
-        or an uncached root — the FM seam treats `{}` as "no badge"."""
-        status_map = self._foreign_status_cache.get(root)
-        if not status_map:
-            return {}
-        rel = os.path.relpath(absolute_path, root)
-        if rel == os.pardir or rel.startswith(os.pardir + os.sep):
-            # Not under `root` as given — retry on realpath'd footing so a
-            # symlinked root/path still matches its canonical foreign key.
-            rel = os.path.relpath(
-                os.path.realpath(absolute_path), os.path.realpath(root)
-            )
-            if rel == os.pardir or rel.startswith(os.pardir + os.sep):
-                return {}  # path is genuinely outside this foreign repo
-        status = status_map.get(rel)
-        if status is None:
-            return {}
-        result: dict[str, object] = {
-            "char": status.char,
-            "state": status.state,
-            "tooltip": status.tooltip,
-            "path": status.path,
-            "additions": status.additions,
-            "deletions": status.deletions,
-        }
-        if status.orig_path is not None:
-            result["origPath"] = status.orig_path
-        return result
 
     @Property("QVariantList", notify=agentActivityChanged)
     def agentActivity(self) -> list:
@@ -6515,36 +5957,19 @@ class AppController(QObject):
             and os.path.isabs(tool_path)
             and payload.get("tool_name") in _AGENT_WRITE_TOOLS
         ):
+            # NOTE: a per-agent change filter once also recorded the CONCRETE
+            # file path here (a `touched` set beside `work_root`, folded against
+            # the git dirty set to scope the side panel to one agent). It was
+            # removed on 2026-08-13 — attributing a working-tree change to an
+            # agent could not be inferred reliably, and git hygiene (one
+            # worktree or branch per agent) makes the attribution structural
+            # instead. `work_root` below is the mechanism that replaced it, so
+            # do NOT delete this branch when pruning the leftovers: the two
+            # lived a few lines apart and only the `touched` half went.
             work_root = resolve_project_root(tool_path)
             if work_root and rec.get("work_root") != work_root:
                 rec["work_root"] = work_root
                 roots_changed = True
-            # v1 per-agent change attribution: remember the CONCRETE file the
-            # agent edited (not just its repo root, which is all `work_root`
-            # keeps) so the side panel can filter the changeset to "este
-            # agente" — the touched ∩ git-dirty intersection computed in
-            # `_focused_agent_changes`. realpath so it compares equal to git's
-            # canonical rev-parse paths. Session-scoped: the set dies with the
-            # slot record on close_agent (no persistence across sessions).
-            touched = rec.setdefault("touched", set())
-            real_path = os.path.realpath(tool_path)
-            if real_path not in touched:
-                touched.add(real_path)
-                # Only the focused agent's set feeds a live binding; a
-                # background agent's edits recompute lazily when it's focused.
-                if slot == self._focused_term_agent:
-                    self.focusedAgentChangesChanged.emit()
-        # v2 Bash-write attribution: a Bash command leaves no `tool_path`, so
-        # snapshot-diff the agent's repo around it — a `git status` probe on the
-        # PreToolUse edge (baseline) and again on PostToolUse; the files that
-        # turned dirty in between are what the command wrote, and get folded into
-        # `touched` like a write-tool edit (see _on_bash_probe_ready). Probes
-        # shell out, so they run on the bash-attrib pool, never on this thread.
-        if payload.get("tool_name") == "Bash" and payload.get("hook_event_name") in (
-            "PreToolUse",
-            "PostToolUse",
-        ):
-            self._submit_bash_probe(slot, rec, str(payload.get("hook_event_name", "")))
         if roots_changed:
             worktree_name = self._agent_worktree_state(rec)[1]
             if rec.get("worktree", "") != worktree_name:
@@ -8180,12 +7605,6 @@ class AppController(QObject):
         # through goes away.
         self._usage_poller.stop()
         self._usage_store.stop()
-        # Stop the Bash-attribution + foreign-status probe pools; cancel queued
-        # probes and don't wait on any in-flight `git status` (a wedged probe
-        # would delay exit up to its 5s timeout — pool threads are reaped at
-        # interpreter exit).
-        self._bash_probe_pool.shutdown(wait=False, cancel_futures=True)
-        self._foreign_probe_pool.shutdown(wait=False, cancel_futures=True)
         # Signal the browser MCP server to exit and drop its config file
         # (daemon thread; reaped with the process either way).
         self._browser_mcp_server.stop()

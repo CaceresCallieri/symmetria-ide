@@ -9,12 +9,14 @@ like an inconsistency to a future reader tidying the chrome, which is exactly
 why an assertion is cheaper than a comment alone:
 
   * the surface switcher and the location toggle show an icon per segment and
-    name only the current one; their two siblings stay fully labelled;
-  * the changes-scope switcher is drawn only when a focused agent exists, or
-    when the scope is already "agent" so the way back survives;
+    name only the current one; their sibling stays fully labelled;
   * the git tab header keeps every label, because each carries a live count.
 
-A "make the switchers consistent" refactor would quietly undo all three.
+A "make the switchers consistent" refactor would quietly undo both.
+
+A third decision lived here — the Active Changes scope switcher, drawn only
+when a focused agent existed. The per-agent change filter it fronted was
+removed on 2026-08-13, so that pair of tests went with it.
 """
 
 from __future__ import annotations
@@ -62,11 +64,6 @@ def agent_top_bar() -> str:
 @pytest.fixture(scope="module")
 def git_history_view() -> str:
     return (_QML / "githistory" / "GitHistoryView.qml").read_text()
-
-
-@pytest.fixture(scope="module")
-def git_status_panel() -> str:
-    return (_QML / "GitStatusPanel.qml").read_text()
 
 
 @pytest.fixture(scope="module")
@@ -199,28 +196,6 @@ def test_icons_render_in_a_declared_font_not_a_context_property(
     )
     assert match, "segmentIcon has no font.family binding"
     assert match.group(1) in {"root.iconFontFamily", "Theme.font.family"}
-
-
-# ---------------------------------------------------------------------------
-# Changes-scope switcher — drawn only when it can mean something.
-# ---------------------------------------------------------------------------
-
-
-def test_scope_switcher_hidden_without_a_focused_agent(git_status_panel: str):
-    """Both clauses are load-bearing: the first hides the inert control, the
-    second is the way back when the pool empties while scope is "agent"."""
-    assert re.search(
-        r'visible:\s*root\.focusedAgentSlot\s*>\s*0\s*\|\|\s*root\.scope\s*===\s*"agent"',
-        git_status_panel,
-    )
-
-
-def test_scope_switcher_keeps_both_labels(git_status_panel: str):
-    for key, label in (("all", "All"), ("agent", "This agent")):
-        entry = _segment_entry(git_status_panel, key)
-        assert entry is not None, f"no segment entry for {key!r}"
-        assert re.search(rf'label:\s*"{label}"', entry)
-        assert "icon:" not in entry
 
 
 # ---------------------------------------------------------------------------

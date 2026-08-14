@@ -26,18 +26,13 @@
   "qml/FocusBar.qml": {
     "missing-property": 1
   },
-  "qml/GitChangeSectionHeader.qml": {
-    "missing-property": 15,
-    "unqualified": 1
-  },
   "qml/GitStatusPanel.qml": {
-    "missing-property": 48,
-    "unqualified": 5
+    "missing-property": 32
   },
   "qml/Main.qml": {
     "import": 11,
     "missing-property": 81,
-    "unqualified": 269,
+    "unqualified": 261,
     "unresolved-type": 7,
     "unused-imports": 2
   },
