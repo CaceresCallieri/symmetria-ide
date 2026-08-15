@@ -79,14 +79,14 @@ interactive verification checklist after touching the agent pool, the
 bridge client, or the chord family:
 
 1. Launch the IDE → `Ctrl+Shift+A` → `n` → claude opens on the agent
-   surface, cwd = project anchor, top-bar chip appears (sparkle + slot 1).
-2. Send a prompt → the chip's sparkle animates within a hook cycle
+   surface, cwd = project anchor, a thread-rail row appears (sparkle + slot 1).
+2. Send a prompt → the row's sparkle animates within a hook cycle
    (activity flows `SYMMETRIA_AGENT_ID=<ide_pid>_<slot>` → hooks →
    agent-bridge → subscription snapshot → `controller.agentActivity`).
 3. The Symmetria Shell dashboard shows the same agent (project, ⚠
    dangerous badge); clicking it focuses the IDE window. The default
    `✳ Claude Code` OSC title is suppressed by `_clean_agent_title` —
-   chips show a title only once claude reports a real session name (`terminal_pid` = IDE pid via the declared
+   rows show a title only once claude reports a real session name (`terminal_pid` = IDE pid via the declared
    `host_window_pid`).
 4. `Ctrl+Shift+E` to editor → `Ctrl+1` → back on slot 1, terminal focused
    typing-ready; `Ctrl+U`/`Ctrl+D` scroll the agent's scrollback;

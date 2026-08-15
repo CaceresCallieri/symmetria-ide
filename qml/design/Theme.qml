@@ -956,6 +956,12 @@ QtObject {
         // countdown and percentage on one line — the longest row the panel
         // can produce — without wrapping.
         readonly property int usagePopupWidth: 300
+        // Agent thread rail (AgentThreadRail.qml), the left column. Narrower
+        // than the 280px file tree on purpose: a tree row carries a path that
+        // must not wrap, while a thread row carries a sparkle, a number and a
+        // title that is allowed to elide. Wide enough for the indicator
+        // cluster plus a readable stretch of title at the `xs` rung.
+        readonly property int threadRailWidth: 220
         readonly property int whichKeyRowHeight: 18   // was 22
         readonly property int whichKeyFooterHeight: 24 // was 28
 

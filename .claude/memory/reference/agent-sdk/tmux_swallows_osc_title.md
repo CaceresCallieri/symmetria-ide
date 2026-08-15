@@ -7,9 +7,10 @@ metadata:
   originSessionId: 6971a6bf-9baf-438e-b7b9-fb00127fe464
 ---
 
-# tmux swallows the OSC title → nameless AgentTopBar chips
+# tmux swallows the OSC title → nameless agent rows
 
-**Symptom (2026-07-21):** every agent chip in the AgentTopBar rendered as a bare
+**Symptom (2026-07-21):** every agent chip in the AgentTopBar (the thread rail
+since 2026-08-15) rendered as a bare
 slot number (1..5) with no session name, even though claude/opencode were clearly
 working. Only appears when the tmux substrate is on (`SYMMETRIA_IDE_AGENT_TMUX=1`,
 which BOTH `~/.local/bin/symmetria-ide{,-stable}` launchers set — so the daily

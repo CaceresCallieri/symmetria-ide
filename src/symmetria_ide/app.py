@@ -75,6 +75,10 @@ from .agent_interrupt import (
 from .agent_pane_slots import (  # importing also registers this @QmlElement type
     AgentPaneSlotModel,
 )
+from .agent_thread_model import (  # importing also registers this @QmlElement type
+    AgentThreadModel,
+    ThreadRow,
+)
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .browser_mcp import BrowserMcpBridge, BrowserMcpServer
 from .chrome_host import ChromeHost, browser_identity
@@ -769,6 +773,12 @@ class AppController(QObject):
         # either: the append-only discipline is what keeps a growing pool from
         # reaping live agent processes, and it is measured, not assumed.
         self._agent_pane_slots = AgentPaneSlotModel()
+        # The thread rail's rows (AgentThreadRail.qml). A SEPARATE model from
+        # the pane registry above, and the two must never be crossed: this one
+        # reorders and drops rows freely because nothing here owns a process,
+        # while the registry above only ever appends because every one of its
+        # rows owns a live agent CLI. See `agent_thread_model.py`.
+        self._agent_threads = AgentThreadModel()
         # Cached PATH probe behind `agentHarnessCatalog`. Cached rather than
         # re-read per getter call so the property can honestly notify: a value
         # that changes without its notify signal is a binding QML never
@@ -1374,6 +1384,14 @@ class AppController(QObject):
         # start() (same pattern as _refresh_project_browser_enabled above).
         # GUI-thread; the probe itself runs on a one-shot daemon thread.
         self.displayedRootChanged.connect(self._reprobe_vps_pairing)
+        # The rail's rows are DERIVED from the live pool, so they rebuild off
+        # the same two notifies the chip strip used to bind against: pool
+        # membership/order/title (termAgentsChanged) and worktree state, which
+        # rides its own signal (see the agentWorktreeChanged comment).
+        # `_rebuild_thread_rows` diffs, so a rebuild per notify is cheap and —
+        # unlike a reset — keeps the rail's selection where the user left it.
+        self.termAgentsChanged.connect(self._rebuild_thread_rows)
+        self.agentWorktreeChanged.connect(self._rebuild_thread_rows)
 
     def _create_instance(self, slot: int) -> None:
         """Allocate one pool entry: host + model + per-instance scalar state.
@@ -3170,6 +3188,52 @@ class AppController(QObject):
         `agent_pane_slots.py`.
         """
         return self._agent_pane_slots
+
+    @Property(QObject, constant=True)
+    def agentThreads(self) -> QObject:
+        """The thread rail's rows (`AgentThreadRail.qml`'s ListView model).
+
+        NOT interchangeable with `agentPaneSlots` above, in either direction:
+        this model reorders and drops rows, which is exactly what must never
+        happen to a model backing the pane Repeater.
+        """
+        return self._agent_threads
+
+    def _live_thread_rows(self) -> list[ThreadRow]:
+        """One row per live agent of the ACTIVE location, in display order.
+
+        Ordering is `_ordered_slots_for_location()` — the same source
+        `agentOrder` reads — so the rail's rows and the dense display numbers
+        (and Ctrl+1..5) cannot drift apart. History rows join this list in
+        Phase 4; today every row is live and carries a positive slot.
+        """
+        rows: list[ThreadRow] = []
+        for slot in self._ordered_slots_for_location():
+            record = self._term_agents.get(slot, {})
+            harness = str(record.get("harness") or "claude")
+            session_id = str(record.get("session_id") or "")
+            rows.append(
+                ThreadRow(
+                    # Durable identity once the harness reveals a session id;
+                    # until then the slot, which is unique among live agents.
+                    thread_id=f"{harness}:{session_id}"
+                    if session_id
+                    else f"live:{slot}",
+                    harness=harness,
+                    session_id=session_id,
+                    title=str(record.get("title") or ""),
+                    updated_at=int(record.get("spawned_at") or 0),
+                    work_root=str(record.get("work_root") or record.get("cwd") or ""),
+                    worktree=str(record.get("worktree") or ""),
+                    slot=slot,
+                )
+            )
+        return rows
+
+    @Slot()
+    def _rebuild_thread_rows(self) -> None:
+        """Re-derive the rail's rows from the live pool."""
+        self._agent_threads.set_rows(self._live_thread_rows())
 
     def _slot_count(self) -> int:
         """Registry high-water mark — the length of every per-slot list below.
@@ -7879,6 +7943,10 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     # Repeater that binds it sits several nested components deep, where an
     # outer-id/`controller.` chain is what qmllint cannot qualify.
     ctx.setContextProperty("agentPaneSlots", controller.agentPaneSlots)
+    # The thread rail's rows. Same reasoning as the registry above — the
+    # ListView that binds it sits inside AgentThreadRail.qml, a component with
+    # no id chain back to `controller`.
+    ctx.setContextProperty("agentThreads", controller.agentThreads)
     # Editor minimap model — Phase 1 of docs/minimap-prd.md. Main.qml
     # binds `MinimapView.bufferRowCount: minimapModel.lineCount`.
     ctx.setContextProperty("minimapModel", controller.minimap_model)

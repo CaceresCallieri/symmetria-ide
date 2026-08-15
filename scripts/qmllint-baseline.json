@@ -11,9 +11,13 @@
     "missing-property": 24,
     "unqualified": 6
   },
+  "qml/AgentThreadRail.qml": {
+    "missing-property": 46,
+    "unqualified": 20
+  },
   "qml/AgentTopBar.qml": {
-    "missing-property": 47,
-    "unqualified": 21
+    "missing-property": 9,
+    "unqualified": 6
   },
   "qml/CommandLine.qml": {
     "missing-property": 39,
@@ -31,8 +35,8 @@
   },
   "qml/Main.qml": {
     "import": 11,
-    "missing-property": 81,
-    "unqualified": 261,
+    "missing-property": 84,
+    "unqualified": 253,
     "unresolved-type": 7,
     "unused-imports": 2
   },

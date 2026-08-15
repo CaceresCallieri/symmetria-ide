@@ -586,14 +586,22 @@ Window {
     // IDE-wide horizontal pane navigation.
     //
     // Spatial chord: Ctrl+H = move left, Ctrl+L = move right. The
-    // window has a two-column topology — a central surface on the
-    // left (agent / editor / terminal, one visible at a time) and
-    // the file-tree sidebar on the right — so:
+    // window has a THREE-column topology since the thread rail landed
+    // — the rail on the left, a central surface in the middle (agent /
+    // editor / terminal / git / FM, one visible at a time), and the
+    // file-tree sidebar on the right — so:
     //
-    //   - Ctrl+L from any central surface         -> focus tree
     //   - Ctrl+H from the tree                    -> focus visible central
+    //   - Ctrl+H from a central surface           -> focus the thread rail
+    //   - Ctrl+H from the rail (no left neighbor) -> silent no-op
+    //   - Ctrl+L from the rail                    -> focus visible central
+    //   - Ctrl+L from any central surface         -> focus tree
     //   - Ctrl+L from the tree (no right neighbor) -> silent no-op
-    //   - Ctrl+H from a central (no left neighbor) -> silent no-op
+    //
+    // Both directions land on the centre through the SAME
+    // `_restoreCentralFocus()` the window's re-activation path uses. It
+    // was duplicated inline here before the rail arrived, and with two
+    // chords now needing it that copy is what would drift.
     //
     // Application-scope chord per the project-wide principle in
     // `.claude/memory/project/meta/ide_owns_keybind_layer.md`: IDE
@@ -635,28 +643,16 @@ Window {
         sequences: ["Ctrl+H"]
         context: Qt.ApplicationShortcut
         onActivated: {
-            if (!treeScope.activeFocus)
+            // Leftmost column already — nothing further left to reach.
+            if (threadRail.activeFocus)
                 return;
-            // FM is a co-mounted central-pane sibling — when it is
-            // visible, editor/terminal/agent are all gated off by
-            // !controller.fmVisible and cannot hold activeFocus.
-            // Route back to the FM item directly; fall through to
-            // the three-way dispatch below only when FM is not open.
-            if (controller.fmVisible && fmPaneLoader.item)
-                fmPaneLoader.item.forceActiveFocus();
-            else if (controller.agentVisible)
-                agentPane.forceActiveFocus();
-            else if (controller.agentSurfaceVisible)
-                // Terminal-agent surface: re-request focus for the focused
-                // slot — the delegate's onFocusAgentRequested handler lands
-                // it on the visible agent terminal.
-                controller.focus_agent(controller.focusedAgent);
-            else if (controller.gitVisible)
-                gitHistoryView.focusContent();
-            else if (controller.terminalVisible)
-                root._focusTerminalPane();
+            // From the tree, "left" is the centre; from the centre, the rail.
+            // `_restoreCentralFocus` handles FM / agent / git / terminal /
+            // editor, so this chord never has to know which one is up.
+            if (treeScope.activeFocus)
+                root._restoreCentralFocus();
             else
-                editor.forceActiveFocus();
+                threadRail.forceActiveFocus();
         }
     }
 
@@ -664,6 +660,13 @@ Window {
         sequences: ["Ctrl+L"]
         context: Qt.ApplicationShortcut
         onActivated: {
+            // From the rail, "right" is the centre.
+            if (threadRail.activeFocus) {
+                root._restoreCentralFocus();
+                return;
+            }
+            // Rightmost column already, or the tree is hidden (responsive
+            // gate / Ctrl+S) so there is no right neighbour to move to.
             if (treeScope.activeFocus)
                 return;
             if (!controller.treeVisible)
@@ -806,6 +809,33 @@ Window {
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 0
+
+            // Agent thread rail — the leftmost column, and the window's index
+            // of agent conversations. It replaced AgentTopBar's centered chip
+            // strip: a bar runs out of width after a handful of pills, and
+            // what the user needs is a list of every thread in the project.
+            //
+            // Always visible in v1 — no toggle chord and no width gate. The
+            // tree's existing responsive gate already hides the OTHER side
+            // panel on a narrow window, so this rail becomes the only one
+            // there rather than a second one.
+            AgentThreadRail {
+                id: threadRail
+                Layout.minimumWidth: Theme.size.threadRailWidth
+                Layout.maximumWidth: Theme.size.threadRailWidth
+                Layout.fillHeight: true
+            }
+
+            // 1px separator, matching the tree's on the opposite edge — same
+            // canvas-corner inset, same rule that no straight line crosses a
+            // rounded corner.
+            Rectangle {
+                Layout.fillHeight: true
+                Layout.topMargin: Theme.radius.canvas
+                Layout.bottomMargin: Theme.radius.canvas
+                implicitWidth: 1
+                color: FmUi.FmTheme.palette.outlineVariant
+            }
 
             Item {
                 id: mainContent
