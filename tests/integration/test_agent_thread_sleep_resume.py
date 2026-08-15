@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
+import threading
 import time
 
 import pytest
@@ -92,6 +94,52 @@ def _rows(controller: AppController):
 def _spawn_resumable(controller: AppController, session_id: str = "ses-phase3") -> int:
     controller.spawn_agent("resume", False, "opencode", session_id)
     return controller.focusedAgent
+
+
+def _index_legacy_claude_thread(
+    controller: AppController,
+    projects_root,
+    main,
+    worktree,
+    session_id: str,
+) -> None:
+    """Publish one pre-store Claude transcript through the real reader boundary."""
+    transcript = projects_root / "bucket" / f"{session_id}.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(
+        "".join(
+            json.dumps(record) + "\n"
+            for record in (
+                {
+                    "type": "user",
+                    "cwd": str(main),
+                    "isSidechain": False,
+                    "userType": "external",
+                    "message": {"role": "user", "content": "Legacy thread"},
+                },
+                {
+                    "type": "assistant",
+                    "cwd": str(main),
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Edit",
+                                "input": {"file_path": str(worktree / "changed.py")},
+                            }
+                        ],
+                    },
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+    threads = importlib.import_module("symmetria_ide.agent_threads")
+    records = threads.ClaudeThreadReader(projects_root=projects_root).read(
+        str(main), threading.Event()
+    )
+    controller._on_threads_indexed(str(main), "claude", records)
 
 
 def test_sleep_direct_pty_releases_only_its_pane_without_tmux(
@@ -324,6 +372,58 @@ def test_resume_dead_thread_uses_exact_identity_and_recorded_worktree(
         "--session",
         "ses-worktree",
     ]
+
+
+def test_resume_legacy_claude_thread_uses_backfilled_rail_worktree(
+    controller: AppController, linked_project, tmp_path
+) -> None:
+    """Regression: transcript backfill drives resume when the store has no row."""
+    store = importlib.import_module("symmetria_ide.agent_thread_store")
+    main, worktree = linked_project
+    projects_root = tmp_path / "claude-projects"
+    session_id = "legacy-worktree"
+    _set_project(controller, main)
+    _index_legacy_claude_thread(controller, projects_root, main, worktree, session_id)
+
+    assert store.load_work_root(str(main), "claude", session_id) is None
+    indexed = next(row for row in _rows(controller) if row.session_id == session_id)
+    assert indexed.slot == 0
+    assert indexed.work_root == str(worktree)
+
+    controller.resume_thread(f"claude:{session_id}")
+
+    resumed_slot = controller.focusedAgent
+    resumed = controller._term_agents[resumed_slot]
+    assert resumed["spawn_type"] == "resume"
+    assert resumed["harness"] == "claude"
+    assert resumed["session_id"] == session_id
+    assert resumed["cwd"] == str(worktree)
+    assert controller.agent_start_dir(resumed_slot) == str(worktree)
+    assert controller.agent_spawn_argv(resumed_slot)[-2:] == ["-r", session_id]
+
+
+def test_resume_vanished_backfilled_worktree_falls_back_with_visible_notice(
+    controller: AppController, linked_project, tmp_path
+) -> None:
+    """Regression: a stale transcript root is validated before resume."""
+    store = importlib.import_module("symmetria_ide.agent_thread_store")
+    main, worktree = linked_project
+    projects_root = tmp_path / "claude-projects"
+    session_id = "legacy-vanished"
+    _set_project(controller, main)
+    _index_legacy_claude_thread(controller, projects_root, main, worktree, session_id)
+    assert store.load_work_root(str(main), "claude", session_id) is None
+    worktree.rename(worktree.with_name("vanished-legacy-worktree"))
+    notices: list[tuple[str, str]] = []
+    controller.locationAlert.connect(
+        lambda title, detail: notices.append((title, detail))
+    )
+
+    controller.resume_thread(f"claude:{session_id}")
+
+    resumed = controller._term_agents[controller.focusedAgent]
+    assert resumed["cwd"] == str(main)
+    assert notices and all(title and detail for title, detail in notices)
 
 
 def test_resume_missing_worktree_falls_back_to_main_with_visible_notice(

@@ -214,8 +214,12 @@ def claude_transcript_path(cwd: str, session_id: str) -> str:
     )
 
 
-def _text_of(content) -> str:
+def message_text(content) -> str:
     """Flatten a message's content to plain text, skipping tool blocks.
+
+    PUBLIC because the transcript shape has two readers now: the judge's tail
+    extraction below, and `agent_threads`' title derivation. A third private
+    copy is exactly how the two would drift apart.
 
     (Adapted from the shell's symmetria_agent_transcript.py — same logic,
     duplicated deliberately: the IDE cannot import across repos.)
@@ -276,7 +280,7 @@ def extract_transcript_tail(
         role = message.get("role")
         if typ not in ("user", "assistant") or role not in ("user", "assistant"):
             continue
-        text = _text_of(message.get("content", ""))
+        text = message_text(message.get("content", ""))
         if not text:
             continue  # tool_use / tool_result-only envelopes
         if len(text) > per_message_chars:

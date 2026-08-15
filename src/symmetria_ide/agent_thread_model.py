@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, QObject, Qt, Slot
 from PySide6.QtQml import QmlElement
@@ -75,12 +75,24 @@ class ThreadHistory:
     the only type it speaks, and it is where the on-disk index's rows join the
     same merge in a later phase.
 
-    In-memory for the run: what makes a conversation survive a restart is the
-    harness's own transcript, read back by the index.
+    Two sources, kept apart until `merge`:
+
+    - `_rows` — threads THIS run watched leave the pool (`record`).
+    - `_indexed` — threads read back off disk by the harness index
+      (`set_index`), which is what makes a conversation survive a restart.
+
+    Kept apart because they are replaced on different schedules: an index scan
+    re-publishes one harness's whole history at once, and folding it into the
+    same dict would either drop this run's own departures or resurrect rows the
+    index has since stopped returning.
     """
 
     def __init__(self) -> None:
         self._rows: dict[str, ThreadRow] = {}
+        # harness -> identity -> row. Per harness because each reader publishes
+        # independently (claude finishes long before opencode's CLI spawn), so
+        # a claude result must not clear opencode's rows.
+        self._indexed: dict[str, dict[str, ThreadRow]] = {}
 
     def record(self, record: dict, work_root: str) -> None:
         """Keep a leaving agent's conversation, at `slot = 0`.
@@ -117,6 +129,15 @@ class ThreadHistory:
             slot=0,
         )
 
+    def set_index(self, harness: str, rows: Sequence[ThreadRow]) -> None:
+        """Replace one harness's on-disk history with a finished scan's rows.
+
+        Wholesale replacement rather than a merge: the scan reads every
+        transcript that still exists, so its result IS that harness's history —
+        anything missing from it was pruned and can no longer be resumed.
+        """
+        self._indexed[harness] = {row.thread_id: row for row in rows}
+
     def merge(self, live: Sequence[ThreadRow]) -> list[ThreadRow]:
         """`live` rows first, then the dead ones, most recently ended first.
 
@@ -124,11 +145,35 @@ class ThreadHistory:
         (resuming re-spawns under the same identity): the live row IS that
         thread, and carrying both would list it twice, once with a pane and
         once without.
+
+        Where a thread appears in BOTH dead sources, this run's own record
+        wins: it watched the agent leave, so its `updated_at` is when the CLI
+        actually stopped and its `work_root` came from the live write-tool
+        follow rather than a backfill. Empty fields still fall back to the
+        indexed twin — the index is the only place an `ai-title` exists, and a
+        pane that never received a title would otherwise show a blank row.
         """
         live_ids = {row.thread_id for row in live}
-        dead = [row for row in self._rows.values() if row.thread_id not in live_ids]
-        dead.sort(key=lambda row: row.updated_at, reverse=True)
-        return list(live) + dead
+        dead: dict[str, ThreadRow] = {}
+        for harness_rows in self._indexed.values():
+            dead.update(harness_rows)
+        for identity, row in self._rows.items():
+            dead[identity] = self._prefer_recorded(row, dead.get(identity))
+        rows = [row for identity, row in dead.items() if identity not in live_ids]
+        rows.sort(key=lambda row: row.updated_at, reverse=True)
+        return list(live) + rows
+
+    @staticmethod
+    def _prefer_recorded(recorded: ThreadRow, indexed: ThreadRow | None) -> ThreadRow:
+        """`recorded`, with anything it lacks filled in from the index."""
+        if indexed is None:
+            return recorded
+        return replace(
+            recorded,
+            title=recorded.title or indexed.title,
+            work_root=recorded.work_root or indexed.work_root,
+            worktree=recorded.worktree or indexed.worktree,
+        )
 
 
 @QmlElement

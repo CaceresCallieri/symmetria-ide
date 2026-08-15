@@ -76,11 +76,13 @@ from .agent_interrupt import (
 from .agent_pane_slots import (  # importing also registers this @QmlElement type
     AgentPaneSlotModel,
 )
+from .agent_thread_indexer import AgentThreadIndexer
 from .agent_thread_model import (  # importing also registers this @QmlElement type
     AgentThreadModel,
     ThreadHistory,
     ThreadRow,
 )
+from .agent_threads import AGENT_WRITE_TOOLS, ThreadRecord
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .browser_mcp import BrowserMcpBridge, BrowserMcpServer
 from .chrome_host import ChromeHost, browser_identity
@@ -162,7 +164,12 @@ _AGENT_TMUX_CONF = _RUNTIME_DIR / "agent-tmux.conf"
 # substitute: it never moves when an agent works in a worktree via Bash
 # (a Bash-tool `cd` changes the tool's persistent shell, not the session
 # process — diagnosed live on magistralia, 2026-07-13).
-_AGENT_WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+#
+# Aliased, not redefined: `agent_threads` replays this exact rule over a past
+# transcript to recover a dead thread's work root, and a resumed thread landing
+# somewhere the live follow would never have gone is precisely what two copies
+# of this set would produce.
+_AGENT_WRITE_TOOLS = AGENT_WRITE_TOOLS
 
 
 def _agent_tmux_enabled() -> bool:
@@ -787,6 +794,20 @@ class AppController(QObject):
         # rules live on the class (agent_thread_model.ThreadHistory); it is
         # held here because `close_agent` is what feeds it.
         self._thread_history = ThreadHistory()
+        # The OTHER source of dead rows: each harness's own history, read off
+        # disk on a worker (agent_thread_indexer). This is what makes threads
+        # survive an IDE restart — `_thread_history.record` only knows about
+        # agents THIS run watched leave.
+        self._agent_thread_indexer = AgentThreadIndexer(parent=self)
+        # queued: index worker -> GUI thread (§4 P2). Spelled out inside
+        # `connect_results` so every subscriber gets the same connection type.
+        self._agent_thread_indexer.connect_results(self._on_threads_indexed)
+        # The canonical root the last index request was made for. Guards the
+        # re-request against `displayedRootChanged`'s other causes: the
+        # worktree follow and a plain `cd` both move the displayed root without
+        # changing the PROJECT, and re-scanning a few hundred transcripts for
+        # every buffer switch would be pure waste.
+        self._thread_index_root: str = ""
         # Cached PATH probe behind `agentHarnessCatalog`. Cached rather than
         # re-read per getter call so the property can honestly notify: a value
         # that changes without its notify signal is a binding QML never
@@ -3255,6 +3276,77 @@ class AppController(QObject):
         """Re-derive the rail's rows from the live pool plus dead history."""
         self._agent_threads.set_rows(self._thread_rows())
 
+    @Slot()
+    def _request_thread_index(self) -> None:
+        """Ask the index worker for this project's history, once per project.
+
+        Wired to `displayedRootChanged`, which fires far more often than the
+        project changes — hence the canonical-root guard. `SYMMETRIA_IDE_THREAD_INDEX=0`
+        is the hard off switch (the suite sets it; see
+        `.claude/rules/test_env_isolation.md`), and it gates the REQUEST rather
+        than `AgentThreadIndexer.start` so a test driving the indexer directly
+        still gets a working worker.
+        """
+        if os.environ.get("SYMMETRIA_IDE_THREAD_INDEX") == "0":
+            return
+        root = self._agent_thread_project_root()
+        if not root or root == self._thread_index_root:
+            return
+        self._thread_index_root = root
+        self._agent_thread_indexer.start(root)
+
+    @Slot(str, str, object)
+    def _on_threads_indexed(self, project_root: str, harness: str, records) -> None:
+        """Fold one harness's finished scan into the rail's dead rows.
+
+        The indexer already dropped superseded generations on the worker; this
+        checks the project AGAIN because a queued emit can be delivered after
+        the user switched projects — the worker's check answers "was this still
+        current when it finished", not "is it still current now".
+        """
+        if agent_thread_store.project_key(project_root) != (
+            self._agent_thread_project_root()
+        ):
+            return
+        stored = agent_thread_store.load_threads(project_root)
+        # `resumable` is the reader's own verdict on whether its harness can
+        # reopen the conversation. Claude answers True for every row it yields
+        # (a pruned transcript is never discovered at all), but a harness that
+        # LISTS sessions it cannot resume needs somewhere to say so, and the
+        # rail must not offer a row that fails on click.
+        rows = [
+            self._indexed_thread_row(record, stored)
+            for record in records
+            if record.resumable
+        ]
+        self._thread_history.set_index(harness, rows)
+        self._rebuild_thread_rows()
+
+    def _indexed_thread_row(self, record: ThreadRecord, stored: dict) -> ThreadRow:
+        """One `ThreadRecord` as a rail row.
+
+        Two facts are OURS rather than the harness's and are applied here.
+        The stored `work_root` beats the transcript backfill: it was written
+        live from the write-tool hooks, while the backfill is a best-effort
+        replay bounded to the transcript's tail. And the worktree GLYPH runs
+        through `_agent_worktree_state`, the same same-repo filter the live
+        chips use, so a dead row cannot claim a worktree a live one would not.
+        """
+        identity = agent_thread_store.thread_key(record.harness, record.session_id)
+        entry = stored.get(identity)
+        saved_root = entry.get("work_root") if isinstance(entry, dict) else ""
+        work_root = str(saved_root or record.work_root or "")
+        return ThreadRow(
+            thread_id=identity,
+            harness=record.harness,
+            session_id=record.session_id,
+            title=record.title,
+            updated_at=int(record.updated_at),
+            work_root=work_root,
+            worktree=self._agent_worktree_state({"work_root": work_root})[1],
+            slot=0,
+        )
+
     def _slot_count(self) -> int:
         """Registry high-water mark — the length of every per-slot list below.
 
@@ -4592,10 +4684,12 @@ class AppController(QObject):
            two processes on one conversation — the same double-resume hazard
            `restore_session` guards, arriving here from the rail instead.
         2. Resolve the start root: the work root the store recorded for this
-           identity, if it still exists AND still belongs to this project.
-           A vanished or foreign root degrades to the main checkout WITH a
-           user-visible notice — silently resuming somewhere else would make
-           the agent's next edit land in the wrong tree.
+           identity, falling back to the one the rail is DISPLAYING (the
+           transcript backfill, for threads older than the store), if it still
+           exists AND still belongs to this project. A vanished or foreign root
+           degrades to the main checkout WITH a user-visible notice — silently
+           resuming somewhere else would make the agent's next edit land in the
+           wrong tree.
         3. Spawn a resume, passing that root explicitly so the
            "new agents always spawn in the MAIN checkout" redirect does not
            apply (see `spawn_agent`'s `start_root`).
@@ -4620,7 +4714,7 @@ class AppController(QObject):
                 return
         stored = agent_thread_store.load_work_root(
             self._agent_thread_project_root(), harness, session_id
-        )
+        ) or self._row_work_root(thread_id)
         start_root = self._resume_start_root(harness, stored)
         self.spawn_agent(
             "resume",
@@ -4631,6 +4725,22 @@ class AppController(QObject):
             session_id,
             start_root=start_root,
         )
+
+    def _row_work_root(self, thread_id: str) -> str:
+        """The work root the RAIL is showing for a thread; "" when unknown.
+
+        The store's fallback, and it has to exist or the transcript backfill
+        would be display-only: an old thread has no store entry by definition
+        (that is what the backfill is for), so resuming from the store alone
+        would spawn in the main checkout while the row beside it showed a
+        branch glyph — the user told one thing and the agent doing another.
+        Read from the model rather than recomputed so the root that resumes is
+        by construction the root that was displayed.
+        """
+        for row in self._agent_threads.rows():
+            if row.thread_id == thread_id:
+                return row.work_root
+        return ""
 
     def _resume_start_root(self, harness: str, stored: str | None) -> str:
         """Validate a stored work root for resume; "" means "use the default".
@@ -7428,6 +7538,13 @@ class AppController(QObject):
         # `_sync_nvim_cwd`, QML bindings) all run with the correct
         # initial value.
         self.displayedRootChanged.emit()
+        # Index this project's past conversations into the rail. AFTER the emit
+        # above, which is what seeds the displayed root — asking earlier would
+        # scan whatever `os.getcwd()` happened to be. The scan itself is on the
+        # index worker and publishes per harness as each finishes, so a few
+        # hundred transcripts never delay startup.
+        self.displayedRootChanged.connect(self._request_thread_index)
+        self._request_thread_index()
         # Phase 2.5 terminal pane — the shell is now spawned by the
         # QMLTermSession in Main.qml (Konsole KSession), the same way the
         # editor nvim is. No Python TerminalBackend pre-warm here anymore;
@@ -7991,6 +8108,10 @@ class AppController(QObject):
         # And the gh PR worker (may be mid network fetch/checkout; short join,
         # daemon reaped on exit — same profile as the ops worker).
         self._gh_pr_controller.stop()
+        # And the thread-index worker. Same reason as the git workers: join it
+        # before the event loop tears down so its cross-thread emit cannot fire
+        # into a half-destroyed receiver.
+        self._agent_thread_indexer.stop()
         # Ask nvim to quit GRACEFULLY over the RPC socket (`_backend.stop()`
         # sends `qa!` + closes the client) so it writes shada/swap cleanly.
         # The terminal widgets (editor nvim + shell) and every agent pane are

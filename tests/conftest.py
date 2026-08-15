@@ -94,6 +94,39 @@ def _isolate_usage_poll(monkeypatch):
     monkeypatch.setenv("SYMMETRIA_IDE_USAGE_POLL", "0")
 
 
+@pytest.fixture(scope="session")
+def _claude_projects_dir(tmp_path_factory):
+    """One empty transcript root for the whole run.
+
+    Session-scoped (unlike the `_isolate_xdg_*` dirs) because nothing ever
+    WRITES here — the thread index only reads — so per-test directories would
+    be two thousand empty dirs bought for nothing. Same precedent as
+    ``_chrome_bin_dir`` / ``_tmux_sock_dir``."""
+    return tmp_path_factory.mktemp("claude_projects")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_thread_index(monkeypatch, _claude_projects_dir):
+    """Keep the thread indexer away from the developer's real conversations.
+
+    Two separate reaches, so two separate vars. ``AppController.start()``
+    requests an index, and the Claude reader's default root is the real
+    ``~/.claude/projects`` — 315 transcripts, tens of megabytes, read from a
+    suite that is supposed to touch nothing live, and re-read on every
+    controller a test constructs.
+
+    ``SYMMETRIA_IDE_THREAD_INDEX`` is set to ``"0"`` (the value IS the off
+    switch, like ``SYMMETRIA_IDE_USAGE_POLL``) and gates the REQUEST, so a test
+    driving ``AgentThreadIndexer`` directly still gets a live worker.
+    ``SYMMETRIA_IDE_CLAUDE_PROJECTS_DIR`` is the containment underneath it: it
+    redirects the reader's default root, so even a code path that reaches a
+    reader without going through the request gate finds an empty directory.
+    ``HOME`` itself is deliberately NOT redirected — Qt resolves fonts and
+    settings through it, and moving it would change far more than this."""
+    monkeypatch.setenv("SYMMETRIA_IDE_THREAD_INDEX", "0")
+    monkeypatch.setenv("SYMMETRIA_IDE_CLAUDE_PROJECTS_DIR", str(_claude_projects_dir))
+
+
 @pytest.fixture(autouse=True)
 def _isolate_xdg_data(monkeypatch, tmp_path_factory):
     """Redirect ``XDG_DATA_HOME`` to a throwaway dir for every test.
@@ -201,6 +234,10 @@ _WORKER_OWNING_SUBCONTROLLERS = (
     # Owns a ThreadPoolExecutor whose task is a bound method, so a submitted
     # poll pins its AppController exactly like the git controllers' threads do.
     "_usage_poller",
+    # The thread-history index worker — same profile as the git workers: a
+    # daemon thread whose target is a bound method, so leaving it running pins
+    # the whole controller graph and re-opens the inotify leak above.
+    "_agent_thread_indexer",
 )
 
 
