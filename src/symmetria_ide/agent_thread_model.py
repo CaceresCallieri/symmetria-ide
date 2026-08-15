@@ -33,11 +33,14 @@ coordination state simply cease to exist when the CLI does.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, QObject, Qt, Slot
 from PySide6.QtQml import QmlElement
+
+from .agent_thread_store import thread_key
 
 QML_IMPORT_NAME = "Symmetria.Ide"
 QML_IMPORT_MAJOR_VERSION = 1
@@ -60,6 +63,72 @@ class ThreadRow:
     work_root: str
     worktree: str
     slot: int
+
+
+class ThreadHistory:
+    """Conversations whose CLI is gone but which can still be resumed.
+
+    Qt-free and controller-free on purpose: it is a pure map from slot-record
+    dicts to `ThreadRow`s, so the rail's ordering rule — the one thing a reader
+    of this feature actually has to find — is not buried inside a
+    nine-thousand-line controller. It lives beside `ThreadRow` because that is
+    the only type it speaks, and it is where the on-disk index's rows join the
+    same merge in a later phase.
+
+    In-memory for the run: what makes a conversation survive a restart is the
+    harness's own transcript, read back by the index.
+    """
+
+    def __init__(self) -> None:
+        self._rows: dict[str, ThreadRow] = {}
+
+    def record(self, record: dict, work_root: str) -> None:
+        """Keep a leaving agent's conversation, at `slot = 0`.
+
+        Fed from the ONE funnel every local departure passes through, so "the
+        row survives the CLI" cannot depend on whether the agent was slept,
+        closed, or exited on its own.
+
+        Two records are deliberately NOT kept:
+
+        - a VPS slot: the server's hub owns its identity, and this IDE never
+          published it;
+        - a slot with no `session_id`: nothing can resume it, so a row would
+          be an entry that fails the moment it is clicked.
+        """
+        if record.get("location", "local") != "local":
+            return
+        harness = str(record.get("harness") or "claude")
+        session_id = str(record.get("session_id") or "")
+        if not session_id:
+            return
+        identity = thread_key(harness, session_id)
+        self._rows[identity] = ThreadRow(
+            thread_id=identity,
+            harness=harness,
+            session_id=session_id,
+            title=str(record.get("title") or ""),
+            # When it STOPPED, not when it started: dead rows sort by recency
+            # of use, and a long-running thread spawned this morning is more
+            # recent than one spawned and closed an hour ago.
+            updated_at=int(time.time()),
+            work_root=work_root,
+            worktree=str(record.get("worktree") or ""),
+            slot=0,
+        )
+
+    def merge(self, live: Sequence[ThreadRow]) -> list[ThreadRow]:
+        """`live` rows first, then the dead ones, most recently ended first.
+
+        A dead row is dropped whenever the same conversation is live again
+        (resuming re-spawns under the same identity): the live row IS that
+        thread, and carrying both would list it twice, once with a pane and
+        once without.
+        """
+        live_ids = {row.thread_id for row in live}
+        dead = [row for row in self._rows.values() if row.thread_id not in live_ids]
+        dead.sort(key=lambda row: row.updated_at, reverse=True)
+        return list(live) + dead
 
 
 @QmlElement
@@ -151,6 +220,18 @@ class AgentThreadModel(QAbstractListModel):
         if not 0 <= row < len(self._rows):
             return 0
         return self._rows[row].slot
+
+    @Slot(int, result=str)
+    def thread_id_at(self, row: int) -> str:
+        """The durable identity at display position `row`; "" when absent.
+
+        The dead-row twin of `slot_at`, and read through the model for the
+        same recycled-delegate reason documented there. "" is what the rail
+        already treats as "nothing to resume".
+        """
+        if not 0 <= row < len(self._rows):
+            return ""
+        return self._rows[row].thread_id
 
     # ------------------------------------------------------------------
     # The single mutator

@@ -12,8 +12,8 @@
     "unqualified": 6
   },
   "qml/AgentThreadRail.qml": {
-    "missing-property": 46,
-    "unqualified": 20
+    "missing-property": 47,
+    "unqualified": 22
   },
   "qml/AgentTopBar.qml": {
     "missing-property": 9,

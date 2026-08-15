@@ -12,8 +12,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PROBE = REPO_ROOT / "tests" / "qml_harness" / "thread_rail_regression_probe.py"
 
 
-def test_dead_rows_and_repeated_close_keep_their_ui_contract() -> None:
-    """Dead rows stay inert; closing a live row returns focus to the rail."""
+def test_dead_rows_and_repeated_end_keep_their_ui_contract() -> None:
+    """Dead rows stay inert; ending a live row returns focus to the rail."""
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
@@ -40,7 +40,9 @@ def test_dead_rows_and_repeated_close_keep_their_ui_contract() -> None:
         "dead_browser_owned": False,
         "dead_browser_attention": False,
         "dead_coord_attention": False,
-        "close_calls": [1],
-        "rail_focus_after_close": True,
-        "sink_focus_after_close": False,
+        "live_number_visible": True,
+        "dead_number_visible": False,
+        "end_calls": [1],
+        "rail_focus_after_end": True,
+        "sink_focus_after_end": False,
     }

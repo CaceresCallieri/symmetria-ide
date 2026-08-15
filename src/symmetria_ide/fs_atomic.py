@@ -15,13 +15,51 @@ on-disk state file should call this rather than rolling its own.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+@contextmanager
+def write_lock(path: Path) -> Iterator[None]:
+    """Blocking cross-process mutex around a read-merge-write of ``path``.
+
+    ``atomic_write_json`` makes a write crash-safe; it does NOT make a
+    read-then-write sequence atomic. Two processes merging different entries
+    into the same file at the same instant each write back the OTHER's stale
+    copy, and one update is silently lost — the classic read-modify-write race.
+    Wrap the whole load-merge-write in this and the loser blocks for the
+    microseconds the critical section lasts.
+
+    Extracted from ``usage_store`` (its original home) once the agent-thread
+    store needed the identical guard for the identical reason: its file is
+    keyed by the CANONICAL project root, so a worktree and its main checkout —
+    two IDE windows, the documented dev/stable setup — share one file.
+
+    A lock file that cannot be opened (read-only or full state dir) degrades to
+    an UNLOCKED write rather than raising: this runs inside queued GUI-thread
+    slots, and losing cross-process ordering is a far smaller failure than an
+    uncaught exception in the event loop.
+    """
+    lock_path = path.with_suffix(path.suffix + ".write.lock")
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as exc:
+        log.debug("write_lock: cannot open %s (%s)", lock_path, exc)
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing releases the flock
 
 
 def atomic_write_json(target: Path, payload: dict) -> bool:

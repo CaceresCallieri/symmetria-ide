@@ -56,6 +56,7 @@ from . import (
     agent_coordination,
     agent_harness,
     agent_registry,
+    agent_thread_store,
     git_subprocess,
     remote_location,
     session_store,
@@ -77,6 +78,7 @@ from .agent_pane_slots import (  # importing also registers this @QmlElement typ
 )
 from .agent_thread_model import (  # importing also registers this @QmlElement type
     AgentThreadModel,
+    ThreadHistory,
     ThreadRow,
 )
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
@@ -779,6 +781,12 @@ class AppController(QObject):
         # while the registry above only ever appends because every one of its
         # rows owns a live agent CLI. See `agent_thread_model.py`.
         self._agent_threads = AgentThreadModel()
+        # Threads whose CLI is gone but whose conversation is resumable.
+        # Populated when a local slot with a session id leaves the pool — by an
+        # explicit sleep, a user close, or the process exiting on its own. The
+        # rules live on the class (agent_thread_model.ThreadHistory); it is
+        # held here because `close_agent` is what feeds it.
+        self._thread_history = ThreadHistory()
         # Cached PATH probe behind `agentHarnessCatalog`. Cached rather than
         # re-read per getter call so the property can honestly notify: a value
         # that changes without its notify signal is a binding QML never
@@ -3204,8 +3212,7 @@ class AppController(QObject):
 
         Ordering is `_ordered_slots_for_location()` — the same source
         `agentOrder` reads — so the rail's rows and the dense display numbers
-        (and Ctrl+1..5) cannot drift apart. History rows join this list in
-        Phase 4; today every row is live and carries a positive slot.
+        (and Ctrl+1..5) cannot drift apart.
         """
         rows: list[ThreadRow] = []
         for slot in self._ordered_slots_for_location():
@@ -3216,7 +3223,7 @@ class AppController(QObject):
                 ThreadRow(
                     # Durable identity once the harness reveals a session id;
                     # until then the slot, which is unique among live agents.
-                    thread_id=f"{harness}:{session_id}"
+                    thread_id=agent_thread_store.thread_key(harness, session_id)
                     if session_id
                     else f"live:{slot}",
                     harness=harness,
@@ -3230,10 +3237,23 @@ class AppController(QObject):
             )
         return rows
 
+    def _thread_rows(self) -> list[ThreadRow]:
+        """The rail's rows: live agents, plus this project's dead threads.
+
+        Dead rows are LOCAL history and appear only in the local location — a
+        VPS session's identity belongs to the server's hub, so the vps view
+        stays exactly the live remote pool (v1 scope). The merge itself is
+        `ThreadHistory`'s (agent_thread_model.py).
+        """
+        rows = self._live_thread_rows()
+        if self._location != "local":
+            return rows
+        return self._thread_history.merge(rows)
+
     @Slot()
     def _rebuild_thread_rows(self) -> None:
-        """Re-derive the rail's rows from the live pool."""
-        self._agent_threads.set_rows(self._live_thread_rows())
+        """Re-derive the rail's rows from the live pool plus dead history."""
+        self._agent_threads.set_rows(self._thread_rows())
 
     def _slot_count(self) -> int:
         """Registry high-water mark — the length of every per-slot list below.
@@ -3645,6 +3665,7 @@ class AppController(QObject):
         dangerous: bool = True,
         harness: str = "claude",
         session_id: str = "",
+        start_root: str = "",
     ) -> None:
         """Allocate the lowest free slot for an agent instance and focus it.
 
@@ -3660,6 +3681,11 @@ class AppController(QObject):
         open their own interactive session pickers inside the terminal (no
         session_id needed); opencode's `--session` REQUIRES an id, which
         the AgentSessionPicker overlay supplies.
+
+        `start_root` is INTERNAL — deliberately absent from the QML-facing
+        @Slot arities above. Its only caller is `resume_thread`, and it is
+        what exempts a resumed conversation from the spawn-to-main-checkout
+        redirect below (see the comment there).
         """
         if spawn_type not in ("fresh", "resume", "continue"):
             log.warning("spawn_agent: unknown spawn_type %r — no-op", spawn_type)
@@ -3718,9 +3744,20 @@ class AppController(QObject):
         # world; a fresh agent starts from the project's source of truth.
         # Deliberately narrow (only worktree roots redirect) so spawning from
         # a plain subdirectory keeps its current cwd.
-        spawn_main_root = linked_worktree_info(resolve_project_root(cwd))[0]
-        if spawn_main_root:
-            cwd = spawn_main_root
+        #
+        # ⚠ EXACTLY ONE CALLER IS EXEMPT: `resume_thread`, which passes the
+        # work root it recovered for a dead conversation as `start_root`. That
+        # thread already HAS a world, and dragging it back to the main
+        # checkout would put the agent's next edit in the wrong tree. Every
+        # agent the user creates fresh still takes the redirect — do not
+        # "simplify" the exemption away, and do not widen it to the QML-facing
+        # spawn surface.
+        if start_root:
+            cwd = start_root
+        else:
+            spawn_main_root = linked_worktree_info(resolve_project_root(cwd))[0]
+            if spawn_main_root:
+                cwd = spawn_main_root
         record = {
             "spawn_type": spawn_type,
             "dangerous": dangerous,
@@ -4045,26 +4082,70 @@ class AppController(QObject):
             start_directory=inst["cwd"],
         )
 
+    @staticmethod
+    def _agent_live_work_root(rec: dict) -> str:
+        """A slot record's best answer to "where is this agent working?".
+
+        In precedence order: `work_root` (the repo root of the last file a
+        WRITE tool touched — the only signal that follows an agent editing a
+        worktree it never cd'd into), then the hook-reported session cwd
+        (`live_cwd`), then the spawn cwd before the first hook arrives.
+
+        `work_root` is stored PRE-resolved (in `_on_agent_hook`) and must not
+        be re-resolved; the other two are raw paths resolved on read. Shared
+        by the worktree glyph, the durable store and the dead-row snapshot so
+        the three can never disagree about the same agent's location.
+        """
+        return rec.get("work_root") or resolve_project_root(
+            rec.get("live_cwd") or rec.get("cwd", "")
+        )
+
+    def _agent_thread_project_root(self) -> str:
+        """The canonical project root this IDE's threads are filed under.
+
+        From `_base_displayed_root` — NOT `displayedRoot`, which IS a linked
+        worktree while the follow is active. `agent_thread_store` canonicalises
+        again on its own, so a worktree passed by any other caller still lands
+        on the same file; going through the base here keeps the intent visible.
+        """
+        return agent_thread_store.project_key(self._base_displayed_root())
+
+    def _persist_agent_work_root(self, slot: int) -> None:
+        """Durably record where a live agent is working, by thread identity.
+
+        The one fact the harnesses do not keep for us (see
+        `agent_thread_store`), and the whole of what makes a resumed thread
+        land back in its worktree. Three edges call this — a write tool moving
+        the work root, the session id first appearing (the root is usually
+        observed BEFORE the identity it must be filed under), and the last
+        flush before sleep.
+
+        Silent no-op for a VPS slot or an agent with no session id yet: both
+        are ordinary states on this path, not failures.
+        """
+        record = self._term_agents.get(slot)
+        if record is None or record.get("location", "local") != "local":
+            return
+        agent_thread_store.save_work_root(
+            self._agent_thread_project_root(),
+            str(record.get("harness") or ""),
+            str(record.get("session_id") or ""),
+            self._agent_live_work_root(record),
+        )
+
     def _agent_worktree_state(self, rec: dict) -> tuple[str, str]:
         """`(worktree_root, worktree_name)` for a slot record iff its live
         root is a linked worktree of THIS project, else `("", "")`.
 
-        The live root is, in precedence order: `work_root` (the repo root of
-        the last file a WRITE tool touched — the only signal that tracks an
-        agent working in a worktree via Bash/absolute paths, where the session
-        cwd never moves), then the hook-reported session cwd (`live_cwd`),
-        then the spawn cwd before the first hook arrives. The same-repo gate
+        The live root comes from `_agent_live_work_root` (which owns the
+        precedence rule). The same-repo gate here
         compares canonical (main-checkout) roots via `_base_displayed_root` —
         NOT `displayedRoot`, which would be circular while an override is
         active — so foreign repos and non-repo dirs never count (v1 scope:
         same-repo worktrees only). Shared by the chip glyph field and the
         override funnel so the two can never disagree.
         """
-        # `work_root` is stored PRE-resolved (in _on_agent_hook) and must not
-        # be re-resolved here; live_cwd/cwd are raw paths resolved on read.
-        agent_root = rec.get("work_root") or resolve_project_root(
-            rec.get("live_cwd") or rec.get("cwd", "")
-        )
+        agent_root = self._agent_live_work_root(rec)
         main_root, name = linked_worktree_info(agent_root)
         if main_root and main_root == canonical_project_root(
             resolve_project_root(self._base_displayed_root())
@@ -4330,11 +4411,20 @@ class AppController(QObject):
         the closed position's left neighbour), or the new first agent;
         closing the last agent falls back to the terminal surface (the
         persistent home surface per the Phase 2.5 topology decision).
+
+        The PROCESS is what this ends. The CONVERSATION survives as a dead
+        rail row whenever the record carries a session id — see
+        `_record_dead_thread` — because every local departure funnels through
+        here: `sleep_agent`, the Ctrl+Shift+Q close, and `on_agent_finished`
+        for a `/exit` or a crash.
         """
         if slot not in self._term_agents:
             log.warning("close_agent: slot %d not in pool — no-op", slot)
             return
         inst = self._term_agents[slot]
+        # Before any mutation below: the record is the only place the thread's
+        # harness, session id, title and work root live once it leaves the pool.
+        self._thread_history.record(inst, self._agent_live_work_root(inst))
         if inst.get("location") == "vps":
             # VPS close = DETACH: dropping the record deactivates the Loader,
             # killing the local ssh client → tmux detaches; the session (and
@@ -4458,11 +4548,136 @@ class AppController(QObject):
         except (OSError, subprocess.SubprocessError) as exc:
             log.warning("%s: tmux kill-session %s failed: %s", context, name, exc)
 
+    @Slot(int)
+    def sleep_agent(self, slot: int) -> None:
+        """End a local agent's PROCESS and keep its conversation resumable.
+
+        The user-facing operation behind the rail's `x` and Ctrl+Shift+Q: the
+        CLI dies and its RAM comes back, the thread stays listed at `slot = 0`
+        and resumes where it was working.
+
+        Two substrates, one call. On a direct PTY, deactivating the slot's
+        Loader kills the child and that IS the whole teardown. Under tmux the
+        Loader's child is a tmux CLIENT — the CLI survives under the tmux
+        server BY DESIGN (that is what lets a restarted IDE re-attach with
+        `new-session -A`), so the session has to be killed explicitly or the
+        pane goes away and the memory does not. `close_agent` runs both, in
+        that order, gated on the socket recorded at spawn; sleeping is
+        therefore `close_agent` plus one last durable write, not a second
+        teardown path that could drift from it.
+
+        VPS slots are refused: a remote close is a DETACH by design (the
+        session keeps running for the phone), so there is nothing to sleep.
+        """
+        record = self._term_agents.get(slot)
+        if record is None:
+            log.warning("sleep_agent: slot %d not in pool — no-op", slot)
+            return
+        if record.get("location", "local") != "local":
+            log.warning("sleep_agent: slot %d is a vps agent — use close_agent", slot)
+            return
+        # Last defensive flush BEFORE the record is dropped: the live hooks
+        # persist every move, but the final one may have arrived while the
+        # session id was still unknown, and after this the record is gone.
+        self._persist_agent_work_root(slot)
+        self.close_agent(slot)
+
+    @Slot(str)
+    def resume_thread(self, thread_id: str) -> None:
+        """Bring a dead thread back — its harness, its id, its work root.
+
+        Three steps, in this order:
+
+        1. Already live? Focus it. Respawning `claude -r <same id>` would put
+           two processes on one conversation — the same double-resume hazard
+           `restore_session` guards, arriving here from the rail instead.
+        2. Resolve the start root: the work root the store recorded for this
+           identity, if it still exists AND still belongs to this project.
+           A vanished or foreign root degrades to the main checkout WITH a
+           user-visible notice — silently resuming somewhere else would make
+           the agent's next edit land in the wrong tree.
+        3. Spawn a resume, passing that root explicitly so the
+           "new agents always spawn in the MAIN checkout" redirect does not
+           apply (see `spawn_agent`'s `start_root`).
+
+        The slot NUMBER is not preserved: "where it was" means the worktree,
+        not an internal index that is invisible to the user and re-dense on
+        every close.
+        """
+        harness, _, session_id = str(thread_id).partition(":")
+        if not harness or not session_id:
+            log.warning("resume_thread: malformed thread id %r — no-op", thread_id)
+            return
+        for slot, record in self._term_agents.items():
+            if (
+                record.get("harness") == harness
+                and record.get("session_id") == session_id
+            ):
+                log.info(
+                    "resume_thread: %s is already live in slot %d", thread_id, slot
+                )
+                self.focus_agent(slot)
+                return
+        stored = agent_thread_store.load_work_root(
+            self._agent_thread_project_root(), harness, session_id
+        )
+        start_root = self._resume_start_root(harness, stored)
+        self.spawn_agent(
+            "resume",
+            # Dangerous-by-default matches every spawn path (see spawn_agent);
+            # the thread was almost certainly created that way too.
+            True,
+            harness,
+            session_id,
+            start_root=start_root,
+        )
+
+    def _resume_start_root(self, harness: str, stored: str | None) -> str:
+        """Validate a stored work root for resume; "" means "use the default".
+
+        Takes the ALREADY-SPLIT harness rather than the thread id: the caller
+        has both halves, and re-parsing the identity here would be a second
+        place that knows its separator — the thing `thread_key` exists to own.
+
+        Empty is the answer for every unusable case, so the caller has one
+        branch: never recorded (an OpenCode thread from before the store, or a
+        Phase-4 history row with no backfill), deleted since, or belonging to
+        another repo now. Only the last two are the user's problem, so only
+        those alert — "we never knew" is not news, and a toast per resume of
+        an old thread would be noise.
+        """
+        if not stored:
+            return ""
+        project_root = self._agent_thread_project_root()
+        if not os.path.isdir(stored):
+            self.locationAlert.emit(
+                "Resuming in the main checkout",
+                f"{harness} worked in {stored}, which no longer exists.",
+            )
+            return ""
+        if canonical_project_root(resolve_project_root(stored)) != project_root:
+            self.locationAlert.emit(
+                "Resuming in the main checkout",
+                f"{stored} is no longer part of this project.",
+            )
+            return ""
+        return stored
+
     @Slot()
     def close_focused_agent(self) -> None:
-        """Ctrl+Shift+Q on the agent surface."""
-        if self._focused_term_agent:
-            self.close_agent(self._focused_term_agent)
+        """Ctrl+Shift+Q on the agent surface.
+
+        Local agents SLEEP (the conversation stays in the rail, resumable);
+        VPS agents keep their detach semantics, where the remote session lives
+        on and Ctrl+Shift+K is the explicit kill.
+        """
+        slot = self._focused_term_agent
+        if not slot:
+            return
+        if self._agent_location(slot) == "local":
+            self.sleep_agent(slot)
+            return
+        self.close_agent(slot)
 
     @Slot(int)
     def on_agent_finished(self, slot: int) -> None:
@@ -6145,6 +6360,13 @@ class AppController(QObject):
             # Advertise the freshly-learned session→slot so peer reporters route
             # this session's later events precisely (idempotent atomic write).
             self._sync_agent_registry()
+        # Durable work root, on BOTH edges and deliberately after the session
+        # backfill above: the store is keyed by `(harness, session_id)`, and
+        # the work root is usually observed BEFORE the identity to file it
+        # under exists — a roots-only persist would drop the very first move,
+        # and an identity-only persist would file a stale root.
+        if roots_changed or session_changed:
+            self._persist_agent_work_root(slot)
         activity_changed = False
         if outcome.clear:
             # idle/offline → drop the activity entry (chip falls back to dormant).

@@ -50,11 +50,19 @@ FocusScope {
     // on its Keys.onPressed handler — verified in an offscreen probe rather
     // than assumed, since a FocusScope with no focused child swallows it.
     //
-    // The single dispatch into the pool. `slot > 0` is the live/dead test;
-    // resuming a dead thread arrives here in the sleep/resume phase.
-    function activateThread(slot: int): void {
+    // The single dispatch into the pool, and the one place the live/dead
+    // split is decided: `slot > 0` means there is a pane to go to, `slot === 0`
+    // means the conversation outlived its CLI and has to be brought back.
+    //
+    // The dead branch dispatches on `threadId` — the durable
+    // "<harness>:<session_id>" identity — and NOT on the row's position or on
+    // any per-slot index, because a dead row has no slot to index and its
+    // position moves whenever a live agent comes or goes.
+    function activateThread(slot: int, threadId: string): void {
         if (slot > 0)
             controller.focus_agent(slot);
+        else if (threadId !== "")
+            controller.resume_thread(threadId);
     }
 
     // ⚠ Through the MODEL, never through `threadList.currentItem.slot`.
@@ -68,8 +76,18 @@ FocusScope {
         return agentThreads.slot_at(threadList.currentIndex);
     }
 
+    // Same reason as `_currentSlot`, for the identity a dead row activates by.
+    function _currentThreadId(): string {
+        return agentThreads.thread_id_at(threadList.currentIndex);
+    }
+
+    // `x` — put the thread to SLEEP: the CLI dies and its RAM comes back, the
+    // row stays and stays resumable. Deliberately not `close_agent`, which is
+    // the internal primitive (and the VPS detach); the rail must never be the
+    // surface that makes a conversation disappear.
+    //
     // Ending an agent from the rail must LEAVE the user in the rail.
-    // `close_agent` refocuses a survivor, and `focus_agent` both swaps the
+    // The close path refocuses a survivor, and `focus_agent` both swaps the
     // central surface to "agent" and lands keyboard focus in that agent's
     // terminal — so without this the first `x` throws you out of the column
     // you are working in, and a second `x` (meant for the next thread) is
@@ -79,7 +97,7 @@ FocusScope {
     function _endThread(slot: int): void {
         if (slot <= 0)
             return;
-        controller.close_agent(slot);
+        controller.sleep_agent(slot);
         Qt.callLater(() => threadList.forceActiveFocus());
     }
 
@@ -157,8 +175,9 @@ FocusScope {
         reuseItems: true
 
         // Vim row navigation, in the same shape as the file tree's. Enter
-        // activates; `x` ends the agent — it becomes an explicit sleep (the
-        // thread survives, dead and resumable) in the sleep/resume phase.
+        // activates the row — focusing a live agent, resuming a dead thread —
+        // and `x` sleeps it: the CLI dies, the thread stays listed and stays
+        // resumable.
         //
         // `currentIndex` is the rail's OWN selection and is deliberately NOT
         // `controller.focusedAgent`: moving down the list must not switch
@@ -173,7 +192,7 @@ FocusScope {
                 threadList.decrementCurrentIndex();
                 event.accepted = true;
             } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                root.activateThread(root._currentSlot());
+                root.activateThread(root._currentSlot(), root._currentThreadId());
                 event.accepted = true;
             } else if (event.key === Qt.Key_X) {
                 root._endThread(root._currentSlot());
@@ -186,6 +205,7 @@ FocusScope {
 
             required property int index
             required property int slot
+            required property string threadId
             required property string harness
             required property string title
             required property string worktree
@@ -274,8 +294,16 @@ FocusScope {
 
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    // Dense DISPLAY position, not the internal slot — the same
-                    // number Ctrl+1..5 addresses.
+                    // ⚠ LIVE ROWS ONLY. `displayNumber` is the dense position
+                    // in the list, and Ctrl+1..5 addresses `agentOrder`, which
+                    // holds live slots only — the two coincide exactly while
+                    // every row above this one is live, which is true because
+                    // ThreadHistory appends dead rows AFTER the live ones. A
+                    // dead row's position is therefore past the end of
+                    // agentOrder: printing its number beside it would offer a
+                    // digit that opens the spawn menu instead of that thread.
+                    // Dead threads are reached by Enter or a click.
+                    visible: row.live
                     text: row.displayNumber
                     color: row.focusedSlot ? Theme.color.text.strong : Theme.color.text.dim
                     font.family: Theme.font.family
@@ -296,7 +324,13 @@ FocusScope {
                     // from anchors rather than from its children.
                     width: Math.max(0, rowContent.width - threadTitle.x)
                     text: row.sessionTitle !== "" ? row.sessionTitle : "untitled"
-                    color: row.focusedSlot ? Theme.color.text.strong : Theme.color.text.normal
+                    // Three rungs, one per state: the focused agent reads
+                    // strongest, other live agents normal, and a dead thread
+                    // recedes to the dim rung — present and activatable, but
+                    // visibly not something that is running.
+                    color: row.focusedSlot
+                        ? Theme.color.text.strong
+                        : (row.live ? Theme.color.text.normal : Theme.color.text.dim)
                     font.family: Theme.font.family
                     font.pixelSize: Theme.font.size.xs
                     renderType: Text.NativeRendering
@@ -383,7 +417,7 @@ FocusScope {
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: root.activateThread(row.slot)
+                onClicked: root.activateThread(row.slot, row.threadId)
                 onPressed: threadList.currentIndex = row.index
             }
         }

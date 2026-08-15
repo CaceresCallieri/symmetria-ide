@@ -30,7 +30,7 @@ class Controller(QObject):
 
     def __init__(self) -> None:
         super().__init__()
-        self.close_calls: list[int] = []
+        self.end_calls: list[int] = []
         self.focus_calls: list[int] = []
         self.focus_sink: QQuickItem | None = None
 
@@ -77,9 +77,18 @@ class Controller(QObject):
 
     @Slot(int)
     def close_agent(self, slot: int) -> None:
-        self.close_calls.append(slot)
+        self._end_agent(slot)
+
+    @Slot(int)
+    def sleep_agent(self, slot: int) -> None:
+        self._end_agent(slot)
+
+    def _end_agent(self, slot: int) -> None:
+        self.end_calls.append(slot)
         if self.focus_sink is not None:
-            # The real close path focuses a surviving terminal synchronously.
+            # Both the historical close path and the Phase-3 sleep path focus a
+            # surviving terminal synchronously.  This probe guards the rail's
+            # focus restoration independently of that intentional rename.
             self.focus_sink.forceActiveFocus()
 
     @Slot(int)
@@ -121,6 +130,21 @@ def _stt_target(delegate: QQuickItem) -> bool:
         if _has_property(item, "isSttTarget"):
             return bool(item.property("isSttTarget"))
     raise RuntimeError("delegate has no rendered AgentChip STT state")
+
+
+def _display_number_visible(delegate: QQuickItem) -> bool:
+    """Whether the delegate's dense Ctrl+N label is actually rendered."""
+    expected = str(delegate.property("displayNumber"))
+    matches = [
+        item
+        for item in _visual_items(delegate)
+        if _has_property(item, "text") and str(item.property("text")) == expected
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected one display-number Text for {expected}, got {len(matches)}"
+        )
+    return bool(matches[0].property("visible"))
 
 
 def main() -> int:
@@ -190,9 +214,11 @@ def main() -> int:
         "dead_browser_owned": bool(dead.property("ownsBrowser")),
         "dead_browser_attention": bool(dead.property("browserAttention")),
         "dead_coord_attention": bool(dead.property("coordAttention")),
-        "close_calls": controller.close_calls,
-        "rail_focus_after_close": bool(root.property("activeFocus")),
-        "sink_focus_after_close": bool(sink.property("activeFocus")),
+        "live_number_visible": _display_number_visible(live),
+        "dead_number_visible": _display_number_visible(dead),
+        "end_calls": controller.end_calls,
+        "rail_focus_after_end": bool(root.property("activeFocus")),
+        "sink_focus_after_end": bool(sink.property("activeFocus")),
     }
     print(json.dumps(result, sort_keys=True))
     return 0
