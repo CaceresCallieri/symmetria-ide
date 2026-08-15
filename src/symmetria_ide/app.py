@@ -72,6 +72,9 @@ from .agent_interrupt import (
     EscapeWatcher,
     should_arm_interrupt_clear,
 )
+from .agent_pane_slots import (  # importing also registers this @QmlElement type
+    AgentPaneSlotModel,
+)
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .browser_mcp import BrowserMcpBridge, BrowserMcpServer
 from .chrome_host import ChromeHost, browser_identity
@@ -600,6 +603,13 @@ class AppController(QObject):
     # a sparse dict, so widening to N is just bumping this constant.
     # 5 matches the originally planned `<C-1>..<C-5>` keybind surface;
     # Track-2 may extend it.
+    #
+    # ⚠ SCOPE (2026-08-15): this bounds exactly TWO pools — the browser window
+    # registry (`_browser_tabs`, `_next_free_browser_slot`) and the parked
+    # Node-SDK pool (`_session_hosts`, `_next_free_slot`, `_coerce_slot_index`).
+    # It NO LONGER bounds the terminal-agent panes: those are unlimited and
+    # sized by `AgentPaneSlotModel` (see `_slot_count`). Do not re-couple them
+    # — the two survivors have caps of their own for their own reasons.
     _MAX_INSTANCES: int = 5
 
     # An agent whose process exits this soon after spawn is treated as a
@@ -747,10 +757,18 @@ class AppController(QObject):
         # Python-wrappable — the Loaders in Main.qml own the process
         # lifecycle; Python owns only the bookkeeping + bridge publish).
         #
-        # Slot numbering is 1-based (1.._MAX_INSTANCES), matching the
-        # Ctrl+1..5 chords. Per-slot record: {spawn_type, dangerous,
+        # Slot numbering is 1-based and UNBOUNDED (the Ctrl+1..5 chords
+        # address the first five DISPLAY positions, not a capacity — see
+        # `agentOrder`). Per-slot record: {spawn_type, dangerous,
         # harness, session_id, cwd, title, spawned_at}.
         self._term_agents: dict[int, dict] = {}
+        # The QML pane registry — one append-only row per slot ever allocated
+        # this run. `_term_agents` above is the source of truth for occupancy;
+        # `_sync_pane_slots` projects it here, and the Loaders in Main.qml
+        # react. Read `agent_pane_slots.py`'s module docstring before touching
+        # either: the append-only discipline is what keeps a growing pool from
+        # reaping live agent processes, and it is measured, not assumed.
+        self._agent_pane_slots = AgentPaneSlotModel()
         # Cached PATH probe behind `agentHarnessCatalog`. Cached rather than
         # re-read per getter call so the property can honestly notify: a value
         # that changes without its notify signal is a binding QML never
@@ -3135,16 +3153,42 @@ class AppController(QObject):
     # Terminal-agent pool (IDE-native orchestrator runtime)
     # ------------------------------------------------------------------
     #
-    # The QML side (Main.qml's agent surface) holds a fixed Repeater of
-    # `maxAgentSlots` Loaders; each Loader's `active` binds to
-    # `agentSlotActive[index]` and instantiates a QMLTermWidget +
-    # QMLTermSession running `agent_spawn_argv(slot)`. Python never
-    # touches the KSession (not wrappable) — spawn/close are expressed
-    # purely as state flips that the Loaders react to.
+    # The QML side (Main.qml's agent surface) holds a Repeater over the
+    # append-only `agentPaneSlots` registry; each Loader's `active` binds to
+    # that row's role and instantiates a QMLTermWidget + QMLTermSession
+    # running `agent_spawn_argv(slot)`. Python never touches the KSession
+    # (not wrappable) — spawn/close are expressed purely as state flips that
+    # the Loaders react to.
 
-    @Property(int, constant=True)
-    def maxAgentSlots(self) -> int:
-        return self._MAX_INSTANCES
+    @Property(QObject, constant=True)
+    def agentPaneSlots(self) -> QObject:
+        """The append-only pane registry, as QML's Repeater model.
+
+        Deliberately the ONLY model QML may point that Repeater at. A model of
+        active agents would reorder on focus and delete on close, and each of
+        those churns delegates — which reaps live agent CLIs. See
+        `agent_pane_slots.py`.
+        """
+        return self._agent_pane_slots
+
+    def _slot_count(self) -> int:
+        """Registry high-water mark — the length of every per-slot list below.
+
+        Grows when a spawn needs a slot beyond the current mark and never
+        shrinks within a run, so `slot - 1` stays a valid index into each
+        `QVariantList` property for as long as QML holds the slot number.
+        """
+        return self._agent_pane_slots.rowCount()
+
+    def _sync_pane_slots(self) -> None:
+        """Project `_term_agents` occupancy onto the pane registry.
+
+        The one funnel — called from `_register_term_agent` and `close_agent`,
+        the only two places `_term_agents` gains or loses a slot. Recomputing
+        from the whole set rather than accumulating per-slot edits is what
+        makes registry-vs-pool drift structurally impossible.
+        """
+        self._agent_pane_slots.sync(self._term_agents.keys())
 
     def _probe_harness_availability(self) -> dict[str, bool]:
         """name -> "is this harness's executable on PATH right now"."""
@@ -3281,21 +3325,25 @@ class AppController(QObject):
 
     @Property("QVariantList", notify=termAgentsChanged)
     def agentSlotActive(self) -> list:
-        """Per-slot occupancy, indexed `slot - 1` (len == maxAgentSlots).
+        """Per-slot occupancy, indexed `slot - 1` (len == `_slot_count()`).
 
-        This is the Loaders' `active` binding — a stable-length list so
-        the fixed Repeater never churns delegates (which would tear down
-        live claude processes; see Main.qml's agent surface comment).
+        Read straight off the pane registry rather than recomputed from
+        `_term_agents`, so this list and the Loaders' own `active` role can
+        never disagree about whether a slot holds a pane.
+
+        No longer the Loaders' binding — they read the registry row directly.
+        It survives as the location-BLIND occupancy view the VPS toggle needs
+        (see CLAUDE.md, "The pool is one physical slot namespace").
         """
-        return [slot in self._term_agents for slot in range(1, self._MAX_INSTANCES + 1)]
+        return self._agent_pane_slots.active_flags()
 
     def _slot_field(self, key: str, default):
         """Per-slot value of `key` from each agent record, indexed `slot - 1`
-        (len == _MAX_INSTANCES). The shared body behind the per-slot status
+        (len == `_slot_count()`). The shared body behind the per-slot status
         @Property lists below — one extraction for six callsites."""
         return [
             self._term_agents.get(slot, {}).get(key, default)
-            for slot in range(1, self._MAX_INSTANCES + 1)
+            for slot in range(1, self._slot_count() + 1)
         ]
 
     @Property("QVariantList", notify=termAgentsChanged)
@@ -3476,7 +3524,7 @@ class AppController(QObject):
                     ),
                 },
             )
-            for slot in range(1, self._MAX_INSTANCES + 1)
+            for slot in range(1, self._slot_count() + 1)
         ]
 
     @Property("QVariantList", notify=agentBrowserChanged)
@@ -3486,7 +3534,7 @@ class AppController(QObject):
         windows only (close_browser drops the slot from every owner)."""
         return [
             len(self._agent_browser_windows.get(slot, ()))
-            for slot in range(1, self._MAX_INSTANCES + 1)
+            for slot in range(1, self._slot_count() + 1)
         ]
 
     @Property("QVariantList", notify=agentBrowserChanged)
@@ -3498,7 +3546,7 @@ class AppController(QObject):
         close, or on agent death."""
         return [
             slot in self._agent_browser_attention
-            for slot in range(1, self._MAX_INSTANCES + 1)
+            for slot in range(1, self._slot_count() + 1)
         ]
 
     @Property("QVariantList", notify=agentCoordChanged)
@@ -3511,7 +3559,7 @@ class AppController(QObject):
         (focus_agent) or the agent closes."""
         return [
             slot in self._agent_coord_attention
-            for slot in range(1, self._MAX_INSTANCES + 1)
+            for slot in range(1, self._slot_count() + 1)
         ]
 
     @Property(int, notify=sttStateChanged)
@@ -3585,9 +3633,6 @@ class AppController(QObject):
             log.warning("spawn_agent: %s resume requires a session id — no-op", harness)
             return
         slot = self._next_free_term_slot()
-        if slot is None:
-            log.warning("spawn_agent: pool full (%d slots)", self._MAX_INSTANCES)
-            return
         # Repair a vanished root BEFORE reading it: an agent spawned into a
         # deleted directory dies as QProcess FailedToStart, so `cwd` below must
         # not be a ghost. `agent_start_dir` degrades once more at the pty seam,
@@ -3690,6 +3735,10 @@ class AppController(QObject):
         """
         self._term_agents[slot] = record
         self._agent_order.append(slot)
+        # Before the notify below: the per-slot QVariantList properties are
+        # sized by the registry, so QML must see the grown registry and the
+        # longer lists in the same turn.
+        self._sync_pane_slots()
         self.termAgentsChanged.emit()
         # agentWorktree is on its own notify (see the signal comment) — a new
         # slot changes that list too, so the occupancy edge emits both.
@@ -4121,7 +4170,11 @@ class AppController(QObject):
             slot = int(slot_str)
         except ValueError:
             return None
-        return slot if 1 <= slot <= self._MAX_INSTANCES else None
+        # No upper bound since 2026-08-15: the terminal-agent pool is
+        # uncapped, so a slot past 5 is an ordinary agent of ours and there is
+        # no maximum left to compare against. The pid check above is the real
+        # filter — this only rejects a non-positive slot.
+        return slot if slot >= 1 else None
 
     def _claim_browser_window(self, agent_slot: int, browser_slot: int) -> None:
         """Record that `agent_slot` owns `browser_slot`, newest-driven LAST
@@ -4252,6 +4305,10 @@ class AppController(QObject):
             )
             self._on_coord_agent_closed(slot)
             del self._term_agents[slot]
+            # Frees the slot: the registry row STAYS, its `active` role flips
+            # false, and exactly that Loader deactivates. Removing the row
+            # instead would churn every later delegate — see agent_pane_slots.
+            self._sync_pane_slots()
             self._term_agent_activity.pop(slot, None)
             self._cancel_pending_interrupt_clear(slot)
             self._forget_local_agent(slot)
@@ -4273,6 +4330,9 @@ class AppController(QObject):
         location_order.remove(slot)
         was_vps = location == "vps"
         del self._term_agents[slot]
+        # Frees the slot without deleting its registry row — see the twin
+        # call in the desync branch above.
+        self._sync_pane_slots()
         self._term_agent_activity.pop(slot, None)
         self._cancel_pending_interrupt_clear(slot)
         self._forget_local_agent(slot)
@@ -5529,9 +5589,6 @@ class AppController(QObject):
                 self.focus_agent(slot)
                 return
         slot = self._next_free_term_slot()
-        if slot is None:
-            log.warning("attach_remote_session: pool full (%d)", self._MAX_INSTANCES)
-            return
         server = self._remote_context.server
         record = {
             "spawn_type": "attach",
@@ -5624,17 +5681,21 @@ class AppController(QObject):
         inst["killed"] = True
         self.close_agent(slot)
 
-    def _next_free_term_slot(self) -> int | None:
-        """Lowest unoccupied terminal-agent slot, or None when full.
+    def _next_free_term_slot(self) -> int:
+        """Lowest unoccupied terminal-agent slot. Never fails.
 
-        Mirrors `_next_free_slot` (the SDK pool's allocator) over
-        `_term_agents` — fill-from-the-bottom so the first spawn is
-        Ctrl+1-reachable.
+        Fill-from-the-bottom, so the first spawn is Ctrl+1-reachable and a
+        closed slot is reused before the registry grows a new row.
+
+        Unlike `_next_free_slot` (the SDK pool's allocator, still capped at
+        `_MAX_INSTANCES`) this one has no upper bound: the panes behind these
+        slots live in an append-only registry that grows without churning its
+        existing delegates, so there is nothing left for a cap to protect.
         """
-        for slot in range(1, self._MAX_INSTANCES + 1):
-            if slot not in self._term_agents:
-                return slot
-        return None
+        slot = 1
+        while slot in self._term_agents:
+            slot += 1
+        return slot
 
     def _term_instance_payload(self, slot: int) -> dict:
         """The bridge's per-instance shape (bridge.lua:185-203 parity).
@@ -7728,6 +7789,7 @@ def _register_qml_types() -> None:
     _ = WhichKeyModel
     _ = WhichKeyState
     _ = SessionModel
+    _ = AgentPaneSlotModel
 
 
 def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
@@ -7812,6 +7874,11 @@ def _build_engine(controller: AppController) -> QQmlApplicationEngine | None:
     ctx.setContextProperty("completionModel", controller.completion)
     ctx.setContextProperty("whichKeyState", controller.whichkey_state)
     ctx.setContextProperty("whichKeyModel", controller.whichkey_model)
+    # The agent surface's pane registry. Also reachable as
+    # `controller.agentPaneSlots`; named at context scope because the
+    # Repeater that binds it sits several nested components deep, where an
+    # outer-id/`controller.` chain is what qmllint cannot qualify.
+    ctx.setContextProperty("agentPaneSlots", controller.agentPaneSlots)
     # Editor minimap model — Phase 1 of docs/minimap-prd.md. Main.qml
     # binds `MinimapView.bufferRowCount: minimapModel.lineCount`.
     ctx.setContextProperty("minimapModel", controller.minimap_model)

@@ -67,6 +67,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Nested-compositor has no dmabuf](reference/qt-pyside/nested_compositor_no_dmabuf.md) — Qt 6.11 implements the protocol nowhere; the EGL warning names the wrong layer
 - [Nested compositor hijacks the host keyboard](reference/qt-pyside/nested_compositor_hijacks_host_keymap.md) — Qt installs a process-wide key handler rewriting every key from a dead-reckoned state: US layout + phantom stuck Shift
 - [Why the suite dies "intermittently"](reference/qt-pyside/processevents_shared_app_segv.md) — two causes: pumping the session app, and leaked AppControllers
+- [Append-only pane registry](reference/qt-pyside/append_only_pane_registry.md) — integer-model Repeater reaps every live pane on growth (3→8); append-only model does not (3→9, zero)
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
 

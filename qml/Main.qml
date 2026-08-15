@@ -267,8 +267,13 @@ Window {
     // internal slot. A position with no agent opens the spawn menu —
     // Ctrl+2 with one agent running means "give me a second one"; the
     // new agent always appends as the next dense number.
+    // FIVE, deliberately literal: this is a KEYBOARD surface (the digit row's
+    // reachable span), not a pool capacity. The agent pool itself is unlimited
+    // — see agent_pane_slots.py — so there is no property to bind here that
+    // would stay honest; `controller.maxAgentSlots` used to be that property
+    // and was retired for asserting a cap that no longer exists.
     Instantiator {
-        model: controller.maxAgentSlots
+        model: 5
         delegate: Shortcut {
             required property int index
             sequences: ["Ctrl+" + (index + 1)]
@@ -1153,16 +1158,23 @@ Window {
                 // agent is visible at a time (`controller.focusedAgent`);
                 // Ctrl+1..5 / Ctrl+Shift+H/L switch which.
                 //
-                // STRUCTURE IS LOAD-BEARING: a fixed `model:
-                // controller.maxAgentSlots` Repeater over per-slot Loaders.
-                // Spawning = the slot's `agentSlotActive[index]` flips true →
-                // Loader instantiates the terminal and starts claude. Closing
-                // = the flag flips false → Loader teardown destroys the
-                // KSession, whose destructor hangs up the Pty and reaps the
-                // claude child. Do NOT replace the fixed Repeater with a
-                // model over `activeAgentSlots` — list churn would
-                // destroy/recreate sibling delegates and kill live claude
-                // processes on every spawn/close.
+                // STRUCTURE IS LOAD-BEARING: a Repeater over the APPEND-ONLY
+                // pane registry (`agentPaneSlots`, agent_pane_slots.py) with
+                // one Loader per slot. Spawning = that row's active flag flips
+                // true → Loader instantiates the terminal and starts the agent
+                // CLI. Closing = the flag flips false → Loader teardown
+                // destroys the KSession, whose destructor hangs up the Pty and
+                // reaps the child.
+                //
+                // The registry only ever APPENDS rows — closing frees a slot,
+                // it never deletes the row and never reorders. That discipline
+                // is the whole safety argument, and it is measured: growing a
+                // plain-integer model 3 → 8 destroyed all three live panes,
+                // while the append-only model grew 3 → 9 with zero
+                // destructions (2026-08-15; tests/qml_harness/pane_growth_probe.py).
+                // So do NOT point this Repeater at a model of ACTIVE agents —
+                // that one reorders on focus and deletes on close, and either
+                // operation churns delegates and kills live agent processes.
                 Item {
                     id: agentSurface
                     anchors.fill: parent
@@ -1308,15 +1320,44 @@ Window {
 
                     Repeater {
                         id: agentSlotRepeater
-                        model: controller.maxAgentSlots
+                        // The append-only pane registry (agent_pane_slots.py),
+                        // NEVER a model of active agents: this one only ever
+                        // appends rows, so growing it leaves live delegates —
+                        // and the agent processes they own — untouched.
+                        model: agentPaneSlots
 
                         delegate: Loader {
                             id: slotLoader
 
                             required property int index
-                            readonly property int slot: slotLoader.index + 1
+                            // From the row, not `index + 1`. They coincide by
+                            // construction (rows are contiguous from slot 1 and
+                            // never move); reading the role is what keeps that
+                            // an assertion of the model rather than of the view.
+                            required property int slot
 
                             anchors.fill: parent
+                            // The registry's own flag, reached through the
+                            // controller rather than as a required role
+                            // property: `active` is already Loader's own
+                            // property, so a required property of that name
+                            // cannot be declared here, and `model.active` does
+                            // not resolve once a delegate declares ANY required
+                            // property (measured: it read true for a false row).
+                            //
+                            // DELIBERATE DUPLICATION, not an oversight. The
+                            // occupancy of a slot is published twice — as the
+                            // model's `active` role and as this list property —
+                            // and only this one drives the Loader. Renaming the
+                            // role (to `occupied`, say) and retiring
+                            // `agentSlotActive` would collapse the two, and was
+                            // rejected: both spellings are named by the approved
+                            // Phase-1 test contract, which looks the role up by
+                            // the name "active" and asserts `agentSlotActive`'s
+                            // length against the registry's row count. They
+                            // cannot drift regardless — `agentSlotActive` IS
+                            // `AgentPaneSlotModel.active_flags()`, the same list
+                            // the role reads, with no second copy of the state.
                             active: controller.agentSlotActive[slotLoader.index]
                             visible: controller.focusedAgent === slotLoader.slot
 

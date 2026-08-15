@@ -646,16 +646,27 @@ def test_snapshot_empty_agent_type_falls_back_to_slot_harness(controller):
 
 
 def test_slots_fill_from_the_bottom(controller):
+    """Guard: the pane high-water mark grows only as slots are allocated."""
     controller.spawn_agent("fresh", True)
     controller.spawn_agent("fresh", True)
     assert controller.agentOrder == [1, 2]
-    assert controller.agentSlotActive == [True, True, False, False, False]
+    # Length tracks the pane registry's high-water mark, not a fixed cap —
+    # two spawns have grown it to exactly two rows.
+    assert controller.agentSlotActive == [True, True]
 
 
-def test_pool_exhaustion_at_max_slots(controller):
-    for _ in range(controller.maxAgentSlots + 1):
+def test_pool_grows_past_the_old_five_slot_cap(controller):
+    """Guard: the pool is uncapped; the sixth spawn allocates rather than refusing.
+
+    Was `test_pool_exhaustion_at_max_slots` until 2026-08-15. The cap it
+    pinned was never a policy — a Repeater over a plain integer reaps every
+    live pane when the integer moves, so five was the number that fit. The
+    append-only registry grows without that churn (see agent_pane_slots.py).
+    """
+    for _ in range(6):
         controller.spawn_agent("fresh", True)
-    assert controller.agentOrder == [1, 2, 3, 4, 5]
+    assert controller.agentOrder == [1, 2, 3, 4, 5, 6]
+    assert controller.agentSlotActive == [True] * 6
 
 
 def test_freed_internal_slot_is_reused(controller):
@@ -663,9 +674,9 @@ def test_freed_internal_slot_is_reused(controller):
     controller.spawn_agent("fresh", True)
     controller.close_agent(1)
     controller.spawn_agent("fresh", True)
-    # Internal slot 1 is reused (SYMMETRIA_AGENT_ID stays unique within
-    # the 1..5 range) but the newcomer APPENDS in display order — the
-    # survivor keeps position 1.
+    # Internal slot 1 is reused (SYMMETRIA_AGENT_ID stays unique among live
+    # agents) but the newcomer APPENDS in display order — the survivor keeps
+    # position 1.
     assert sorted(controller.agentOrder) == [1, 2]
     assert controller.agentOrder == [2, 1]
 
