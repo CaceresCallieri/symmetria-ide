@@ -77,5 +77,6 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Daemon freezes agent env](reference/agent-sdk/daemon_freezes_agent_env.md) — CC 2.1.x spare-pool freezes agent env id across projects; attribute by session_id+cwd
 - [tmux server env leak](reference/agent-sdk/tmux_server_env_leak.md) — tmux server leaks starter's CLAUDE_JOB_DIR → foreign session titles; scrub -gr + env -u
 - [tmux swallows OSC title](reference/agent-sdk/tmux_swallows_osc_title.md) — blank chip names in tmux; fix: set-titles on + "#T" in agent-tmux.conf
+- [opencode session list scoping](reference/agent-sdk/opencode_session_list_scoping.md) — folds worktrees itself; outside a git project it returns 15 foreign `global` rows, so filter by `directory`
 
 _(sidecar protocol contract lives in CLAUDE.md "The agent backend" section + `sidecar/src/protocol.ts`.)_

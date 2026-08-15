@@ -6,17 +6,21 @@
 // selection UI instead of vim.ui.select.
 //
 // ⚠ OpenCode-SPECIFIC, despite the harness-parameterised spawn below: the
-// list comes from `controller.request_opencode_sessions()`, which shells
-// `opencode session list` unconditionally. The harness rides through so the
-// SPAWN is correct, not so the FETCH is general. A second `resumeRequiresId`
-// harness therefore does NOT work here for free — it needs a harness-
-// parameterised fetch on the controller (its own list command and parser)
-// before this modal can serve it.
+// list comes from `controller.request_opencode_sessions()`, which answers
+// from the thread index's cached OpenCode records and shells
+// `opencode session list` only when that cache is cold or unusable. The
+// harness rides through so the SPAWN is correct, not so the FETCH is general.
+// A second `resumeRequiresId` harness therefore does NOT work here for free —
+// it needs a harness-parameterised fetch on the controller (its own list
+// command and parser) before this modal can serve it.
 //
-// Flow: open(harness, dangerous) → controller.request_opencode_sessions()
-// (async worker; `opencode session list` takes ~1s) → onOpencodeSessionsReady
-// fills the list → j/k/arrows move, Enter spawns
-// `opencode --session <id>`, Esc cancels.
+// Flow: open(harness, dangerous) → controller.request_opencode_sessions() →
+// onOpencodeSessionsReady fills the list → j/k/arrows move, Enter spawns
+// `opencode --session <id>`, Esc cancels. That handler can fire TWICE for one
+// open: a cache hit answers synchronously (inside the call above — which is
+// why `_show()` runs first, so the stale-result guard does not swallow it),
+// and the refresh scan it forces re-emits when it lands. The cold path is a
+// single async answer ~1s later.
 //
 // The scrim + centered panel + FM scale-pop entrance + keyboard-modal
 // focus-self-heal all come from ModalOverlay (this is the root element);

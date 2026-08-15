@@ -82,7 +82,12 @@ from .agent_thread_model import (  # importing also registers this @QmlElement t
     ThreadHistory,
     ThreadRow,
 )
-from .agent_threads import AGENT_WRITE_TOOLS, ThreadRecord
+from .agent_threads import (
+    AGENT_WRITE_TOOLS,
+    OpenCodeThreadReader,
+    ThreadRecord,
+    opencode_rows_in_project,
+)
 from .bootstrap import QML_DIR, configure_headless_mode, configure_logging
 from .browser_mcp import BrowserMcpBridge, BrowserMcpServer
 from .chrome_host import ChromeHost, browser_identity
@@ -808,6 +813,17 @@ class AppController(QObject):
         # changing the PROJECT, and re-scanning a few hundred transcripts for
         # every buffer switch would be pure waste.
         self._thread_index_root: str = ""
+        # harness -> (project key, the records that harness last published).
+        # The resume picker reads OpenCode's entry instead of running the CLI a
+        # second time (see `request_opencode_sessions`); the project key is
+        # carried alongside because a scan for the PREVIOUS project can still
+        # be sitting here when the picker opens on the new one.
+        self._indexed_thread_records: dict[str, tuple[str, list[ThreadRecord]]] = {}
+        # Is a resume picker waiting on the refresh scan its open triggered,
+        # and what did that open already show it? GUI-thread only, like every
+        # other picker flag here.
+        self._opencode_picker_pending = False
+        self._opencode_picker_sent: list[dict] = []
         # Cached PATH probe behind `agentHarnessCatalog`. Cached rather than
         # re-read per getter call so the property can honestly notify: a value
         # that changes without its notify signal is a binding QML never
@@ -3281,19 +3297,38 @@ class AppController(QObject):
         """Ask the index worker for this project's history, once per project.
 
         Wired to `displayedRootChanged`, which fires far more often than the
-        project changes — hence the canonical-root guard. `SYMMETRIA_IDE_THREAD_INDEX=0`
-        is the hard off switch (the suite sets it; see
-        `.claude/rules/test_env_isolation.md`), and it gates the REQUEST rather
-        than `AgentThreadIndexer.start` so a test driving the indexer directly
-        still gets a working worker.
+        project changes — hence the canonical-root guard inside.
+        """
+        self._start_thread_index()
+
+    def _start_thread_index(self, *, force: bool = False) -> bool:
+        """Request a scan; `True` when one was actually started.
+
+        `SYMMETRIA_IDE_THREAD_INDEX=0` is the hard off switch (the suite sets
+        it; see `.claude/rules/test_env_isolation.md`), and it gates the
+        REQUEST rather than `AgentThreadIndexer.start` so a test driving the
+        indexer directly still gets a working worker.
+
+        `force` skips the same-project guard, and exists because that guard
+        makes the index a STARTUP snapshot: nothing re-requests a scan when an
+        agent spawns, sleeps or exits, so a conversation started after the
+        first scan would never be listed. Callers that answer a user action
+        from the index (the resume picker) pass it; the signal-driven call
+        does not, or every buffer switch would re-read a few hundred
+        transcripts.
+
+        The boolean is what lets a caller fall back: when the switch is off or
+        no project root is resolved, nothing will arrive and the caller has to
+        find its own answer.
         """
         if os.environ.get("SYMMETRIA_IDE_THREAD_INDEX") == "0":
-            return
+            return False
         root = self._agent_thread_project_root()
-        if not root or root == self._thread_index_root:
-            return
+        if not root or (root == self._thread_index_root and not force):
+            return False
         self._thread_index_root = root
         self._agent_thread_indexer.start(root)
+        return True
 
     @Slot(str, str, object)
     def _on_threads_indexed(self, project_root: str, harness: str, records) -> None:
@@ -3304,10 +3339,15 @@ class AppController(QObject):
         the user switched projects — the worker's check answers "was this still
         current when it finished", not "is it still current now".
         """
-        if agent_thread_store.project_key(project_root) != (
-            self._agent_thread_project_root()
-        ):
+        project_key = agent_thread_store.project_key(project_root)
+        if project_key != self._agent_thread_project_root():
             return
+        # Kept in the reader's own vocabulary, not as rail rows: the resume
+        # picker wants the harness's session list, which is what a record IS,
+        # while a `ThreadRow` has already had our `work_root` and worktree
+        # glyph folded onto it.
+        self._indexed_thread_records[harness] = (project_key, list(records))
+        self._answer_pending_opencode_picker(harness)
         stored = agent_thread_store.load_threads(project_root)
         # `resumable` is the reader's own verdict on whether its harness can
         # reopen the conversation. Claude answers True for every row it yields
@@ -4751,12 +4791,24 @@ class AppController(QObject):
 
         Empty is the answer for every unusable case, so the caller has one
         branch: never recorded (an OpenCode thread from before the store, or a
-        Phase-4 history row with no backfill), deleted since, or belonging to
-        another repo now. Only the last two are the user's problem, so only
-        those alert — "we never knew" is not news, and a toast per resume of
-        an old thread would be noise.
+        history row with no backfill), deleted since, or belonging to another
+        repo now.
+
+        ⚠ ALL THREE alert. The never-recorded case was silent until OpenCode
+        joined the index, on the argument that "we never knew" is not news —
+        but OpenCode records no work location at ALL (its `directory` is the
+        main checkout even for a session done in a linked worktree), so silence
+        there would make the ordinary case the invisible one: the user resumes
+        a thread they remember working in a worktree, the agent starts in main,
+        and nothing on screen says the location was a fallback rather than a
+        recovery. The notice is the only thing that distinguishes "resumed
+        where it was" from "resumed where we could".
         """
         if not stored:
+            self.locationAlert.emit(
+                "Resuming in the main checkout",
+                f"No work location was recorded for this {harness} thread.",
+            )
             return ""
         project_root = self._agent_thread_project_root()
         if not os.path.isdir(stored):
@@ -5819,15 +5871,39 @@ class AppController(QObject):
 
     @Slot()
     def request_opencode_sessions(self) -> None:
-        """Fetch this project's OpenCode session list for the resume picker.
+        """This project's OpenCode session list, for the resume picker.
 
-        `opencode session list` scopes itself to the project derived from
-        its cwd (same trick orchestrator.nvim's resume_picker uses), so we
-        run it in displayedRoot and let OpenCode do the grouping. Async on
-        a one-shot daemon thread — the CLI takes ~1s and must never block
-        the GUI; the result arrives via opencodeSessionsReady.
+        The thread index already asked OpenCode this exact question — the rail
+        needs the same session list the picker does — so the cached records
+        answer it for free and the CLI is not spawned twice. The subprocess
+        below survives as the COLD path only: the picker can open before the
+        first index scan finishes, and it also carries the ok/failed
+        distinction the rail has no use for but the picker renders.
+
+        Both paths answer on `opencodeSessionsReady`. The cached one emits
+        synchronously, which is safe precisely because it does no I/O — and the
+        picker's own `open()` sets `visible` before calling this, so a
+        synchronous answer is not swallowed by its stale-result guard.
+
+        ⚠ The cache alone would make the picker a STARTUP SNAPSHOT: the index
+        is requested once per project, so a session created after that scan
+        would be unlistable for the rest of the run. So a cache hit shows its
+        rows immediately AND forces a fresh scan, whose result re-emits here
+        (`_answer_pending_opencode_picker`). When the forced scan cannot start
+        the user still has the rows that were shown.
         """
-        cwd = self.displayedRoot
+        cached = self._cached_opencode_picker_rows()
+        if cached:
+            self._opencode_picker_sent = cached
+            self.opencodeSessionsReady.emit({"ok": True, "sessions": cached})
+            self._opencode_picker_pending = self._start_thread_index(force=True)
+            return
+        # The CANONICAL project root, not `displayedRoot`: measured 2026-08-15,
+        # the CLI answers with 15 unrelated `projectId: "global"` sessions when
+        # its cwd is inside no git project, so asking from wherever the chrome
+        # happens to be pointed is what lets another project's rows in. Same
+        # rule the reader follows (see `OpenCodeThreadReader`).
+        cwd = self._agent_thread_project_root() or self.displayedRoot
         threading.Thread(
             target=self._fetch_opencode_sessions,
             args=(cwd,),
@@ -5835,23 +5911,84 @@ class AppController(QObject):
             name="opencode-session-list",
         ).start()
 
+    def _answer_pending_opencode_picker(self, harness: str) -> None:
+        """Re-emit a forced scan's OpenCode rows to an open picker.
+
+        Only when the fresh scan actually found rows. An empty result here is
+        ambiguous by construction — `OpenCodeThreadReader` returns `[]` for a
+        timeout, a non-zero exit, bad JSON and a missing binary alike — so
+        emitting it would turn any CLI hiccup into "no sessions found" over a
+        list the user can see is not empty. Keeping the shown rows is the
+        conservative reading of an ambiguous answer.
+
+        An UNCHANGED result is dropped too, which is the common case: the
+        picker resets its selection on every payload, so re-emitting an
+        identical list would jump the cursor back to the top under a user who
+        is already scrolling it.
+        """
+        if harness != "opencode" or not self._opencode_picker_pending:
+            return
+        self._opencode_picker_pending = False
+        rows = self._cached_opencode_picker_rows()
+        if rows and rows != self._opencode_picker_sent:
+            self._opencode_picker_sent = rows
+            self.opencodeSessionsReady.emit({"ok": True, "sessions": rows})
+
+    def _cached_opencode_picker_rows(self) -> list[dict] | None:
+        """The indexed OpenCode sessions as picker rows; None when unusable.
+
+        ⚠ An EMPTY scan result is treated as unusable, not as "no sessions".
+        The reader cannot tell the two apart — every failure mode it contains
+        (timeout, non-zero exit, unparseable JSON, missing binary) returns `[]`
+        and the indexer publishes empty results too — so answering the picker
+        from it would render one failed startup scan as "No sessions found for
+        this project" for the rest of the session, with no retry. The CLI path
+        below carries a real ok/failed distinction, so an empty cache sends the
+        picker there instead.
+        """
+        entry = self._indexed_thread_records.get("opencode")
+        if entry is None:
+            return None
+        project_key, records = entry
+        if not records or project_key != self._agent_thread_project_root():
+            return None
+        rows = sorted(records, key=lambda record: record.updated_at, reverse=True)
+        return [
+            {
+                "id": record.session_id,
+                # The id is the fallback the CLI parser uses too: a row with no
+                # label at all is unpickable.
+                "title": record.title or record.session_id,
+                "when": agent_harness.format_session_when(record.updated_at or None),
+            }
+            for record in rows
+        ]
+
     def _fetch_opencode_sessions(self, cwd: str) -> None:
-        """Worker-thread body of request_opencode_sessions (one-shot).
+        """Worker-thread body of request_opencode_sessions (the COLD path).
 
         Every path MUST reach the emit below — an unhandled exception
         here would kill the worker silently and leave the picker stuck
         in its "loading" state with no error feedback, hence the broad
         catch around the whole fetch+parse.
+
+        The command and its timeout come from `OpenCodeThreadReader` rather
+        than being spelled again here: the two surfaces read the SAME command
+        and must not drift. So does the project filter — an unfiltered picker
+        would resume another project's conversation from a global-scope answer
+        even though the rail beside it refuses the same row (see
+        `opencode_rows_in_project`, whose `keep_unscoped` is what keeps a row
+        with no `directory` at all listed here).
         """
         sessions: list[dict] | None = None
         try:
             result = subprocess.run(
-                ["opencode", "session", "list", "--format", "json"],
+                OpenCodeThreadReader().list_argv(),
                 check=False,
                 cwd=cwd,
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=OpenCodeThreadReader.TIMEOUT_SEC,
             )
             if result.returncode != 0:
                 log.error(
@@ -5863,6 +6000,10 @@ class AppController(QObject):
                 sessions = agent_harness.parse_opencode_sessions(result.stdout)
                 if sessions is None:
                     log.error("opencode session list: unparseable output")
+                else:
+                    sessions = opencode_rows_in_project(
+                        sessions, cwd, keep_unscoped=True
+                    )
         except Exception:
             log.exception("opencode session list failed")
         emit_gc_safe(

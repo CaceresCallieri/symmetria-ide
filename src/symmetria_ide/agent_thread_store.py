@@ -126,9 +126,15 @@ def load_threads(project_root: str) -> dict[str, dict]:
 def load_work_root(project_root: str, harness: str, session_id: str) -> str | None:
     """The stored work root for one thread, or `None` when we never saw it.
 
-    `None` rather than `""` is the contract: "no record" and "recorded as
-    nowhere" would otherwise be indistinguishable, and the resume path treats
-    them differently (fall back silently vs. warn the user).
+    `None` rather than `""` is the contract: it separates "this store has no
+    entry for the thread" from "an entry exists and records an empty root",
+    which is what the read-merge-write in `save_work_root` needs in order to
+    leave an existing entry alone rather than overwrite it with nothing.
+
+    (It used to be justified by the resume path treating the two differently —
+    silent fallback vs. a warning. It no longer does: `_resume_start_root`
+    alerts on every falsy value, because OpenCode records no work location at
+    all and silence there would hide the ordinary case.)
     """
     if not harness or not session_id:
         return None

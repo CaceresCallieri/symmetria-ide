@@ -625,12 +625,31 @@ def tmux_wrap(
     ]
 
 
-def parse_opencode_sessions(stdout: str) -> list[dict] | None:
-    """Parse `opencode session list --format json` into picker rows.
+def format_session_when(epoch_seconds: float | None) -> str:
+    """The picker's short timestamp label; "" when there is no timestamp.
 
-    Returns rows shaped {id, title, when} sorted newest-first, or None
-    when the output isn't a JSON array (distinct from [] = genuinely no
-    sessions). `updated`/`created` are epoch milliseconds.
+    Shared so the two producers of a picker row — this module's parser and
+    `AppController`'s projection of the thread index — cannot format the same
+    column two different ways.
+    """
+    if epoch_seconds is None:
+        return ""
+    return time.strftime("%b %d %H:%M", time.localtime(epoch_seconds))
+
+
+def parse_opencode_sessions(stdout: str) -> list[dict] | None:
+    """Parse `opencode session list --format json` into normalized rows.
+
+    Returns rows sorted newest-first, or None when the output isn't a JSON
+    array (distinct from [] = genuinely no sessions).
+
+    A row carries BOTH halves: `{id, title, when}` for the resume picker, and
+    `{directory, projectId, updated, created}` for `OpenCodeThreadReader`,
+    which needs the scope fields to decide whether a session belongs to this
+    project at all. The two used to be separate — the picker's shape was all
+    this returned, and the reader would have had to re-parse the same JSON to
+    recover `directory`. `updated`/`created` stay in the CLI's own unit, epoch
+    MILLISECONDS, and are 0 when absent.
     """
     try:
         decoded = json.loads(stdout)
@@ -652,14 +671,20 @@ def parse_opencode_sessions(stdout: str) -> list[dict] | None:
         if not session_id:
             continue
         ts = session_ts(session)
-        when = ""
-        if ts is not None:
-            when = time.strftime("%b %d %H:%M", time.localtime(ts / 1000))
         rows.append(
             {
                 "id": session_id,
                 "title": str(session.get("title") or "") or session_id,
-                "when": when,
+                "when": format_session_when(None if ts is None else ts / 1000),
+                "directory": str(session.get("directory") or ""),
+                "projectId": str(session.get("projectId") or ""),
+                "updated": _epoch_ms(session.get("updated")),
+                "created": _epoch_ms(session.get("created")),
             }
         )
     return rows
+
+
+def _epoch_ms(value: object) -> int:
+    """One `updated`/`created` field as epoch milliseconds; 0 when absent."""
+    return int(value) if isinstance(value, (int, float)) else 0

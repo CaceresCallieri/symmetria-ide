@@ -8,9 +8,12 @@ each harness wrote down, because the IDE keeps almost nothing of its own (see
 Every harness gets ONE reader behind the `ThreadIndexReader` protocol, and the
 readers are registered in `THREAD_READERS`. Adding Pi later is writing a third
 reader and registering it — no caller changes, because the indexer only ever
-iterates the registry. Qt-free and synchronous on purpose, like `agent_harness`
-and `worktree`: the Qt lane lives in `agent_thread_indexer.py`, which is the
-only thing that knows these calls are slow.
+iterates the registry. The two that exist prove the interface is not
+Claude-shaped: `ClaudeThreadReader` walks files this project has to interpret
+itself, while `OpenCodeThreadReader` asks a CLI that already did the
+interpreting. Qt-free and synchronous on purpose, like `agent_harness` and
+`worktree`: the Qt lane lives in `agent_thread_indexer.py`, which is the only
+thing that knows these calls are slow.
 
 Claude's index — the non-obvious parts, all measured 2026-08-15 against the
 developer's 315 real transcripts:
@@ -55,6 +58,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -62,6 +66,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .agent_coordination import message_text
+from .agent_harness import parse_opencode_sessions
 from .project_browser_marker import resolve_project_root
 from .worktree import canonical_project_root
 
@@ -104,7 +109,7 @@ class ThreadRecord:
     treats as "start in the main checkout".
 
     `session_cwd` is the field OWNERSHIP was decided by — the transcript's own
-    `cwd` for claude, OpenCode's `directory` when that reader lands. It is
+    `cwd` for claude, the session's `directory` for opencode. It is
     deliberately NOT a work-root fallback: measured 2026-08-15, a session
     rooted in the main checkout made 158 of its 230 writes inside a linked
     worktree, so the session cwd is exactly the signal that does not answer
@@ -363,11 +368,185 @@ class ClaudeThreadReader:
             return b"", b""
 
 
+def opencode_rows_in_project(
+    rows: Iterable[dict], project_root: str, *, keep_unscoped: bool = False
+) -> list[dict]:
+    """The parsed OpenCode rows that belong to `project_root`.
+
+    The SECOND of the two overlapping defences described on
+    `OpenCodeThreadReader` — the cwd makes the good answer likely, this is what
+    keeps a global-scope answer out. Shared with the resume picker's cold path
+    (`AppController._fetch_opencode_sessions`), because a filter that guards
+    the rail and not the picker still resumes another project's conversation:
+    the two surfaces read the same command and must agree on what it means.
+
+    `keep_unscoped` is the one place they differ, and it is about a row with no
+    `directory` at all. Every row the real CLI emits carries one (measured
+    2026-08-15), so this only decides the synthetic case. The rail drops it —
+    an unscopable row in a durable list is exactly how a foreign thread gets in
+    — while the picker keeps it, because the picker is an explicit action the
+    user just took in this project, and its own contract tests pin that a row
+    with no scope information still lists.
+    """
+    project = canonical_project_root(resolve_project_root(project_root))
+    kept: list[dict] = []
+    for row in rows:
+        directory = str(row.get("directory") or "")
+        if not directory:
+            if keep_unscoped:
+                kept.append(row)
+            continue
+        if canonical_project_root(resolve_project_root(directory)) == project:
+            kept.append(row)
+    return kept
+
+
+class OpenCodeThreadReader:
+    """OpenCode's own session store, via its CLI, scoped to one project.
+
+    Nothing is read off disk here: OpenCode keeps its sessions behind
+    `opencode session list --format json`, which also generates the titles, so
+    this reader is a subprocess where Claude's is a file walk. Two consequences
+    it does not share with Claude, both measured 2026-08-15 (method and the
+    three cwd configurations in
+    `.claude/memory/reference/agent-sdk/opencode_session_list_scoping.md`):
+
+    - **The cwd decides the scope, and an unscoped cwd fails OPEN.** Run from
+      the linked worktree and from the main checkout, the command returned the
+      identical 4 rows with the same `projectId` and `directory` at the main
+      checkout — the CLI folds worktrees itself. Run from a cwd inside no git
+      project at all, the same command returned **15 unrelated sessions** with
+      `projectId: "global"` and `directory` values in other repositories. Hence
+      two defences that overlap on purpose: ask at the CANONICAL project root,
+      and then discard every row whose `directory` does not canonicalise back
+      onto it. The first makes the good answer likely; the second is what keeps
+      a global-scope answer from putting another project's conversations in
+      this project's rail.
+    - **There is no worktree information on this side.** `directory` is the
+      main checkout even for a session done inside a linked worktree, so
+      `work_root` is always "" here and an OpenCode thread older than
+      `agent_thread_store` resumes in the main checkout with a visible notice.
+      Do not try to infer one — the field that would carry it does not exist.
+
+    A warm run took 1.56 s, which is why this reader publishes second and why
+    `agent_thread_indexer` exists at all.
+    """
+
+    harness = "opencode"
+
+    # The exact command, as one constant, because two things run it: this
+    # reader and the resume picker's cold-start fallback
+    # (`AppController._fetch_opencode_sessions`, which imports both constants
+    # rather than repeating the literal).
+    LIST_ARGV: tuple[str, ...] = ("opencode", "session", "list", "--format", "json")
+
+    # Well over the 1.56 s measured warm (2026-08-15; see
+    # `.claude/memory/reference/agent-sdk/opencode_session_list_scoping.md`),
+    # so the timeout only fires on a genuinely wedged CLI. No cold figure is
+    # cited: the 3.8 s this project once recorded is retracted, and no
+    # replacement cold run was taken.
+    TIMEOUT_SEC = 15
+
+    # Points the reader at a different executable. Exists for the test suite:
+    # the default reaches the developer's REAL opencode and its live session
+    # store, which is the class of reach `.claude/rules/test_env_isolation.md`
+    # requires an environment-level switch for (the `SYMMETRIA_IDE_CHROME_BIN`
+    # precedent). Resolved per call, so an override applied after construction
+    # still bites.
+    BIN_ENV = "SYMMETRIA_IDE_OPENCODE_BIN"
+
+    def list_argv(self) -> list[str]:
+        """`LIST_ARGV` with the executable the environment selects."""
+        argv = list(self.LIST_ARGV)
+        argv[0] = os.environ.get(self.BIN_ENV) or argv[0]
+        return argv
+
+    def read(
+        self, project_root: str, stop_event: threading.Event
+    ) -> list[ThreadRecord]:
+        project = canonical_project_root(resolve_project_root(project_root))
+        if not project or stop_event.is_set():
+            return []
+        stdout = self._list_sessions(project)
+        if stdout is None:
+            return []
+        rows = parse_opencode_sessions(stdout)
+        if rows is None:
+            log.warning("opencode thread index: unparseable `session list` output")
+            return []
+        records: list[ThreadRecord] = []
+        for row in opencode_rows_in_project(rows, project):
+            directory = str(row.get("directory") or "")
+            timestamp = row.get("updated") or row.get("created") or 0
+            records.append(
+                ThreadRecord(
+                    harness=self.harness,
+                    session_id=str(row.get("id") or ""),
+                    title=str(row.get("title") or ""),
+                    # The CLI reports milliseconds; `ThreadRecord` is in
+                    # seconds, like Claude's mtime, so the rail can order the
+                    # two harnesses against each other.
+                    updated_at=float(timestamp) / 1000.0,
+                    session_cwd=directory,
+                    # Always "" — see the class docstring.
+                    work_root="",
+                    # `--session <id>` reopens anything this command lists.
+                    resumable=True,
+                )
+            )
+        return records
+
+    def _list_sessions(self, cwd: str) -> str | None:
+        """The CLI's stdout, or None with a logged reason on any failure.
+
+        Every failure mode is contained here and none escapes as an exception:
+        this runs on the indexer's single worker thread, and although that loop
+        catches per-reader failures, an exception is a harness losing its whole
+        history where a logged empty result is one scan that found nothing.
+        """
+        try:
+            result = subprocess.run(
+                self.list_argv(),
+                check=False,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=self.TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning(
+                "opencode thread index: `session list` timed out after %ss in %s",
+                self.TIMEOUT_SEC,
+                cwd,
+            )
+            return None
+        except OSError as e:
+            # FileNotFoundError is the ordinary case: OpenCode is optional, and
+            # a project that never uses it must degrade to no rows, not to an
+            # error surface.
+            log.warning("opencode thread index: cannot run `session list`: %s", e)
+            return None
+        if result.returncode != 0:
+            log.warning(
+                "opencode thread index: `session list` exited %d: %s",
+                result.returncode,
+                (result.stderr or "").strip(),
+            )
+            return None
+        return result.stdout
+
+
 # harness name -> a zero-argument factory for its reader. The indexer builds
 # every registered reader and asks each for the same project, so a new harness
 # joins the rail's history by adding one line here.
+#
+# Registration ORDER is publication order, and it is deliberate: claude reads a
+# few hundred local files in well under a second while opencode spawns a CLI,
+# so listing claude first puts rows on the rail while opencode is still
+# starting. Pi would be a third entry and nothing else.
 THREAD_READERS: dict[str, Callable[[], ThreadIndexReader]] = {
     "claude": ClaudeThreadReader,
+    "opencode": OpenCodeThreadReader,
 }
 
 

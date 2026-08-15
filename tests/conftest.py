@@ -177,6 +177,26 @@ def _chrome_bin_dir(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
+def _opencode_bin_dir(tmp_path_factory):
+    """One throwaway directory holding the nonexistent OpenCode binary path."""
+    return tmp_path_factory.mktemp("opencode_bin")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_opencode_history(monkeypatch, _opencode_bin_dir):
+    """Keep history discovery away from the developer's live OpenCode store.
+
+    ``OpenCodeThreadReader`` spawns the configured executable and asks it for
+    sessions.  Contain that reach at the environment boundary so a test that
+    starts an index scan without mocking ``subprocess.run`` still fails closed.
+    Tests of the production default opt in by deleting this variable locally.
+    """
+    monkeypatch.setenv(
+        "SYMMETRIA_IDE_OPENCODE_BIN", str(_opencode_bin_dir / "no-opencode")
+    )
+
+
+@pytest.fixture(scope="session")
 def _tmux_sock_dir(tmp_path_factory):
     """One throwaway directory for the whole run to hold the fake tmux socket
     path. Session-scoped because nothing ever creates the socket — a per-test
