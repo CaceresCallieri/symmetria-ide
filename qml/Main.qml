@@ -2111,14 +2111,23 @@ Window {
                 // WHICH sub-pane (changes vs main tree) had focus, which
                 // mattered once Ctrl+J/Ctrl+K subdivided the side panel
                 // into two independently-navigable regions. The per-pane
-                // FocusBars follow a color-flip contract (accent.focus ↔
-                // transparent on color, never on geometry — so focus
-                // transitions cost no layout round-trip) but render as a
-                // left-edge bar rather than a full envelope — subtler, and
-                // clear of the scrollbar. These side-panel bars are now the
-                // ONLY focus-status affordance; the central surface has no
-                // equivalent border by design (see the note above
-                // fmPaneLoader).
+                // FocusBars render as a single-edge bar rather than a full
+                // envelope — subtler, and clear of the scrollbar. Their
+                // focus transition and the reason it costs no layout
+                // round-trip are documented once, in FocusBar.qml's header;
+                // do not restate the mechanism here, because this copy
+                // already drifted once when the component changed.
+                //
+                // ⚠ These two are no longer the only focus bars: the thread
+                // rail carries a third (AgentThreadRail.qml), so a change to
+                // the shared component reaches all three panes at once. The
+                // grow/shrink animation the rail introduced is deliberately
+                // inherited here — one focus language across the window, not
+                // an animated rail beside two instant side panels.
+                //
+                // The pane bars remain the only focus-status affordance; the
+                // central surface has no equivalent border by design (see the
+                // note above fmPaneLoader).
 
                 // Three-section composition inside the side panel:
                 //   1. LocationHeader — current displayedRoot + anchor

@@ -48,7 +48,8 @@ Rectangle {
     // leaves. A 1px hairline at 40% white appearing in one frame is easy to
     // miss; the motion is what makes it register at the edge of vision.
     transform: Scale {
-        origin.x: 0
+        // Only `yScale` is ever driven, so `origin.x` would be inert — the
+        // bar is 1px wide and never scales horizontally.
         origin.y: bar.height / 2
         yScale: bar.focused ? 1 : 0
 
