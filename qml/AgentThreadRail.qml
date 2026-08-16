@@ -35,6 +35,22 @@
 // ORDINARY list model — rows insert, move and leave. That is safe precisely
 // because it is NOT the model behind the agent pane Repeater, which is
 // append-only because each of its delegates owns a live agent CLI.
+//
+// ─── THREE ROW STATES, THREE CHANNELS ───────────────────────────────────
+// A row can be all three at once, so none of them may be a fill:
+//
+//   ACTIVE   — the agent on the central surface (`focusedSlot`): filled
+//              background. With no focused agent NO row carries it.
+//   SELECTED — the keyboard cursor (`selected`, moved with j/k): a marker bar
+//              down the row's left edge. Deliberately NOT the fill, which is
+//              the bug this replaced — the cursor painted itself in the
+//              "active" colour, so the highlight stayed where the cursor had
+//              last been while a different agent was on screen.
+//   HOVER    — the pointer: a translucent wash painted OVER whichever fill is
+//              underneath, so it composes with the other two instead of
+//              replacing them.
+//
+// Tokens for all three live in `Theme.color.rail`.
 
 import QtQuick
 import Symmetria.Agents.UI as AgentsUI
@@ -43,6 +59,68 @@ import "design"
 
 FocusScope {
     id: root
+
+    // Above the separator and the central surface in the parent RowLayout's
+    // paint order, for ONE reason: the peek panel at the bottom of this file
+    // hangs off the rail's right edge over the central surface, and a panel
+    // constrained to the 220px rail would only re-elide the title it exists to
+    // show. Nothing else here overlaps a sibling, and window-scope overlays
+    // (modal scrims, popups) are siblings of the whole RowLayout, so they
+    // still paint above this.
+    z: 1
+
+    // ─── Peek state ─────────────────────────────────────────────────────
+    // Which row the peek panel describes, and the snapshot it draws. The
+    // delegates PUSH into these rather than the panel reading the model,
+    // because a live row's title comes from the pool (`agentTitles`) and only
+    // the delegate holds the resolved live-or-durable value.
+    property int peekIndex: -1
+    property string peekTitle: ""
+    property string peekMeta: ""
+    // The row's y in the ListView's CONTENT coordinates plus its height, so
+    // the panel can track the row through a scroll with a live binding on
+    // `contentY` instead of a stale absolute position.
+    property real peekRowY: 0
+    property real peekRowHeight: 0
+    // Set by the delay timer, cleared the moment the target changes: the panel
+    // opens after a pause, so running the list with j/k does not fire a burst.
+    property bool peekShown: false
+    // Index of the row under the pointer, -1 for none. The pointer WINS over
+    // the keyboard cursor while it is on a row; when it leaves, the selected
+    // row's binding re-evaluates and the panel returns to the cursor.
+    property int hoverIndex: -1
+
+    function _trackHover(index: int, hovered: bool): void {
+        if (hovered)
+            root.hoverIndex = index;
+        else if (root.hoverIndex === index)
+            root.hoverIndex = -1;
+    }
+
+    function _openPeek(index: int, title: string, meta: string, rowY: real, rowHeight: real): void {
+        // A new target hides whatever is open BEFORE the delay restarts, so
+        // the panel never lingers on the previous row's text while pointing at
+        // this one.
+        if (root.peekIndex !== index)
+            root.peekShown = false;
+        root.peekIndex = index;
+        root.peekTitle = title;
+        root.peekMeta = meta;
+        root.peekRowY = rowY;
+        root.peekRowHeight = rowHeight;
+        peekDelay.restart();
+    }
+
+    // Index-guarded: delegates are recycled, so a row that stops being the
+    // target after another row has already claimed the panel must not close
+    // it. Same discipline as `_currentSlot` reading through the model.
+    function _closePeek(index: int): void {
+        if (root.peekIndex !== index)
+            return;
+        peekDelay.stop();
+        root.peekIndex = -1;
+        root.peekShown = false;
+    }
 
     // Ctrl+H (the spatial-navigation block in Main.qml) calls
     // `forceActiveFocus()` on this scope directly. The ListView below carries
@@ -209,12 +287,14 @@ FocusScope {
             required property string harness
             required property string title
             required property string worktree
+            required property double updatedAt
 
             // The dead/live gate every per-slot read below depends on.
             readonly property bool live: row.slot > 0
             readonly property int displayNumber: row.index + 1
             readonly property bool selected: row.index === threadList.currentIndex
             readonly property bool focusedSlot: row.live && controller.focusedAgent === row.slot
+            readonly property bool hovered: rowHover.hovered
             readonly property var activity: row.live ? controller.agentActivity[row.slot - 1] : null
             // Two fields read the LIVE per-slot list while the agent is
             // running and the row's own copy otherwise: a dead thread has no
@@ -232,12 +312,93 @@ FocusScope {
                 row.live && !!(controller.agentBrowserAttention[row.slot - 1])
             readonly property bool coordAttention:
                 row.live && !!(controller.agentCoordAttention[row.slot - 1])
+            // One fallback, two readers (the row's own Text and the peek
+            // panel's), so an empty title cannot render two different ways.
+            readonly property string displayTitle:
+                row.sessionTitle !== "" ? row.sessionTitle : "untitled"
+
+            // Whether the peek panel should describe THIS row. The pointer
+            // wins whenever it is on any row (`root.hoverIndex < 0` gates the
+            // keyboard half), so moving the mouse does not fight the cursor,
+            // and letting go of the mouse hands the panel back to the cursor.
+            //
+            // `threadList.activeFocus` is load-bearing: the rail keeps its
+            // selection while the user types in a terminal, so without the
+            // gate the panel would hang over the central surface for the rest
+            // of the session, pointing at a row nobody is looking at.
+            readonly property bool peeked: row.hovered
+                || (root.hoverIndex < 0 && row.selected && threadList.activeFocus)
+
+            onPeekedChanged: row._syncPeek()
+            onHoveredChanged: root._trackHover(row.index, row.hovered)
+
+            function _syncPeek(): void {
+                if (row.peeked)
+                    root._openPeek(row.index, row.displayTitle, row._peekMeta(), row.y, row.height);
+                else
+                    root._closePeek(row.index);
+            }
+
+            // The context the ROW cannot show: which harness the conversation
+            // belongs to, its worktree in words rather than as a glyph, and
+            // whether it is running or how long ago it last moved.
+            //
+            // A function, not a property: it reads `Date.now()`, which is not
+            // a binding dependency, so a cached property would show an age
+            // frozen at the moment the delegate was created (gotcha #3). It is
+            // evaluated once per open instead.
+            function _peekMeta(): string {
+                const parts = [row.harness];
+                if (row.worktreeName !== "")
+                    parts.push(Theme.glyph.worktree + " " + row.worktreeName);
+                if (row.live)
+                    parts.push(row.activity && row.activity.state ? row.activity.state : "running");
+                else if (row.updatedAt > 0)
+                    parts.push(UsageFormat.age(row.updatedAt, Date.now()));
+                return parts.join("   ");
+            }
 
             width: ListView.view.width
             height: Math.max(rowContent.implicitHeight, trailing.implicitHeight)
                 + Theme.spacing.sm * 2
             radius: Theme.radius.sm
-            color: row.selected ? Theme.color.bg.raisedSelected : "transparent"
+            // ACTIVE only — the agent being VIEWED, never the keyboard cursor.
+            // `focusedSlot` is false for every row when `focusedAgent` is 0, so
+            // with no agent focused nothing is filled. The cursor gets the
+            // marker bar below and the pointer gets the wash; see the
+            // three-channel note in this file's header.
+            color: row.focusedSlot ? Theme.color.rail.activeRow : "transparent"
+
+            // HOVER — a wash ON TOP of the fill rather than a competing fill,
+            // which is what lets a row be active AND hovered and still show
+            // both. Translucent by construction (see Theme.color.rail).
+            Rectangle {
+                anchors.fill: parent
+                radius: parent.radius
+                visible: row.hovered
+                color: Theme.color.rail.hoverRow
+            }
+
+            // SELECTED — the keyboard cursor. A marker bar down the left edge,
+            // inside `rowContent`'s left margin so it displaces no content and
+            // can coexist with the fill and the wash.
+            Rectangle {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Theme.spacing.xxs
+                visible: row.selected
+                width: Theme.spacing.xxs
+                height: parent.height - Theme.spacing.sm * 2
+                radius: width / 2
+                color: Theme.color.rail.selectionMarker
+            }
+
+            HoverHandler {
+                id: rowHover
+                // Informational only — the panel it opens takes no focus and
+                // handles no keys, so this must not change the cursor or eat
+                // the click the MouseArea below owns.
+            }
 
             // Identity + title, filling everything the trailing cluster does
             // not claim. Anchored to `trailing.left` rather than to the row's
@@ -253,7 +414,13 @@ FocusScope {
                 spacing: Theme.spacing.sm
 
                 // Shared sparkle (Symmetria.Agents.UI) — the same element the
-                // pills carried, driven by the same bridge-fed activity dict.
+                // pills carried, driven by the same bridge-fed activity dict,
+                // and the row's ONLY harness mark: the chip is coloured by
+                // `agentType`, so claude and opencode already read apart at a
+                // glance while the same element carries idle / active /
+                // working. A separate brand `Image` shipped beside it and was
+                // removed as redundant — the colour says which backend and the
+                // animation says what it is doing. Do not add it back.
                 AgentsUI.AgentChip {
                     anchors.verticalCenter: parent.verticalCenter
                     size: Theme.font.size.sm * 1.4
@@ -271,25 +438,6 @@ FocusScope {
                     // is running.
                     isSttTarget: row.live && controller.sttTargetSlot === row.slot
                     sttIsTranscribing: controller.sttTranscribing
-                }
-
-                // Harness brand mark. New next to the pills, and the direct
-                // answer to "did I talk to Claude or to OpenCode" — the thing
-                // the rail exists to stop being invisible. Brand fills are
-                // baked into the SVGs and intentionally not Theme-tokened,
-                // the same call AgentSpawnMenu makes.
-                Image {
-                    anchors.verticalCenter: parent.verticalCenter
-                    source: {
-                        const entry = controller.harness_menu_entry(row.harness);
-                        return entry ? Qt.resolvedUrl(entry.icon) : "";
-                    }
-                    sourceSize.width: Theme.font.size.sm * 2
-                    sourceSize.height: Theme.font.size.sm * 2
-                    width: Theme.font.size.sm
-                    height: Theme.font.size.sm
-                    smooth: true
-                    fillMode: Image.PreserveAspectFit
                 }
 
                 Text {
@@ -323,7 +471,7 @@ FocusScope {
                     // its PRECEDING siblings, and rowContent's own width comes
                     // from anchors rather than from its children.
                     width: Math.max(0, rowContent.width - threadTitle.x)
-                    text: row.sessionTitle !== "" ? row.sessionTitle : "untitled"
+                    text: row.displayTitle
                     // Three rungs, one per state: the focused agent reads
                     // strongest, other live agents normal, and a dead thread
                     // recedes to the dim rung — present and activatable, but
@@ -419,6 +567,108 @@ FocusScope {
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.activateThread(row.slot, row.threadId)
                 onPressed: threadList.currentIndex = row.index
+            }
+        }
+    }
+
+    // The pause before the peek panel opens. Restarted by every change of
+    // target, so a run down the list with j/k opens ONE panel — the one the
+    // user stopped on — instead of a burst.
+    Timer {
+        id: peekDelay
+        interval: Theme.anim.peekDelay
+        repeat: false
+        onTriggered: root.peekShown = root.peekIndex >= 0
+    }
+
+    // ─── Peek panel ─────────────────────────────────────────────────────
+    // A row's title is elided, and finding a conversation again is the whole
+    // reason the rail exists — a truncated title defeats it. This shows the
+    // FULL title plus the context the row has no width for.
+    //
+    // Passive by construction: no focus, no Keys handler, no MouseArea. Esc is
+    // load-bearing in the agent panes (it interrupts a running turn), so an
+    // informational panel that took focus would cost the user a cancel — the
+    // same rule UsageDetailPopup documents.
+    PillCard {
+        id: peekCard
+
+        // Hangs off the rail's RIGHT edge, over the central surface: a panel
+        // confined to the 220px rail would re-elide the very title it exists
+        // to show. It never overlaps the rows themselves, so the pointer can
+        // not land on it and end the hover that opened it. (`root.z` above is
+        // what lets it paint over the central surface at all.)
+        x: root.width + Theme.spacing.xs
+        // Vertically centred on its row and clamped into the rail's height, and
+        // it tracks the row through a scroll because `contentY` is a live
+        // binding dependency rather than a value captured at open time.
+        y: Math.max(0, Math.min(root.height - peekCard.height,
+            threadList.y + root.peekRowY - threadList.contentY
+                + (root.peekRowHeight - peekCard.height) / 2))
+        width: Theme.size.threadPeekWidth
+        implicitHeight: peekBody.implicitHeight + Theme.spacing.md * 2
+        height: implicitHeight
+        visible: root.peekShown && root.peekIndex >= 0
+        // Grows out of the rail edge it is anchored to, the same FM scale-pop
+        // every other popup in the IDE enters with.
+        transformOrigin: Item.Left
+        scale: Theme.anim.popFromScale
+        opacity: 0
+
+        states: State {
+            name: "shown"
+            when: peekCard.visible
+            PropertyChanges {
+                peekCard.scale: 1
+                peekCard.opacity: 1
+            }
+        }
+        transitions: Transition {
+            to: "shown"
+            NumberAnimation {
+                target: peekCard
+                property: "scale"
+                duration: Theme.anim.duration
+                easing.type: Easing.OutBack
+                easing.overshoot: Theme.anim.popOvershoot
+            }
+            NumberAnimation {
+                target: peekCard
+                property: "opacity"
+                duration: Theme.anim.duration
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve: Theme.anim.standardCurve
+            }
+        }
+
+        Column {
+            id: peekBody
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Theme.spacing.md
+            spacing: Theme.spacing.xs
+
+            // The whole point: WRAPPED, never elided.
+            Text {
+                width: peekBody.width
+                text: root.peekTitle
+                color: Theme.color.text.strong
+                font.family: Theme.font.family
+                font.pixelSize: Theme.font.size.sm
+                wrapMode: Text.Wrap
+                renderType: Text.NativeRendering
+            }
+
+            Text {
+                width: peekBody.width
+                visible: root.peekMeta !== ""
+                text: root.peekMeta
+                color: Theme.color.text.dim
+                font.family: Theme.font.family
+                font.pixelSize: Theme.font.size.xs
+                wrapMode: Text.Wrap
+                renderType: Text.NativeRendering
             }
         }
     }
