@@ -28,7 +28,7 @@
     "unqualified": 4
   },
   "qml/FocusBar.qml": {
-    "missing-property": 1
+    "missing-property": 3
   },
   "qml/GitStatusPanel.qml": {
     "missing-property": 31

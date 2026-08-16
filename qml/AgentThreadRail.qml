@@ -387,7 +387,9 @@ FocusScope {
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.leftMargin: Theme.spacing.xxs
                 visible: row.selected
-                width: Theme.spacing.xxs
+                // Its own token, not a `spacing` rung — see that token for why
+                // neither 2 nor 4 works.
+                width: Theme.size.threadRailMarkerWidth
                 height: parent.height - Theme.spacing.sm * 2
                 radius: width / 2
                 color: Theme.color.rail.selectionMarker
@@ -569,6 +571,26 @@ FocusScope {
                 onPressed: threadList.currentIndex = row.index
             }
         }
+    }
+
+    // Which pane the keyboard is in — the same affordance the file tree and
+    // the git-status panel carry, and the reason it is the SAME component and
+    // not a rail-specific one: three panes now compete for the keyboard
+    // (rail ↔ centre ↔ tree, via Ctrl+H/Ctrl+L), so the signal that answers
+    // "where am I typing" has to be one language across all three.
+    //
+    // ⚠ Do NOT confuse this with the per-row selection marker inside the
+    // delegate. This bar is about the PANE; that one is about the ROW. They
+    // are deliberately different widths and different alphas: the pane bar is
+    // a 1px hairline at 40% white, the row marker a 3px opaque capsule.
+    //
+    // `Qt.RightEdge` because the rail sits on the LEFT of the window: the
+    // default left edge would put it against the window frame AND a few pixels
+    // from the row marker, which is also a left-edge line. See FocusBar's own
+    // header — every pane's bar faces the workspace.
+    FocusBar {
+        focused: root.activeFocus
+        edge: Qt.RightEdge
     }
 
     // The pause before the peek panel opens. Restarted by every change of

@@ -482,10 +482,13 @@ QtObject {
             // `activeRow`, so it has to read as "the pointer is here" on
             // either ground without ever reading as a second selection.
             readonly property color hoverRow: "#0dffffff"
-            // Keyboard cursor bar. The amber accent the worktree glyph and the
-            // cmdline firstchar already carry, so the cursor reads as the same
-            // "you are here" language across the chrome.
-            readonly property color selectionMarker: theme.color.accent.primary
+            // Keyboard cursor bar. The neutral near-white the chrome already
+            // uses for its most prominent text, NOT the amber accent: amber is
+            // the language of "this thing is special" (worktree glyph, cmdline
+            // firstchar, browser attention), and the cursor is not special —
+            // it is just where you happen to be standing. A coloured bar read
+            // as a status the row did not have.
+            readonly property color selectionMarker: theme.color.text.strong
         }
 
         // Diff visualization. Tints `tool_diff` rows in the agent pane —
@@ -1009,6 +1012,12 @@ QtObject {
         // only re-elide the same text; 300 matches `usagePopupWidth`, so the
         // IDE's two informational panels read as one surface family.
         readonly property int threadPeekWidth: 300
+        // The rail's keyboard-cursor bar. Its own token rather than a
+        // `spacing` rung because the scale jumps 2 -> 4 and neither works: at
+        // 2 the capsule's 1px radius does not resolve and it renders as a hard
+        // square-ended line, while 4 reads heavier than the cursor deserves.
+        // 3 is the narrowest width whose rounding still resolves.
+        readonly property int threadRailMarkerWidth: 3
         readonly property int whichKeyRowHeight: 18   // was 22
         readonly property int whichKeyFooterHeight: 24 // was 28
 
