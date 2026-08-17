@@ -222,10 +222,11 @@ Window {
         onActivated: controller.toggle_git_history()
     }
 
-    // Ctrl+Shift+D is FREE. It toggled the Active Changes panel between the
-    // whole repo and the focused agent's own changes until 2026-08-13, when
-    // that per-agent filter was removed (see GitStatusPanel.qml's header).
-    // Ctrl+U / Ctrl+D — UNshifted, half-page scroll — are unrelated and live.
+    // Ctrl+Shift+D switches the side-panel tab — see its Shortcut further
+    // down, beside the sidebar toggle. (It was briefly unbound: it had scoped
+    // the Active Changes panel to the focused agent until that per-agent
+    // filter was removed on 2026-08-13.) Ctrl+U / Ctrl+D — UNshifted,
+    // half-page scroll — are unrelated and live.
 
     // Browser surface toggle — go watch what an agent is doing (or see the
     // page it left once idle; the window lives as long as the agent does).
@@ -318,6 +319,16 @@ Window {
                 return;
             controller.show_tree();
             root._flipSidePanelTab();
+            // "Does not move focus" means does not STEAL it — not "never
+            // touches it". When focus is already inside the side panel, the
+            // flip hides the very body that owns `activeFocus`, and Qt drops
+            // focus off a hidden item: the user's keyboard is then stranded on
+            // whatever ancestor Qt falls back to, with j/k dead. Re-seating it
+            // in the new tab is the only way the chord stays usable FROM the
+            // panel. The guard is false on every other surface, so the
+            // no-steal contract holds exactly where it was meant to.
+            if (treeScope.activeFocus)
+                root._focusSidePanelTab();
         }
     }
 
@@ -758,7 +769,7 @@ Window {
         }
     }
 
-    // NOTE — Ctrl+J / Ctrl+K are FREE again since 2026-08-15.
+    // NOTE — Ctrl+J / Ctrl+K are FREE again since 2026-08-17.
     //
     // They were `ApplicationShortcut`s routing focus between the side panel's
     // two vertically-stacked sub-panes: Ctrl+K up to the changes pane, Ctrl+J
@@ -2068,11 +2079,34 @@ Window {
                 // With exactly two tabs, "previous" and "next" name the same
                 // destination, and a Shift variant that did nothing would read
                 // as a broken key.
+                // ⚠ The modal guard is NOT redundant with the FM's own key
+                // swallow, and the difference is one popup. While a tree modal
+                // is open the FM's TreeKeyHandler eats every key — but that
+                // only covers keys aimed at the TREE. A modal's own TextInput
+                // holds focus instead, so whatever IT declines bubbles here
+                // past the tree entirely. Measured against the installed FM
+                // module: RenamePopup and DeleteConfirmPopup both claim Tab,
+                // CreateFilePopup does NOT — so without this guard, pressing
+                // Tab while typing a new filename flips the tab AND
+                // `_focusSidePanelTab()` yanks focus out of the still-open
+                // dialog into the tree, which then swallows every key,
+                // including the Escape that would close it.
+                //
+                // Returns WITHOUT setting `event.accepted`, so the key travels
+                // on to whatever else wants it rather than being eaten here.
+                //
+                // The modifier mask lets Shift through and nothing else:
+                // `Backtab` IS Shift+Tab, while `Ctrl+Tab` and friends have no
+                // business flipping a side-panel tab.
                 Keys.onPressed: function (event) {
-                    if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
-                        root._toggleSidePanelTab();
-                        event.accepted = true;
-                    }
+                    if (event.key !== Qt.Key_Tab && event.key !== Qt.Key_Backtab)
+                        return;
+                    if ((event.modifiers & ~Qt.ShiftModifier) !== Qt.NoModifier)
+                        return;
+                    if (treeOpsWindowState.activeModal !== treeOpsWindowState.modalNone)
+                        return;
+                    root._toggleSidePanelTab();
+                    event.accepted = true;
                 }
 
                 // Panel-level chrome matte. Painted on the FocusScope itself
@@ -2124,7 +2158,7 @@ Window {
                 //      FileTreeView (tab 0) or GitStatusPanel (tab 1).
                 //
                 // GitStatusPanel and FileTreeView were CO-MOUNTED and stacked
-                // vertically until 2026-08-15, the changes pane capped at half
+                // vertically until 2026-08-17, the changes pane capped at half
                 // the column and folding away when clean. Two trees splitting
                 // one narrow column meant neither had room: the changes pane
                 // scrolled inside its cap while the file tree lost half its
@@ -2152,10 +2186,9 @@ Window {
                     // which is enough visual breath to distinguish them.
                     // Adding `spacing.lg` on top of that (previous setup,
                     // commit 59d602a) produced a ~26px band that read as
-                    // "blank wallpaper" rather than panel separation. When
-                    // GitStatusPanel is hidden (clean tree) the layout
-                    // naturally collapses — `spacing` only applies between
-                    // visible siblings, so 0 is the cleanest no-op too.
+                    // "blank wallpaper" rather than panel separation. Only one
+                    // tab body is visible at a time, so `spacing` never applies
+                    // between them anyway — 0 is the honest value.
                     // If you want them visually further apart, raise this
                     // — but check the cumulative gap, not just this value
                     // in isolation.
@@ -2730,6 +2763,14 @@ Window {
                 // from a central pane resumes where the user left off rather
                 // than always on the files tree.
                 //
+                // The visibility guard is for the OTHER caller. The Ctrl+L
+                // Shortcut checks `treeVisible` before firing, but
+                // `AppController._on_nav_event` emits this signal unguarded on
+                // nvim spillover — with a hidden sidebar that would focus an
+                // invisible item and drop focus into nothing.
+                if (!controller.treeVisible)
+                    return;
+                //
                 // The old visibility guard here (fall back to the main tree if
                 // the changes pane had hidden mid-session) is gone with the
                 // condition that produced it: the changes tab no longer hides
@@ -2770,27 +2811,46 @@ Window {
 
         }
 
-        // Re-park focus when the changes tree empties UNDER the user — they
-        // are sitting on a row in the changes tab and the last change goes
-        // away (a commit, a stash, a discard from anywhere). The inner
-        // FileTreeView flips `visible: false` for the empty state, and an
-        // invisible item cannot keep activeFocus, so focus would be orphaned:
-        // the panel would look focused but swallow every key, including the
-        // Tab that is the way out.
+        // Keep focus alive across BOTH edges of the changeset emptying and
+        // filling under the user, while they sit in the changes tab. The inner
+        // FileTreeView is `visible: root.hasChanges`, and an invisible item can
+        // hold no activeFocus, so each edge orphans focus in its own direction:
         //
-        // This replaces a broader guard that ALSO reset the tab to files. That
+        //   • dirty → clean (a commit, a stash, a discard from anywhere): the
+        //     tree disappears out from under the cursor. Focus goes to the
+        //     panel's own FocusScope, which keeps `treeScope`'s Tab handler
+        //     above it in the chain — otherwise the panel looks focused but
+        //     swallows every key, including the Tab that is the way out.
+        //   • clean → dirty (they edit a file while parked on the empty tab):
+        //     the tree appears, but focus is still on the outer scope, so j/k/
+        //     Return are dead until the user clicks or Tabs twice. Hand focus
+        //     down into the tree that just arrived.
+        //
+        // ⚠ Deferred via `Qt.callLater`, and that is load-bearing. This handler
+        // and the tree's own `visible` binding both react to the SAME
+        // `hasChangesChanged` emission, and QML guarantees no order between
+        // them. Focusing synchronously would work only while the binding
+        // happens to run first — and would silently strand focus on an item
+        // that hides one notification later if that order ever inverted.
+        // Deferring runs us after every binding for this emission has settled.
+        //
+        // This replaces a narrower guard that also reset the tab to files. That
         // was right when the changes pane hard-hid — the tab it named stopped
         // existing. It is wrong now: the tab is still there showing its empty
         // state, and yanking the user to a different tab because they finished
-        // committing overrides a choice they did not revisit. Park focus on
-        // the panel's own FocusScope instead and leave the tab alone.
+        // committing overrides a choice they did not revisit.
         Connections {
             target: gitStatusPanel
             function onHasChangesChanged(): void {
-                if (gitStatusPanel.hasChanges || root.sidePanelTab !== 1)
+                if (root.sidePanelTab !== 1 || !treeScope.activeFocus)
                     return;
-                if (treeScope.activeFocus)
-                    gitStatusPanel.forceActiveFocus();
+                Qt.callLater(function () {
+                    // Re-check inside the deferred call: the tab, the focus and
+                    // the changeset can all have moved again before it runs.
+                    if (root.sidePanelTab !== 1 || !treeScope.activeFocus)
+                        return;
+                    root._focusSidePanelTab();
+                });
             }
         }
 

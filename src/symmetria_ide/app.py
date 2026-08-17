@@ -423,9 +423,11 @@ class AppController(QObject):
     # remount). Delivering both together makes the pair atomic by construction.
     treeMountRequested = Signal(str, list)
     # QML-bound focus pull. Main.qml's Connections block listens for this
-    # signal and calls `fileTreeView.forceActiveFocus()`. Emitted by the
-    # `focus_tree()` Slot, which the Ctrl+J ApplicationShortcut in
-    # qml/Main.qml dispatches. Carries no payload — it's a one-way ask.
+    # signal and routes focus to the CURRENT side-panel tab (files or
+    # changes) via `_focusSidePanelTab()`. Emitted by the `focus_tree()`
+    # Slot, which the Ctrl+L ApplicationShortcut in qml/Main.qml dispatches
+    # (it was Ctrl+J until the side-panel tabs retired that chord).
+    # Carries no payload — it's a one-way ask.
     focusTreeRequested = Signal()
     # Reverse direction of focusTreeRequested — fired from
     # `_on_nav_event` when nvim spillover targets the editor (no
@@ -1038,7 +1040,7 @@ class AppController(QObject):
         self._fm_visible = False
         self._fm_initial_path = ""
         # File-tree sidebar focus is driven entirely from QML
-        # (Ctrl+J ApplicationShortcut → focus_tree()); the Lua `<leader>tf`
+        # (Ctrl+L ApplicationShortcut → focus_tree()); the Lua `<leader>tf`
         # → `tree` rpcnotify path was stripped alongside the agent hijacks.
         self._backend.nav_event.connect(self._on_nav_event)
         # queued: NvimBackend worker → AppController GUI. Secondary surface
@@ -2882,8 +2884,10 @@ class AppController(QObject):
 
         Emits `focusTreeRequested` rather than reaching into QML
         directly — keeps the Python side stateless about QML focus
-        ownership. Main.qml's Connections block calls
-        `fileTreeView.forceActiveFocus()` on receipt.
+        ownership. Main.qml's Connections block routes this to the CURRENT
+        side-panel tab via `_focusSidePanelTab()`, so it may land on the
+        changes tree rather than the file tree; it also drops the request
+        when the sidebar is hidden, since `_on_nav_event` emits unguarded.
         """
         self.focusTreeRequested.emit()
 

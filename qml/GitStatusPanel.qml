@@ -1,7 +1,7 @@
 // Active Changes panel — a path-filtered FileTreeView of pending git changes.
 //
 // The CHANGES tab of the side panel. It shared that column vertically with the
-// main FileTreeView until 2026-08-15, when the two became tabs — so this panel
+// main FileTreeView until 2026-08-17, when the two became tabs — so this panel
 // now owns the full column height whenever its tab is current, and the host
 // (not the panel) decides when that is. On a clean working tree, or outside a
 // git repo, it draws a quiet empty state rather than hiding: a tab body that
@@ -64,11 +64,13 @@
 //      (This was a Ctrl+J / Ctrl+K pair for directional nav between two
 //      vertically-stacked sub-panes, removed with the stacking.)
 //
-// Auto-fallback when the changeset empties UNDER the user: Main.qml's
-// `onHasChangesChanged` Connection on this item re-parks focus onto this
-// FocusScope, because the inner tree hides for the empty state and an
-// invisible item cannot hold activeFocus — focus has to move proactively
-// or Qt drops it silently and the panel swallows every key, Tab included.
+// Auto-fallback across BOTH edges of the changeset changing under the user:
+// Main.qml's `onHasChangesChanged` Connection re-seats focus each way, because
+// the inner tree is `visible: root.hasChanges` and an invisible item cannot
+// hold activeFocus. Emptying (a commit) would strand focus on the vanished
+// tree — the panel then looks focused but swallows every key, Tab included;
+// filling (an edit while parked on the empty tab) would leave focus on this
+// outer scope with the tree unreachable, so j/k/Return do nothing.
 
 import QtQuick
 import QtQuick.Layouts
@@ -91,8 +93,8 @@ FocusScope {
     id: root
 
     // Backing model exposed via the `gitStatusList` context property — a
-    // flat `GitStatusListModel`. Still used here ONLY for the header
-    // file-count display (`model.count`); the embedded tree pulls its
+    // flat `GitStatusListModel`. Used here ONLY for `hasChanges`
+    // (`model.count`), which drives the empty state; the embedded tree pulls its
     // rendering from the FM's FileSystemModel + pathFilter gate.
     property QtObject model: null
 
@@ -103,8 +105,10 @@ FocusScope {
     property var stats: ({})
 
     // Absolute path to the git repo root. Drives the embedded
-    // FileTreeView's `rootPath`. Empty string short-circuits via the
-    // outer `visible:` guard since the panel auto-hides on clean trees.
+    // FileTreeView's `rootPath`. An empty string costs nothing: outside a git
+    // repo `hasChanges` is false, so the tree is hidden and the empty state
+    // draws instead. (It used to short-circuit through an outer `visible:`
+    // guard, back when the panel hid itself on a clean tree.)
     property string repoRoot: ""
 
     // FM duck-typed status seam — `statusForPath(absPath) -> {char, color,
@@ -291,6 +295,7 @@ FocusScope {
         // of an otherwise empty column and makes nothing look like an event.
         // Clean is the normal state of a repo, so it should read as a footnote.
         Text {
+            id: emptyState
             Layout.fillWidth: true
             Layout.topMargin: Theme.spacing.xs
             Layout.leftMargin: Theme.spacing.xs
