@@ -27,12 +27,12 @@
     "missing-property": 1
   },
   "qml/GitStatusPanel.qml": {
-    "missing-property": 31
+    "missing-property": 28
   },
   "qml/Main.qml": {
     "import": 11,
-    "missing-property": 81,
-    "unqualified": 261,
+    "missing-property": 87,
+    "unqualified": 263,
     "unresolved-type": 7,
     "unused-imports": 2
   },
@@ -55,7 +55,7 @@
     "unqualified": 6
   },
   "qml/SegmentedControl.qml": {
-    "missing-property": 24
+    "missing-property": 28
   },
   "qml/SessionsMenu.qml": {
     "missing-property": 15,

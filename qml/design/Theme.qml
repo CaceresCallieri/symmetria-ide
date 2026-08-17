@@ -78,6 +78,18 @@ QtObject {
         // nf-oct-git_branch — the worktree mark (tree header + agent chips).
         readonly property string worktree: "\uf418"
 
+        // nf-cod-list_tree \u2014 the side panel's FILES tab. Codicon, monoline,
+        // the same family and stroke weight as the surface marks below,
+        // because the two controls sit one above the other in the same column
+        // and a mixed family reads as two unrelated widgets.
+        //
+        // The side panel's other tab (CHANGES) deliberately takes NO token of
+        // its own: it binds `glyph.surface.git` (nf-cod-source_control), the
+        // same mark the central git surface carries. One codepoint, one
+        // meaning \u2014 a second "changes" glyph would claim the two surfaces show
+        // different things, and they show the same changeset at two scopes.
+        readonly property string fileTree: "\ueb86"
+
         // The four central surfaces, as the AgentTopBar switcher draws them.
         // ONE icon family on purpose (Codicons, VS Code's set) plus a bare
         // shell prompt: every mark here is MONOLINE, drawn with a single

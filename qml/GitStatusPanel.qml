@@ -1,8 +1,12 @@
 // Active Changes panel — a path-filtered FileTreeView of pending git changes.
 //
-// Sits ABOVE the main FileTreeView in the side panel column. Auto-hidden when
-// the working tree is clean or we're not in a git repo (model.count == 0). The
-// body is an embedded `FmUi.FileTreeView` whose `pathFilter` restricts visible
+// The CHANGES tab of the side panel. It shared that column vertically with the
+// main FileTreeView until 2026-08-15, when the two became tabs — so this panel
+// now owns the full column height whenever its tab is current, and the host
+// (not the panel) decides when that is. On a clean working tree, or outside a
+// git repo, it draws a quiet empty state rather than hiding: a tab body that
+// vanishes under a tab header that stays is worse than one that says nothing.
+// The body is an embedded `FmUi.FileTreeView` whose `pathFilter` restricts visible
 // rows to the repo's changed paths (plus ancestors up to the root). It is
 // always-expanded by default — `initialExpandDepth: -1` with the FM's caps
 // (`maxExpandDepth: 8`, `_autoExpandModelCeiling: 100`,
@@ -52,20 +56,19 @@
 //      so calling `forceActiveFocus()` on it is a no-op for keys.
 //   2. This panel's `focusInternal()` proxy — forwards to the
 //      embedded tree so consumers don't reach inside.
-//   3. Main.qml's Ctrl+J / Ctrl+K ApplicationShortcuts — vim-style
-//      directional sub-pane nav. Ctrl+K (up) lands here, Ctrl+J
-//      (down) lands on the main tree. Both gated on
-//      `treeScope.activeFocus` so the chords pass through to
-//      nvim/terminal when the side panel isn't focused. Ctrl+L from
-//      a central pane respects a sticky `activeTreeSubPane`
-//      property — re-entering the side panel lands on whichever
-//      sub-pane the user was last in, not always on the main tree.
+//   3. Main.qml's Tab handler on `treeScope` — one key toggling the two
+//      tabs, which routes focus through `_focusSidePanelTab()`. It is a
+//      focus-chain `Keys.onPressed`, not an ApplicationShortcut, so Tab
+//      keeps its own meaning in the terminal and in nvim. Ctrl+L from a
+//      central pane re-enters on whichever tab is current.
+//      (This was a Ctrl+J / Ctrl+K pair for directional nav between two
+//      vertically-stacked sub-panes, removed with the stacking.)
 //
-// Auto-fallback when the panel hides (clean tree): Main.qml's
-// `onVisibleChanged` Connection on this item resets
-// `activeTreeSubPane` to 0 and re-routes focus to the main tree
-// if needed — invisible items can't hold activeFocus, so we have to
-// move focus proactively before Qt silently drops it.
+// Auto-fallback when the changeset empties UNDER the user: Main.qml's
+// `onHasChangesChanged` Connection on this item re-parks focus onto this
+// FocusScope, because the inner tree hides for the empty state and an
+// invisible item cannot hold activeFocus — focus has to move proactively
+// or Qt drops it silently and the panel swallows every key, Tab included.
 
 import QtQuick
 import QtQuick.Layouts
@@ -73,13 +76,17 @@ import Symmetria.FileManager.UI as FmUi
 import "design"
 
 // FocusScope (not plain Item) — `activeFocus` propagates true when the
-// embedded FileTreeView's inner ListView has the active focus, which
-// lets Main.qml render a per-sub-pane focus border via a plain binding
-// (`gitStatusPanel.activeFocus ? Theme.color.accent.focus : ...`) AND
-// drive the sticky `activeTreeSubPane` property via
-// `onActiveFocusChanged` — works for both keyboard chords AND mouse
-// clicks (the inner ListView gains focus naturally on either path,
-// and FocusScope.activeFocus bubbles up regardless).
+// embedded FileTreeView's inner ListView has the active focus, which lets
+// Main.qml render this tab's focus bar via a plain binding
+// (`gitStatusPanel.activeFocus ? Theme.color.accent.focus : ...`) for both
+// keyboard arrivals AND mouse clicks (the inner ListView gains focus
+// naturally on either path, and FocusScope.activeFocus bubbles up
+// regardless).
+//
+// It is load-bearing a second way since the tabs landed: on a clean working
+// tree the inner tree is hidden, so this scope is the only thing in the tab
+// that CAN take focus, and Main.qml focuses it directly to keep the Tab key
+// reachable. A plain Item here would drop focus outside the side panel.
 FocusScope {
     id: root
 
@@ -112,34 +119,21 @@ FocusScope {
     // empty-but-valid on first paint.
     property var pathFilter: ({})
 
-    // Optional upper bound on the pane's height. `-1` (default) preserves
-    // pure content-fit behaviour. Consumers in a tall column (e.g.
-    // Main.qml's side panel) bind this to a fraction of the column
-    // height so a pathologically large changeset can't push the
-    // FileTreeView below off-screen — when implicitHeight exceeds
-    // maxHeight, the panel clamps and the embedded FileTreeView's
-    // own ListView scrollbar engages (the inner tree uses
-    // `Layout.fillHeight: true` so its rendered height tracks whatever
-    // the panel was actually granted, not its content-fit ideal).
-    property real maxHeight: -1
-
-    // When true, the panel folds away (height → 0, opacity → 0) even though
-    // the working tree is dirty — the host sets this while the dedicated git
-    // "changes" central surface is on screen, since that surface already shows
-    // the full changes tree and this side mini-panel would just duplicate it.
-    // The fold/unfold is animated (see the Layout.preferredHeight + opacity
-    // Behaviors below) so the main file tree below glides up to claim the
-    // space and back down on return — "the changes rise away, then settle
-    // back" rather than a jarring pop.
-    property bool collapsed: false
-
-    // Whether the panel is actually reachable for keyboard focus — visible AND
-    // not collapsed. The host's focus-routing chords (Ctrl+K, Ctrl+L re-entry)
-    // gate on this instead of bare `visible`, because a collapsed panel is
-    // still `visible: true` (it animates rather than hard-hiding) but can no
-    // longer hold focus. The matching `reachableChanged` drives the host's
-    // focus-release fallback.
-    readonly property bool reachable: visible && !collapsed
+    // Whether the current changeset has anything in it. Drives the empty state
+    // below, and the host reads it to decide whether focus can land on the
+    // inner tree at all (an empty tree has no focusable row).
+    //
+    // THREE properties stood here until the side panel became tabbed:
+    // `maxHeight` (a cap so a huge changeset could not push the file tree off
+    // the bottom of a SHARED column), `collapsed` (a host-driven fold, so this
+    // mini-tree got out of the way while the central git surface showed the
+    // same changeset), and `reachable` (visible && !collapsed, which the focus
+    // chords gated on). All three answered questions that only exist when two
+    // trees share one column vertically. With one tab visible at a time, the
+    // panel simply fills its tab, the host's tab state is the fold, and
+    // "reachable" is just "this tab is current" — a question the HOST owns and
+    // this panel cannot answer. Do not reintroduce them alongside the tabs.
+    readonly property bool hasChanges: model !== null && model.count > 0
 
     // Emitted when the user clicks a file row. Carries the ABSOLUTE
     // filesystem path of the activated file. Main.qml connects this to
@@ -159,50 +153,22 @@ FocusScope {
         changesTree.focusInternal();
     }
 
-    // Auto-hide when there are no changes. Hidden state collapses the
-    // vertical real estate so the main file tree below claims it back.
-    visible: model && model.count > 0
-    // Include the asymmetric top+bottom margins so the chrome Rectangle
-    // matches the actual content layout. Without the `+ topMargin +
-    // bottomMargin`, ColumnLayout inside this Item gets anchors.fill with
-    // margins which leaves it `2*margin` less tall than its content wants.
-    implicitHeight: visible
-        ? content.implicitHeight + Theme.spacing.sm * 2
-        : 0
-    // Collapsed → 0 height so the ColumnLayout reclaims the space for the
-    // main file tree below; the Behavior eases the fold/unfold. The clean-tree
-    // case (visible:false) already collapses implicitHeight to 0, so this
-    // multiplexes both reasons the panel can occupy no space.
-    Layout.preferredHeight: collapsed ? 0 : implicitHeight
-    Behavior on Layout.preferredHeight {
-        NumberAnimation {
-            duration: Theme.anim.duration
-            easing.type: Easing.BezierSpline
-            easing.bezierCurve: Theme.anim.standardCurve
-        }
-    }
-    // `-1` is Qt's "no cap" sentinel for Layout.maximumHeight, matching
-    // the property's own default. Binding rather than gating keeps the
-    // expression reactive when maxHeight changes (e.g. window resize).
-    Layout.maximumHeight: maxHeight > 0 ? maxHeight : -1
+    // The panel NO LONGER decides whether it is on screen — the host's tab
+    // state does, and it fills whatever height the tab grants it.
+    //
+    // It self-hid on `model.count > 0` while it was stacked above the file
+    // tree, where a clean working tree meant "give the space back". As a tab
+    // that same rule would make the tab body vanish under a header that is
+    // still there, so the clean case became an EMPTY STATE instead (see
+    // `emptyState` below). The tab header stays put and the keybind keeps
+    // meaning the same thing on a clean tree as on a dirty one.
     Layout.fillWidth: true
-
-    // Fade in concert with the height fold so the panel "dissolves" upward
-    // rather than just shrinking. Same curve/duration as the height Behavior
-    // so the two read as one motion.
-    opacity: collapsed ? 0 : 1
-    Behavior on opacity {
-        NumberAnimation {
-            duration: Theme.anim.duration
-            easing.type: Easing.BezierSpline
-            easing.bezierCurve: Theme.anim.standardCurve
-        }
-    }
-    // Clip during the fold so the content (chrome + tree) is cropped to the
-    // shrinking height instead of bleeding past it mid-animation.
-    clip: true
-    // Inert while collapsed — no stray clicks land on the invisible tree.
-    enabled: !collapsed
+    // Content-fit implicit height is still published for any consumer that
+    // wants to size to content; the tabbed host overrides it with
+    // `Layout.fillHeight`. Includes the asymmetric top+bottom margins, or the
+    // ColumnLayout inside (anchors.fill with margins) ends up `2*margin`
+    // shorter than its content wants.
+    implicitHeight: content.implicitHeight + Theme.spacing.sm * 2
 
     // `bg.bar`, matching the side-panel column this sits in — see the matte
     // on `treeScope` in Main.qml for why the whole column shares the bars'
@@ -227,21 +193,30 @@ FocusScope {
         anchors.rightMargin: Theme.spacing.xs
         spacing: Theme.spacing.xs
 
-        // Section header — quiet label + three aggregate bucket rows
-        // (staged ●, unstaged ○, untracked ✦) carrying +adds -dels (n).
-        // Bucket rows hide themselves when their file count is 0, so a
-        // clean staging area collapses to just the title.
+        // Section header — three aggregate bucket rows (staged ●, unstaged ○,
+        // untracked ✦) carrying +adds -dels (n). Bucket rows hide themselves
+        // when their file count is 0, so a clean staging area collapses this
+        // whole block to nothing.
+        //
+        // A `Changes · N` title sat above the buckets until the side panel
+        // became tabbed. The tab header now draws that exact pair — the
+        // source-control glyph and the file count as its badge — directly
+        // above this block, so the title restated its own header one line
+        // down. Do not add it back; put anything the tab cannot say (a
+        // per-bucket total, a branch ref) in the buckets instead.
         ColumnLayout {
             Layout.fillWidth: true
+            // ⚠ Explicit `false`, and it is load-bearing. A Layout nested
+            // directly inside another Layout gets `Layout.fillHeight: true` by
+            // DEFAULT (Qt Quick Layouts, unlike a plain Item, which defaults
+            // false) — so without this line the header competes with the tab
+            // body for the leftover column height. It was invisible while this
+            // panel was sized to its own content (there was no leftover to
+            // take); the moment the panel became a full-height tab it pushed
+            // the empty state into the vertical middle of the column and stole
+            // rows from the changes tree.
+            Layout.fillHeight: false
             spacing: Theme.spacing.xxs
-
-            Text {
-                Layout.fillWidth: true
-                text: "Changes · " + (root.model ? root.model.count : 0)
-                color: Theme.color.text.dim
-                font.family: Theme.font.family
-                font.pixelSize: Theme.font.size.xs
-            }
 
             Repeater {
                 // Bucket rows summarise WORK-BY-SIDE (staged / unstaged /
@@ -307,21 +282,43 @@ FocusScope {
             }
         }
 
+        // Clean-working-tree state. Replaces the panel's old self-hide: as a
+        // tab body it must draw SOMETHING, or the tab header sits above a void
+        // and the user cannot tell "no changes" from "this pane is broken".
+        //
+        // Deliberately one quiet line, `text.dim`, top-aligned rather than
+        // centred in the tab: a centred empty state pulls the eye to the middle
+        // of an otherwise empty column and makes nothing look like an event.
+        // Clean is the normal state of a repo, so it should read as a footnote.
+        Text {
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.spacing.xs
+            Layout.leftMargin: Theme.spacing.xs
+            visible: !root.hasChanges
+            text: "No changes"
+            color: Theme.color.text.dim
+            font.family: Theme.font.family
+            font.pixelSize: Theme.font.size.xs
+        }
+
+        // Absorbs the leftover column height in the empty state, so the
+        // "No changes" line stays pinned under the buckets instead of being
+        // vertically centred by the ColumnLayout's own distribution.
+        Item {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            visible: !root.hasChanges
+        }
+
         // The tree-shaped list of changed files. Reuses the FM's FileTreeView
         // with `pathFilter` narrowing visible rows to the current changeset.
         //
-        // Sizing is dual-mode, via the tree's `Layout.fillHeight`:
-        //   1. Panel under maxHeight (or maxHeight unset). This Item's
-        //      `implicitHeight` is header impl + tree impl (= contentHeight +
-        //      padding), so the `Layout.preferredHeight: implicitHeight`
-        //      upstream hands the panel exactly enough room for every row.
-        //      fillHeight then grants the tree that same height and the
-        //      ScrollBar stays hidden (FM-side gate:
-        //      `view.contentHeight > view.height + 0.5`).
-        //   2. Panel clamped by maxHeight. The tree gets less than its
-        //      contentHeight, the FM ListView scrolls, and the ScrollBar
-        //      appears. When the cap is engaged the main FileTreeView below is
-        //      guaranteed at least `column.height - maxHeight` of space.
+        // `Layout.fillHeight` makes the tree claim whatever the tab granted the
+        // panel; the FM ListView scrolls internally once the changeset exceeds
+        // it (FM-side gate: `view.contentHeight > view.height + 0.5`). The
+        // old dual-mode sizing note here described a `maxHeight` cap that the
+        // tabbed layout removed — a tab is never in competition for height with
+        // the file tree, so there is nothing left to clamp against.
         //
         // A Flickable wrapped this tree while the panel stacked several
         // per-repo sections; with one tree again the FM ListView does its own
@@ -337,6 +334,11 @@ FocusScope {
             id: changesTree
             Layout.fillWidth: true
             Layout.fillHeight: true
+            // Hidden rather than empty on a clean tree: the FM tree with an
+            // empty `pathFilter` still mounts its root row, so leaving it
+            // visible would draw a lone project folder under "No changes" and
+            // read as one changed directory.
+            visible: root.hasChanges
 
             rootPath: root.repoRoot
             initialExpandDepth: -1

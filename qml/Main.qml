@@ -51,18 +51,66 @@ Window {
     // `onWidthChanged` does not fire for the construction-time value.
     onWidthChanged: controller.set_window_width(width)
 
-    // Side-panel sub-pane focus memory. 0 = main fileTreeView, 1 =
-    // gitStatusPanel (Active Changes). Updated by the Ctrl+J / Ctrl+K
-    // chords below; read by `onFocusTreeRequested` so re-entering the
-    // side panel from a central pane (via Ctrl+L) lands focus on
-    // whichever sub-pane the user was last in, NOT always on the main
-    // tree. This gives the two sub-panes true parity — the user can
-    // "live in" the changes pane across editor round-trips without
-    // re-navigating each time. Default 0 preserves prior behavior on
-    // first Ctrl+L. Auto-reset to 0 when gitStatusPanel hides (clean
-    // tree → invisible item can't accept focus; without the reset,
-    // Ctrl+L would silently bind focus to a hidden item).
-    property int activeTreeSubPane: 0
+    // Which side-panel TAB is on screen. 0 = files (the main fileTreeView),
+    // 1 = changes (gitStatusPanel). Toggled by Tab while the side panel holds
+    // focus, and by clicking the SegmentedControl in the panel header.
+    //
+    // This was `activeTreeSubPane` and meant something weaker: the two panes
+    // were BOTH mounted, stacked vertically, and this only remembered which
+    // one focus was last in, so Ctrl+L re-entry could land where the user
+    // left off. It is now the display state itself — the non-current tab is
+    // `visible: false`. `onFocusTreeRequested` still reads it for the same
+    // reason as before (re-entry lands where you left), but the question it
+    // answers is now "what is on screen", not "what did you last touch".
+    //
+    // No auto-reset guard is needed any more. The old one existed because the
+    // changes pane hard-hid on a clean working tree, which could orphan the
+    // sticky value on an unfocusable item; the changes tab is now always
+    // present (it draws an empty state instead), so 1 is always a legal value.
+    property int sidePanelTab: 0
+
+    // Flip which tab the side panel shows. Focus is NOT this function's
+    // business — the two callers want opposite things from it, which is
+    // exactly why the flip lives on its own:
+    //   • `_toggleSidePanelTab()` below (Tab, and the header click) follows
+    //     with focus, because you are navigating the panel.
+    //   • the Ctrl+Shift+D chord does NOT, because the whole point there is
+    //     to see the other tab without leaving the surface you are in.
+    function _flipSidePanelTab(): void {
+        root.sidePanelTab = root.sidePanelTab === 0 ? 1 : 0;
+    }
+
+    // Toggle the side panel between its two tabs and carry keyboard focus into
+    // whatever the new tab shows. Called from the Tab key handler on
+    // `treeScope` and from the header control's `activated` signal, so both
+    // routes land in exactly the same state — a click that left focus behind
+    // would make the next Tab press read as a no-op.
+    function _toggleSidePanelTab(): void {
+        root._flipSidePanelTab();
+        root._focusSidePanelTab();
+    }
+
+    // Hand focus to the current tab's inner ListView — the item that actually
+    // owns the FM's `Keys.onPressed` (j/k/h/l, Ctrl+D/U, Return). Calling
+    // `forceActiveFocus()` on a FileTreeView's outer Item is a no-op for keys.
+    //
+    // The changes tab has one state the files tab never has: EMPTY. On a clean
+    // working tree its inner FileTreeView is `visible: false`, and an invisible
+    // item cannot take activeFocus — so `focusInternal()` there drops focus
+    // into nothing and the user cannot even press Tab to get back out.
+    // GitStatusPanel's own root IS a FocusScope, so focusing THAT parks focus
+    // inside the side panel with `treeScope`'s Tab handler still above it in
+    // the chain, which keeps the way out working.
+    function _focusSidePanelTab(): void {
+        if (root.sidePanelTab === 1) {
+            if (gitStatusPanel.hasChanges)
+                gitStatusPanel.focusInternal();
+            else
+                gitStatusPanel.forceActiveFocus();
+            return;
+        }
+        fileTreeView.focusInternal();
+    }
 
     // Editor minimap feature flag.
     // HACK: disabled pending nvim-in-terminal minimap integration — the
@@ -228,6 +276,49 @@ Window {
         sequences: ["Ctrl+E"]
         context: Qt.ApplicationShortcut
         onActivated: controller.toggle_fm()
+    }
+
+    // Side-panel tab switch from ANY surface — the twin of the panel-scoped
+    // Tab key, for when you want to see the other tab WITHOUT leaving the
+    // editor/terminal/agent you are typing in.
+    //
+    // Deliberately does NOT move focus. That is the whole distinction from
+    // Tab: this one changes what the panel SHOWS, Tab changes what you are
+    // navigating. Pressing this from the editor and landing in the tree would
+    // make "let me glance at the changes" cost a trip back. `Ctrl+L` still
+    // enters, and lands on whichever tab is current.
+    //
+    // D-for-diff. It is free BECAUSE of this feature area — it scoped the
+    // Active Changes panel to the focused agent until that filter was removed
+    // (2026-08-13), so the letter already means "the changes panel" here. It
+    // also fits the letter-names-the-destination grammar of Ctrl+Shift+E/T/G/B,
+    // and with exactly two tabs "go to changes" and "toggle" are the same
+    // keystroke — pressing it on the changes tab returns to files, which is
+    // the swap-last-two shape those chords already have.
+    //
+    // Reveals the sidebar first via `show_tree()` — NOT `toggle_tree()`, which
+    // flips and would hide a sidebar that is already up (and would set user
+    // intent False on a narrow window, keeping it hidden after the window
+    // widens). Without the reveal the chord is a silent no-op whenever the
+    // panel is closed, which reads as a broken keybind rather than as a closed
+    // panel. The responsive width gate still wins, so on a narrow window this
+    // legitimately does nothing visible.
+    //
+    // Modal-guarded like its Ctrl+Shift siblings: the tree's own rename/create/
+    // delete popups render over the side panel and target the main tree, so
+    // swapping the tab under an open one would pull the ground out from under
+    // a dialog the user is typing into.
+    Shortcut {
+        sequences: ["Ctrl+Shift+D"]
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (root._anyModalVisible())
+                return;
+            if (treeOpsWindowState.activeModal !== treeOpsWindowState.modalNone)
+                return;
+            controller.show_tree();
+            root._flipSidePanelTab();
+        }
     }
 
     // Manual file-tree sidebar toggle. Flips the *user-intent* half of
@@ -667,85 +758,24 @@ Window {
         }
     }
 
-    // IDE-wide vertical sub-pane navigation INSIDE the side panel.
+    // NOTE — Ctrl+J / Ctrl+K are FREE again since 2026-08-15.
     //
-    // The side panel is sub-divided into two co-mounted FileTreeViews:
-    // the Active Changes pane (gitStatusPanel, sits on top, hidden when
-    // the working tree is clean) and the main FileTreeView below. Both
-    // own identical FM-level Keys.onPressed handlers (j/k/Ctrl+D/
-    // Ctrl+U/Return/...), so once focus lands on either inner ListView
-    // the keys all "just work" inside that sub-pane — the only thing
-    // missing was a way to ROUTE focus between the two sub-panes.
+    // They were `ApplicationShortcut`s routing focus between the side panel's
+    // two vertically-stacked sub-panes: Ctrl+K up to the changes pane, Ctrl+J
+    // down to the main tree, both gated on `treeScope.activeFocus` so they
+    // passed through to nvim (Ctrl+K) and the terminal (Ctrl+J = ASCII LF,
+    // Ctrl+K = readline kill-to-end-of-line) everywhere else. Tabs removed the
+    // spatial relation the chords named — there is no "up" pane any more — and
+    // one Tab toggle replaces the pair.
     //
-    // Spatial chord, vim-style: Ctrl+K = up (the changes pane is
-    // physically above), Ctrl+J = down (the main tree is below).
-    // Directional, NOT toggle — Ctrl+K from the main tree always lands
-    // on the changes pane; Ctrl+K when already in the changes pane is a
-    // silent no-op. This is the same shape as Ctrl+H / Ctrl+L for
-    // horizontal cross-pane nav (always-directional, never-wrap), so
-    // the muscle memory is consistent.
-    //
-    // CRITICAL gating: `enabled: treeScope.activeFocus` — and for Ctrl+K
-    // ALSO `gitStatusPanel.reachable` (visible && !collapsed). When the side panel doesn't have
-    // focus (e.g. focus is on editor, terminal, or agent pane), the
-    // Shortcut is `enabled: false` and Qt does NOT consume the key —
-    // it passes through the focus chain normally. That preserves:
-    //   - nvim's Ctrl+K (no default binding; many plugins use it)
-    //   - terminal Ctrl+J (= ASCII LF, literal newline; critical for
-    //     readline/zsh/anything that reads stdin)
-    //   - terminal Ctrl+K (= readline kill-to-end-of-line)
-    // When the side panel DOES have focus, these meanings would be
-    // unreachable anyway (you're not typing into nvim/terminal here),
-    // so the chord interception is the only sensible behavior.
-    //
-    // Why ApplicationShortcut not Keys.onPressed at treeScope: the FM's
-    // inner ListView matches `event.key === Qt.Key_J/K` WITHOUT a
-    // modifier check (FileTreeView.qml:1024,1030) — bare j/k for
-    // next/prev row. Without ApplicationShortcut interception, Ctrl+J
-    // would be eaten by the ListView handler as plain `j` (advance
-    // row) before any focus-chain handler could see it. Same rationale
-    // as the Ctrl+H Shortcut comment block above; the precedent is
-    // already canonical here.
-    //
-    // gitStatusPanel.reachable gate on Ctrl+K is important: when the
-    // working tree is clean the changes pane is `visible: false`, and
-    // while the git "changes" surface is up it is `collapsed` (visible
-    // but folded to 0 height) — in either case its inner items can't
-    // accept focus. `reachable` (visible && !collapsed) covers both.
-    // Without the gate, Ctrl+K would land focus on an unfocusable item —
-    // focus would silently disappear and the user couldn't navigate
-    // anywhere with keys until they clicked or pressed Ctrl+H back to a
-    // central pane.
-    Shortcut {
-        sequences: ["Ctrl+K"]
-        context: Qt.ApplicationShortcut
-        enabled: treeScope.activeFocus && gitStatusPanel.reachable
-        onActivated: {
-            // Optimistic update — onActiveFocusChanged (gitStatusPanel) also writes
-            // this property, but we set it here as a defensive fallback in case
-            // focusInternal() doesn't land focus (e.g. item not yet ready).
-            root.activeTreeSubPane = 1;
-            gitStatusPanel.focusInternal();
-        }
-    }
-
-    Shortcut {
-        sequences: ["Ctrl+J"]
-        context: Qt.ApplicationShortcut
-        // No gitStatusPanel.visible guard here — intentional asymmetry with Ctrl+K.
-        // Ctrl+J must stay enabled even when the changes pane is hidden, so the
-        // user can still reach the main tree. If we added the guard, a user in the
-        // changes pane when it hides (clean tree) would have no keyboard path to the
-        // main tree until a Ctrl+H+Ctrl+L round-trip.
-        enabled: treeScope.activeFocus
-        onActivated: {
-            // Optimistic update — onActiveFocusChanged (mainTreeScope) also writes
-            // this property, but we set it here as a defensive fallback in case
-            // focusInternal() doesn't land focus (e.g. item not yet ready).
-            root.activeTreeSubPane = 0;
-            fileTreeView.focusInternal();
-        }
-    }
+    // If either is ever rebound, note what the old comment established here:
+    // an `ApplicationShortcut` was required rather than a `Keys.onPressed` on
+    // `treeScope`, because the FM's inner ListView matches `Qt.Key_J`/`Key_K`
+    // WITHOUT checking modifiers (bare j/k = next/prev row), so a focus-chain
+    // handler never sees the Ctrl variants. Tab does not have that problem —
+    // the FM tree claims no Tab at all — which is why the tab toggle can live
+    // in a plain `Keys.onPressed` and leave the terminal's and nvim's own Tab
+    // completely alone.
 
     // IDE-wide fuzzy file finder. ApplicationShortcut so it fires from
     // EVERY surface — editor, terminal, agent, FM, tree — replacing
@@ -2012,6 +2042,39 @@ Window {
                 // boundary instead of just tree→editor. See the
                 // Ctrl+H / Ctrl+L Shortcut block at the Window root.
 
+                // Tab toggles the side panel's two tabs (files ↔ changes).
+                //
+                // A plain `Keys.onPressed` on this FocusScope, NOT an
+                // ApplicationShortcut — and that is the whole reason Tab is
+                // affordable as a binding. An application-scope Tab would fire
+                // from every surface and cost the terminal its completion key
+                // and nvim its own Tab, which no side-panel feature is worth.
+                // Scoped here it is inert unless the side panel already holds
+                // focus, where Tab has no competing meaning.
+                //
+                // It works because an unhandled Tab BUBBLES up the focus chain
+                // from the FM's inner ListView to here: the FM's FileTreeView
+                // owns no Tab handler and declares no `activeFocusOnTab` child,
+                // so Qt's focus traversal never claims it first. Verified
+                // against the installed FmUi.FileTreeView. This is the same
+                // idiom, for the same reason, as the Tab handler in
+                // `qml/githistory/WorkingFileTreeView.qml` — read its
+                // REGRESSION NOTE, which applies verbatim here: if the toggle
+                // ever silently stops working, a new Tab-claiming focusable
+                // inside the FM tree is the first suspect, and the fix is
+                // `activeFocusOnTab: false` on the tree instance.
+                //
+                // Backtab (Shift+Tab) toggles too rather than going backwards.
+                // With exactly two tabs, "previous" and "next" name the same
+                // destination, and a Shift variant that did nothing would read
+                // as a broken key.
+                Keys.onPressed: function (event) {
+                    if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                        root._toggleSidePanelTab();
+                        event.accepted = true;
+                    }
+                }
+
                 // Panel-level chrome matte. Painted on the FocusScope itself
                 // (not each child) so the spacing gap between GitStatusPanel
                 // and FileTreeView — and any future sub-panels — inherits the
@@ -2033,13 +2096,14 @@ Window {
                 }
 
                 // Whole-side-panel focus border removed — replaced by
-                // per-sub-pane focus indicators inside each sub-pane
-                // (see the Rectangle children of GitStatusPanel and the
-                // mainTreeScope FocusScope below). A single envelope
-                // around the entire side panel couldn't communicate
-                // WHICH sub-pane (changes vs main tree) had focus, which
-                // mattered once Ctrl+J/Ctrl+K subdivided the side panel
-                // into two independently-navigable regions. The per-pane
+                // per-tab focus indicators inside each tab body (see the
+                // FocusBar children of GitStatusPanel and the mainTreeScope
+                // FocusScope below). A single envelope around the entire side
+                // panel couldn't communicate WHICH region had focus, back when
+                // both were on screen at once. With tabs, only one body is
+                // visible, so the bars now say "the side panel has focus"
+                // rather than "which half" — kept because that is still the
+                // question the user asks before pressing j. The per-pane
                 // FocusBars follow a color-flip contract (accent.focus ↔
                 // transparent on color, never on geometry — so focus
                 // transitions cost no layout round-trip) but render as a
@@ -2049,18 +2113,35 @@ Window {
                 // equivalent border by design (see the note above
                 // fmPaneLoader).
 
-                // Three-section composition inside the side panel:
-                //   1. LocationHeader — current displayedRoot + anchor
+                // Composition inside the side panel — a fixed head and one
+                // swappable body:
+                //   1. LocationHeader   — current displayedRoot + anchor
                 //      glyph. Always visible (the "where am I" question
                 //      is load-bearing for the dual-mode navigation-vs-
                 //      project framing in docs/vision.md).
-                //   2. GitStatusPanel — auto-hidden when clean; collapses
-                //      to zero height so the tree below claims its space.
-                //   3. FileTreeView   — fills the remaining vertical space.
+                //   2. Tab header       — SegmentedControl, files ↔ changes.
+                //   3. The current tab's body, filling all remaining height:
+                //      FileTreeView (tab 0) or GitStatusPanel (tab 1).
                 //
-                // No separator between them — the panel's chrome border
-                // already provides visual delineation, and a hairline
-                // separator would just add noise when GitStatusPanel hides.
+                // GitStatusPanel and FileTreeView were CO-MOUNTED and stacked
+                // vertically until 2026-08-15, the changes pane capped at half
+                // the column and folding away when clean. Two trees splitting
+                // one narrow column meant neither had room: the changes pane
+                // scrolled inside its cap while the file tree lost half its
+                // height to a panel the user might not be reading. Tabs give
+                // whichever one the user is actually using the whole column.
+                //
+                // Both bodies stay declared here and swap on `visible` — a
+                // Loader would remount the FM tree on every toggle, discarding
+                // its expanded-path state and scroll position and re-running
+                // the mount race documented at `_applyTreeMount()`. An
+                // invisible ColumnLayout child claims no space, so the cost of
+                // keeping both is the idle memory of one mounted tree, not
+                // layout height.
+                //
+                // No separator between the sections — the panel's chrome
+                // border already delineates, and the tab header itself is now
+                // the visual break between head and body.
                 ColumnLayout {
                     anchors.fill: parent
                     // No explicit spacing between sub-sections. Each
@@ -2173,32 +2254,93 @@ Window {
                         }
                     }
 
+                    // The tab header. Same SegmentedControl the surface
+                    // switcher and local|vps use, so the side panel gains no
+                    // new switcher idiom — which is the whole reason that
+                    // component exists (read its header: four hand-rolled
+                    // copies once made the IDE look like it had more toggles
+                    // than ideas).
+                    //
+                    // The `segments` array is REBUILT whenever the count
+                    // changes, which is correct and cheap: a `badgeFor(key)`
+                    // function in a binding would never re-evaluate (gotcha
+                    // #3), and rebuilding recreates two Text-only delegates
+                    // that hold no state and back no process.
+                    //
+                    // The count goes in `badge`, not `label`: with icons set,
+                    // the label only draws on the CURRENT segment, so a count
+                    // composed into it would vanish from the changes tab
+                    // exactly while the user is on the files tab — the one
+                    // moment it is telling them something they cannot already
+                    // see. Empty string at zero, so a clean tree shows a bare
+                    // glyph rather than a "0" that reads as a stat.
+                    SegmentedControl {
+                        id: sidePanelTabs
+                        // Centred in the column, NOT stretched. The root of
+                        // SegmentedControl is a `Row`, so it sizes to its own
+                        // content — `Layout.fillWidth` would widen the item
+                        // while the segments still packed against the left
+                        // edge, which is what left them there. Dropping it and
+                        // aligning is the whole centring; there is no spacer
+                        // trick needed (contrast the RowLayout centre-drift
+                        // recorded in memory, which bites when a hidden
+                        // fillWidth sibling is in the layout).
+                        //
+                        // Known cost, accepted: with the active-only label the
+                        // control has TWO widths ("files" vs "changes" plus the
+                        // count badge), so centring re-centres the pair on every
+                        // switch instead of only moving the trailing edge. The
+                        // shift is a handful of pixels and rides the component's
+                        // existing `Behavior on implicitWidth`, so it glides
+                        // rather than jumps. AgentTopBar carries the same
+                        // two-widths caveat for the same reason.
+                        Layout.alignment: Qt.AlignHCenter
+                        Layout.topMargin: Theme.spacing.xxs
+                        Layout.bottomMargin: Theme.spacing.xxs
+                        // Narrower than the default: this control lives in a
+                        // 280px column beside a scrollbar, not on a full-width
+                        // bar. At the default padding the two segments plus
+                        // the active label overran the column.
+                        horizontalPadding: Theme.spacing.sm
+
+                        segments: [
+                            {key: "files", label: "files", icon: Theme.glyph.fileTree},
+                            {key: "changes", label: "changes", icon: Theme.glyph.surface.git,
+                             badge: gitStatusList.count > 0 ? String(gitStatusList.count) : ""},
+                        ]
+                        current: root.sidePanelTab === 1 ? "changes" : "files"
+
+                        // Clicking a segment must land focus in the tab it
+                        // opened, exactly as Tab does — otherwise focus stays
+                        // wherever it was and the user's next Tab press reads
+                        // as a dead key. `_toggleSidePanelTab` is not reusable
+                        // here (a click names a destination, it does not
+                        // flip), so this sets the tab and calls the shared
+                        // focus half.
+                        onActivated: function (key) {
+                            root.sidePanelTab = key === "changes" ? 1 : 0;
+                            root._focusSidePanelTab();
+                        }
+                    }
+
                     GitStatusPanel {
                         id: gitStatusPanel
                         Layout.fillWidth: true
-                        // Cap the changes pane at half the side panel
-                        // column so a pathological changeset (e.g. a
-                        // fresh checkout with hundreds of untracked
-                        // files, or a project with a giant `node_modules`
-                        // surfaced via `respectGitignore: false`) cannot
-                        // push the main FileTreeView below off-screen.
-                        // When the cap engages, the panel's embedded
-                        // FileTreeView scrolls via its own ListView.
-                        // `parent` is the enclosing ColumnLayout, whose
-                        // height is anchored to the side panel
-                        // Rectangle — stable, no binding loop.
-                        // TODO: promote to Theme.sizing.gitPanelMaxFraction
-                        // once this pattern recurs (Theme token is the right
-                        // escape hatch per project-standards §3 P2).
-                        maxHeight: parent.height * 0.5
-                        // Fold away while the git "changes" surface is on
-                        // screen — that surface IS the full changes tree, so
-                        // this side mini-tree would just duplicate it. Only in
-                        // CHANGES mode, not history: when the central surface
-                        // shows commits, the side changes tree is a useful
-                        // at-a-glance reference again, so it slides back down.
-                        collapsed: controller.centralSurface === "git"
-                                   && gitHistoryView.mode === "changes"
+                        Layout.fillHeight: true
+                        // The tab IS the visibility. Two properties used to
+                        // decide it instead, and both were consequences of the
+                        // stacked layout that tabs removed:
+                        //   `maxHeight: parent.height * 0.5` capped this pane
+                        //   so a pathological changeset could not push the file
+                        //   tree off the bottom of a SHARED column. Nothing is
+                        //   shared now — the tab owns the column.
+                        //   `collapsed` folded it away while the central git
+                        //   surface showed the same changeset. The user now
+                        //   picks the tab, so folding it under them would
+                        //   override a choice they just made; a duplicated view
+                        //   is their call, and one they can see they made.
+                        // Do not reintroduce either alongside the tabs.
+                        visible: root.sidePanelTab === 1
                         model: gitStatusList
                         // Header-bucket aggregates (staged/unstaged/untracked
                         // adds/dels/files) — populated by the same worker
@@ -2228,27 +2370,22 @@ Window {
                                 editor.forceActiveFocus();
                         }
 
-                        // GitStatusPanel's root is a FocusScope, so
-                        // `activeFocus` is true whenever the embedded
-                        // inner ListView has activeFocus — works for
-                        // BOTH keyboard chord arrivals (Ctrl+K via
-                        // `focusInternal()`) and mouse clicks (the FM
-                        // delegate focuses the ListView naturally).
-                        // The sticky `activeTreeSubPane` property gets
-                        // updated here too, so Ctrl+L re-entry from the
-                        // editor lands here even after a click-driven
-                        // focus arrival — no click-vs-keyboard desync.
-                        onActiveFocusChanged: {
-                            if (activeFocus)
-                                root.activeTreeSubPane = 1;
-                        }
+                        // An `onActiveFocusChanged` handler here wrote
+                        // `activeTreeSubPane = 1`, so that a CLICK into this
+                        // pane updated the sticky property the same way the
+                        // Ctrl+K chord did and Ctrl+L re-entry did not desync.
+                        // Tabs make that write unreachable: an invisible item
+                        // cannot take activeFocus, so this pane only ever gains
+                        // focus while its tab is already current, and the
+                        // property is already 1. Do not add it back as
+                        // "defensive" — it would be a write that can only ever
+                        // restate what is already true.
 
-                        // Per-sub-pane focus indicator. Replaces the
-                        // prior whole-side-panel `treeScopeFocusBorder`
-                        // — the user couldn't tell WHICH sub-pane had
-                        // focus from a single envelope around the whole
-                        // column. Geometry + rationale live in
-                        // FocusBar.qml.
+                        // Per-tab focus indicator. GitStatusPanel's root is a
+                        // FocusScope, so `activeFocus` is true whenever the
+                        // embedded inner ListView holds it — for keyboard
+                        // arrivals (Tab, Ctrl+L) and mouse clicks alike.
+                        // Geometry + rationale live in FocusBar.qml.
                         FocusBar {
                             focused: gitStatusPanel.activeFocus
                         }
@@ -2257,22 +2394,21 @@ Window {
                     // Wrap the main FileTreeView in a FocusScope so its
                     // `activeFocus` propagates from the inner ListView,
                     // mirroring GitStatusPanel's FocusScope-rooted
-                    // behavior. This is what lets the per-sub-pane
-                    // focus border + sticky-property tracking work for
-                    // the main tree too — `mainTreeScope.activeFocus`
+                    // behavior. This is what lets the per-tab focus bar work
+                    // for the main tree too — `mainTreeScope.activeFocus`
                     // is true on click OR keyboard arrival. Layout
                     // properties (fillWidth/fillHeight) live on the
                     // wrapper; the FileTreeView itself uses anchors.fill
                     // to match the wrapper's geometry.
+                    //
+                    // The FILES tab. Its `onActiveFocusChanged` write of the
+                    // sticky sub-pane property is gone for the same reason as
+                    // the changes tab's — see the note there.
                     FocusScope {
                         id: mainTreeScope
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-
-                        onActiveFocusChanged: {
-                            if (activeFocus)
-                                root.activeTreeSubPane = 0;
-                        }
+                        visible: root.sidePanelTab === 0
 
                         FmUi.FileTreeView {
                             id: fileTreeView
@@ -2521,7 +2657,7 @@ Window {
                 // RenamePopup's positional bindings assume fileTreeView
                 // coordinates unconditionally. Extending ops to the
                 // changes pane means sharing this WindowState and making
-                // the positional trio activeTreeSubPane-aware.
+                // the positional trio sidePanelTab-aware.
                 FmUi.WindowState {
                     id: treeOpsWindowState
                     // Live binding chain: initialPath → currentPath (the
@@ -2590,29 +2726,17 @@ Window {
         Connections {
             target: controller
             function onFocusTreeRequested(): void {
-                // Honors the sticky `activeTreeSubPane` property — Ctrl+L
-                // re-entry lands focus on whichever sub-pane the user
-                // last navigated to (via Ctrl+J / Ctrl+K), not always
-                // on the main tree. The visibility guard handles the
-                // race where the changes pane was last-active but
-                // hid mid-session before this signal fired (clean
-                // tree); in that case we fall back to the main tree.
+                // Ctrl+L re-entry lands on the CURRENT tab, so coming back
+                // from a central pane resumes where the user left off rather
+                // than always on the files tree.
                 //
-                // Both panes expose `focusInternal()` — a public
-                // function on the FM FileTreeView that delegates
-                // `forceActiveFocus()` to its internal `view` ListView
-                // (the item that actually owns `Keys.onPressed` for
-                // j/k/h/l/Ctrl+D/Ctrl+U/Return). Calling
-                // `forceActiveFocus()` on the FileTreeView's outer Item
-                // directly is a no-op for keyboard nav — the outer
-                // Item becomes activeFocusItem but keystrokes never
-                // reach the ListView. GitStatusPanel forwards through
-                // the same `focusInternal()` surface so both sub-panes
-                // are structurally symmetric.
-                if (root.activeTreeSubPane === 1 && gitStatusPanel.reachable)
-                    gitStatusPanel.focusInternal();
-                else
-                    fileTreeView.focusInternal();
+                // The old visibility guard here (fall back to the main tree if
+                // the changes pane had hidden mid-session) is gone with the
+                // condition that produced it: the changes tab no longer hides
+                // on a clean working tree, so `sidePanelTab === 1` can never
+                // name something that is not on screen. The remaining
+                // empty-tree case is handled inside `_focusSidePanelTab`.
+                root._focusSidePanelTab();
             }
 
             // Reverse direction of onFocusTreeRequested. Fired from
@@ -2646,37 +2770,27 @@ Window {
 
         }
 
-        // Auto-reset `activeTreeSubPane` when the changes pane hides
-        // (clean working tree). Without this, the sticky-focus property
-        // could point at an invisible sub-pane — Ctrl+L would then call
-        // `gitStatusPanel.focusInternal()` and the FM would
-        // forceActiveFocus on an item Qt refuses to focus (invisible
-        // items can't be activeFocusItem), silently dropping focus
-        // into a black hole. Resetting to 0 (main tree) keeps Ctrl+L
-        // always landing on a reachable sub-pane. The Ctrl+K chord
-        // that originally set activeTreeSubPane=1 is also gated on
-        // `gitStatusPanel.reachable`, so the symmetric guard there
-        // prevents the bad state from being re-entered while the
-        // pane is hidden OR collapsed.
+        // Re-park focus when the changes tree empties UNDER the user — they
+        // are sitting on a row in the changes tab and the last change goes
+        // away (a commit, a stash, a discard from anywhere). The inner
+        // FileTreeView flips `visible: false` for the empty state, and an
+        // invisible item cannot keep activeFocus, so focus would be orphaned:
+        // the panel would look focused but swallow every key, including the
+        // Tab that is the way out.
         //
-        // Keyed on `reachable` (not `visible`) so this fires for BOTH
-        // ways the panel stops accepting focus: the clean-tree hard-hide
-        // (visible:false) AND the git-surface fold (collapsed:true, where
-        // visible stays true). Either transition orphans focus the same
-        // way, so they share one release path.
+        // This replaces a broader guard that ALSO reset the tab to files. That
+        // was right when the changes pane hard-hid — the tab it named stopped
+        // existing. It is wrong now: the tab is still there showing its empty
+        // state, and yanking the user to a different tab because they finished
+        // committing overrides a choice they did not revisit. Park focus on
+        // the panel's own FocusScope instead and leave the tab alone.
         Connections {
             target: gitStatusPanel
-            function onReachableChanged(): void {
-                if (gitStatusPanel.reachable || root.activeTreeSubPane !== 1)
+            function onHasChangesChanged(): void {
+                if (gitStatusPanel.hasChanges || root.sidePanelTab !== 1)
                     return;
-                root.activeTreeSubPane = 0;
-                // If the side panel currently has focus, the previously-
-                // active sub-pane is the one that just went away — its
-                // inner items can no longer hold activeFocus. Hand focus
-                // to the main tree so the user can keep navigating without
-                // having to round-trip through Ctrl+H+Ctrl+L.
                 if (treeScope.activeFocus)
-                    fileTreeView.focusInternal();
+                    gitStatusPanel.forceActiveFocus();
             }
         }
 

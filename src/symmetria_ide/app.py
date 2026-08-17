@@ -2612,6 +2612,30 @@ class AppController(QObject):
         self._tree_user_visible = not self._tree_user_visible
         self._emit_tree_visible_if_changed(was_visible)
 
+    @Slot()
+    def show_tree(self) -> None:
+        """Reveal the sidebar — the IDEMPOTENT twin of `toggle_tree`.
+
+        Exists because `toggle_tree` FLIPS, which makes it the wrong
+        primitive for any caller that wants the sidebar *shown*: called
+        while the sidebar is already hidden by the responsive width gate
+        (user intent True, window too narrow) a flip sets intent to False
+        and the sidebar then stays hidden even after the window widens
+        again. The caller cannot guard against that either, because
+        `treeVisible` is the AND of both inputs and does not say which one
+        is False.
+
+        Sets user intent only; the width gate still ANDs on top, so this
+        cannot force the sidebar open on a narrow window — deliberately the
+        same precedence `toggle_tree` documents.
+
+        Caller: the Ctrl+Shift+D side-panel tab chord, which reveals the
+        panel it is about to switch so the key is never a silent no-op.
+        """
+        was_visible = self.treeVisible
+        self._tree_user_visible = True
+        self._emit_tree_visible_if_changed(was_visible)
+
     @Property(QObject, constant=True)
     def gitController(self) -> QObject:
         """The `GitController` exposed to QML.
