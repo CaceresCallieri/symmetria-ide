@@ -267,8 +267,13 @@ Window {
     // internal slot. A position with no agent opens the spawn menu —
     // Ctrl+2 with one agent running means "give me a second one"; the
     // new agent always appends as the next dense number.
+    // FIVE, deliberately literal: this is a KEYBOARD surface (the digit row's
+    // reachable span), not a pool capacity. The agent pool itself is unlimited
+    // — see agent_pane_slots.py — so there is no property to bind here that
+    // would stay honest; `controller.maxAgentSlots` used to be that property
+    // and was retired for asserting a cap that no longer exists.
     Instantiator {
-        model: controller.maxAgentSlots
+        model: 5
         delegate: Shortcut {
             required property int index
             sequences: ["Ctrl+" + (index + 1)]
@@ -581,14 +586,22 @@ Window {
     // IDE-wide horizontal pane navigation.
     //
     // Spatial chord: Ctrl+H = move left, Ctrl+L = move right. The
-    // window has a two-column topology — a central surface on the
-    // left (agent / editor / terminal, one visible at a time) and
-    // the file-tree sidebar on the right — so:
+    // window has a THREE-column topology since the thread rail landed
+    // — the rail on the left, a central surface in the middle (agent /
+    // editor / terminal / git / FM, one visible at a time), and the
+    // file-tree sidebar on the right — so:
     //
-    //   - Ctrl+L from any central surface         -> focus tree
     //   - Ctrl+H from the tree                    -> focus visible central
+    //   - Ctrl+H from a central surface           -> focus the thread rail
+    //   - Ctrl+H from the rail (no left neighbor) -> silent no-op
+    //   - Ctrl+L from the rail                    -> focus visible central
+    //   - Ctrl+L from any central surface         -> focus tree
     //   - Ctrl+L from the tree (no right neighbor) -> silent no-op
-    //   - Ctrl+H from a central (no left neighbor) -> silent no-op
+    //
+    // Both directions land on the centre through the SAME
+    // `_restoreCentralFocus()` the window's re-activation path uses. It
+    // was duplicated inline here before the rail arrived, and with two
+    // chords now needing it that copy is what would drift.
     //
     // Application-scope chord per the project-wide principle in
     // `.claude/memory/project/meta/ide_owns_keybind_layer.md`: IDE
@@ -630,28 +643,16 @@ Window {
         sequences: ["Ctrl+H"]
         context: Qt.ApplicationShortcut
         onActivated: {
-            if (!treeScope.activeFocus)
+            // Leftmost column already — nothing further left to reach.
+            if (threadRail.activeFocus)
                 return;
-            // FM is a co-mounted central-pane sibling — when it is
-            // visible, editor/terminal/agent are all gated off by
-            // !controller.fmVisible and cannot hold activeFocus.
-            // Route back to the FM item directly; fall through to
-            // the three-way dispatch below only when FM is not open.
-            if (controller.fmVisible && fmPaneLoader.item)
-                fmPaneLoader.item.forceActiveFocus();
-            else if (controller.agentVisible)
-                agentPane.forceActiveFocus();
-            else if (controller.agentSurfaceVisible)
-                // Terminal-agent surface: re-request focus for the focused
-                // slot — the delegate's onFocusAgentRequested handler lands
-                // it on the visible agent terminal.
-                controller.focus_agent(controller.focusedAgent);
-            else if (controller.gitVisible)
-                gitHistoryView.focusContent();
-            else if (controller.terminalVisible)
-                root._focusTerminalPane();
+            // From the tree, "left" is the centre; from the centre, the rail.
+            // `_restoreCentralFocus` handles FM / agent / git / terminal /
+            // editor, so this chord never has to know which one is up.
+            if (treeScope.activeFocus)
+                root._restoreCentralFocus();
             else
-                editor.forceActiveFocus();
+                threadRail.forceActiveFocus();
         }
     }
 
@@ -659,6 +660,13 @@ Window {
         sequences: ["Ctrl+L"]
         context: Qt.ApplicationShortcut
         onActivated: {
+            // From the rail, "right" is the centre.
+            if (threadRail.activeFocus) {
+                root._restoreCentralFocus();
+                return;
+            }
+            // Rightmost column already, or the tree is hidden (responsive
+            // gate / Ctrl+S) so there is no right neighbour to move to.
             if (treeScope.activeFocus)
                 return;
             if (!controller.treeVisible)
@@ -801,6 +809,33 @@ Window {
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 0
+
+            // Agent thread rail — the leftmost column, and the window's index
+            // of agent conversations. It replaced AgentTopBar's centered chip
+            // strip: a bar runs out of width after a handful of pills, and
+            // what the user needs is a list of every thread in the project.
+            //
+            // Always visible in v1 — no toggle chord and no width gate. The
+            // tree's existing responsive gate already hides the OTHER side
+            // panel on a narrow window, so this rail becomes the only one
+            // there rather than a second one.
+            AgentThreadRail {
+                id: threadRail
+                Layout.minimumWidth: Theme.size.threadRailWidth
+                Layout.maximumWidth: Theme.size.threadRailWidth
+                Layout.fillHeight: true
+            }
+
+            // 1px separator, matching the tree's on the opposite edge — same
+            // canvas-corner inset, same rule that no straight line crosses a
+            // rounded corner.
+            Rectangle {
+                Layout.fillHeight: true
+                Layout.topMargin: Theme.radius.canvas
+                Layout.bottomMargin: Theme.radius.canvas
+                implicitWidth: 1
+                color: FmUi.FmTheme.palette.outlineVariant
+            }
 
             Item {
                 id: mainContent
@@ -1153,16 +1188,23 @@ Window {
                 // agent is visible at a time (`controller.focusedAgent`);
                 // Ctrl+1..5 / Ctrl+Shift+H/L switch which.
                 //
-                // STRUCTURE IS LOAD-BEARING: a fixed `model:
-                // controller.maxAgentSlots` Repeater over per-slot Loaders.
-                // Spawning = the slot's `agentSlotActive[index]` flips true →
-                // Loader instantiates the terminal and starts claude. Closing
-                // = the flag flips false → Loader teardown destroys the
-                // KSession, whose destructor hangs up the Pty and reaps the
-                // claude child. Do NOT replace the fixed Repeater with a
-                // model over `activeAgentSlots` — list churn would
-                // destroy/recreate sibling delegates and kill live claude
-                // processes on every spawn/close.
+                // STRUCTURE IS LOAD-BEARING: a Repeater over the APPEND-ONLY
+                // pane registry (`agentPaneSlots`, agent_pane_slots.py) with
+                // one Loader per slot. Spawning = that row's active flag flips
+                // true → Loader instantiates the terminal and starts the agent
+                // CLI. Closing = the flag flips false → Loader teardown
+                // destroys the KSession, whose destructor hangs up the Pty and
+                // reaps the child.
+                //
+                // The registry only ever APPENDS rows — closing frees a slot,
+                // it never deletes the row and never reorders. That discipline
+                // is the whole safety argument, and it is measured: growing a
+                // plain-integer model 3 → 8 destroyed all three live panes,
+                // while the append-only model grew 3 → 9 with zero
+                // destructions (2026-08-15; tests/qml_harness/pane_growth_probe.py).
+                // So do NOT point this Repeater at a model of ACTIVE agents —
+                // that one reorders on focus and deletes on close, and either
+                // operation churns delegates and kills live agent processes.
                 Item {
                     id: agentSurface
                     anchors.fill: parent
@@ -1308,15 +1350,44 @@ Window {
 
                     Repeater {
                         id: agentSlotRepeater
-                        model: controller.maxAgentSlots
+                        // The append-only pane registry (agent_pane_slots.py),
+                        // NEVER a model of active agents: this one only ever
+                        // appends rows, so growing it leaves live delegates —
+                        // and the agent processes they own — untouched.
+                        model: agentPaneSlots
 
                         delegate: Loader {
                             id: slotLoader
 
                             required property int index
-                            readonly property int slot: slotLoader.index + 1
+                            // From the row, not `index + 1`. They coincide by
+                            // construction (rows are contiguous from slot 1 and
+                            // never move); reading the role is what keeps that
+                            // an assertion of the model rather than of the view.
+                            required property int slot
 
                             anchors.fill: parent
+                            // The registry's own flag, reached through the
+                            // controller rather than as a required role
+                            // property: `active` is already Loader's own
+                            // property, so a required property of that name
+                            // cannot be declared here, and `model.active` does
+                            // not resolve once a delegate declares ANY required
+                            // property (measured: it read true for a false row).
+                            //
+                            // DELIBERATE DUPLICATION, not an oversight. The
+                            // occupancy of a slot is published twice — as the
+                            // model's `active` role and as this list property —
+                            // and only this one drives the Loader. Renaming the
+                            // role (to `occupied`, say) and retiring
+                            // `agentSlotActive` would collapse the two, and was
+                            // rejected: both spellings are named by the approved
+                            // Phase-1 test contract, which looks the role up by
+                            // the name "active" and asserts `agentSlotActive`'s
+                            // length against the registry's row count. They
+                            // cannot drift regardless — `agentSlotActive` IS
+                            // `AgentPaneSlotModel.active_flags()`, the same list
+                            // the role reads, with no second copy of the state.
                             active: controller.agentSlotActive[slotLoader.index]
                             visible: controller.focusedAgent === slotLoader.slot
 
@@ -2040,14 +2111,23 @@ Window {
                 // WHICH sub-pane (changes vs main tree) had focus, which
                 // mattered once Ctrl+J/Ctrl+K subdivided the side panel
                 // into two independently-navigable regions. The per-pane
-                // FocusBars follow a color-flip contract (accent.focus ↔
-                // transparent on color, never on geometry — so focus
-                // transitions cost no layout round-trip) but render as a
-                // left-edge bar rather than a full envelope — subtler, and
-                // clear of the scrollbar. These side-panel bars are now the
-                // ONLY focus-status affordance; the central surface has no
-                // equivalent border by design (see the note above
-                // fmPaneLoader).
+                // FocusBars render as a single-edge bar rather than a full
+                // envelope — subtler, and clear of the scrollbar. Their
+                // focus transition and the reason it costs no layout
+                // round-trip are documented once, in FocusBar.qml's header;
+                // do not restate the mechanism here, because this copy
+                // already drifted once when the component changed.
+                //
+                // ⚠ These two are no longer the only focus bars: the thread
+                // rail carries a third (AgentThreadRail.qml), so a change to
+                // the shared component reaches all three panes at once. The
+                // grow/shrink animation the rail introduced is deliberately
+                // inherited here — one focus language across the window, not
+                // an animated rail beside two instant side panels.
+                //
+                // The pane bars remain the only focus-status affordance; the
+                // central surface has no equivalent border by design (see the
+                // note above fmPaneLoader).
 
                 // Three-section composition inside the side panel:
                 //   1. LocationHeader — current displayedRoot + anchor

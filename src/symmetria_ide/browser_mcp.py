@@ -492,7 +492,7 @@ class BrowserMcpServer:
             """Signal the user to look at THIS agent's browser window.
 
             Lights a notification dot on your agent's browser globe in the IDE
-            top bar — use it when you've loaded or found something in the
+            thread rail — use it when you've loaded or found something in the
             browser the user should see (a result page, a diff, a preview).
             The user does NOT get pulled to the browser automatically; this dot
             is how they know to come look. Requires that you have an open window
@@ -514,7 +514,8 @@ class BrowserMcpServer:
                 transcript and then send YOU a go-ahead message to continue.
 
                 `agent` is the other agent's DISPLAY number — the number shown
-                on its chip in the IDE top bar (what the user calls "agent 3").
+                on its row in the IDE's thread rail (what the user calls
+                "agent 3").
                 It is strictly 1-based — there is no 0 = "focused" shorthand.
                 `note` is an optional one-line description of what you are
                 waiting for (e.g. "the API refactor is merged"); it is shown to

@@ -15,7 +15,7 @@ the multi-provider shape forces:
 2. **Two locks, deliberately.** `poll_lock` is leader election: with N IDE
    windows open, only the one that takes it performs the (network-bound, ~2s)
    poll, so the request count stays at one per interval no matter how many
-   windows are up. `_write_lock` is a separate microsecond-scale mutex around
+   windows are up. `fs_atomic.write_lock` is a separate microsecond-scale mutex around
    the read-merge-write, so a status-line tap publishing on the GUI thread is
    never blocked behind an in-flight poll.
 
@@ -43,7 +43,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QFileSystemWatcher, QObject, Signal
 
-from .fs_atomic import atomic_write_json
+from .fs_atomic import atomic_write_json, write_lock
 from .usage_providers import ProviderUsage, usage_from_dict
 
 __all__ = [
@@ -93,33 +93,10 @@ def read(path: Path) -> dict[str, ProviderUsage]:
     return out
 
 
-@contextmanager
-def _write_lock(path: Path) -> Iterator[None]:
-    """Blocking mutex around the read-merge-write. Held for microseconds.
-
-    Without it, two windows publishing different providers at the same instant
-    would each write back the OTHER's stale entry (classic read-modify-write
-    race), and one update would be silently lost until its next observation.
-    Blocking is safe precisely because the critical section excludes all I/O
-    against the network — the long poll holds `poll_lock`, a different file.
-    """
-    lock_path = path.with_suffix(path.suffix + ".write.lock")
-    try:
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError as exc:
-        # A read-only or full runtime dir must not turn every agent turn into
-        # an uncaught exception inside a queued GUI-thread slot. Degrade to an
-        # unlocked write: `atomic_write_json` is still crash-safe, we only lose
-        # the cross-process ordering guarantee — which is exactly the tradeoff
-        # `poll_lock` already makes for the same failure.
-        log.debug("usage-store: cannot open write lock (%s)", exc)
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)  # closing releases the flock
+# The read-merge-write mutex moved to `fs_atomic.write_lock` once the
+# agent-thread store needed the identical guard — see that function. Blocking
+# is safe here precisely because this critical section excludes all network
+# I/O: the long poll holds `poll_lock` below, a different file.
 
 
 @contextmanager
@@ -159,7 +136,7 @@ def publish_if_newer(path: Path, usage: ProviderUsage) -> bool:
     """
     if usage.observed_at_ns <= 0:
         return False
-    with _write_lock(path):
+    with write_lock(path):
         current = read(path)
         existing = current.get(usage.provider)
         if existing is not None and existing.observed_at_ns >= usage.observed_at_ns:

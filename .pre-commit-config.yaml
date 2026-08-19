@@ -64,10 +64,14 @@ repos:
 
       # pyright runs in REPORT-ONLY mode — it never blocks a commit.
       #
-      # Baseline: 82 errors, measured 2026-08-13 against the `[tool.pyright]`
+      # Baseline: 83 errors, measured 2026-08-15 against the `[tool.pyright]`
       # scope in pyproject.toml (which is what took it down from 608; read the
-      # comment there before touching this). Was 85 on 2026-08-04; the drop was
-      # NOT attributed to a specific change — only the total was re-measured.
+      # comment there before touching this). Was 82 on 2026-08-13 and 85 on
+      # 2026-08-04; the 2026-08-13 drop was NOT attributed to a specific change
+      # — only the total was re-measured. The +1 on 2026-08-15 IS attributed:
+      # constructing `AgentPaneSlotModel` adds one more of the `@QmlElement`
+      # false positives gotcha #7 describes, exactly like the seven sibling
+      # models constructed beside it.
       # The number this comment used to claim, ~39, was stale AND measured
       # against no config at all — the same class of drift as the missing ruff
       # config, so verify it rather than trusting it. `pyright | tail -1` is the

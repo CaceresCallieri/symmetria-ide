@@ -31,6 +31,22 @@ def controller(monkeypatch):
     """
     monkeypatch.setattr("symmetria_ide.app.ChromeHost", FakeChromeHost)
     ctrl = AppController()
+    # Two agent slots, registered directly rather than spawned (a spawn would
+    # drag in focus, bridge publication and surface switching, none of which
+    # this file is about). They must exist: a browser window is OWNED by an
+    # agent, and since 2026-08-15 the per-agent-slot lists below —
+    # agentBrowserCount, agentBrowserAttention — are sized by the pane
+    # registry's high-water mark rather than by a fixed five, so a link
+    # attributed to a slot no agent ever held would have nowhere to show.
+    for slot in (1, 2):
+        ctrl._term_agents[slot] = {
+            "harness": "claude",
+            "cwd": "",
+            "title": "",
+            "dangerous": True,
+        }
+        ctrl._agent_order.append(slot)
+    ctrl._sync_pane_slots()
     yield ctrl
     ctrl.shutdown()
 
@@ -430,8 +446,21 @@ def test_agent_death_drops_its_links_and_attention(controller):
 
 
 def test_agent_browser_lists_match_slot_count(controller):
-    assert len(controller.agentBrowserCount) == controller._MAX_INSTANCES
-    assert len(controller.agentBrowserAttention) == controller._MAX_INSTANCES
+    """Guard: both lists are indexed `agentSlot - 1`, so they follow the AGENT pool.
+
+    That is the pane registry's high-water mark since 2026-08-15, not
+    `_MAX_INSTANCES` — the terminal-agent pool is uncapped, while
+    `_MAX_INSTANCES` still bounds the BROWSER registry (below) and the parked
+    SDK pool.
+    """
+    assert len(controller.agentBrowserCount) == controller._agent_pane_slots.rowCount()
+    assert len(controller.agentBrowserAttention) == len(controller.agentBrowserCount)
+
+
+def test_browser_registry_is_still_capped_at_five(controller):
+    """The lifted agent cap must not widen the browser's own pool."""
+    controller._browser_tabs = {slot: {"url": "", "title": ""} for slot in range(1, 6)}
+    assert controller._next_free_browser_slot() is None
 
 
 def test_shutdown_stops_chrome(controller):

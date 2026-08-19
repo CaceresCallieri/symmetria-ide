@@ -7,7 +7,7 @@ metadata:
   originSessionId: c2520dc6-0151-4951-b845-22f8c8f29d04
 ---
 
-The IDE's AgentTopBar STT soundwave and the Symmetria Shell agentbar's STT
+The IDE's AgentThreadRail STT soundwave and the Symmetria Shell agentbar's STT
 soundwave look identical but are fed by **different sources** — so they can
 disagree, and that disagreement is by design:
 
