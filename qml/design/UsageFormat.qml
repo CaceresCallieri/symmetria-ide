@@ -1,6 +1,13 @@
 // Presentation helpers for subscription usage — shared by the compact
 // `UsageIndicator`, the `UsageDetailPopup`, and StatusBar's context segment.
 //
+// The two ELAPSED-TIME helpers (`age`, `duration`) have outgrown that name and
+// are shared with `AgentThreadRail` as well. They stayed here rather than
+// moving to a new singleton for the reason the whole file exists: "how long
+// ago" had already been written twice before the rail wanted it a third time,
+// and a `TimeFormat.qml` holding two functions would just be a second place a
+// future caller has to know to look.
+//
 // Why a singleton in `design/` rather than functions on each consumer: the
 // threshold colour and the reset countdown were BOTH already duplicated once
 // (StatusBar carried private `_usageColor` / `_resetCountdown` copies of
@@ -96,6 +103,39 @@ QtObject {
         if (h < 24)
             return h + "h ago";
         return Math.floor(h / 24) + "d ago";
+    }
+
+    // Bare elapsed time since a unix-epoch-SECONDS stamp ("now", "22m", "2h",
+    // "3d") — `age` without the "ago", for a caller that supplies the meaning
+    // itself. The thread rail is that caller: the same string there reads
+    // "working for 22m" on an agent that is running and "idle for 22m" on one
+    // that is not, and only the row knows which.
+    //
+    // SINGLE-UNIT on purpose, where `countdown` composes two ("2h30m"). That
+    // one has a whole status-bar segment to fill and a deadline where the
+    // minutes matter; this one sits at the right edge of a 220px rail row, and
+    // the reader is asking "recently, or a while ago" — a second unit costs
+    // width the title needs and answers a question nobody asked.
+    //
+    // `nowMs` is the caller's live clock for the same reason it is on `age`
+    // and `countdown`: read here, `Date.now()` would not be a binding
+    // dependency and every duration would freeze at its first evaluation
+    // (gotcha #3).
+    function duration(sinceEpochSec, nowMs) {
+        if (!sinceEpochSec || sinceEpochSec <= 0)
+            return "";
+        var diff = Math.floor(nowMs / 1000 - sinceEpochSec);
+        // Guard the clock going backwards (an NTP step, a suspend/resume)
+        // rather than rendering "-3m", which reads as a bug in the rail.
+        if (diff < 60)
+            return "now";
+        var m = Math.floor(diff / 60);
+        if (m < 60)
+            return m + "m";
+        var h = Math.floor(m / 60);
+        if (h < 24)
+            return h + "h";
+        return Math.floor(h / 24) + "d";
     }
 
     // Human wording for a provider fetch failure. The raw reasons are stable

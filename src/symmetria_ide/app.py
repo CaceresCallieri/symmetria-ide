@@ -3771,6 +3771,74 @@ class AppController(QObject):
             for slot in range(1, self._slot_count() + 1)
         ]
 
+    @Property("QVariantList", notify=agentActivityChanged)
+    def agentTiming(self) -> list:
+        """Per-slot `{busySince, idleSince}` epoch seconds, indexed `slot - 1`.
+
+        Exactly one of the pair is non-zero for a live slot, and which one is
+        the state itself: `busySince` means "working since then", `idleSince`
+        means "last stopped working then" — which for an agent CLI is when it
+        finished answering, i.e. the moment the user's last reply arrived.
+
+        Separate from `agentActivity` rather than folded into its dicts
+        because that list is REBUILT wholesale by both snapshot handlers from
+        payloads that carry no timestamps; a stamp living there would be
+        erased by the next bridge frame. It lives on the `_term_agents`
+        record instead, whose lifetime is exactly the agent's — which is also
+        what keeps a reused slot number from inheriting the previous agent's
+        clock, with no pruning to remember.
+
+        `agentActivityChanged` is the honest notify: the stamps move only on a
+        busy/idle edge, and that signal fires on exactly those. A slot that is
+        BRAND NEW is covered without a signal at all — its row is created
+        after the record, so the binding's first evaluation already reads the
+        spawn seed.
+        """
+        return [
+            {
+                "busySince": self._term_agents.get(slot, {}).get("busy_since", 0),
+                "idleSince": self._term_agents.get(slot, {}).get("idle_since", 0),
+            }
+            for slot in range(1, self._slot_count() + 1)
+        ]
+
+    def _emit_activity_changed(self) -> None:
+        """Stamp the busy/idle edges, then publish the activity change.
+
+        The ONE funnel every activity publication goes through, so that "when
+        did this state begin" cannot be forgotten at a call site. That matters
+        because the four writers of `_term_agent_activity` are far apart (the
+        local hook, the Esc-interrupt clear, the shell-bridge snapshot and the
+        forwarded VPS hub snapshot) and two of them replace the whole dict
+        rather than editing one slot — a per-site before/after capture would
+        be four chances to drop half an edge.
+        """
+        self._stamp_activity_edges()
+        self.agentActivityChanged.emit()
+
+    def _stamp_activity_edges(self) -> None:
+        """Move each slot's clock to now if its busy/idle state just flipped.
+
+        Busy-ness is PRESENCE in `_term_agent_activity` — the same test the
+        coordination pipeline already uses (`watched_is_busy`), not a reading
+        of the `state` string, because the clear path pops the entry rather
+        than writing an idle state into it.
+
+        Writing the new stamp and zeroing its twin in one step is what keeps
+        the "exactly one is non-zero" invariant true for every reader; the
+        zeroed field is also the memory of the previous state, so an edge that
+        did not happen writes nothing and a steady state never re-stamps.
+        """
+        now = int(time.time())
+        for slot, record in self._term_agents.items():
+            if slot in self._term_agent_activity:
+                if not record.get("busy_since"):
+                    record["busy_since"] = now
+                    record["idle_since"] = 0
+            elif not record.get("idle_since"):
+                record["idle_since"] = now
+                record["busy_since"] = 0
+
     @Property("QVariantList", notify=agentBrowserChanged)
     def agentBrowserCount(self) -> list:
         """Per-slot count of OPEN browser windows the agent owns, indexed
@@ -3934,6 +4002,15 @@ class AppController(QObject):
             # payload + sort): monotonic is immune to clock adjustments and has
             # the sub-second resolution the ~250ms OOM-death window needs.
             "spawn_mono": time.monotonic(),
+            # When the CURRENT busy/idle state began — the rail's "how long".
+            # EXACTLY ONE of the two is non-zero, and which one is itself the
+            # state: that is deliberate, and it is why no third field
+            # remembers whether the agent is working. `_stamp_activity_edges`
+            # is the only writer and it maintains the invariant on every edge.
+            # Seeded idle at spawn (a fresh agent has not worked yet), so the
+            # very first row already reads a truthful "now" rather than a gap.
+            "busy_since": 0,
+            "idle_since": int(time.time()),
             # Stable tmux session name (<project>-<slot>) used when the tmux
             # substrate is enabled — for the wrap at spawn and the kill at close.
             # Computed here (not at spawn-argv time) so it is fixed for the
@@ -4658,7 +4735,7 @@ class AppController(QObject):
             self._focused_by_location[location] = 0
         self.termAgentsChanged.emit()
         self.agentWorktreeChanged.emit()
-        self.agentActivityChanged.emit()
+        self._emit_activity_changed()
         if not was_vps:
             # VPS slots were never published to the shell bridge (see
             # _register_term_agent) — a remove for an unknown buf is noise.
@@ -6667,7 +6744,7 @@ class AppController(QObject):
                 activity_changed = True
         # else: observer/recap/unmapped event — only session_id may have changed.
         if activity_changed:
-            self.agentActivityChanged.emit()
+            self._emit_activity_changed()
             # Coordination edge taps (claude agents — the local-capture path):
             # a clear that actually popped is the busy→idle edge, a state that
             # actually set is the idle→busy edge (agent_coordination pipeline).
@@ -6813,7 +6890,7 @@ class AppController(QObject):
         log.info(
             "interrupt-clear: slot %d sparkle cleared after Esc (no hook fired)", slot
         )
-        self.agentActivityChanged.emit()
+        self._emit_activity_changed()
         # Coordination: an Esc-interrupt is a busy→idle edge too (the judge
         # will typically read the cut-short transcript as in_progress/needs_user).
         self._on_coord_idle(slot)
@@ -6891,7 +6968,7 @@ class AppController(QObject):
         if new_activity != self._term_agent_activity:
             old_activity = self._term_agent_activity
             self._term_agent_activity = new_activity
-            self.agentActivityChanged.emit()
+            self._emit_activity_changed()
             # Coordination edge taps for legacy BRIDGE-driven slots. Locally-
             # captured slots (Claude, OpenCode, Pi) get
             # their edges in _on_agent_hook / _clear_interrupted_agent.
@@ -7025,7 +7102,7 @@ class AppController(QObject):
             self.termAgentsChanged.emit()
         if new_activity != self._term_agent_activity:
             self._term_agent_activity = new_activity
-            self.agentActivityChanged.emit()
+            self._emit_activity_changed()
 
     def _dispatch_inject(self, payload: dict, fail) -> None:
         """Validate an inject request and hand delivery to QML.

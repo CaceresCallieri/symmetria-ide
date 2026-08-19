@@ -42,6 +42,13 @@ class Controller(QObject):
     def agentActivity(self) -> list[dict[str, object]]:
         return [{"state": "working", "tool": "Edit", "agentType": "claude"}]
 
+    @Property("QVariantList", notify=agentActivityChanged)
+    def agentTiming(self) -> list[dict[str, object]]:
+        # Busy, matching the "working" activity above: exactly one of the pair
+        # is non-zero in production, and a probe that broke that invariant
+        # would exercise a state the rail never sees.
+        return [{"busySince": 1_755_600_000, "idleSince": 0}]
+
     @Property("QVariantList", notify=agentTitlesChanged)
     def agentTitles(self) -> list[str]:
         return ["live title from pool"]

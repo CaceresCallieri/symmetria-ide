@@ -90,6 +90,28 @@ FocusScope {
     // row's binding re-evaluates and the panel returns to the cursor.
     property int hoverIndex: -1
 
+    // ─── The rail's clock ───────────────────────────────────────────────
+    // Every "how long" on a row is measured against THIS, and it is a
+    // property rather than a `Date.now()` inside the formatter for the reason
+    // gotcha #3 records: a function reading the clock is not a binding
+    // dependency, so each age would compute once when its delegate was built
+    // and then sit frozen — the one failure mode that makes a duration worse
+    // than no duration at all.
+    //
+    // 30s, and deliberately not faster: every age the rail prints is
+    // minute-granular, so a 1s tick would re-evaluate two bindings on every
+    // visible row sixty times a minute to produce the identical string
+    // fifty-nine of those times. The visible cost is that a duration can be
+    // up to 30s late crossing a minute boundary, which is invisible.
+    property double nowMs: Date.now()
+
+    Timer {
+        interval: 30000
+        running: true
+        repeat: true
+        onTriggered: root.nowMs = Date.now()
+    }
+
     function _trackHover(index: int, hovered: bool): void {
         if (hovered)
             root.hoverIndex = index;
@@ -317,6 +339,32 @@ FocusScope {
             readonly property string displayTitle:
                 row.sessionTitle !== "" ? row.sessionTitle : "untitled"
 
+            // ─── How long ──────────────────────────────────────────────
+            // `{busySince, idleSince}` for a live slot — exactly one of the
+            // pair is non-zero, and WHICH one is the state itself. See
+            // AppController.agentTiming for why the stamps live on the pool
+            // record instead of inside the activity dict.
+            readonly property var timing:
+                row.live ? controller.agentTiming[row.slot - 1] : null
+            // WORKING, which is narrower than `live`: an agent sitting at its
+            // prompt is live and not working, and the two read differently on
+            // the row. Not derived from `activity.state` — the clear path
+            // POPS the activity entry rather than writing an idle state into
+            // it, so the string is "" for both idle and never-reported.
+            readonly property bool working: !!(row.timing && row.timing.busySince > 0)
+            // The single stamp the age counts from, one per row state:
+            // working since then, stopped working then (which for an agent
+            // CLI is when it finished answering — the moment the user asked
+            // to see), or, for a thread whose CLI is gone, when the
+            // conversation last moved at all.
+            readonly property double sinceEpoch:
+                !row.live ? row.updatedAt
+                    : (row.timing
+                        ? (row.working ? row.timing.busySince : row.timing.idleSince)
+                        : 0)
+            readonly property string ageText:
+                UsageFormat.duration(row.sinceEpoch, root.nowMs)
+
             // Whether the peek panel should describe THIS row. The pointer
             // wins whenever it is on any row (`root.hoverIndex < 0` gates the
             // keyboard half), so moving the mouse does not fight the cursor,
@@ -340,8 +388,14 @@ FocusScope {
             }
 
             // The context the ROW cannot show: which harness the conversation
-            // belongs to, its worktree in words rather than as a glyph, and
-            // whether it is running or how long ago it last moved.
+            // belongs to, and what its bare duration MEANS. The row prints
+            // "22m" and leaves the meaning to a colour; here there is room to
+            // say which of the three things that number is, so the panel is
+            // where the ambiguity gets resolved rather than a place the same
+            // fact is repeated.
+            //
+            // The worktree is deliberately NOT repeated: it moved onto the
+            // row's own second line, in words, when the row grew.
             //
             // A function, not a property: it reads `Date.now()`, which is not
             // a binding dependency, so a cached property would show an age
@@ -349,18 +403,24 @@ FocusScope {
             // evaluated once per open instead.
             function _peekMeta(): string {
                 const parts = [row.harness];
-                if (row.worktreeName !== "")
-                    parts.push(Theme.glyph.worktree + " " + row.worktreeName);
-                if (row.live)
-                    parts.push(row.activity && row.activity.state ? row.activity.state : "running");
-                else if (row.updatedAt > 0)
-                    parts.push(UsageFormat.age(row.updatedAt, Date.now()));
+                const elapsed = UsageFormat.duration(row.sinceEpoch, Date.now());
+                if (elapsed === "")
+                    return parts.join("   ");
+                if (!row.live)
+                    parts.push("last active " + elapsed + " ago");
+                else if (row.working)
+                    parts.push("working for " + elapsed);
+                else
+                    parts.push("replied " + elapsed + " ago");
                 return parts.join("   ");
             }
 
             width: ListView.view.width
-            height: Math.max(rowContent.implicitHeight, trailing.implicitHeight)
-                + Theme.spacing.sm * 2
+            // Driven by the two stacked lines rather than by a fixed number,
+            // so the row grows with the text rung instead of clipping it. No
+            // loop: `rowBody` takes its width from anchors and its implicit
+            // height from font metrics, neither of which reads this height.
+            height: rowBody.implicitHeight + Theme.spacing.sm * 2
             radius: Theme.radius.sm
             // ACTIVE only — the agent being VIEWED, never the keyboard cursor.
             // `focusedSlot` is false for every row when `focusedAgent` is 0, so
@@ -402,15 +462,27 @@ FocusScope {
                 // the click the MouseArea below owns.
             }
 
-            // Identity + title, filling everything the trailing cluster does
-            // not claim. Anchored to `trailing.left` rather than to the row's
-            // right edge so the title's elide point tracks how many
-            // indicators are lit, with no width arithmetic to keep in sync.
+            // ─── The row's two lines ────────────────────────────────────
+            // Line one is identity — sparkle, number, title, live indicators.
+            // Line two is context — the worktree by NAME, and how long the
+            // thread has been in its current state.
+            //
+            // Two lines, not one, because the one-line row had already run
+            // out of width: the title elided against a cluster of glyphs, and
+            // every fact that could not be compressed into a glyph had no
+            // home but the peek panel, which only opens on a deliberate
+            // pause. The second line is what lets the rail answer "which of
+            // these was I just in" without hovering anything.
+            //
+            // A Row holding the sparkle beside a Column of the two lines,
+            // rather than a Column of two Rows: the sparkle spans both lines
+            // and stays vertically centred on the whole row, which is what
+            // keeps it reading as the row's mark instead of as line one's.
             Row {
-                id: rowContent
+                id: rowBody
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.left: parent.left
-                anchors.right: trailing.left
+                anchors.right: parent.right
                 anchors.leftMargin: Theme.spacing.sm
                 anchors.rightMargin: Theme.spacing.sm
                 spacing: Theme.spacing.sm
@@ -442,123 +514,232 @@ FocusScope {
                     sttIsTranscribing: controller.sttTranscribing
                 }
 
-                Text {
+                Column {
+                    id: rowLines
                     anchors.verticalCenter: parent.verticalCenter
-                    // ⚠ LIVE ROWS ONLY. `displayNumber` is the dense position
-                    // in the list, and Ctrl+1..5 addresses `agentOrder`, which
-                    // holds live slots only — the two coincide exactly while
-                    // every row above this one is live, which is true because
-                    // ThreadHistory appends dead rows AFTER the live ones. A
-                    // dead row's position is therefore past the end of
-                    // agentOrder: printing its number beside it would offer a
-                    // digit that opens the spawn menu instead of that thread.
-                    // Dead threads are reached by Enter or a click.
-                    visible: row.live
-                    text: row.displayNumber
-                    color: row.focusedSlot ? Theme.color.text.strong : Theme.color.text.dim
-                    font.family: Theme.font.family
-                    font.pixelSize: Theme.font.size.xs
-                    font.weight: row.focusedSlot
-                        ? Theme.font.weight.bold
-                        : Theme.font.weight.medium
-                    font.letterSpacing: 0.6
-                    renderType: Text.NativeRendering
-                }
+                    // Everything the sparkle before it did not take. Same
+                    // shape the title used to compute against `rowContent`,
+                    // and no loop for the same reason: a Row child's `x`
+                    // depends only on its PRECEDING siblings' widths, while
+                    // this Row's own width comes from anchors.
+                    width: Math.max(0, rowBody.width - rowLines.x)
+                    spacing: Theme.spacing.xxs
 
-                Text {
-                    id: threadTitle
-                    anchors.verticalCenter: parent.verticalCenter
-                    // Whatever the Row has left after the marks before it.
-                    // No loop: a Row child's `x` depends only on the widths of
-                    // its PRECEDING siblings, and rowContent's own width comes
-                    // from anchors rather than from its children.
-                    width: Math.max(0, rowContent.width - threadTitle.x)
-                    text: row.displayTitle
-                    // Three rungs, one per state: the focused agent reads
-                    // strongest, other live agents normal, and a dead thread
-                    // recedes to the dim rung — present and activatable, but
-                    // visibly not something that is running.
-                    color: row.focusedSlot
-                        ? Theme.color.text.strong
-                        : (row.live ? Theme.color.text.normal : Theme.color.text.dim)
-                    font.family: Theme.font.family
-                    font.pixelSize: Theme.font.size.xs
-                    renderType: Text.NativeRendering
-                    elide: Text.ElideRight
-                }
-            }
+                    // ─── Line one: identity ─────────────────────────────
+                    Item {
+                        width: parent.width
+                        // From the TITLE alone, deliberately not the max with
+                        // the indicators. The glyphs are sized to the `sm`
+                        // rung while the title sits at `xs`, so a max would
+                        // make a row ONE PIXEL taller exactly while it owns a
+                        // browser window — measured 39px against its
+                        // neighbours' 38 — and rows would then twitch as
+                        // agents opened and closed windows. Nothing clips
+                        // (Items do not by default), so the glyph simply
+                        // overflows that pixel, centred and invisible. Sizing
+                        // both lines from their one never-hidden text is also
+                        // what keeps them agreeing; see line two.
+                        height: threadTitle.implicitHeight
 
-            // Trailing indicator cluster — worktree, browser, coordination.
-            // A SIBLING of rowContent, pinned to the row's right edge, so the
-            // title above elides against it instead of pushing it off-row.
-            Row {
-                id: trailing
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.right: parent.right
-                anchors.rightMargin: Theme.spacing.sm
-                spacing: Theme.spacing.xs
+                        Text {
+                            id: rowNumber
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            // ⚠ LIVE ROWS ONLY. `displayNumber` is the dense
+                            // position in the list, and Ctrl+1..5 addresses
+                            // `agentOrder`, which holds live slots only — the
+                            // two coincide exactly while every row above this
+                            // one is live, which is true because ThreadHistory
+                            // appends dead rows AFTER the live ones. A dead
+                            // row's position is therefore past the end of
+                            // agentOrder: printing its number beside it would
+                            // offer a digit that opens the spawn menu instead
+                            // of that thread. Dead threads are reached by
+                            // Enter or a click.
+                            visible: row.live
+                            text: row.displayNumber
+                            color: row.focusedSlot
+                                ? Theme.color.text.strong
+                                : Theme.color.text.dim
+                            font.family: Theme.font.family
+                            font.pixelSize: Theme.font.size.xs
+                            font.weight: row.focusedSlot
+                                ? Theme.font.weight.bold
+                                : Theme.font.weight.medium
+                            font.letterSpacing: 0.6
+                            renderType: Text.NativeRendering
+                        }
 
-                // Worktree — this agent's live work root is a linked git
-                // worktree of the project. Escape form of the glyph, never
-                // the literal private-use character.
-                Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible: row.worktreeName.length > 0
-                    text: Theme.glyph.worktree
-                    font.family: editorFontFamily
-                    font.pixelSize: Theme.font.size.sm
-                    color: Theme.color.accent.primary
-                    renderType: Text.NativeRendering
-                }
+                        Text {
+                            id: threadTitle
+                            // Between the number and the indicators, elided
+                            // against `indicators.left` rather than against
+                            // the row's edge, so the elide point tracks how
+                            // many indicators are lit with no width
+                            // arithmetic to keep in sync.
+                            //
+                            // An invisible `rowNumber` still reports its
+                            // implicit width, so a dead row anchors to the
+                            // parent instead — otherwise every dead title
+                            // would start indented past a number that is not
+                            // being drawn.
+                            anchors.left: row.live ? rowNumber.right : parent.left
+                            anchors.leftMargin: row.live ? Theme.spacing.sm : 0
+                            anchors.right: indicators.left
+                            anchors.rightMargin: Theme.spacing.xs
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: row.displayTitle
+                            // Three rungs, one per state: the focused agent
+                            // reads strongest, other live agents normal, and a
+                            // dead thread recedes to the dim rung — present
+                            // and activatable, but visibly not running.
+                            color: row.focusedSlot
+                                ? Theme.color.text.strong
+                                : (row.live ? Theme.color.text.normal : Theme.color.text.dim)
+                            font.family: Theme.font.family
+                            font.pixelSize: Theme.font.size.xs
+                            renderType: Text.NativeRendering
+                            elide: Text.ElideRight
+                        }
 
-                // Browser ownership (globe) + its attention badge. Clicking
-                // goes to that agent's browser — one-way, as on the pill.
-                Item {
-                    id: browserIndicator
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible: row.ownsBrowser
-                    width: visible ? browserGlyph.implicitWidth : 0
-                    height: browserGlyph.implicitHeight
+                        // Live indicators — browser ownership, coordination.
+                        // Pinned to line one's right edge so the title above
+                        // elides against them. The worktree glyph is NOT here
+                        // any more: it moved to line two, where it can carry
+                        // the worktree's NAME instead of only its existence.
+                        Row {
+                            id: indicators
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: Theme.spacing.xs
 
-                    Text {
-                        id: browserGlyph
-                        anchors.centerIn: parent
-                        text: ""  // nf-fa-globe
-                        font.family: editorFontFamily
-                        font.pixelSize: Theme.font.size.sm
-                        color: row.browserAttention
-                            ? Theme.color.text.strong
-                            : Theme.color.text.dim
-                        renderType: Text.NativeRendering
+                            // Browser ownership (globe) + its attention badge.
+                            // Clicking goes to that agent's browser — one-way,
+                            // as on the pill.
+                            Item {
+                                id: browserIndicator
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: row.ownsBrowser
+                                width: visible ? browserGlyph.implicitWidth : 0
+                                height: browserGlyph.implicitHeight
+
+                                Text {
+                                    id: browserGlyph
+                                    anchors.centerIn: parent
+                                    // Was a literal PUA character here
+                                    // and had already been flattened to
+                                    // "" — see the token's comment.
+                                    text: Theme.glyph.browser
+                                    font.family: editorFontFamily
+                                    font.pixelSize: Theme.font.size.sm
+                                    color: row.browserAttention
+                                        ? Theme.color.text.strong
+                                        : Theme.color.text.dim
+                                    renderType: Text.NativeRendering
+                                }
+
+                                AttentionDot {
+                                    visible: row.browserAttention
+                                    width: Math.round(browserGlyph.implicitHeight * 0.34)
+                                    height: width
+                                    color: Theme.color.accent.primary
+                                    anchors.right: browserGlyph.right
+                                    anchors.top: browserGlyph.top
+                                    anchors.rightMargin: -Math.round(width * 0.25)
+                                    anchors.topMargin: Math.round(width * 0.15)
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: controller.focus_agent_browser(row.slot)
+                                }
+                            }
+
+                            // Coordination attention — a wait_for_agent
+                            // trigger needs the user. Blue, so it reads as
+                            // coordination rather than as the globe's amber
+                            // notification.
+                            AttentionDot {
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: row.coordAttention
+                                width: visible ? Math.round(Theme.font.size.sm * 0.55) : 0
+                                height: Math.round(Theme.font.size.sm * 0.55)
+                                color: Theme.color.mode.command
+                            }
+                        }
                     }
 
-                    AttentionDot {
-                        visible: row.browserAttention
-                        width: Math.round(browserGlyph.implicitHeight * 0.34)
-                        height: width
-                        color: Theme.color.accent.primary
-                        anchors.right: browserGlyph.right
-                        anchors.top: browserGlyph.top
-                        anchors.rightMargin: -Math.round(width * 0.25)
-                        anchors.topMargin: Math.round(width * 0.15)
-                    }
+                    // ─── Line two: context ──────────────────────────────
+                    // ALWAYS present, even with no worktree and no age to
+                    // print. A line that appears only on some rows would make
+                    // the rows different heights, and a list whose rows change
+                    // height as agents come and go is harder to scan than one
+                    // that spends a few empty pixels.
+                    Item {
+                        width: parent.width
+                        // From the AGE, which is the one child of this line
+                        // that is never hidden. Taking the max with the
+                        // worktree name would collapse the line to nothing on
+                        // a row that has neither — and font metrics are
+                        // identical for both anyway.
+                        height: ageLabel.implicitHeight
 
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: controller.focus_agent_browser(row.slot)
-                    }
-                }
+                        Text {
+                            id: worktreeGlyph
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: row.worktreeName !== ""
+                            // ESCAPE form via the token, never the literal
+                            // private-use character — a literal once arrived
+                            // through an edit pipeline as an empty string and
+                            // rendered as nothing, with no warning.
+                            text: Theme.glyph.worktree
+                            // The Nerd Font, not the chrome family: this
+                            // codepoint exists only in the patched font.
+                            font.family: editorFontFamily
+                            font.pixelSize: Theme.font.size.xs
+                            color: Theme.color.accent.primary
+                            renderType: Text.NativeRendering
+                        }
 
-                // Coordination attention — a wait_for_agent trigger needs
-                // the user. Blue, so it reads as coordination rather than
-                // as the globe's amber notification.
-                AttentionDot {
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible: row.coordAttention
-                    width: visible ? Math.round(Theme.font.size.sm * 0.55) : 0
-                    height: Math.round(Theme.font.size.sm * 0.55)
-                    color: Theme.color.mode.command
+                        Text {
+                            id: worktreeName
+                            anchors.left: worktreeGlyph.right
+                            anchors.leftMargin: Theme.spacing.xxs
+                            anchors.right: ageLabel.left
+                            anchors.rightMargin: Theme.spacing.xs
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: row.worktreeName !== ""
+                            text: row.worktreeName
+                            color: Theme.color.text.dim
+                            font.family: Theme.font.family
+                            font.pixelSize: Theme.font.size.xs
+                            renderType: Text.NativeRendering
+                            elide: Text.ElideRight
+                        }
+
+                        // How long — working for, or since it last replied.
+                        // The row prints the bare duration and lets the
+                        // COLOUR carry which of the two it is: a working
+                        // thread reads at the normal rung, everything else
+                        // recedes to dim. Both neutral, per the achromatic
+                        // ramp — the sparkle beside it is already animating,
+                        // so weight is enough of a distinction here and an
+                        // accent would make every busy agent shout.
+                        Text {
+                            id: ageLabel
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: row.ageText
+                            color: row.working
+                                ? Theme.color.text.normal
+                                : Theme.color.text.dim
+                            font.family: Theme.font.family
+                            font.pixelSize: Theme.font.size.xs
+                            renderType: Text.NativeRendering
+                        }
+                    }
                 }
             }
 

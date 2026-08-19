@@ -78,6 +78,19 @@ QtObject {
         // nf-oct-git_branch — the worktree mark (tree header + agent chips).
         readonly property string worktree: "\uf418"
 
+        // nf-fa-globe — the browser-ownership mark on an agent's thread-rail
+        // row. Late to this table, and that is the whole point: it lived as a
+        // LITERAL private-use character inside AgentThreadRail.qml, and had
+        // already been flattened to an EMPTY STRING by the time anyone looked
+        // — so the globe rendered as nothing on every row that owned a browser
+        // window, with no warning, exactly as the block comment above warns.
+        // Verified at the byte level (`text: ""` is `22 22`) in the committed
+        // file on 2026-08-19, and the codepoint verified against the installed
+        // CaskaydiaCove Nerd Font, whose cmap maps U+F0AC to `fa-globe`.
+        // Second glyph lost to that pipeline: the argument for the TOKEN, not
+        // only for the escape.
+        readonly property string browser: "\uf0ac"
+
         // nf-cod-list_tree — the side panel's FILES tab. Codicon, monoline,
         // the same family and stroke weight as the surface marks below,
         // because the two controls sit one above the other in the same column
