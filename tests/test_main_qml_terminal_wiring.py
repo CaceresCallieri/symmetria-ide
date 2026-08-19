@@ -19,6 +19,7 @@ import re
 from pathlib import Path
 
 import pytest
+from qml_source import extract_braced_body
 
 
 @pytest.fixture(scope="module")
@@ -69,7 +70,7 @@ def test_direct_terminal_chord_present(main_qml: str):
     # inside the block, so rewind to the `Shortcut` decl first.
     shortcut_decl = main_qml.rfind("Shortcut", 0, chord_idx)
     assert shortcut_decl >= 0
-    chord_block = _extract_braced_body(main_qml, shortcut_decl)
+    chord_block = extract_braced_body(main_qml, shortcut_decl)
     assert "controller.toggle_terminal_home()" in chord_block
     assert "Qt.ApplicationShortcut" in chord_block
 
@@ -181,42 +182,6 @@ def test_focus_terminal_requested_handler(main_qml: str):
     assert "terminalView.forceActiveFocus()" in main_qml
 
 
-def _extract_braced_body(text: str, decl_start: int) -> str:
-    """Return the `{...}` body of the declaration at ``decl_start``, brace-matched.
-
-    Resilient to braces inside ``//`` line comments and string literals (', ",
-    `), which QML/JS bodies contain — a naive depth counter would miscount on
-    those. Replaces brittle fixed-offset windows into QML source that break on
-    unrelated edits. Raises AssertionError if the braces never balance.
-    """
-    open_idx = text.index("{", decl_start)
-    depth = 0
-    j = open_idx
-    in_str: str | None = None
-    while j < len(text):
-        c = text[j]
-        if in_str is not None:
-            if c == "\\":
-                j += 2
-                continue
-            if c == in_str:
-                in_str = None
-        elif c in "'\"`":
-            in_str = c
-        elif c == "/" and j + 1 < len(text) and text[j + 1] == "/":
-            nl = text.find("\n", j)
-            j = len(text) if nl == -1 else nl
-            continue
-        elif c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[open_idx : j + 1]
-        j += 1
-    raise AssertionError(f"unbalanced braces from declaration at index {decl_start}")
-
-
 def test_window_activation_considers_terminal_visible(main_qml: str):
     """Window.onActiveChanged must route to terminalView when the
     terminal is the current central surface. Without this, alt-tabbing
@@ -243,7 +208,7 @@ def test_window_activation_considers_terminal_visible(main_qml: str):
     # matching rather than a fixed character window — the body grows whenever a
     # modal guard is prepended (it has been bumped twice), and a too-small
     # window silently passes/fails on unrelated edits.
-    dispatch_block = _extract_braced_body(main_qml, dispatch_idx)
+    dispatch_block = extract_braced_body(main_qml, dispatch_idx)
     assert "_focusTerminalPane()" in dispatch_block
     assert "controller.focus_agent(controller.focusedAgent)" in dispatch_block
     # Modal guard: re-activation must NOT yank focus out of an open spawn
@@ -645,13 +610,17 @@ def test_orchestrator_relay_absent(main_qml: str):
 
 
 def test_agent_focus_chords_present(main_qml: str):
-    """An Instantiator over maxAgentSlots must bind Ctrl+N → focus_agent.
+    """An Instantiator over the five quick keys must bind Ctrl+N → focus_agent.
 
     Always-enabled by design: focus_agent auto-switches the central
     surface, so the chords double as surface switchers; Python no-ops on
     empty slots.
+
+    The model is the literal 5 since 2026-08-15: the agent pool itself is
+    uncapped (see agent_pane_slots.py), so these five are a keyboard surface
+    rather than a capacity, and there is no pool property left to bind.
     """
-    assert "model: controller.maxAgentSlots" in main_qml
+    assert "model: 5" in main_qml
     # Ctrl+N addresses the Nth chip in DISPLAY order (dense, compacting),
     # so the dispatch reads controller.agentOrder, not internal slots.
     assert "controller.focus_agent(order[index])" in main_qml
@@ -659,9 +628,9 @@ def test_agent_focus_chords_present(main_qml: str):
     # dense number) instead of silently no-oping. Scope this to the actual
     # Ctrl+1..5 dispatch: Ctrl+Shift+A has another open() call and must not be
     # allowed to satisfy this branch's contract.
-    instantiator_idx = main_qml.index("model: controller.maxAgentSlots")
+    instantiator_idx = main_qml.index("model: 5")
     instantiator_decl = main_qml.rfind("Instantiator", 0, instantiator_idx)
-    dispatch = _extract_braced_body(main_qml, instantiator_decl)
+    dispatch = extract_braced_body(main_qml, instantiator_decl)
     alias = re.search(r"\bvar\s+(\w+)\s*=\s*agentSpawnMenu\s*;", dispatch)
     receivers = ["agentSpawnMenu", *(alias.groups() if alias is not None else ())]
     executable_dispatch = re.sub(r"//[^\n]*", "", dispatch)
@@ -712,11 +681,17 @@ def test_agent_scrollback_chords_present(main_qml: str):
 
 
 def test_agent_surface_pool_structure(main_qml: str):
-    """The agent surface must be a FIXED Repeater over maxAgentSlots with
-    per-slot Loaders — list-model churn would destroy live claude
-    processes (see the agentSurface comment block).
+    """Guard: the agent surface uses the APPEND-ONLY pane
+    registry with per-slot Loaders.
+
+    The registry is the one list model safe here: it only appends, so growth
+    leaves live delegates alone (measured 3 → 9, zero destroyed). A model of
+    ACTIVE agents would reorder on focus and delete on close, and that churn
+    destroys delegates — which reaps live agent CLIs. See the agentSurface
+    comment block and agent_pane_slots.py.
     """
     assert "agentSlotRepeater" in main_qml
+    assert "model: agentPaneSlots" in main_qml
     assert "active: controller.agentSlotActive[slotLoader.index]" in main_qml
     assert "visible: controller.focusedAgent === slotLoader.slot" in main_qml
     assert "controller.agent_spawn_argv(slotLoader.slot)" in main_qml

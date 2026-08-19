@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from qml_source import extract_braced_body
 
 from symmetria_ide.agent_harness import HARNESSES, MENU_ORDERED_HARNESSES
 from symmetria_ide.app import AppController
@@ -21,41 +22,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PROBE = REPO_ROOT / "tests" / "qml_harness" / "spawn_menu_probe.py"
 
 
-def _extract_braced_body(text: str, declaration_start: int) -> str:
-    """Return a QML declaration body without relying on a character window."""
-    open_index = text.index("{", declaration_start)
-    depth = 0
-    index = open_index
-    quote: str | None = None
-    while index < len(text):
-        character = text[index]
-        if quote is not None:
-            if character == "\\":
-                index += 2
-                continue
-            if character == quote:
-                quote = None
-        elif character in "'\"`":
-            quote = character
-        elif character == "/" and text[index + 1 : index + 2] == "/":
-            newline = text.find("\n", index)
-            index = len(text) if newline == -1 else newline
-            continue
-        elif character == "{":
-            depth += 1
-        elif character == "}":
-            depth -= 1
-            if depth == 0:
-                return text[open_index : index + 1]
-        index += 1
-    raise AssertionError(f"unbalanced QML braces from index {declaration_start}")
-
-
 def _shortcut_body(source: str, sequence: str) -> str:
     sequence_index = source.index(f'sequences: ["{sequence}"]')
     declaration_start = source.rfind("Shortcut", 0, sequence_index)
     assert declaration_start >= 0, f"Shortcut for {sequence} not found"
-    return _extract_braced_body(source, declaration_start)
+    return extract_braced_body(source, declaration_start)
 
 
 def _spawn_menu_receivers(source: str) -> tuple[str, ...]:
@@ -294,9 +265,10 @@ def test_ctrl_number_on_an_empty_slot_preserves_an_open_choice():
     a stage-1 harness the user had already picked.
     """
     main_qml = (REPO_ROOT / "qml" / "Main.qml").read_text()
-    instantiator_index = main_qml.index("model: controller.maxAgentSlots")
+    assert "model: 5" in main_qml
+    instantiator_index = main_qml.index("model: 5")
     declaration_start = main_qml.rfind("Instantiator", 0, instantiator_index)
-    dispatch = _extract_braced_body(main_qml, declaration_start)
+    dispatch = extract_braced_body(main_qml, declaration_start)
     executable_dispatch = _without_line_comments(dispatch)
     preserves_choice = any(
         re.search(

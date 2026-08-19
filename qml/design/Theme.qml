@@ -466,6 +466,43 @@ QtObject {
             readonly property color permissionDeny: "#D2602D"
         }
 
+        // Thread-rail row states (AgentThreadRail.qml). THREE of them can be
+        // true on the SAME row at the same time — the agent currently on the
+        // central surface (active), the keyboard cursor (selected), and the
+        // pointer (hover) — so each one is given a different visual CHANNEL
+        // rather than a different value of one fill:
+        //
+        //   active   — a filled surface        (this rung's `activeRow`)
+        //   selected — a left marker bar       (`selectionMarker`)
+        //   hover    — a translucent wash ON TOP of whatever fill is there
+        //              (`hoverRow`)
+        //
+        // Three competing FILLS was the first cut and it cannot work: a row
+        // that is active AND hovered AND selected has one `color` binding, so
+        // two of the three states are simply invisible, which is the bug this
+        // rung exists to fix (the rail shipped painting the keyboard cursor in
+        // the "active" colour, so the highlight sat on the row the cursor last
+        // touched while a DIFFERENT agent was on screen).
+        readonly property QtObject rail: QtObject {
+            // ALIASES the top surface rung rather than introducing a sixth
+            // near-black: the active row is the strongest thing in the column,
+            // which is exactly what `raisedSelected` already means, and the
+            // alias keeps a palette swap moving both together.
+            readonly property color activeRow: theme.color.bg.raisedSelected
+            // Pointer wash. White at ~5% alpha, deliberately BELOW
+            // `border.hairline`'s 8%: it is painted over BOTH the bar rung and
+            // `activeRow`, so it has to read as "the pointer is here" on
+            // either ground without ever reading as a second selection.
+            readonly property color hoverRow: "#0dffffff"
+            // Keyboard cursor bar. The neutral near-white the chrome already
+            // uses for its most prominent text, NOT the amber accent: amber is
+            // the language of "this thing is special" (worktree glyph, cmdline
+            // firstchar, browser attention), and the cursor is not special —
+            // it is just where you happen to be standing. A coloured bar read
+            // as a status the row did not have.
+            readonly property color selectionMarker: theme.color.text.strong
+        }
+
         // Diff visualization. Tints `tool_diff` rows in the agent pane —
         // assistant edits land as a `user`-role tool_result envelope,
         // which `SessionModel._row_from_user` re-routes into a `tool_diff`
@@ -887,6 +924,13 @@ QtObject {
         // chip when focus lands on it should feel responsive, not laggy. A
         // 400ms fade on the surface switcher read sluggish on a rapid tap.
         readonly property int quick: 150
+        // How long a surface must stay under the pointer (or under the
+        // keyboard cursor) before an informational panel opens for it — the
+        // thread rail's peek panel. Long enough that running down the list
+        // with j/k does not fire a burst of panels, short enough that pausing
+        // on a row feels like it answered immediately. Deliberately longer
+        // than `quick` (which is a state FADE, not a decision to open).
+        readonly property int peekDelay: 350
     }
 
     // ─── Depth (claymorphism — NEUTRALIZED) ──────────────────────
@@ -968,6 +1012,24 @@ QtObject {
         // countdown and percentage on one line — the longest row the panel
         // can produce — without wrapping.
         readonly property int usagePopupWidth: 300
+        // Agent thread rail (AgentThreadRail.qml), the left column. Narrower
+        // than the 280px file tree on purpose: a tree row carries a path that
+        // must not wrap, while a thread row carries a sparkle, a number and a
+        // title that is allowed to elide. Wide enough for the indicator
+        // cluster plus a readable stretch of title at the `xs` rung.
+        readonly property int threadRailWidth: 220
+        // The rail's peek panel — the hover/keyboard tooltip that shows a
+        // thread's FULL title, which the row itself elides. Wider than the
+        // rail it hangs off (220) because a panel no wider than the row would
+        // only re-elide the same text; 300 matches `usagePopupWidth`, so the
+        // IDE's two informational panels read as one surface family.
+        readonly property int threadPeekWidth: 300
+        // The rail's keyboard-cursor bar. Its own token rather than a
+        // `spacing` rung because the scale jumps 2 -> 4 and neither works: at
+        // 2 the capsule's 1px radius does not resolve and it renders as a hard
+        // square-ended line, while 4 reads heavier than the cursor deserves.
+        // 3 is the narrowest width whose rounding still resolves.
+        readonly property int threadRailMarkerWidth: 3
         readonly property int whichKeyRowHeight: 18   // was 22
         readonly property int whichKeyFooterHeight: 24 // was 28
 

@@ -67,6 +67,8 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Nested-compositor has no dmabuf](reference/qt-pyside/nested_compositor_no_dmabuf.md) — Qt 6.11 implements the protocol nowhere; the EGL warning names the wrong layer
 - [Nested compositor hijacks the host keyboard](reference/qt-pyside/nested_compositor_hijacks_host_keymap.md) — Qt installs a process-wide key handler rewriting every key from a dead-reckoned state: US layout + phantom stuck Shift
 - [Why the suite dies "intermittently"](reference/qt-pyside/processevents_shared_app_segv.md) — two causes: pumping the session app, and leaked AppControllers
+- [Append-only pane registry](reference/qt-pyside/append_only_pane_registry.md) — integer-model Repeater reaps every live pane on growth (3→8); append-only model does not (3→9, zero)
+- [ListView.currentItem goes stale](reference/qt-pyside/listview_currentitem_goes_stale.md) — after a removal it can be the recycled delegate of the departed row; resolve selections through the model
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
 
@@ -75,5 +77,6 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Daemon freezes agent env](reference/agent-sdk/daemon_freezes_agent_env.md) — CC 2.1.x spare-pool freezes agent env id across projects; attribute by session_id+cwd
 - [tmux server env leak](reference/agent-sdk/tmux_server_env_leak.md) — tmux server leaks starter's CLAUDE_JOB_DIR → foreign session titles; scrub -gr + env -u
 - [tmux swallows OSC title](reference/agent-sdk/tmux_swallows_osc_title.md) — blank chip names in tmux; fix: set-titles on + "#T" in agent-tmux.conf
+- [opencode session list scoping](reference/agent-sdk/opencode_session_list_scoping.md) — folds worktrees itself; outside a git project it returns 15 foreign `global` rows, so filter by `directory`
 
 _(sidecar protocol contract lives in CLAUDE.md "The agent backend" section + `sidecar/src/protocol.ts`.)_
