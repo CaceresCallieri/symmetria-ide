@@ -1338,6 +1338,15 @@ class AppController(QObject):
         # Same-thread: workingTreeChanged fires on the GUI thread
         # (QTimer.timeout) and checktime() marshals to nvim's loop via
         # async_call itself, so no QueuedConnection is needed here.
+        #
+        # Revalidate worktree follow FIRST. Another agent can remove the
+        # focused agent's worktree, leaving its last write-tool `work_root`
+        # pointed at a directory that no longer exists. No hook comes from the
+        # focused agent on that edge, so the filesystem signal is the only
+        # prompt repair. The recompute also clears the stale worktree glyph.
+        self._git_controller.workingTreeChanged.connect(
+            self._recompute_agent_root_override
+        )
         self._git_controller.workingTreeChanged.connect(self._backend.checktime)
         # Real-time history freshness. `GitLogController` (the "git" surface's
         # committed-log viewer) is request-driven and owns NO watcher of its
