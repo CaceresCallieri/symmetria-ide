@@ -2028,6 +2028,23 @@ def test_spawn_while_following_spawns_in_main(controller, worktree_env):
     assert controller.displayedRoot == main
 
 
+def test_spawn_while_following_preserves_base_subdirectory(controller, worktree_env):
+    """A focused agent's worktree follow must not replace the shell's cwd."""
+    main, wt = worktree_env
+    shell_dir = os.path.join(main, "src")
+    os.mkdir(shell_dir)
+    _push_cwd(controller, shell_dir)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(1, "PreToolUse", tool_name="Bash", session_id="s1", cwd=wt)
+    )
+    assert controller.displayedRoot == wt
+
+    controller.spawn_agent("fresh", True)
+
+    assert controller._term_agents[2]["cwd"] == shell_dir
+
+
 def test_spawn_from_manually_displayed_worktree_spawns_in_main(
     controller, worktree_env
 ):

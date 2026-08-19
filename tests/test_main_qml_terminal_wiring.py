@@ -659,6 +659,15 @@ def test_agent_management_chords_present(main_qml: str):
     assert "controller.cycle_agent_focus(1)" in main_qml
 
 
+def test_agent_spawn_menu_syncs_the_local_shell_cwd(main_qml: str):
+    """Opening the chooser must close the terminal poll's 600ms stale window."""
+    helper_start = main_qml.index("function _syncLocalShellCwd()")
+    helper = extract_braced_body(main_qml, helper_start)
+    assert "shellSession.currentDir" in helper
+    assert "controller.on_shell_cwd(shellDir)" in helper
+    assert "onAboutToOpen: root._syncLocalShellCwd()" in main_qml
+
+
 def test_agent_scrollback_chords_present(main_qml: str):
     """Ctrl+U/D half-page scrollback must route through the agentSurface
     helper and stay gated off while the sidebar holds focus (the tree

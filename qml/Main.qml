@@ -3071,6 +3071,7 @@ Window {
     // focusAgentRequested handles the handoff to the new terminal.
     AgentSpawnMenu {
         id: agentSpawnMenu
+        onAboutToOpen: root._syncLocalShellCwd()
         onDismissed: root._restoreCentralFocus()
         // Resume-by-id harnesses (opencode) defer `r` to the IDE's session
         // picker. The harness rides the signal INTO open(), so the picker
@@ -3509,6 +3510,26 @@ Window {
         else
             terminalView.forceActiveFocus();
     }
+
+    /// Refresh the project root from the local shell before opening the agent
+    /// chooser.
+    /// The regular cwd poll pauses when another surface is visible and can also
+    /// lag a quick `cd` -> spawn sequence by 600ms. Read KSession directly at
+    /// this user-action seam so a fresh agent cannot inherit that stale root.
+    // The referenced ids and context property belong to this same Main.qml
+    // document. Qualifying child ids through Window properties would add three
+    // aliases only to satisfy this static check.
+    // qmllint disable unqualified
+    function _syncLocalShellCwd() {
+        if (controller.location === "local") {
+            var shellDir = shellSession.currentDir;
+            if (shellDir && shellDir !== terminalView._lastShellDir) {
+                terminalView._lastShellDir = shellDir;
+                controller.on_shell_cwd(shellDir);
+            }
+        }
+    }
+    // qmllint enable unqualified
 
     /// Shared focus dispatch: pull active focus into the visible central
     /// surface. Used by Window.onActiveChanged and modal dismissals.
