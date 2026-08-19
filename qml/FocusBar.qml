@@ -36,10 +36,31 @@ Rectangle {
     // selection marker, which is itself a left-edge line.
     property int edge: Qt.LeftEdge
 
+    // How far the bar stops SHORT of its parent's top and bottom edges.
+    //
+    // This exists for one rule the chrome already follows elsewhere: no
+    // straight line crosses a rounded corner. A full-height hairline beside
+    // the canvas runs on past the point where the corner has already curved
+    // away, and stands alone next to the wedge — a hard vertical tick in a
+    // corner whose whole purpose is to be soft. The 1px separators on both
+    // seams solve it with the same `Theme.radius.canvas` inset (see their
+    // Layout.topMargin at their call sites in Main.qml); this bar sits in
+    // those same seams and was the one line still running the full height.
+    //
+    // Per-site rather than defaulted, because the ends differ per pane: an end
+    // that meets a chrome bar has no corner to clear and must NOT be inset, or
+    // the bar reads as arbitrarily short. Set only the end that reaches the
+    // canvas corner. Insets, not a smaller height — `height` is what the Scale
+    // animation is measured against, and anchoring keeps the two in step.
+    property real topInset: 0
+    property real bottomInset: 0
+
     anchors.left: bar.edge === Qt.LeftEdge ? parent.left : undefined
     anchors.right: bar.edge === Qt.RightEdge ? parent.right : undefined
     anchors.top: parent.top
     anchors.bottom: parent.bottom
+    anchors.topMargin: bar.topInset
+    anchors.bottomMargin: bar.bottomInset
     width: 1
     color: Theme.color.accent.focus
     z: 50

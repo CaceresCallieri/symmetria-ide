@@ -588,9 +588,17 @@ FocusScope {
     // default left edge would put it against the window frame AND a few pixels
     // from the row marker, which is also a left-edge line. See FocusBar's own
     // header — every pane's bar faces the workspace.
+    //
+    // Inset at BOTH ends: the rail spans the full content row, so this bar
+    // runs the whole way down the same seam the 1px separator beside it
+    // divides — and that separator already stops a canvas corner short at each
+    // end. Matching it is what keeps the two lines in that seam reading as one
+    // edge instead of one overshooting the other.
     FocusBar {
         focused: root.activeFocus
         edge: Qt.RightEdge
+        topInset: Theme.radius.canvas
+        bottomInset: Theme.radius.canvas
     }
 
     // The pause before the peek panel opens. Restarted by every change of
