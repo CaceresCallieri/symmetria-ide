@@ -534,17 +534,20 @@ QtObject {
             // showing the canvas colour reads as a window onto it rather than
             // as a brighter version of its neighbours.
             //
-            // Load-bearing consequence: at this rung the fill is only ~8 units
-            // darker than the rail and CANNOT carry the state on its own, which
-            // is why `activeBorder` below exists rather than being decoration.
-            // Do not "restore contrast" by lightening this back — the pair is
-            // the signal.
+            // ⚠ UNDERSTATED ON PURPOSE, and this is the part to read before
+            // changing it. At this rung the fill is only ~3 lightness units
+            // below the rail, so the mark is quiet. A `border.hairline` edge
+            // shipped beside it for exactly that reason and was REMOVED the
+            // same day (2026-08-19) on the user's call: it drew a hard bright
+            // rectangle, which is a heavier mark than "this is the one you are
+            // looking at" needs in a column of quiet neutrals.
+            //
+            // So do not add the border back, and do not lighten this rung to
+            // "restore contrast" — that returns the row to reading as a raised
+            // highlight and loses the one thing this says. The fill is also not
+            // alone: the active row's title is the only one at the `strong`
+            // text rung.
             readonly property color activeRow: theme.color.bg.canvas
-            // The edge that actually announces the active row. `border.hairline`
-            // is the chrome's one edge alpha (white @ 8%), so this aliases it
-            // rather than inventing a rail-local edge: the row is the same kind
-            // of small bounded surface every other bordered element here is.
-            readonly property color activeBorder: theme.color.border.hairline
             // Pointer wash. White at ~5% alpha, deliberately BELOW
             // `border.hairline`'s 8%: it is painted over BOTH the bar rung and
             // `activeRow`, so it has to read as "the pointer is here" on

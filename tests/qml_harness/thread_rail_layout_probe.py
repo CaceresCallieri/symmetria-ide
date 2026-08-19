@@ -24,7 +24,6 @@ from pathlib import Path
 
 from PySide6.QtCore import Property, QObject, Signal, Slot
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtQml import QQmlProperty
 from PySide6.QtQuick import QQuickItem, QQuickView
 
 from symmetria_ide.agent_thread_model import AgentThreadModel, ThreadRow
@@ -198,7 +197,22 @@ def _rail_ground(root: QQuickItem) -> float:
     raise RuntimeError("the rail drew no background rectangle")
 
 
-def _describe(delegate: QQuickItem, age: str) -> dict:
+def _edge_lightness(delegate: QQuickItem, shot) -> float | None:
+    """Lightness of the pixel on the row's top edge, in the rendered image.
+
+    Sampled at the horizontal MIDPOINT so it cannot land in a corner, where a
+    rounded rectangle is antialiasing between the row and the rail whatever
+    the border does. Returns None when the row is scrolled out of the grab.
+    """
+    top_left = delegate.mapToItem(None, delegate.boundingRect().topLeft())
+    x = int(top_left.x() + delegate.width() / 2)
+    y = int(top_left.y())
+    if not (0 <= x < shot.width() and 0 <= y < shot.height()):
+        return None
+    return round(shot.pixelColor(x, y).lightnessF(), 4)
+
+
+def _describe(delegate: QQuickItem, age: str, shot) -> dict:
     """Geometry facts about one row, in the DELEGATE's own coordinates."""
     title = _find_text(delegate, str(delegate.property("displayTitle")))
     age_label = _find_text(delegate, age)
@@ -221,6 +235,8 @@ def _describe(delegate: QQuickItem, age: str) -> dict:
 
     return {
         "slot": delegate.property("slot"),
+        # The ONLY answer to "is an outline drawn" — see the border note above.
+        "edgeLightness": _edge_lightness(delegate, shot),
         # The delegate's own y in the ListView's content item, which is what
         # lets a caller compute the gap BETWEEN rows. Taken raw rather than
         # mapped, so a transform on an ancestor cannot skew it.
@@ -230,12 +246,22 @@ def _describe(delegate: QQuickItem, age: str) -> dict:
         "working": bool(delegate.property("working")),
         "focused": bool(delegate.property("focusedSlot")),
         "radius": round(delegate.property("radius"), 1),
-        # The ACTIVE row's two marks. `border.width` goes through
-        # QQmlProperty's DOTTED path, not `property("border")` — the latter
-        # returns a `QQuickPen*`, for which PySide has no converter and which
-        # raises rather than returning None. Same shape as the KSession case
-        # in CLAUDE.md: a Qt C++ type QML can reach and Python cannot.
-        "borderWidth": round(QQmlProperty(delegate, "border.width").read(), 1),
+        # ⚠ NO border properties are reported, and that is a finding rather
+        # than an omission. Measured 2026-08-19 against a bare
+        # `Rectangle { color: "red" }`: Qt Quick's defaults are
+        # `border.width: 1` and `border.color: #000000` at full alpha — yet
+        # nothing is drawn, because `QQuickPen` is only applied once it has
+        # been ASSIGNED, and that valid/invalid state is not a property.
+        #
+        # So reading `border.width` cannot tell "no border" from "a 1px black
+        # border", and a test asserting `width == 0` would fail on a Rectangle
+        # that draws no border at all. The only thing that can answer is the
+        # rendered pixel — see `edgeLightness` below.
+        #
+        # (Reading it at all needs QQmlProperty's DOTTED path. Plain
+        # `property("border")` returns a `QQuickPen*`, a Qt C++ type PySide has
+        # no converter for, and RAISES rather than returning None — the same
+        # shape as the KSession case in CLAUDE.md.)
         "fill": _lightness(delegate.property("color")),
         "ageText": str(delegate.property("ageText")),
         "title": box(title),
@@ -313,10 +339,14 @@ def main() -> int:
     root.setProperty("nowMs", float(NOW_SEC) * 1000.0)
     app.processEvents()
 
+    # ONE grab for every row's edge sample: `grabWindow` is synchronous and
+    # re-grabbing per row would be four full renders for four pixels.
+    shot = view.grabWindow()
+
     rows = _delegates(root)
     expected_ages = ["22m", "3h", "now", "2d"]
     described = [
-        _describe(delegate, age)
+        _describe(delegate, age, shot)
         for delegate, age in zip(rows, expected_ages, strict=True)
     ]
     print(

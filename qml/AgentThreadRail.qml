@@ -40,11 +40,11 @@
 // A row can be all three at once, so none of them may be a fill:
 //
 //   ACTIVE   — the agent on the central surface (`focusedSlot`): a recessed
-//              canvas-rung fill INSIDE a hairline border. Two marks for one
-//              state on purpose — the fill alone is ~8 lightness units from
-//              the rail behind it, which is at the threshold of visible, and
-//              the border is what actually announces the row. With no focused
-//              agent NO row carries it.
+//              canvas-rung fill, DARKER than the rail, so the row reads as a
+//              window onto the surface that thread is on. Deliberately quiet —
+//              a hairline border was tried beside it and removed for being a
+//              harder mark than the state needs. With no focused agent NO row
+//              carries it.
 //   SELECTED — the keyboard cursor (`selected`, moved with j/k): a marker bar
 //              down the row's left edge. Deliberately NOT the fill, which is
 //              the bug this replaced — the cursor painted itself in the
@@ -453,19 +453,19 @@ FocusScope {
             // marker bar below and the pointer gets the wash; see the
             // three-channel note in this file's header.
             //
-            // A FILL AND AN EDGE, and the edge is the part that carries it.
-            // The fill is a canvas-rung recess only ~8 lightness units from the
-            // rail behind it, which on its own is at the threshold of visible —
-            // the state used to be told by the title's colour rung alone, and
-            // that was too easy to lose among nineteen rows. See
-            // `Theme.color.rail` for why the pair is the signal.
+            // A RECESSED FILL AND NOTHING ELSE. A hairline border shipped
+            // alongside it on 2026-08-19 and was removed the same day on the
+            // user's call: it drew a hard bright rectangle around the row,
+            // which is a heavier mark than "this is the one you are looking
+            // at" needs in a column of quiet neutrals.
+            //
+            // So the fill carries the state alone, and it is a canvas-rung
+            // recess about 3 lightness units below the rail behind it. That is
+            // deliberately understated, NOT an oversight to be corrected by
+            // lightening it back — see `Theme.color.rail.activeRow`. The row
+            // is also the only one in the list whose title reads at the
+            // `strong` rung, so the fill is not doing the work by itself.
             color: row.focusedSlot ? Theme.color.rail.activeRow : "transparent"
-            // Zero width, not a transparent colour: a 1px transparent border
-            // still insets the fill by a pixel, so every inactive row would
-            // paint one pixel smaller than its active neighbour and the list
-            // would breathe as focus moved.
-            border.width: row.focusedSlot ? 1 : 0
-            border.color: Theme.color.rail.activeBorder
 
             // HOVER — a wash ON TOP of the fill rather than a competing fill,
             // which is what lets a row be active AND hovered and still show

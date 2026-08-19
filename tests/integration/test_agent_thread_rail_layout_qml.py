@@ -134,41 +134,54 @@ def test_threads_are_separated_by_more_air_than_their_two_lines_are() -> None:
     )
 
 
-def test_the_active_row_is_marked_by_a_border_and_a_recess() -> None:
-    """Two marks for one state, and the pair is the point.
+def test_the_active_row_is_marked_by_a_recess_and_no_outline() -> None:
+    """One quiet mark, and the ABSENCE of the loud one, both asserted.
 
-    The active row used to be told by a LIGHTER fill and by the title's colour
-    rung. The fill now aliases the canvas rung, which is DARKER than the rail
-    behind it — it reads as a window onto the surface that thread is on, and
-    it is only about three lightness units away, so it cannot carry the state
-    alone. The border is what actually announces the row.
+    The fill aliases the canvas rung, DARKER than the rail behind it: the
+    active thread is the one whose pane is on the canvas, so the row reads as
+    a window onto it rather than as a brighter neighbour. Lightening it to
+    "restore contrast" returns it to a raised highlight and loses that.
 
-    Both halves are asserted because either one alone silently degrades: drop
-    the border and the state is at the threshold of visible, lighten the fill
-    "to restore contrast" and it stops meaning anything.
+    The missing outline is asserted rather than left unmentioned, because a
+    hairline border shipped here on 2026-08-19 and was removed the same day
+    for being a harder mark than the state needs — without an assertion the
+    next reader who finds the recess too subtle re-adds it silently.
+
+    ⚠ Asserted on the RENDERED PIXEL, and it has to be. Qt Quick's
+    `Rectangle.border.width` defaults to 1 with an opaque black colour and
+    still draws nothing, because `QQuickPen` only applies once ASSIGNED and
+    that state is not a property — so a property-level `border.width == 0`
+    assertion would be testing Qt's default and would fail on a Rectangle with
+    no border at all. Measured against a bare Rectangle on 2026-08-19; the
+    method is in the probe.
     """
     probe = _probe()
     rows = probe["rows"]
     active = [row for row in rows if row["focused"]]
     assert len(active) == 1, "the probe is meant to focus exactly one row"
 
-    assert active[0]["borderWidth"] == 1.0
-    # Zero, never a transparent 1px border: a border of any width insets the
-    # fill, so an inactive row would paint a pixel smaller than its active
-    # neighbour and the list would breathe as focus moved.
-    assert all(row["borderWidth"] == 0.0 for row in rows if not row["focused"])
-
-    # RECESSED, not raised. This is the assertion that catches the tempting
-    # wrong fix.
+    # RECESSED, not raised. The assertion that catches the tempting wrong fix.
     assert active[0]["fill"] is not None
     assert active[0]["fill"] < probe["railGround"], (
         f"the active row's fill ({active[0]['fill']}) is not darker than the "
         f"rail behind it ({probe['railGround']})"
     )
 
-    # An inactive row paints NOTHING and shows the rail through. A second
-    # opaque fill would compete with the active one at whatever rung it chose.
-    assert all(row["fill"] is None for row in rows if not row["focused"])
+    # The row's own edge pixel IS its fill — an outline of any brightness
+    # would show up here as a lighter value.
+    assert active[0]["edgeLightness"] == active[0]["fill"], (
+        f"the active row drew an outline (edge {active[0]['edgeLightness']} "
+        f"against fill {active[0]['fill']}) — see the note on "
+        "Theme.color.rail.activeRow before adding one back"
+    )
+
+    # An inactive row paints NOTHING: its edge is the rail showing through,
+    # and it carries no competing fill of its own.
+    for row in rows:
+        if row["focused"]:
+            continue
+        assert row["fill"] is None
+        assert row["edgeLightness"] == probe["railGround"], row
 
 
 def test_the_age_is_right_aligned_across_every_row() -> None:

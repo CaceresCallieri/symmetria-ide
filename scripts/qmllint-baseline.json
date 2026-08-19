@@ -12,7 +12,7 @@
     "unqualified": 6
   },
   "qml/AgentThreadRail.qml": {
-    "missing-property": 80,
+    "missing-property": 79,
     "unqualified": 28
   },
   "qml/AgentTopBar.qml": {
@@ -96,7 +96,7 @@
   },
   "qml/design/Theme.qml": {
     "invalid-lint-directive": 17,
-    "missing-property": 30,
+    "missing-property": 29,
     "unqualified": 3
   },
   "qml/design/UsageFormat.qml": {
