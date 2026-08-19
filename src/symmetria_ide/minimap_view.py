@@ -94,12 +94,15 @@ _INDENT_RGBA: tuple[tuple[int, int, int], ...] = (
     # Re-derived with the flat-aesthetic palette move: Theme.text.* came down
     # a rung, so these followed to keep the annotations honest.
     #
-    # ⚠ These track the text ramp's LUMINANCE, not its exact hex. The flat
-    # palette's text rungs carry a slight cool tint (text.normal is #a8a8ae),
-    # while this ramp must stay strictly R == G == B — the Phase 4.5 decision
-    # that the silhouette reads as text rather than as tinted chrome, enforced
-    # by `test_indent_palette_is_neutral_gray`. So each rung is its text
-    # counterpart with the tint removed, not a copy of it.
+    # ⚠ These track the text ramp's LUMINANCE, and as of 2026-08-19 that also
+    # makes them its exact hex. This ramp must stay strictly R == G == B — the
+    # Phase 4.5 decision that the silhouette reads as text rather than as
+    # tinted chrome, enforced by `test_indent_palette_is_neutral_gray`. It used
+    # to differ from the text rungs because THOSE carried a cool tint
+    # (text.normal was #a8a8ae) and each rung here was its counterpart with the
+    # tint removed. The Theme ramp is achromatic now, so the two coincide.
+    # Keep the constraint anyway: it is what stops a future re-tint of Theme
+    # from reaching the silhouette.
     (0xE4, 0xE4, 0xE4),  # level 0 — text.emphasis luminance (brightest)
     (0xA8, 0xA8, 0xA8),  # level 1 — text.normal luminance
     (0x7E, 0x7E, 0x7E),  # level 2 — mid-tone
@@ -154,10 +157,12 @@ _DIAGNOSTIC_RGBA: tuple[tuple[int, int, int], ...] = (
     (0xC2, 0x8B, 0x12),  # warn  — Theme.mode.normal  (wine_theme.keyword)
     (0x6D, 0x94, 0xE9),  # info  — Theme.mode.command (wine_theme.accent_blue)
     # `hint` is the one entry aliasing a NEUTRAL token rather than an accent,
-    # so it is the one that moved with the flat-aesthetic palette (text.dim
-    # #7a7a7a -> #6e6e73). The three accent rows above are wine_theme-derived
-    # and deliberately did not move.
-    (0x6E, 0x6E, 0x73),  # hint  — Theme.text.dim
+    # so it is the one that moves whenever the neutral ramp does: text.dim ran
+    # #7a7a7a -> #6e6e73 with the flat-aesthetic palette, then -> #6e6e6e when
+    # the ramp went achromatic (2026-08-19). The three accent rows above are
+    # wine_theme-derived and deliberately did not move on either pass.
+    # `test_diagnostic_palette_matches_theme_qml` is what catches this drifting.
+    (0x6E, 0x6E, 0x6E),  # hint  — Theme.text.dim
 )
 
 # Map wire-format severity string to its index in `_DIAGNOSTIC_RGBA`.

@@ -2499,8 +2499,13 @@ Window {
                         // embedded inner ListView holds it — for keyboard
                         // arrivals (Tab, Ctrl+L) and mouse clicks alike.
                         // Geometry + rationale live in FocusBar.qml.
+                        //
+                        // Bottom inset only: this body's bottom edge lands at
+                        // the canvas's bottom corner, while its top meets the
+                        // tab header, which has no corner to clear.
                         FocusBar {
                             focused: gitStatusPanel.activeFocus
+                            bottomInset: Theme.radius.canvas
                         }
                     }
 
@@ -2736,8 +2741,11 @@ Window {
                         // to `mainTreeScope.activeFocus` (the wrapping
                         // FocusScope), which flips when the inner
                         // ListView gains/loses activeFocus.
+                        // Bottom inset only, for the same reason as the
+                        // changes tab's bar above.
                         FocusBar {
                             focused: mainTreeScope.activeFocus
+                            bottomInset: Theme.radius.canvas
                         }
                     }
                 }

@@ -12,7 +12,7 @@
     "unqualified": 6
   },
   "qml/AgentThreadRail.qml": {
-    "missing-property": 66,
+    "missing-property": 68,
     "unqualified": 26
   },
   "qml/AgentTopBar.qml": {
@@ -35,7 +35,7 @@
   },
   "qml/Main.qml": {
     "import": 11,
-    "missing-property": 89,
+    "missing-property": 91,
     "unqualified": 256,
     "unresolved-type": 7,
     "unused-imports": 2

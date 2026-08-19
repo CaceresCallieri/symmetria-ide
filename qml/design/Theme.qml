@@ -192,10 +192,30 @@ QtObject {
         // "height". The content area is the darkest thing in the window and
         // every layer of chrome around it is a step lighter:
         //
-        //     canvas  #0f0f10   editor, terminal, agents, git, FM
-        //     chrome  #131316   framed cards and detail views ON the canvas
-        //     bar     #17171a   top bar, status bar, side panel, window root
-        //     raised  #1e1e22   popups and modals, which must clear `bar`
+        //     canvas  #0f0f0f   editor, terminal, agents, git, FM
+        //     chrome  #131313   framed cards and detail views ON the canvas
+        //     bar     #171717   top bar, status bar, side panel, window root
+        //     raised  #1e1e1e   popups and modals, which must clear `bar`
+        //
+        // ⚠ THE RAMP IS ACHROMATIC, AND THAT IS THE POINT (2026-08-19). Every
+        // rung is r == g == b. It was NOT: each carried a cool cast that grew
+        // with the rung (blue-minus-red ran +1, +3, +3, +4, +5, +6), which the
+        // ladder documented as a trend to keep new rungs "on trend" with. On a
+        // real seat the accumulated result read as blue-grey rather than as
+        // neutral, most visibly on the largest flat areas — the thread rail and
+        // the side panel. The reference is T3 Code, whose chrome is pure
+        // neutral and carries its identity in ONE saturated accent instead.
+        //
+        // The neutralisation dropped the blue channel to meet r/g and left r/g
+        // untouched, so every rung's ORDERING and spacing survive exactly; only
+        // the hue is gone. Luminance falls by under half a point per rung (blue
+        // contributes ~7% of it), which is below the threshold at which any of
+        // the contrast decisions recorded here would change.
+        //
+        // Do NOT re-introduce a per-rung cool skew "for warmth balance" or to
+        // put a new rung on the old trend. If a future rung is needed, give it
+        // r == g == b like its neighbours. The warm accents below are where
+        // this palette carries colour; the neutrals are deliberately inert.
         //
         // ⚠ The SIDE PANEL is on `bar`, not on `chrome`, and that is a
         // correction rather than an inconsistency (2026-08-13, from the first
@@ -238,23 +258,23 @@ QtObject {
             // — silently erasing the distinction this ladder exists to make.
             // `surfaceContainerLowest` (#0F0D13) is the one role that sits
             // BELOW `surface`, which keeps the six rungs strictly increasing.
-            readonly property color canvas: theme._c("surfaceContainerLowest", "#0f0f10")
+            readonly property color canvas: theme._c("surfaceContainerLowest", "#0f0f0f")
             // Framed cards and detail views that float ON the canvas — the git
             // surface's columns, PillSurface's default fill. One step out from
             // the content, which is what lifts them off it. NOT the side panel
             // (see the correction in the ladder note above).
-            readonly property color chrome: theme._c("surface", "#131316")
+            readonly property color chrome: theme._c("surface", "#131313")
             // The two chrome BARS (AgentTopBar, StatusBar), the SIDE PANEL
             // they bracket, and the window root behind everything. The
             // outermost rung, so the chrome reads as one frame around the
             // content rather than as parts of it.
-            readonly property color bar: theme._c("surfaceContainerLow", "#17171a")
+            readonly property color bar: theme._c("surfaceContainerLow", "#171717")
             // Popups, modals and any surface that must read as sitting ABOVE
             // the chrome. Replaces the drop shadow that used to say so. Note
             // it must clear `bar`, not `chrome` — a popup usually opens over
             // the bars, which are the lightest chrome.
-            readonly property color raised: theme._c("surfaceContainer", "#1e1e22")
-            readonly property color selected: theme._c("surfaceContainerHigh", "#26262b")
+            readonly property color raised: theme._c("surfaceContainer", "#1e1e1e")
+            readonly property color selected: theme._c("surfaceContainerHigh", "#262626")
             // The `selected` twin for anything sitting ON a raised surface (a
             // PillCard modal, a picker, a detail card). `selected` is only a
             // few lightness units above `raised`, so the same token used
@@ -262,11 +282,12 @@ QtObject {
             // Consumers pick between the two; nothing derives one from the
             // other, because the step that reads correctly over `chrome` is
             // not the step that reads correctly over `raised`.
-            // #303036, not #303038: blue-minus-red across the rungs runs
-            // +1, +3, +3, +4, +5, so a +8 top rung took roughly double the
-            // per-step cool shift of everything below it and read as bluer
-            // rather than simply lighter. Same lightness, skew back on trend.
-            readonly property color raisedSelected: theme._c("surfaceContainerHighest", "#303036")
+            // Was #303036, on a since-removed rule that each rung carry a
+            // slightly stronger cool skew than the one below it. The ramp is
+            // achromatic now (see the ⚠ note in the ladder above), so this is
+            // #303030 for the same reason every other rung lost its blue: the
+            // r/g value that set its lightness is unchanged.
+            readonly property color raisedSelected: theme._c("surfaceContainerHighest", "#303030")
             // Modal backdrop (AgentSpawnMenu). Black @ 45% — dims the
             // surface enough to read "modal" without hiding context;
             // sits over the already-translucent terminal panes, so a
@@ -292,12 +313,18 @@ QtObject {
         // Neutral text ramp. Five rungs cover the useful range from
         // "almost invisible" (dim) to "selected row foreground"
         // (selected). Most chrome text uses `normal` or `strong`.
-        // Slightly cooler and less bright than the pre-flat ramp: the darker
-        // base raises every rung's contrast, so the old values read as glare.
+        // Less bright than the pre-flat ramp: the darker base raises every
+        // rung's contrast, so the old values read as glare.
+        //
+        // Achromatic, on the same 2026-08-19 pass as the surface ladder and
+        // for the same reason — these rungs also carried a cool cast (+4 to +6
+        // blue-minus-red), and text is where it was hardest to unsee once
+        // noticed: a whole list of titles at `normal` reads blue-grey. Same
+        // transformation, so the ramp's lightness steps are unchanged.
         readonly property QtObject text: QtObject {
-            readonly property color dim: theme._c("outline", "#6e6e73")
-            readonly property color normal: theme._c("onSurfaceVariant", "#a8a8ae")
-            readonly property color strong: theme._c("onSurface", "#d4d4d8")
+            readonly property color dim: theme._c("outline", "#6e6e6e")
+            readonly property color normal: theme._c("onSurfaceVariant", "#a8a8a8")
+            readonly property color strong: theme._c("onSurface", "#d4d4d4")
             // `emphasis` and `selected` stay LITERAL: M3 has no neutral role
             // above `onSurface`, and the nearest candidates are accent-derived
             // (`onPrimaryContainer`) or inverted (`inverseSurface`). Reading
@@ -306,8 +333,8 @@ QtObject {
             // rules out. They therefore ride `strong`'s scheme value visually
             // rather than tracking it literally; if a swap makes them collide,
             // raise them here rather than routing them.
-            readonly property color emphasis: "#e4e4e8"
-            readonly property color selected: "#f0f0f2"
+            readonly property color emphasis: "#e4e4e4"
+            readonly property color selected: "#f0f0f0"
         }
 
         // Warm accents. `primary` and `bright` derive from wine_theme
@@ -646,7 +673,7 @@ QtObject {
                 readonly property color level0: "#e4e4e4"    // text.emphasis luminance — top-level, brightest
                 readonly property color level1: "#a8a8a8"    // text.normal luminance   — function-body level
                 readonly property color level2: "#7e7e7e"    // mid-tone between normal and dim
-                readonly property color level3: "#525252"    // deep nesting — quietest, just under text.dim (#6e6e73)
+                readonly property color level3: "#525252"    // deep nesting — quietest, just under text.dim (#6e6e6e)
             }
 
             // Viewport indicator — Phase 3 of docs/minimap-prd.md.

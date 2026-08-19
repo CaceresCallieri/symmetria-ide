@@ -204,6 +204,85 @@ def test_thread_rail_chrome_uses_theme_tokens_not_literal_styling() -> None:
     assert not re.search(r"\b(?:rgb|rgba|hsla?)\s*\(", rail)
 
 
+def test_theme_neutral_ramps_are_achromatic() -> None:
+    """Spec: the surface ladder and text ramp carry no hue (2026-08-19).
+
+    Both ramps used to carry a cool cast that grew per rung, which read as
+    blue-grey on the large flat areas. The guard is per-rung `r == g == b`
+    rather than a hex list, so a future lightness retune stays free while a
+    re-tint fails.
+
+    Scoped to the `bg` and `text` GROUPS structurally, not by token name: the
+    names collide across groups (`normal` is both a text rung and the warm
+    `mode.normal`), and the accents, mode colours and diff palette are
+    deliberately saturated.
+    """
+    theme = _source(QML / "design" / "Theme.qml")
+
+    found: dict[str, tuple[int, int, int]] = {}
+    for group in ("bg", "text"):
+        marker = theme.find(f"readonly property QtObject {group}:")
+        assert marker >= 0, f"Theme.qml has no `{group}` colour group"
+        body = extract_braced_body(theme, marker)
+
+        for match in re.finditer(
+            r'readonly property color (\w+):[^\n]*?"#([0-9a-fA-F]{6,8})"', body
+        ):
+            name, hex_value = match.group(1), match.group(2)
+            if len(hex_value) == 8:  # ARGB — drop alpha, judge the colour
+                hex_value = hex_value[2:]
+            red, green, blue = (int(hex_value[i : i + 2], 16) for i in (0, 2, 4))
+            found[f"{group}.{name}"] = (red, green, blue)
+            assert red == green == blue, (
+                f"Theme neutral `{group}.{name}` = #{hex_value} is tinted "
+                f"(r={red} g={green} b={blue}); the ramp must stay achromatic"
+            )
+
+    # Guard the guard: a rename must not let this silently match nothing.
+    assert len(found) >= 8, f"expected the neutral ramp tokens, matched {found}"
+
+
+def test_focus_bars_stop_short_of_the_canvas_corner() -> None:
+    """Spec: no straight line crosses a rounded corner.
+
+    A FocusBar anchors top-to-bottom on its parent, so without an inset it
+    runs past the point where the canvas has already curved away — the exact
+    thing the 1px separators beside it already avoid with the same
+    `Theme.radius.canvas` margin. The rail's bar spans the whole content row
+    and insets at BOTH ends; the two side-panel bars sit under the tab header,
+    so only their bottom end reaches a corner.
+
+    Asserted at the call sites rather than as a default on the component: an
+    end that meets a chrome bar has no corner to clear, and defaulting the
+    inset would silently shorten those.
+    """
+    bar_component = _without_comments(_source(QML / "FocusBar.qml"))
+    assert "property real topInset" in bar_component
+    assert "property real bottomInset" in bar_component
+    assert "anchors.topMargin: bar.topInset" in bar_component
+    assert "anchors.bottomMargin: bar.bottomInset" in bar_component
+
+    rail_bar = _without_comments(_rail())
+    marker = rail_bar.find("FocusBar")
+    assert marker >= 0, "AgentThreadRail no longer instantiates a FocusBar"
+    body = extract_braced_body(rail_bar, marker)
+    assert "topInset: Theme.radius.canvas" in body
+    assert "bottomInset: Theme.radius.canvas" in body
+
+    main = _without_comments(_source(QML / "Main.qml"))
+    side_panel_bars = [
+        extract_braced_body(main, m.start())
+        for m in re.finditer(r"\bFocusBar\s*\{", main)
+    ]
+    assert len(side_panel_bars) == 2, (
+        f"expected the two side-panel FocusBars in Main.qml, found "
+        f"{len(side_panel_bars)}"
+    )
+    for body in side_panel_bars:
+        assert "bottomInset: Theme.radius.canvas" in body
+        assert "topInset" not in body
+
+
 def test_whole_tree_qmllint_gate_has_no_new_findings() -> None:
     """Guard: Phase 2 cannot hide new QML debt in the checked-in baseline."""
     result = subprocess.run(
