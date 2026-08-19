@@ -2275,6 +2275,8 @@ def test_worktree_deletion_event_releases_focused_agent_follow(
     assert controller.displayedRoot == main
     assert controller.displayingWorktree == ""
     assert controller.agentWorktree[1] == ""
+    assert controller._term_agents[2]["work_root"] == ""
+    assert controller._agent_live_work_root(controller._term_agents[2]) == main
     assert displayed_roots == [main]
     assert mounted_roots == [main]
     assert controller._git_controller.repoRoot == main

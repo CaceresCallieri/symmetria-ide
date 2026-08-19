@@ -4355,6 +4355,21 @@ class AppController(QObject):
         # `linked_worktree_info` and clears the override on its own, which would
         # otherwise just re-expose a ghost anchor underneath it.
         self._drop_vanished_roots()
+        # `work_root` deliberately outranks the process cwd because write-tool
+        # paths are the only reliable signal when an agent edits through an
+        # absolute worktree path. Once that path vanishes, retaining it is no
+        # longer tracking: a later persistence edge saves the dead root again,
+        # and recreating the path can resurrect an unrelated follow. Clear only
+        # genuinely absent observations, then persist the fallback root.
+        cleared_dead_root = False
+        if rec is not None:
+            for field in ("work_root", "live_cwd"):
+                observed_root = str(rec.get(field) or "")
+                if observed_root and _root_is_gone(observed_root):
+                    rec[field] = ""
+                    cleared_dead_root = True
+            if cleared_dead_root:
+                self._persist_agent_work_root(slot)
         target_root, target_name = (
             ("", "") if rec is None else (self._agent_worktree_state(rec))
         )
