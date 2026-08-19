@@ -335,6 +335,263 @@ def test_location_header_reflects_anchor_state(main_qml: str):
 
 
 # ---------------------------------------------------------------------------
+# Side-panel tabs — files ↔ changes, one visible at a time, toggled by Tab.
+# The two panes were co-mounted and stacked vertically before this; every
+# assertion here guards a failure mode that is silent rather than loud.
+# ---------------------------------------------------------------------------
+
+
+def test_side_panel_tab_bodies_are_mutually_exclusive(main_qml: str):
+    """Both tab bodies must gate `visible` on `sidePanelTab`.
+
+    If either loses its gate the two trees render stacked again — which
+    looks like a layout bug rather than a missing binding, and the panel
+    silently returns to the split column the tabs replaced.
+    """
+    assert "visible: root.sidePanelTab === 1" in main_qml, (
+        "GitStatusPanel must be visible only on the changes tab."
+    )
+    assert "visible: root.sidePanelTab === 0" in main_qml, (
+        "mainTreeScope must be visible only on the files tab."
+    )
+
+
+def _strip_comments(block: str) -> str:
+    """Drop `//` comment lines from a QML slice.
+
+    Structural tests that assert a name is ABSENT must not match the prose
+    explaining why it is absent — the comments here deliberately name what
+    was removed so a future reader does not reintroduce it.
+    """
+    return "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("//")
+    )
+
+
+def test_side_panel_tab_bodies_are_not_loaded(main_qml: str):
+    """The bodies swap on `visible`, never through a Loader.
+
+    A Loader would remount the FM tree on every toggle, discarding its
+    expanded-path state and scroll position and re-running the mount race
+    documented at `_applyTreeMount()`. That regression is invisible in a
+    screenshot and only shows up as "the tree keeps collapsing".
+    """
+    tabs_idx = main_qml.find("id: sidePanelTabs")
+    tree_idx = main_qml.find("id: fileTreeView")
+    assert tabs_idx >= 0 and tree_idx > tabs_idx
+    assert "Loader" not in _strip_comments(main_qml[tabs_idx:tree_idx])
+
+
+def test_side_panel_tab_toggle_is_focus_chain_not_shortcut(main_qml: str):
+    """Tab must be handled by a `Keys.onPressed` on the side panel, NOT by
+    a `Shortcut`.
+
+    An application-scope Tab would fire from every surface and cost the
+    terminal its completion key and nvim its own Tab. Scoped to the focus
+    chain it is inert unless the side panel already holds focus. This
+    asserts the mechanism, not just the behaviour, because a well-meaning
+    refactor to "make the chord consistent with its siblings" would
+    reintroduce exactly that regression.
+    """
+    assert 'sequences: ["Tab"]' not in main_qml
+    # Both key constants must be consulted, but deliberately NOT pinned to a
+    # particular boolean shape: the handler is an early-return chain today and
+    # was a single `||` before, and neither phrasing is the thing under test.
+    assert "Qt.Key_Tab" in main_qml
+    assert "Qt.Key_Backtab" in main_qml
+    assert "root._toggleSidePanelTab()" in main_qml
+
+
+def test_side_panel_tab_click_and_key_share_a_focus_path(main_qml: str):
+    """Clicking a segment and pressing Tab must both route focus through
+    `_focusSidePanelTab()`.
+
+    If the click path skips it, focus stays wherever it was and the user's
+    next Tab press reads as a dead key — the click "worked" visually, so
+    the bug presents as an unrelated broken keybind.
+
+    Scoped to the click handler's own body. A whole-file count does not
+    falsify this: three other call sites (`_toggleSidePanelTab`, the Ctrl+L
+    re-entry, the changeset-edge re-park) already satisfy any threshold, so
+    deleting the call from exactly this handler would leave the test green.
+    """
+    tabs_idx = main_qml.find("id: sidePanelTabs")
+    assert tabs_idx >= 0
+    handler_idx = main_qml.find("onActivated: function (key)", tabs_idx)
+    assert handler_idx > tabs_idx, "the tab header must handle onActivated"
+    end = main_qml.find("\n                    }\n", handler_idx)
+    assert end > handler_idx
+    assert "root._focusSidePanelTab()" in main_qml[handler_idx:end]
+
+
+def test_stacked_side_panel_properties_are_gone(main_qml: str):
+    """`maxHeight` and `collapsed` on GitStatusPanel must not be re-bound.
+
+    Both existed only because two trees shared one column: the cap kept a
+    huge changeset from pushing the file tree off-screen, and the fold got
+    the mini-tree out of the way of the central git surface. Re-adding
+    either alongside the tabs would clamp or hide a tab body the user
+    explicitly selected.
+    """
+    panel_idx = main_qml.find("GitStatusPanel {")
+    tree_idx = main_qml.find("id: mainTreeScope")
+    assert panel_idx >= 0 and tree_idx > panel_idx
+    # Strip `//` comment lines first — the block deliberately NAMES both
+    # properties in prose, to record why they must not come back. Matching
+    # the documentation of a removal as if it were the removal undone is
+    # the classic way this style of structural test turns into noise.
+    panel_block = "\n".join(
+        line
+        for line in main_qml[panel_idx:tree_idx].splitlines()
+        if not line.lstrip().startswith("//")
+    )
+    assert "maxHeight:" not in panel_block
+    assert "collapsed:" not in panel_block
+
+
+def _shortcut_body(main_qml: str, sequence: str) -> str:
+    """Slice one Shortcut's own body, from its `sequences:` line to the
+    closing brace at the block's indentation.
+
+    A fixed character window does NOT work here: Main.qml's Shortcuts sit
+    directly beside each other with long comment blocks between them, so a
+    generous window bleeds into the NEXT chord's prose and matches names it
+    legitimately discusses (the Ctrl+S block right below this one explains
+    `toggle_tree`, which is exactly what the Ctrl+Shift+D test asserts is
+    absent).
+    """
+    start = main_qml.find(f'sequences: ["{sequence}"]')
+    assert start >= 0, f"{sequence} must be bound."
+    end = main_qml.find("\n    }\n", start)
+    assert end > start, f"{sequence}'s Shortcut block is not closed as expected."
+    return main_qml[start:end]
+
+
+def test_side_panel_tab_chord_exists_at_application_scope(main_qml: str):
+    """Ctrl+Shift+D must switch the tab from ANY surface.
+
+    The panel-scoped Tab key only works once you are already in the panel;
+    this chord is the "look at the other tab without leaving the editor"
+    half. Application scope is what makes it fire from nvim insert mode and
+    from a focused terminal.
+    """
+    block = _shortcut_body(main_qml, "Ctrl+Shift+D")
+    assert "context: Qt.ApplicationShortcut" in block
+    assert "root._flipSidePanelTab()" in block
+
+
+def test_side_panel_tab_chord_does_not_steal_focus(main_qml: str):
+    """The chord must never pull focus into the panel from OUTSIDE it.
+
+    That is the entire distinction from the Tab key: this one changes what
+    the panel SHOWS, Tab changes what you are navigating. Pulling focus into
+    the tree unconditionally would make "glance at the changes" cost a trip
+    back to whatever you were typing in — the regression is easy to
+    introduce by "unifying" the two paths on `_toggleSidePanelTab()`, which
+    is why the flip is a separate function from the flip-and-focus.
+
+    The chord DOES re-seat focus in the one case where not doing so strands
+    the keyboard: focus already inside the panel, where the flip hides the
+    body that owns it. That call must stay guarded by `treeScope.activeFocus`
+    — an unguarded one is the regression this asserts against.
+    """
+    block = _shortcut_body(main_qml, "Ctrl+Shift+D")
+    assert "_toggleSidePanelTab" not in block, (
+        "the chord must flip without the focus half — use _flipSidePanelTab."
+    )
+    assert "treeScope.activeFocus" in block, (
+        "the re-seat must be guarded on focus already being in the panel."
+    )
+    # The guard and the call must be adjacent, so the call cannot survive a
+    # refactor that drops the condition while leaving both strings present.
+    guard_idx = block.find("if (treeScope.activeFocus)")
+    focus_idx = block.find("root._focusSidePanelTab()")
+    assert guard_idx >= 0, "the focus re-seat must sit behind an if-guard."
+    assert focus_idx > guard_idx, "the guard must precede the focus re-seat."
+    assert block.count("root._focusSidePanelTab()") == 1
+
+
+def test_side_panel_tab_key_is_modal_guarded(main_qml: str):
+    """The Tab handler must refuse to fire while a tree modal is open.
+
+    The FM's own key swallow does NOT cover this: it eats keys aimed at the
+    TREE, but a modal's TextInput holds focus instead, so whatever that
+    input declines bubbles past the tree to `treeScope`. Measured against
+    the installed FM module, `CreateFilePopup` claims no Tab — so without
+    the guard, Tab while typing a new filename flips the tab and yanks
+    focus out of the still-open dialog, which then swallows every key
+    including the Escape that would close it.
+    """
+    scope_idx = main_qml.find("id: treeScope")
+    assert scope_idx >= 0
+    handler_idx = main_qml.find("Keys.onPressed: function (event)", scope_idx)
+    assert handler_idx > scope_idx, "treeScope must own a Keys.onPressed handler"
+    end = main_qml.find("\n                }\n", handler_idx)
+    assert end > handler_idx
+    body = main_qml[handler_idx:end]
+    assert "treeOpsWindowState.activeModal" in body
+    # The guard must precede the toggle, or it guards nothing.
+    assert body.find("treeOpsWindowState.activeModal") < body.find(
+        "root._toggleSidePanelTab()"
+    )
+
+
+def test_side_panel_tab_chord_reveals_rather_than_toggles_the_sidebar(main_qml: str):
+    """The chord must call `show_tree()`, never `toggle_tree()`.
+
+    `toggle_tree` FLIPS: on an already-visible sidebar it would hide the very
+    panel the chord is about to switch, so every second press would blank the
+    side panel. On a narrow window it would additionally set user intent to
+    False, keeping the sidebar hidden after the window widens again.
+    """
+    block = _shortcut_body(main_qml, "Ctrl+Shift+D")
+    assert "controller.show_tree()" in block
+    assert "toggle_tree" not in block
+
+
+@pytest.fixture(scope="module")
+def git_status_panel_qml() -> str:
+    """Load GitStatusPanel.qml once per module — the changes tab's body."""
+    repo_root = Path(__file__).resolve().parent.parent
+    return (repo_root / "qml" / "GitStatusPanel.qml").read_text()
+
+
+def test_changes_panel_header_does_not_fill_height(git_status_panel_qml: str):
+    """The bucket header must carry an explicit `Layout.fillHeight: false`.
+
+    A Layout nested directly inside another Layout defaults fillHeight to
+    TRUE in Qt Quick Layouts (a plain Item defaults false). Without the
+    explicit override the header competes with the tab body for the
+    leftover column height: the empty state drifts to the vertical middle
+    of the column and the changes tree loses rows. This was latent while
+    the panel was sized to its own content and only appeared once it
+    became a full-height tab — so a future reader has every reason to
+    delete the line as redundant. It is not.
+
+    Scoped to the bucket header's own block: a whole-file match would stay
+    green if the line were deleted from here and happened to appear on any
+    other element, which is precisely the regression being guarded.
+    """
+    header_idx = git_status_panel_qml.find("// Section header")
+    assert header_idx >= 0, "the bucket header's comment block must be present"
+    end = git_status_panel_qml.find("Repeater {", header_idx)
+    assert end > header_idx
+    assert "Layout.fillHeight: false" in git_status_panel_qml[header_idx:end]
+
+
+def test_changes_panel_has_an_empty_state(git_status_panel_qml: str):
+    """A clean working tree must draw an empty state, not hide the panel.
+
+    The panel self-hid on `model.count > 0` while it was stacked above the
+    file tree. As a tab body that rule leaves the tab header sitting above
+    a void, which reads as a broken pane rather than as a clean repo.
+    """
+    assert "readonly property bool hasChanges" in git_status_panel_qml
+    assert "visible: !root.hasChanges" in git_status_panel_qml
+    assert "visible: model && model.count > 0" not in git_status_panel_qml
+
+
+# ---------------------------------------------------------------------------
 # Terminal-agent chord family — Ctrl+1..5 / Ctrl+Shift+A/Q/H/L / Ctrl+U/D
 # (HARD CUTOVER: these chords previously relayed to orchestrator.nvim via
 # controller.send_editor_keys; the IDE-native agent surface owns them now.)

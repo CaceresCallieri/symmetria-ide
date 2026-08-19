@@ -139,3 +139,52 @@ def test_user_hidden_intent_persists_across_widening(controller):
     assert controller.treeVisible is False
     controller.set_window_width(2000)  # very wide, but intent is still off
     assert controller.treeVisible is False
+
+
+# ---------------------------------------------------------------------------
+# `show_tree()` — the idempotent reveal (Ctrl+Shift+D side-panel tab chord).
+# ---------------------------------------------------------------------------
+
+
+def test_show_tree_reveals_a_user_hidden_sidebar(controller):
+    """The reveal turns user intent ON regardless of its prior value."""
+    controller.toggle_tree()  # wide → intent off → hidden
+    assert controller.treeVisible is False
+    emissions = _capture(controller.treeVisibleChanged)
+    controller.show_tree()
+    assert controller.treeVisible is True
+    assert len(emissions) == 1
+
+
+def test_show_tree_is_idempotent_and_silent_when_already_visible(controller):
+    """Calling it on an already-visible sidebar must not toggle it off, and
+    must emit nothing.
+
+    This is the entire reason the slot exists. The chord that calls it fires
+    on every press, including while the sidebar is already up — routed
+    through `toggle_tree` it would HIDE the panel it is meant to reveal, so
+    every second press of the tab chord would blank the side panel.
+    """
+    assert controller.treeVisible is True
+    emissions = _capture(controller.treeVisibleChanged)
+    controller.show_tree()
+    assert controller.treeVisible is True
+    assert emissions == []
+
+
+def test_show_tree_leaves_intent_recoverable_on_a_narrow_window(controller):
+    """On a narrow window the reveal cannot show the sidebar (the width gate
+    still dominates) — but it must leave user intent TRUE, so widening the
+    window brings the panel back.
+
+    `toggle_tree` is what makes this a real trap: called in the same state it
+    flips intent to False, and the sidebar then stays hidden even after the
+    window widens. The caller cannot detect the case either, because
+    `treeVisible` is the AND of both inputs and does not say which is False.
+    """
+    controller.set_window_width(SIDEBAR_MIN_WINDOW_WIDTH - 100)
+    assert controller.treeVisible is False
+    controller.show_tree()
+    assert controller.treeVisible is False  # width gate still wins
+    controller.set_window_width(2000)
+    assert controller.treeVisible is True  # intent survived

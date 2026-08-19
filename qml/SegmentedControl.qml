@@ -50,7 +50,17 @@
 // re-flow into a reveal rather than a jump. If position memory ever matters
 // more than width, the fix is a fixed per-segment width, not a wider label.
 //
-// `segments` is an array of `{key, label, icon?}`. Compose a dynamic label (a count, a
+// THE BADGE, AND WHY IT IS NOT JUST A LABEL. A segment may also carry an
+// optional `badge` — a short string (a count, a ref) drawn after the label.
+// Unlike the label it draws in EVERY state, current or not. That is the whole
+// reason it exists: with `icon` set, the label is the current segment's alone,
+// so a count composed into `label` disappears exactly when it is most useful —
+// on the tab you are NOT looking at. The side panel's changes tab is the
+// motivating case: the count is how you see there is pending work without
+// switching to it. It renders `text.dim` in both states on purpose, so it
+// reads as metadata beside the label rather than competing with it.
+//
+// `segments` is an array of `{key, label, icon?, badge?}`. Compose a dynamic label (a count, a
 // current ref) into `label` at the CALL SITE rather than passing a formatting
 // function: a function call in a QML binding does not re-evaluate (CLAUDE.md
 // gotcha #3), so a `labelFor(key)` property would silently freeze the first
@@ -157,6 +167,12 @@ Row {
             // one would leave a zero-width VISIBLE Text, which still earns the
             // Row's spacing and pads the pill with nothing.
             readonly property string labelText: segment.modelData.label || ""
+            // Absent `badge` reads as undefined; coerce for the same reason
+            // `iconGlyph` does. Note this is a STRING — a consumer passing a
+            // number 0 would coerce to "" here and the badge would vanish,
+            // which is usually what a zero count wants anyway; a consumer that
+            // wants "0" drawn must pass it as a string.
+            readonly property string badgeText: segment.modelData.badge || ""
             // No icon means the label is the only content, so it must always
             // draw. With an icon, the label is the CURRENT segment's alone --
             // unless nothing is current at all, when every label returns (see
@@ -266,6 +282,23 @@ Row {
                     Behavior on color {
                         ColorAnimation { duration: Theme.anim.quick }
                     }
+                }
+
+                // Always-on count/ref. See the header note on why this is a
+                // separate Text and not part of `label`: it must survive the
+                // active-only label rule. No weight flip between states —
+                // `text.dim` in both — so the eye reads it as an annotation on
+                // the segment rather than as a second, competing label.
+                Text {
+                    id: segmentBadge
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: segment.badgeText !== ""
+                    text: segment.badgeText
+                    color: Theme.color.text.dim
+                    font.family: Theme.font.family
+                    font.pixelSize: Theme.font.size.xs
+                    font.weight: Theme.font.weight.medium
+                    renderType: Text.NativeRendering
                 }
             }
 

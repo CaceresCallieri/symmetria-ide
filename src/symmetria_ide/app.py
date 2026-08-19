@@ -444,9 +444,11 @@ class AppController(QObject):
     # remount). Delivering both together makes the pair atomic by construction.
     treeMountRequested = Signal(str, list)
     # QML-bound focus pull. Main.qml's Connections block listens for this
-    # signal and calls `fileTreeView.forceActiveFocus()`. Emitted by the
-    # `focus_tree()` Slot, which the Ctrl+J ApplicationShortcut in
-    # qml/Main.qml dispatches. Carries no payload — it's a one-way ask.
+    # signal and routes focus to the CURRENT side-panel tab (files or
+    # changes) via `_focusSidePanelTab()`. Emitted by the `focus_tree()`
+    # Slot, which the Ctrl+L ApplicationShortcut in qml/Main.qml dispatches
+    # (it was Ctrl+J until the side-panel tabs retired that chord).
+    # Carries no payload — it's a one-way ask.
     focusTreeRequested = Signal()
     # Reverse direction of focusTreeRequested — fired from
     # `_on_nav_event` when nvim spillover targets the editor (no
@@ -1111,7 +1113,7 @@ class AppController(QObject):
         self._fm_visible = False
         self._fm_initial_path = ""
         # File-tree sidebar focus is driven entirely from QML
-        # (Ctrl+J ApplicationShortcut → focus_tree()); the Lua `<leader>tf`
+        # (Ctrl+L ApplicationShortcut → focus_tree()); the Lua `<leader>tf`
         # → `tree` rpcnotify path was stripped alongside the agent hijacks.
         self._backend.nav_event.connect(self._on_nav_event)
         # queued: NvimBackend worker → AppController GUI. Secondary surface
@@ -2693,6 +2695,30 @@ class AppController(QObject):
         self._tree_user_visible = not self._tree_user_visible
         self._emit_tree_visible_if_changed(was_visible)
 
+    @Slot()
+    def show_tree(self) -> None:
+        """Reveal the sidebar — the IDEMPOTENT twin of `toggle_tree`.
+
+        Exists because `toggle_tree` FLIPS, which makes it the wrong
+        primitive for any caller that wants the sidebar *shown*: called
+        while the sidebar is already hidden by the responsive width gate
+        (user intent True, window too narrow) a flip sets intent to False
+        and the sidebar then stays hidden even after the window widens
+        again. The caller cannot guard against that either, because
+        `treeVisible` is the AND of both inputs and does not say which one
+        is False.
+
+        Sets user intent only; the width gate still ANDs on top, so this
+        cannot force the sidebar open on a narrow window — deliberately the
+        same precedence `toggle_tree` documents.
+
+        Caller: the Ctrl+Shift+D side-panel tab chord, which reveals the
+        panel it is about to switch so the key is never a silent no-op.
+        """
+        was_visible = self.treeVisible
+        self._tree_user_visible = True
+        self._emit_tree_visible_if_changed(was_visible)
+
     @Property(QObject, constant=True)
     def gitController(self) -> QObject:
         """The `GitController` exposed to QML.
@@ -2939,8 +2965,10 @@ class AppController(QObject):
 
         Emits `focusTreeRequested` rather than reaching into QML
         directly — keeps the Python side stateless about QML focus
-        ownership. Main.qml's Connections block calls
-        `fileTreeView.forceActiveFocus()` on receipt.
+        ownership. Main.qml's Connections block routes this to the CURRENT
+        side-panel tab via `_focusSidePanelTab()`, so it may land on the
+        changes tree rather than the file tree; it also drops the request
+        when the sidebar is hidden, since `_on_nav_event` emits unguarded.
         """
         self.focusTreeRequested.emit()
 
