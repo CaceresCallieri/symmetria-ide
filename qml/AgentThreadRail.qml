@@ -270,7 +270,21 @@ FocusScope {
         anchors.rightMargin: Theme.spacing.sm
         clip: true
         focus: true
-        spacing: Theme.spacing.xxs
+        // ⚠ This is the ONLY gap separating one thread from the next, and it
+        // has to beat the 2px gap INSIDE a row that binds its two lines
+        // together — the rail is read by that contrast, not by the absolute
+        // number. It was `xxs` while a row was one line, where the row itself
+        // was the unit; two lines made the row a GROUP, and a group needs
+        // more air around it than within it.
+        //
+        // The reason it read cramped is worth keeping, because the obvious
+        // reading is wrong: the gap was already 14px against 2px inside. But
+        // line two is EMPTY ON THE LEFT for a row with no worktree (the age
+        // is right-aligned), so down the left column — where the eye actually
+        // scans — the titles sat at an even 40px pitch with nothing between
+        // them, and an even pitch reads as one list of single lines. The
+        // margin is what makes that pitch uneven again.
+        spacing: Theme.spacing.md
         model: agentThreads
         reuseItems: true
 

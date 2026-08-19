@@ -91,6 +91,45 @@ def test_rows_are_uniform_height_and_the_second_line_sits_below_the_first() -> N
         assert age["y"] >= title["y"] + title["h"], row
 
 
+def test_threads_are_separated_by_more_air_than_their_two_lines_are() -> None:
+    """The rail is read by a CONTRAST, so assert the ratio, not a pixel count.
+
+    A two-line row is a group, and a group only reads as one if the gap around
+    it beats the gap inside it. The failure this guards is subtle enough to
+    have shipped once: line two is empty on the LEFT for a row with no
+    worktree, so down the left column the titles sat at an even pitch and the
+    whole rail read as a list of single lines.
+
+    Measured against the TEXT, not the delegate boxes — the row's own padding
+    is part of the air the reader sees, and comparing box edges would credit
+    the gap with padding the eye reads as belonging to the row.
+    """
+    rows = _rows()
+
+    inner = {
+        round(row["age"]["y"] - (row["title"]["y"] + row["title"]["h"]), 1)
+        for row in rows
+    }
+    assert len(inner) == 1, f"rows disagree on their internal gap: {inner}"
+    within = inner.pop()
+
+    between = [
+        round(
+            (later["y"] + later["title"]["y"])
+            - (earlier["y"] + earlier["age"]["y"] + earlier["age"]["h"]),
+            1,
+        )
+        for earlier, later in zip(rows, rows[1:], strict=False)
+    ]
+    assert between, "need at least two rows to have a gap at all"
+    assert len(set(between)) == 1, f"rows are unevenly spaced: {between}"
+
+    assert between[0] >= within * 4, (
+        f"threads are separated by {between[0]}px but their own lines by "
+        f"{within}px — too close to read as separate threads"
+    )
+
+
 def test_the_age_is_right_aligned_across_every_row() -> None:
     """One right edge for every row, whatever else the row is showing.
 

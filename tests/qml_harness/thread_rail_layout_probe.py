@@ -192,6 +192,10 @@ def _describe(delegate: QQuickItem, age: str) -> dict:
 
     return {
         "slot": delegate.property("slot"),
+        # The delegate's own y in the ListView's content item, which is what
+        # lets a caller compute the gap BETWEEN rows. Taken raw rather than
+        # mapped, so a transform on an ancestor cannot skew it.
+        "y": round(delegate.y(), 1),
         "height": round(delegate.height(), 1),
         "width": round(delegate.width(), 1),
         "working": bool(delegate.property("working")),
