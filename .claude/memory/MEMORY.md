@@ -69,6 +69,7 @@ Auto-memory for symmetria-ide. See `.claude/rules/memory_doctrine.md` for the la
 - [Why the suite dies "intermittently"](reference/qt-pyside/processevents_shared_app_segv.md) — two causes: pumping the session app, and leaked AppControllers
 - [Append-only pane registry](reference/qt-pyside/append_only_pane_registry.md) — integer-model Repeater reaps every live pane on growth (3→8); append-only model does not (3→9, zero)
 - [ListView.currentItem goes stale](reference/qt-pyside/listview_currentitem_goes_stale.md) — after a removal it can be the recycled delegate of the departed row; resolve selections through the model
+- [Invisible glyph literals](reference/qt-pyside/invisible_glyph_literals.md) — a flattened PUA glyph shows as `""` in diffs, Read and review; check BYTES before font or colour
 
 ## Reference — agent-sdk — `reference/agent-sdk/` (claude-agent-sdk + sidecar protocol)
 

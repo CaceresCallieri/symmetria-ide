@@ -78,6 +78,19 @@ QtObject {
         // nf-oct-git_branch — the worktree mark (tree header + agent chips).
         readonly property string worktree: "\uf418"
 
+        // nf-fa-globe — the browser-ownership mark on an agent's thread-rail
+        // row. Late to this table, and that is the whole point: it lived as a
+        // LITERAL private-use character inside AgentThreadRail.qml, and had
+        // already been flattened to an EMPTY STRING by the time anyone looked
+        // — so the globe rendered as nothing on every row that owned a browser
+        // window, with no warning, exactly as the block comment above warns.
+        // Verified at the byte level (`text: ""` is `22 22`) in the committed
+        // file on 2026-08-19, and the codepoint verified against the installed
+        // CaskaydiaCove Nerd Font, whose cmap maps U+F0AC to `fa-globe`.
+        // Second glyph lost to that pipeline: the argument for the TOKEN, not
+        // only for the escape.
+        readonly property string browser: "\uf0ac"
+
         // nf-cod-list_tree — the side panel's FILES tab. Codicon, monoline,
         // the same family and stroke weight as the surface marks below,
         // because the two controls sit one above the other in the same column
@@ -511,11 +524,51 @@ QtObject {
         // the "active" colour, so the highlight sat on the row the cursor last
         // touched while a DIFFERENT agent was on screen).
         readonly property QtObject rail: QtObject {
-            // ALIASES the top surface rung rather than introducing a sixth
-            // near-black: the active row is the strongest thing in the column,
-            // which is exactly what `raisedSelected` already means, and the
-            // alias keeps a palette swap moving both together.
-            readonly property color activeRow: theme.color.bg.raisedSelected
+            // The active row is RECESSED, not raised — it aliases the CANVAS
+            // rung, which is DARKER than the `bar` rung the rail is painted on.
+            // It ran on `raisedSelected` (the lightest rung) until 2026-08-19,
+            // on the reasoning that the active row is the strongest thing in
+            // the column; the user's reading was the opposite and is the better
+            // one, because it says something true that a highlight cannot: the
+            // active thread is the one whose pane is ON the canvas, so the row
+            // showing the canvas colour reads as a window onto it rather than
+            // as a brighter version of its neighbours.
+            //
+            // ⚠ UNDERSTATED ON PURPOSE, and this is the part to read before
+            // changing it. At this rung the fill is only ~3 lightness units
+            // below the rail, so the mark is quiet. A `border.hairline` edge
+            // shipped beside it for exactly that reason and was REMOVED the
+            // same day (2026-08-19) on the user's call: it drew a hard bright
+            // rectangle, which is a heavier mark than "this is the one you are
+            // looking at" needs in a column of quiet neutrals.
+            //
+            // So do not add the border back, and do not lighten this rung to
+            // "restore contrast" — that returns the row to reading as a raised
+            // highlight and loses the one thing this says. The fill is also not
+            // alone: the active row's title is the only one at the `strong`
+            // text rung.
+            readonly property color activeRow: theme.color.bg.canvas
+
+            // The row of a thread whose CLI is RUNNING but is not the one on
+            // screen. One rung UP from the `bar` the rail is painted on, so
+            // the three lifecycle states each get their own ground and the
+            // ladder reads outward from the rail in both directions:
+            //
+            //   active  bg.canvas  #0f0f0f   ~8 units BELOW the rail
+            //   live    bg.raised  #1e1e1e   ~7 units ABOVE it
+            //   dead    (none)               the rail itself, showing through
+            //
+            // Opposite DIRECTIONS rather than two steps the same way, which is
+            // what keeps live and active apart (~15 units) while each stays
+            // modest against the rail. Two rungs in the same direction would
+            // have made the pair hardest to tell from each OTHER — the
+            // distinction the user actually reads, since only one row is ever
+            // active and the live ones are its neighbours.
+            //
+            // Shipped 2026-08-19 because a running agent was distinguished
+            // from a slept one by the TITLE's colour rung alone, which is
+            // invisible in a rail of nineteen rows.
+            readonly property color liveRow: theme.color.bg.raised
             // Pointer wash. White at ~5% alpha, deliberately BELOW
             // `border.hairline`'s 8%: it is painted over BOTH the bar rung and
             // `activeRow`, so it has to read as "the pointer is here" on
