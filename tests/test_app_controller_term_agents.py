@@ -2244,6 +2244,45 @@ def test_deleted_followed_worktree_releases_the_chrome(controller, worktree_env)
     assert controller.agentWorktree[0] == ""
 
 
+def test_worktree_deletion_event_releases_focused_agent_follow(
+    controller, worktree_env
+):
+    """Filesystem deletion repairs follow without a focus or hook event."""
+    main, wt = worktree_env
+    _push_cwd(controller, main)
+    controller.spawn_agent("fresh", True)
+    controller.spawn_agent("fresh", True)
+    controller._on_agent_hook(
+        _hook(2, "PreToolUse", tool_name="Write", tool_path=f"{wt}/a.py", cwd=main)
+    )
+    assert controller.focusedAgent == 2
+    assert controller._term_agents[2]["live_cwd"] == main
+    assert controller.displayedRoot == wt
+    displayed_roots: list[str] = []
+    mounted_roots: list[str] = []
+    worktree_changes: list[None] = []
+    controller.displayedRootChanged.connect(
+        lambda: displayed_roots.append(controller.displayedRoot)
+    )
+    controller.treeMountRequested.connect(
+        lambda root, _expanded: mounted_roots.append(root)
+    )
+    controller.agentWorktreeChanged.connect(lambda: worktree_changes.append(None))
+
+    shutil.rmtree(wt)
+    controller._git_controller.workingTreeChanged.emit()
+
+    assert controller.displayedRoot == main
+    assert controller.displayingWorktree == ""
+    assert controller.agentWorktree[1] == ""
+    assert controller._term_agents[2]["work_root"] == ""
+    assert controller._agent_live_work_root(controller._term_agents[2]) == main
+    assert displayed_roots == [main]
+    assert mounted_roots == [main]
+    assert controller._git_controller.repoRoot == main
+    assert worktree_changes == [None]
+
+
 def test_drop_vanished_roots_is_inert_in_vps_location(controller, tmp_path):
     # In vps the roots are server paths behind an SSHFS mount: stat'ing them
     # blocks the GUI thread on a hung mount and answers False on a stale one,
