@@ -524,11 +524,27 @@ QtObject {
         // the "active" colour, so the highlight sat on the row the cursor last
         // touched while a DIFFERENT agent was on screen).
         readonly property QtObject rail: QtObject {
-            // ALIASES the top surface rung rather than introducing a sixth
-            // near-black: the active row is the strongest thing in the column,
-            // which is exactly what `raisedSelected` already means, and the
-            // alias keeps a palette swap moving both together.
-            readonly property color activeRow: theme.color.bg.raisedSelected
+            // The active row is RECESSED, not raised — it aliases the CANVAS
+            // rung, which is DARKER than the `bar` rung the rail is painted on.
+            // It ran on `raisedSelected` (the lightest rung) until 2026-08-19,
+            // on the reasoning that the active row is the strongest thing in
+            // the column; the user's reading was the opposite and is the better
+            // one, because it says something true that a highlight cannot: the
+            // active thread is the one whose pane is ON the canvas, so the row
+            // showing the canvas colour reads as a window onto it rather than
+            // as a brighter version of its neighbours.
+            //
+            // Load-bearing consequence: at this rung the fill is only ~8 units
+            // darker than the rail and CANNOT carry the state on its own, which
+            // is why `activeBorder` below exists rather than being decoration.
+            // Do not "restore contrast" by lightening this back — the pair is
+            // the signal.
+            readonly property color activeRow: theme.color.bg.canvas
+            // The edge that actually announces the active row. `border.hairline`
+            // is the chrome's one edge alpha (white @ 8%), so this aliases it
+            // rather than inventing a rail-local edge: the row is the same kind
+            // of small bounded surface every other bordered element here is.
+            readonly property color activeBorder: theme.color.border.hairline
             // Pointer wash. White at ~5% alpha, deliberately BELOW
             // `border.hairline`'s 8%: it is painted over BOTH the bar rung and
             // `activeRow`, so it has to read as "the pointer is here" on

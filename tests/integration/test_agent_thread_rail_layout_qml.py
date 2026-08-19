@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PROBE = REPO_ROOT / "tests" / "qml_harness" / "thread_rail_layout_probe.py"
 
 
-def _rows() -> list[dict]:
+def _probe() -> dict:
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
@@ -35,7 +35,11 @@ def _rows() -> list[dict]:
         f"thread-rail layout probe exited {completed.returncode}\n"
         f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
     )
-    return json.loads(completed.stdout)["rows"]
+    return json.loads(completed.stdout)
+
+
+def _rows() -> list[dict]:
+    return _probe()["rows"]
 
 
 def test_every_row_shows_its_age_in_the_right_form() -> None:
@@ -128,6 +132,43 @@ def test_threads_are_separated_by_more_air_than_their_two_lines_are() -> None:
         f"threads are separated by {between[0]}px but their own lines by "
         f"{within}px — too close to read as separate threads"
     )
+
+
+def test_the_active_row_is_marked_by_a_border_and_a_recess() -> None:
+    """Two marks for one state, and the pair is the point.
+
+    The active row used to be told by a LIGHTER fill and by the title's colour
+    rung. The fill now aliases the canvas rung, which is DARKER than the rail
+    behind it — it reads as a window onto the surface that thread is on, and
+    it is only about three lightness units away, so it cannot carry the state
+    alone. The border is what actually announces the row.
+
+    Both halves are asserted because either one alone silently degrades: drop
+    the border and the state is at the threshold of visible, lighten the fill
+    "to restore contrast" and it stops meaning anything.
+    """
+    probe = _probe()
+    rows = probe["rows"]
+    active = [row for row in rows if row["focused"]]
+    assert len(active) == 1, "the probe is meant to focus exactly one row"
+
+    assert active[0]["borderWidth"] == 1.0
+    # Zero, never a transparent 1px border: a border of any width insets the
+    # fill, so an inactive row would paint a pixel smaller than its active
+    # neighbour and the list would breathe as focus moved.
+    assert all(row["borderWidth"] == 0.0 for row in rows if not row["focused"])
+
+    # RECESSED, not raised. This is the assertion that catches the tempting
+    # wrong fix.
+    assert active[0]["fill"] is not None
+    assert active[0]["fill"] < probe["railGround"], (
+        f"the active row's fill ({active[0]['fill']}) is not darker than the "
+        f"rail behind it ({probe['railGround']})"
+    )
+
+    # An inactive row paints NOTHING and shows the rail through. A second
+    # opaque fill would compete with the active one at whatever rung it chose.
+    assert all(row["fill"] is None for row in rows if not row["focused"])
 
 
 def test_the_age_is_right_aligned_across_every_row() -> None:

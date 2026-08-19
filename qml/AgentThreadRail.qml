@@ -39,8 +39,12 @@
 // ─── THREE ROW STATES, THREE CHANNELS ───────────────────────────────────
 // A row can be all three at once, so none of them may be a fill:
 //
-//   ACTIVE   — the agent on the central surface (`focusedSlot`): filled
-//              background. With no focused agent NO row carries it.
+//   ACTIVE   — the agent on the central surface (`focusedSlot`): a recessed
+//              canvas-rung fill INSIDE a hairline border. Two marks for one
+//              state on purpose — the fill alone is ~8 lightness units from
+//              the rail behind it, which is at the threshold of visible, and
+//              the border is what actually announces the row. With no focused
+//              agent NO row carries it.
 //   SELECTED — the keyboard cursor (`selected`, moved with j/k): a marker bar
 //              down the row's left edge. Deliberately NOT the fill, which is
 //              the bug this replaced — the cursor painted itself in the
@@ -435,13 +439,33 @@ FocusScope {
             // loop: `rowBody` takes its width from anchors and its implicit
             // height from font metrics, neither of which reads this height.
             height: rowBody.implicitHeight + Theme.spacing.sm * 2
-            radius: Theme.radius.sm
-            // ACTIVE only — the agent being VIEWED, never the keyboard cursor.
+            // `md`, not the `sm` every other list row in the IDE uses
+            // (CommitListView, PrListView, AgentPane, the pickers). Deliberate
+            // and narrow: those rows are SINGLE-LINE and draw no border, so
+            // their corner is never actually seen — 3px on this row's two-line
+            // box, once the border below made the corner visible at all, read
+            // as square. If the rest of the IDE ever grows bordered rows, they
+            // should come here rather than this going back.
+            radius: Theme.radius.md
+            // ACTIVE — the agent being VIEWED, never the keyboard cursor.
             // `focusedSlot` is false for every row when `focusedAgent` is 0, so
             // with no agent focused nothing is filled. The cursor gets the
             // marker bar below and the pointer gets the wash; see the
             // three-channel note in this file's header.
+            //
+            // A FILL AND AN EDGE, and the edge is the part that carries it.
+            // The fill is a canvas-rung recess only ~8 lightness units from the
+            // rail behind it, which on its own is at the threshold of visible —
+            // the state used to be told by the title's colour rung alone, and
+            // that was too easy to lose among nineteen rows. See
+            // `Theme.color.rail` for why the pair is the signal.
             color: row.focusedSlot ? Theme.color.rail.activeRow : "transparent"
+            // Zero width, not a transparent colour: a 1px transparent border
+            // still insets the fill by a pixel, so every inactive row would
+            // paint one pixel smaller than its active neighbour and the list
+            // would breathe as focus moved.
+            border.width: row.focusedSlot ? 1 : 0
+            border.color: Theme.color.rail.activeBorder
 
             // HOVER — a wash ON TOP of the fill rather than a competing fill,
             // which is what lets a row be active AND hovered and still show

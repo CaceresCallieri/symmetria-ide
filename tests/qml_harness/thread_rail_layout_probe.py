@@ -24,6 +24,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Property, QObject, Signal, Slot
 from PySide6.QtGui import QGuiApplication
+from PySide6.QtQml import QQmlProperty
 from PySide6.QtQuick import QQuickItem, QQuickView
 
 from symmetria_ide.agent_thread_model import AgentThreadModel, ThreadRow
@@ -169,6 +170,34 @@ def _find_text(delegate: QQuickItem, wanted: str) -> QQuickItem | None:
     return None
 
 
+def _lightness(colour) -> float | None:
+    """A colour's lightness 0..1, or None when it is fully transparent.
+
+    None rather than 0 for a transparent fill: an inactive row paints nothing
+    and shows the rail behind it, so calling that "black" would let a caller
+    compare it against a real colour and get a meaningless answer.
+    """
+    if colour is None or colour.alpha() == 0:
+        return None
+    return round(colour.lightnessF(), 4)
+
+
+def _rail_ground(root: QQuickItem) -> float:
+    """Lightness of the rail's own background — what an active row sits on.
+
+    A DIRECT child of the root that fills it: the rail paints its ground as
+    the first thing in the file. Delegates are Rectangles too, hence the
+    direct-children walk rather than the recursive one.
+    """
+    for item in root.childItems():
+        colour = item.property("color")
+        if colour is not None and item.width() == root.width():
+            lightness = _lightness(colour)
+            if lightness is not None:
+                return lightness
+    raise RuntimeError("the rail drew no background rectangle")
+
+
 def _describe(delegate: QQuickItem, age: str) -> dict:
     """Geometry facts about one row, in the DELEGATE's own coordinates."""
     title = _find_text(delegate, str(delegate.property("displayTitle")))
@@ -199,6 +228,15 @@ def _describe(delegate: QQuickItem, age: str) -> dict:
         "height": round(delegate.height(), 1),
         "width": round(delegate.width(), 1),
         "working": bool(delegate.property("working")),
+        "focused": bool(delegate.property("focusedSlot")),
+        "radius": round(delegate.property("radius"), 1),
+        # The ACTIVE row's two marks. `border.width` goes through
+        # QQmlProperty's DOTTED path, not `property("border")` — the latter
+        # returns a `QQuickPen*`, for which PySide has no converter and which
+        # raises rather than returning None. Same shape as the KSession case
+        # in CLAUDE.md: a Qt C++ type QML can reach and Python cannot.
+        "borderWidth": round(QQmlProperty(delegate, "border.width").read(), 1),
+        "fill": _lightness(delegate.property("color")),
         "ageText": str(delegate.property("ageText")),
         "title": box(title),
         "age": box(age_label),
@@ -281,7 +319,11 @@ def main() -> int:
         _describe(delegate, age)
         for delegate, age in zip(rows, expected_ages, strict=True)
     ]
-    print(json.dumps({"rows": described}, sort_keys=True))
+    print(
+        json.dumps(
+            {"rows": described, "railGround": _rail_ground(root)}, sort_keys=True
+        )
+    )
     return 0
 
 
