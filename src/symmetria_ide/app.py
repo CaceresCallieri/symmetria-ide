@@ -3895,11 +3895,14 @@ class AppController(QObject):
         # This is not belt-and-braces: `record["cwd"]` becomes tmux's
         # `new-session -c`, and the tmux substrate — not the direct-PTY path —
         # is what both launchers actually run.
-        cwd = _existing_root(self.displayedRoot, self._home)
+        # A focused agent may temporarily point `displayedRoot` at its linked
+        # worktree. That chrome follow must not choose the next agent's project:
+        # fresh agents start from the user's anchor or shell cwd underneath it.
+        cwd = _existing_root(self._base_displayed_root(), self._home)
         # New agents ALWAYS spawn in the MAIN checkout (user decision,
         # 2026-07-13 — reverses the short-lived "everything follows" spawn
-        # semantics): when the displayed root is a linked worktree — via the
-        # worktree follow OR a manual cd/anchor into one — redirect the spawn
+        # semantics): when the base root is a linked worktree — via a manual
+        # cd/anchor into one — redirect the spawn
         # to the canonical main root. A worktree remains the FOCUSED agent's
         # world; a fresh agent starts from the project's source of truth.
         # Deliberately narrow (only worktree roots redirect) so spawning from

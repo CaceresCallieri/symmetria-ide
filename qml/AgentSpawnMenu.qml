@@ -132,12 +132,17 @@ ModalOverlay {
     // (same handoff shape as resumePickerRequested).
     signal attachPickerRequested(bool dangerous)
 
+    // Main.qml uses this seam to capture the shell's current directory before
+    // the chooser appears. Keeping it in open() covers every opening chord.
+    signal aboutToOpen()
+
     // Override the base open() to reset the wizard before raising.
     // reassert() (used by Main.qml's modal guard on window re-activation) is
     // INHERITED unchanged precisely because it must NOT reset: calling
     // open() there would throw the user back to stage 0 every time they
     // Alt-Tabbed out mid-choice.
     function open() {
+        root.aboutToOpen();
         // Re-read PATH first: this is the moment the row list is about to be
         // shown, and the controller only notifies when the answer moved, so a
         // harness installed since the last open lights up here and nowhere
