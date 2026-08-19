@@ -36,25 +36,44 @@
 // because it is NOT the model behind the agent pane Repeater, which is
 // append-only because each of its delegates owns a live agent CLI.
 //
-// ─── THREE ROW STATES, THREE CHANNELS ───────────────────────────────────
-// A row can be all three at once, so none of them may be a fill:
+// ─── WHAT A ROW SAYS, AND ON WHICH CHANNEL ──────────────────────────────
+// A row can be in several of these at once, so they are carried on
+// DIFFERENT channels and never on the same one.
+//
+// THE FILL IS THE THREAD'S LIFECYCLE — three grounds, not two:
 //
 //   ACTIVE   — the agent on the central surface (`focusedSlot`): a recessed
 //              canvas-rung fill, DARKER than the rail, so the row reads as a
-//              window onto the surface that thread is on. Deliberately quiet —
-//              a hairline border was tried beside it and removed for being a
-//              harder mark than the state needs. With no focused agent NO row
-//              carries it.
+//              window onto the surface that thread is on. At most one row.
+//   LIVE     — its CLI is running, but it is not the one on screen: a
+//              `raised`-rung fill, one step ABOVE the rail.
+//   DEAD     — the conversation outlived its CLI (`slot == 0`): NO fill at
+//              all, so the rail itself shows through and the row recedes.
+//
+// Live shipped last (2026-08-19) and is the one to understand: a running
+// agent was told from a slept one by the TITLE's colour rung alone, which
+// disappears in a rail of nineteen rows — "which of these are actually
+// running" was unanswerable at a glance. The two directions away from the
+// rail are deliberate; see `Theme.color.rail.liveRow`.
+//
+// NO ROW DRAWS AN OUTLINE. A hairline border shipped on the active row on
+// 2026-08-19 and came out the same day: a hard bright rectangle is a heavier
+// mark than these states need in a column of quiet neutrals. The text rungs
+// reinforce the same three states (strong / normal / dim) rather than
+// carrying them alone, which is what they used to have to do.
+//
+// TWO MORE CHANNELS, both independent of the fill:
+//
 //   SELECTED — the keyboard cursor (`selected`, moved with j/k): a marker bar
-//              down the row's left edge. Deliberately NOT the fill, which is
+//              down the row's left edge. Deliberately NOT a fill, which is
 //              the bug this replaced — the cursor painted itself in the
 //              "active" colour, so the highlight stayed where the cursor had
 //              last been while a different agent was on screen.
 //   HOVER    — the pointer: a translucent wash painted OVER whichever fill is
-//              underneath, so it composes with the other two instead of
-//              replacing them.
+//              underneath, so it composes with the lifecycle instead of
+//              replacing it.
 //
-// Tokens for all three live in `Theme.color.rail`.
+// Tokens for all of them live in `Theme.color.rail`.
 
 import QtQuick
 import Symmetria.Agents.UI as AgentsUI
@@ -453,19 +472,19 @@ FocusScope {
             // marker bar below and the pointer gets the wash; see the
             // three-channel note in this file's header.
             //
-            // A RECESSED FILL AND NOTHING ELSE. A hairline border shipped
-            // alongside it on 2026-08-19 and was removed the same day on the
-            // user's call: it drew a hard bright rectangle around the row,
-            // which is a heavier mark than "this is the one you are looking
-            // at" needs in a column of quiet neutrals.
+            // THE FILL IS THE LIFECYCLE, in three grounds — see the
+            // three-states note in this file's header. Active recesses BELOW
+            // the rail, live rises ABOVE it, dead paints nothing and lets the
+            // rail through. Tokens and the reasoning for the two directions
+            // live in `Theme.color.rail`.
             //
-            // So the fill carries the state alone, and it is a canvas-rung
-            // recess about 3 lightness units below the rail behind it. That is
-            // deliberately understated, NOT an oversight to be corrected by
-            // lightening it back — see `Theme.color.rail.activeRow`. The row
-            // is also the only one in the list whose title reads at the
-            // `strong` rung, so the fill is not doing the work by itself.
-            color: row.focusedSlot ? Theme.color.rail.activeRow : "transparent"
+            // No outline on any of them. A hairline border shipped on the
+            // active row on 2026-08-19 and was removed the same day on the
+            // user's call: it drew a hard bright rectangle, which is a heavier
+            // mark than these states need in a column of quiet neutrals.
+            color: row.focusedSlot
+                ? Theme.color.rail.activeRow
+                : (row.live ? Theme.color.rail.liveRow : "transparent")
 
             // HOVER — a wash ON TOP of the fill rather than a competing fill,
             // which is what lets a row be active AND hovered and still show

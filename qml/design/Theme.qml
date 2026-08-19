@@ -548,6 +548,27 @@ QtObject {
             // alone: the active row's title is the only one at the `strong`
             // text rung.
             readonly property color activeRow: theme.color.bg.canvas
+
+            // The row of a thread whose CLI is RUNNING but is not the one on
+            // screen. One rung UP from the `bar` the rail is painted on, so
+            // the three lifecycle states each get their own ground and the
+            // ladder reads outward from the rail in both directions:
+            //
+            //   active  bg.canvas  #0f0f0f   ~8 units BELOW the rail
+            //   live    bg.raised  #1e1e1e   ~7 units ABOVE it
+            //   dead    (none)               the rail itself, showing through
+            //
+            // Opposite DIRECTIONS rather than two steps the same way, which is
+            // what keeps live and active apart (~15 units) while each stays
+            // modest against the rail. Two rungs in the same direction would
+            // have made the pair hardest to tell from each OTHER — the
+            // distinction the user actually reads, since only one row is ever
+            // active and the live ones are its neighbours.
+            //
+            // Shipped 2026-08-19 because a running agent was distinguished
+            // from a slept one by the TITLE's colour rung alone, which is
+            // invisible in a rail of nineteen rows.
+            readonly property color liveRow: theme.color.bg.raised
             // Pointer wash. White at ~5% alpha, deliberately BELOW
             // `border.hairline`'s 8%: it is painted over BOTH the bar rung and
             // `activeRow`, so it has to read as "the pointer is here" on

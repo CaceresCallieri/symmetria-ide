@@ -134,54 +134,67 @@ def test_threads_are_separated_by_more_air_than_their_two_lines_are() -> None:
     )
 
 
-def test_the_active_row_is_marked_by_a_recess_and_no_outline() -> None:
-    """One quiet mark, and the ABSENCE of the loud one, both asserted.
+def test_the_fill_gives_each_lifecycle_state_its_own_ground() -> None:
+    """Three grounds, ordered — and the ORDER is the assertion that matters.
 
-    The fill aliases the canvas rung, DARKER than the rail behind it: the
-    active thread is the one whose pane is on the canvas, so the row reads as
-    a window onto it rather than as a brighter neighbour. Lightening it to
-    "restore contrast" returns it to a raised highlight and loses that.
+    The rail has to answer "which of these are actually running" at a glance,
+    and for a while it could not: a live thread was told from a slept one by
+    the title's colour rung alone, which vanishes in a column of nineteen
+    rows. The fill now carries the lifecycle instead.
 
-    The missing outline is asserted rather than left unmentioned, because a
-    hairline border shipped here on 2026-08-19 and was removed the same day
-    for being a harder mark than the state needs — without an assertion the
-    next reader who finds the recess too subtle re-adds it silently.
+    Asserted as inequalities against the rail rather than as literal colours,
+    so a palette retune stays free while the three stay distinguishable. The
+    two DIRECTIONS are the load-bearing part: active recesses below the rail
+    and live rises above it, which is what keeps those two — the pair a reader
+    actually compares — far apart while each stays modest on its own.
+    """
+    probe = _probe()
+    rows = probe["rows"]
+    ground = probe["railGround"]
+
+    active = [row for row in rows if row["focused"]]
+    live = [row for row in rows if row["slot"] > 0 and not row["focused"]]
+    dead = [row for row in rows if row["slot"] == 0]
+    assert len(active) == 1 and live and dead, "the probe needs all three states"
+
+    # ACTIVE recesses BELOW the rail: the row reads as a window onto the
+    # surface that thread is on, not as a brighter neighbour.
+    assert active[0]["fill"] is not None and active[0]["fill"] < ground
+
+    # LIVE rises ABOVE it — a card, so a running agent is visible as one.
+    assert all(row["fill"] is not None and row["fill"] > ground for row in live)
+
+    # DEAD paints nothing and lets the rail through.
+    assert all(row["fill"] is None for row in dead)
+
+
+def test_no_row_draws_an_outline() -> None:
+    """The absence is asserted, because it was present for a few hours.
+
+    A hairline border shipped on the active row on 2026-08-19 and was removed
+    the same day for being a harder mark than the state needs. Without an
+    assertion the next reader who finds a ground too subtle re-adds it.
 
     ⚠ Asserted on the RENDERED PIXEL, and it has to be. Qt Quick's
     `Rectangle.border.width` defaults to 1 with an opaque black colour and
-    still draws nothing, because `QQuickPen` only applies once ASSIGNED and
+    still draws nothing, because `QQuickPen` applies only once ASSIGNED and
     that state is not a property — so a property-level `border.width == 0`
     assertion would be testing Qt's default and would fail on a Rectangle with
     no border at all. Measured against a bare Rectangle on 2026-08-19; the
     method is in the probe.
     """
     probe = _probe()
-    rows = probe["rows"]
-    active = [row for row in rows if row["focused"]]
-    assert len(active) == 1, "the probe is meant to focus exactly one row"
 
-    # RECESSED, not raised. The assertion that catches the tempting wrong fix.
-    assert active[0]["fill"] is not None
-    assert active[0]["fill"] < probe["railGround"], (
-        f"the active row's fill ({active[0]['fill']}) is not darker than the "
-        f"rail behind it ({probe['railGround']})"
-    )
-
-    # The row's own edge pixel IS its fill — an outline of any brightness
-    # would show up here as a lighter value.
-    assert active[0]["edgeLightness"] == active[0]["fill"], (
-        f"the active row drew an outline (edge {active[0]['edgeLightness']} "
-        f"against fill {active[0]['fill']}) — see the note on "
-        "Theme.color.rail.activeRow before adding one back"
-    )
-
-    # An inactive row paints NOTHING: its edge is the rail showing through,
-    # and it carries no competing fill of its own.
-    for row in rows:
-        if row["focused"]:
-            continue
-        assert row["fill"] is None
-        assert row["edgeLightness"] == probe["railGround"], row
+    for row in probe["rows"]:
+        # A row's top-edge pixel IS its own ground — its fill where it has
+        # one, the rail showing through where it does not. An outline of any
+        # brightness would show up here as a third value.
+        expected = row["fill"] if row["fill"] is not None else probe["railGround"]
+        assert row["edgeLightness"] == expected, (
+            f"row {row['slot']} drew an outline (edge {row['edgeLightness']} "
+            f"against ground {expected}) — see the note on Theme.color.rail "
+            "before adding one back"
+        )
 
 
 def test_the_age_is_right_aligned_across_every_row() -> None:
